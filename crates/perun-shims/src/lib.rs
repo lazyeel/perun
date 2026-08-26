@@ -10,6 +10,7 @@ pub mod process;
 pub mod registry;
 pub mod runtime_state;
 pub mod seh_tls;
+pub mod shell_path;
 pub mod strings_env;
 pub mod sync;
 pub mod table;

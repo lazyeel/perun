@@ -60,8 +60,15 @@ pub unsafe fn init_thread_teb(image_base: u64) -> *mut FakeTeb {
     CURRENT_TEB.with(|slot| {
         let mut b = Box::new(std::mem::zeroed::<FakeTeb>());
         let p = &mut *b as *mut FakeTeb as u64;
-        b.stack_base = 0x7FFF_FFFF_F000;
-        b.stack_limit = 0x7FFF_0000_0000;
+
+        // Stack bounds must reflect the REAL Linux stack. MSVC's __chkstk
+        // reads gs:[0x10] (StackLimit) and probes pages downward toward it;
+        // a fake limit above the actual stack makes the probe run into
+        // unmapped memory and fault. Query pthread for the true range.
+        let (stack_base, stack_limit) = real_stack_bounds();
+        b.stack_base = stack_base;
+        b.stack_limit = stack_limit;
+
         b.self_ptr = p;
         b.tls_array = (p + 0x100) as u64; // points to tls_slots array
         b.peb_ptr = (p + std::mem::offset_of!(FakeTeb, peb) as u64) as u64;
@@ -79,6 +86,31 @@ pub unsafe fn init_thread_teb(image_base: u64) -> *mut FakeTeb {
         }
         teb_ptr
     })
+}
+
+/// Return `(stack_base, stack_limit)` = (top, bottom) of the current thread's
+/// real stack, via `pthread_getattr_np`. Falls back to a conservative window
+/// around the current stack pointer if the query fails.
+fn real_stack_bounds() -> (u64, u64) {
+    unsafe {
+        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+        if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) == 0 {
+            let mut stack_addr: *mut libc::c_void = std::ptr::null_mut();
+            let mut stack_size: usize = 0;
+            let ok = libc::pthread_attr_getstack(&attr, &mut stack_addr, &mut stack_size) == 0;
+            libc::pthread_attr_destroy(&mut attr);
+            if ok && !stack_addr.is_null() && stack_size > 0 {
+                let bottom = stack_addr as u64;
+                let top = bottom + stack_size as u64;
+                return (top, bottom);
+            }
+        }
+    }
+    // Fallback: bracket the current stack pointer. Probe a local to get rsp.
+    let local: u64 = 0;
+    let rsp = &local as *const u64 as u64;
+    // Assume up to 8 MiB of stack below the current pointer.
+    (rsp + 0x1000, rsp.saturating_sub(8 * 1024 * 1024))
 }
 
 /// Access the current thread's LastErrorValue pointer directly (for shims).
