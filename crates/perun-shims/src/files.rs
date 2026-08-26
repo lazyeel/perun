@@ -40,6 +40,13 @@ win32_api! {
         let wide = read_wide(name);
         let path = String::from_utf16_lossy(&wide);
 
+        if std::env::var("PERUN_TRACE").is_ok() {
+            eprintln!(
+                "[perun] CreateFileW({:?}, access={access:#x}, disp={disposition})",
+                path
+            );
+        }
+
         // Directory open (used by guests probing folder existence).
         if attrs & FILE_ATTRIBUTE_DIRECTORY != 0 && disposition == OPEN_EXISTING {
             let mode = libc::O_RDONLY | libc::O_DIRECTORY;

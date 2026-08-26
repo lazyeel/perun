@@ -196,15 +196,6 @@ fn cmd_call(args: &[String]) -> i32 {
     };
     println!("[perun] export {export_name} @ {:#x}", export_ptr as usize);
 
-    // Parse up to 4 args.
-    let mut argv = [0u64; 4];
-    for (i, a) in args[2..].iter().take(4).enumerate() {
-        argv[i] = parse_num(a).unwrap_or_else(|| {
-            eprintln!("error: bad argument {a:?}");
-            std::process::exit(2);
-        });
-    }
-
     // Scratch page for pointer-backed arguments / output capture.
     let scratch = unsafe {
         libc::mmap(
@@ -221,6 +212,20 @@ fn cmd_call(args: &[String]) -> i32 {
         return 1;
     }
     unsafe { std::ptr::write_bytes(scratch as *mut u8, 0, 0x1000) };
+
+    // Parse up to 4 args. The token "scratch" resolves to the clean scratch
+    // page address, so callers can hand the guest a zeroed parameter block.
+    let mut argv = [0u64; 4];
+    for (i, a) in args[2..].iter().take(4).enumerate() {
+        argv[i] = if a == "scratch" {
+            scratch as u64
+        } else {
+            parse_num(a).unwrap_or_else(|| {
+                eprintln!("error: bad argument {a:?}");
+                std::process::exit(2);
+            })
+        };
+    }
 
     type ExportFn = unsafe extern "win64" fn(u64, u64, u64, u64) -> u64;
     let f: ExportFn = unsafe { std::mem::transmute(export_ptr) };
