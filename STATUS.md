@@ -13,9 +13,49 @@ x86_64, statically linked MSVC CRT):
   crashing.
 - Per-thread FakeTEB installed behind `GS_BASE` (`arch_prctl(ARCH_SET_GS)`);
   `FS` left untouched for glibc. FLS backed by the TEB inline TLS slots.
+  Stack bounds derived from pthread so MSVC `__chkstk` probes the real stack.
 - `DllMain(DLL_PROCESS_ATTACH)` returns **TRUE** with zero unresolved-import
-  traps. 106 Win32 APIs implemented.
+  traps. 111 Win32 APIs implemented.
 - `cargo test`: 9/9 passing. Debug and release profiles both build clean.
+
+`perun call <image.dll> <export> [args...]` invokes an export through the
+Win64 ABI after init. A `scratch` argument token supplies a clean zeroed page
+for pointer-backed parameters.
+
+## The ADI dispatcher now runs end-to-end
+
+`perun call CoreADI64.dll vdfut768ig <cmd> scratch` executes the dispatcher's
+full provisioning logic and returns a clean ADI error code instead of
+crashing. Observed behavior:
+
+- Resolves `<CommonAppData>\Apple Computer\iTunes\adi` via
+  `SHGetFolderPathW(CSIDL_COMMON_APPDATA)` + `PathAppendW` +
+  `PathIsDirectoryW` + `GetFileAttributesW`, confirming each directory.
+- Returns `0xffff5016` (not provisioned) for every command code tested
+  (0..255), with no file, registry, mutex, or enumeration access.
+
+This is the trap-and-scaffold design paying off: each missing Win32 API was
+surfaced by the trap reporter and implemented in turn until the dispatcher
+ran its full logic.
+
+## The provisioning gate (current wall)
+
+The `0xffff5016` result is checked **before** command dispatch and is uniform
+across all commands, so it is an in-memory provisioning-state flag, not a
+per-command result. The dispatcher's control flow is control-flow-flattened
+(obfuscated), but the entry sequence is decoded:
+
+- First-level dispatch is a pure `rdx` NULL check (param present vs null).
+- The command code (`rcx`) is run through an obfuscated arithmetic transform
+  and stored for a second-level dispatch that only runs once provisioning
+  passes.
+- Default error `0xffff5036` is loaded at entry; `0xffff5016` overrides it on
+  the not-provisioned path.
+
+The provisioning blob is device-specific cryptographic material issued by
+Apple during a provisioning handshake. On a fresh offline system there is no
+blob, so ADI faithfully reports not-provisioned. This is the SAP/PAT commerce
+gate the project exists to understand.
 
 ## Invariants
 
@@ -29,26 +69,10 @@ x86_64, statically linked MSVC CRT):
 - The proprietary DLL is never committed or distributed; it is obtained
   locally by the user (extraction steps are in the README).
 
-## The wall (resolved)
-
-The original blocker was `DllMain` returning `FALSE` in the C prototype. The
-Rust rewrite got past it: the failure was not guest logic but two runtime
-defects, both now fixed.
-
-1. **Trap-stub reach.** Stubs jumped to the dispatcher with `jmp rel32`, but
-   the RWX stub page (`mmap(NULL)`) and the main binary land far apart under
-   ASLR (measured ~34 TB). The rel32 displacement overflowed and the jump
-   landed in unmapped memory → SIGSEGV. Fixed by switching to an absolute
-   `jmp [rip+0]` with the dispatcher address embedded in the stub.
-2. **Missing CRT APIs.** `GetStartupInfoW`, `GetACP`, `FlsAlloc/GetValue/
-   SetValue/Free`, and `InitializeCriticalSectionEx` were unimplemented; the
-   MSVC CRT needs them during DLL init. All implemented.
-
 ## Ways forward
 
-- Call the ADI dispatcher export (`cvu8io98wun`, RVA `0xe4b00`) with
-  provisioning parameters once DllMain init is confirmed stable across
-  repeated runs.
+- Feed the dispatcher a valid provisioning context (param struct) to pass the
+  in-memory gate, or locate the command that loads/creates the blob.
 - Grow the shim surface as real guests exercise more APIs (the trap reporter
   names each missing symbol with its arguments).
 - `perun scaffold` command to generate a ready-to-fill shim stub from a trap
@@ -59,8 +83,8 @@ defects, both now fixed.
 - `crates/perun-core` — PE32+ parser, loader, relocations, IAT patching,
   TEB/PEB, trap-stub pool.
 - `crates/perun-shims` — Win32→POSIX translation matrix (memory, files, sync,
-  strings/env, registry, process, SEH/TLS/FLS).
-- `crates/perun-cli` — `perun run` / `perun info` runner.
+  strings/env, registry, process, SEH/TLS/FLS, shell/path).
+- `crates/perun-cli` — `perun run` / `perun info` / `perun call` runner.
 
 ## Reproduce
 
@@ -68,6 +92,7 @@ defects, both now fixed.
 cargo build --release -p perun-cli
 ./target/release/perun info  /path/to/CoreADI64.dll
 ./target/release/perun run   /path/to/CoreADI64.dll --verbose
+./target/release/perun call  /path/to/CoreADI64.dll vdfut768ig 0 scratch
 ```
 
 ---
