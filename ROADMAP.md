@@ -1,37 +1,44 @@
 # Roadmap
 
-## Phase 1 — Rust port of the working prototype
+## Phase 1 — Loader and init (done)
 
-- [ ] PE32+ parser (headers, sections, data directories) in safe Rust where possible
-- [ ] Section mapping with page-aligned protections (W^X aware)
-- [ ] Base relocations (`DIR64`, `HIGHLOW`)
-- [ ] Import resolution against the shim table
-- [ ] Export lookup by name/ordinal
-- [ ] `extern "win64"` shim plumbing; IAT filled with direct pointers
-- [ ] Micro-stub pool for unresolved imports (`mov r10d, <idx>; jmp dispatcher`)
-- [ ] Per-thread FakeTEB (`GS:[0x30]` self, `+0x58` TLS array, `+0x60` PEB,
-      `+0x68` last error, stack bounds), installed via `arch_prctl(ARCH_SET_GS)`
-- [ ] DllMain invocation from Rust; parity check against the C prototype
+- [x] PE32+ parser (headers, sections, data directories)
+- [x] Section mapping with page-aligned protections
+- [x] Base relocations (`DIR64`)
+- [x] Import resolution against the shim table
+- [x] Export lookup by name/ordinal
+- [x] `extern "win64"` shim plumbing; IAT filled with direct pointers
+- [x] Micro-stub pool for unresolved imports (absolute `jmp [rip+0]`)
+- [x] Per-thread FakeTEB installed via `arch_prctl(ARCH_SET_GS)`
+- [x] FLS (`FlsAlloc`/`FlsGetValue`/`FlsSetValue`/`FlsFree`) over TEB TLS slots
+- [x] `DllMain(DLL_PROCESS_ATTACH)` returns TRUE on CoreADI64.dll, zero traps
 
-## Phase 2 — Runtime completeness
+## Phase 2 — The actual goal: ADI dispatcher
 
-- [ ] Full UTF-16 ↔ UTF-8 conversion layer (surrogate pairs, best-fit for A-suffix APIs)
-- [ ] Typed handle table: files, events, mutexes, pseudo-handles
-- [ ] Synthetic registry backed by an INI-like store
-- [ ] Thread creation interception: wrapper installs TEB/GS before guest start routine
-- [ ] TLS slots (`TlsAlloc`/`TlsGetValue`/`TlsSetValue`/`TlsFree`)
+- [ ] Call the ADI dispatcher export (`cvu8io98wun`, RVA `0xe4b00`) with
+      provisioning parameters after init
+- [ ] Map the dispatcher's expected inputs (device identity, attestation
+      material) onto values the runtime can supply
+- [ ] Observe and decode the dispatcher's response / error path
+- [ ] Grow the shim surface as the dispatcher exercises more Win32 APIs
+
+## Phase 3 — Runtime completeness
+
+- [ ] Full UTF-16 ↔ UTF-8 conversion layer (surrogate pairs, best-fit for
+      A-suffix APIs)
+- [ ] Thread creation interception: wrapper installs TEB/GS before guest
+      start routine
 - [ ] SEH surface stays minimal by design: detect-and-report stubs only
 
-## Phase 3 — Developer experience
+## Phase 4 — Developer experience
 
-- [ ] `perun run <dll>` / `perun inspect <dll>` / `perun trace`
-- [ ] Scaffolding generator: trap on unknown import → emit ready macro file
-- [ ] Declarative `win32_api!` macro for adding implementations without touching the core
-- [ ] Unit tests running entirely on Linux, no Windows toolchain needed
-- [ ] Embedded-API example: call one export from any Linux program in two lines
+- [ ] `perun scaffold`: trap on unknown import → emit ready macro file
+- [ ] Embedded-API example: call one export from any Linux program in two
+      lines
 
 ## Explicitly out of scope (for now)
 
-- Exception unwinding emulation (`.pdata`/`.xdata` walkers, personality routines)
+- Exception unwinding emulation (`.pdata`/`.xdata` walkers, personality
+  routines)
 - Graphics/DirectX/COM apartment model
 - 32-bit (WoW64-style) images

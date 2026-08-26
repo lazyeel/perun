@@ -27,7 +27,7 @@ x86_64, statically linked MSVC CRT):
   never `jmp rel32` (the RWX stub page and the dispatcher can be terabytes
   apart under ASLR; rel32 only reaches ±2 GB).
 - The proprietary DLL is never committed or distributed; it is obtained
-  locally by the user (see `prototype/README.md`).
+  locally by the user (extraction steps are in the README).
 
 ## The wall (resolved)
 
@@ -61,8 +61,6 @@ defects, both now fixed.
 - `crates/perun-shims` — Win32→POSIX translation matrix (memory, files, sync,
   strings/env, registry, process, SEH/TLS/FLS).
 - `crates/perun-cli` — `perun run` / `perun info` runner.
-- `prototype/` — historical C proof of concept (reference only, not built by
-  cargo).
 
 ## Reproduce
 

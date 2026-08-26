@@ -38,9 +38,7 @@ The Rust runtime loads and initializes a real Windows DLL. On Apple's
 the shim table, installs a per-thread TEB, and `DllMain(DLL_PROCESS_ATTACH)`
 returns `TRUE` with no unresolved-import traps. 106 Win32 APIs are implemented.
 
-A working C prototype (PE mapping, relocations, 103/103 imports resolved) is
-kept under `prototype/` for reference. See [ROADMAP.md](ROADMAP.md) for what
-remains.
+See [ROADMAP.md](ROADMAP.md) for what remains.
 
 ## Building
 
@@ -64,8 +62,18 @@ See [`LICENSE`](LICENSE) for the full Apache-2.0 terms and
 [`NOTICE`](NOTICE) for mandatory downstream attribution requirements.
 
 This repository does not include and does not distribute any proprietary
-binaries; see `prototype/README.md` for how to obtain test DLLs for local
-experiments.
+binaries. To obtain a test DLL for local experiments, extract one from an
+iTunes for Windows installer:
+
+```bash
+curl -o iTunes64Setup.exe \
+  "https://secure-appldnld.apple.com/itunes12/001-80053-20210422-E8A3B28C-A3B2-11EB-BE07-CE1B67FC6302/iTunes64Setup.exe"
+cabextract iTunes64Setup.exe -d extracted/
+msiextract extracted/iTunes64.msi -C itunes/
+cp itunes/iTunes/CoreADI64.dll .
+```
+
+Requires `cabextract` and `msiextract` (package `msitools`).
 
 ### Attribution & Downstream Use
 
