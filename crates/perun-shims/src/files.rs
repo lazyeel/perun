@@ -306,6 +306,9 @@ win32_api! {
         if std::env::var("PERUN_TRACE").is_ok() {
             eprintln!("[perun] GetFileAttributesW({:?}) -> {attrs:#x}", path);
         }
+        // Research hook: latest possible pre-gate fill point (last call in the
+        // dir-walk, immediately before the gate reads the object).
+        crate::util::late_fill_gate_candidates();
         attrs
     }
 }

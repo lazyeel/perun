@@ -237,8 +237,15 @@ fn cmd_call(args: &[String]) -> i32 {
     // block. Options of the form --poke RVA=VALUE write a qword into guest
     // memory (image.base + RVA) before the call, letting us pre-fill globals.
     let mut argv = [0u64; 4];
-    // (kind, target, value): kind 0 = guest RVA, kind 1 = ctx region offset
+    // (kind, target, value): kind 0 = guest RVA, kind 1 = ctx offset,
+    // kind 2 = scratch offset
     let mut pokes: Vec<(u8, u64, u64)> = Vec::new();
+    // --patch=RVA=HEXBYTES: raw code patch into the mapped image (mprotect'd)
+    let mut patches: Vec<(u64, Vec<u8>)> = Vec::new();
+    // --peek=RVA[,RVA...]: read guest qwords after the call
+    let mut peeks: Vec<String> = Vec::new();
+    // --peek-ptr=RVA[,RVA...]: dereference guest RVA as host pointer, dump object
+    let mut peek_ptrs: Vec<String> = Vec::new();
     let mut ai = 0usize;
     let resolve = |tok: &str| -> Option<u64> {
         match tok {
@@ -248,6 +255,32 @@ fn cmd_call(args: &[String]) -> i32 {
         }
     };
     for a in args[2..].iter() {
+        if let Some(spec) = a.strip_prefix("--patch=") {
+            let (rva_s, hex_s) = spec.split_once('=').unwrap_or((spec, ""));
+            let rva = parse_num(rva_s).unwrap_or_else(|| {
+                eprintln!("error: bad --patch rva {rva_s:?}");
+                std::process::exit(2);
+            });
+            let clean: String = hex_s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+            if clean.len() % 2 != 0 || clean.is_empty() {
+                eprintln!("error: bad --patch bytes {hex_s:?}");
+                std::process::exit(2);
+            }
+            let bytes: Vec<u8> = (0..clean.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&clean[i..i + 2], 16).unwrap())
+                .collect();
+            patches.push((rva, bytes));
+            continue;
+        }
+        if let Some(spec) = a.strip_prefix("--peek=") {
+            peeks.push(spec.to_string());
+            continue;
+        }
+        if let Some(spec) = a.strip_prefix("--peek-ptr=") {
+            peek_ptrs.push(spec.to_string());
+            continue;
+        }
         if let Some(spec) = a.strip_prefix("--poke=") {
             let (tgt_s, val_s) = spec.split_once('=').unwrap_or((spec, ""));
             let val = resolve(val_s).unwrap_or_else(|| {
@@ -260,6 +293,12 @@ fn cmd_call(args: &[String]) -> i32 {
                     std::process::exit(2);
                 });
                 pokes.push((1, off, val));
+            } else if let Some(off_s) = tgt_s.strip_prefix("scratch+") {
+                let off = parse_num(off_s).unwrap_or_else(|| {
+                    eprintln!("error: bad scratch offset {off_s:?}");
+                    std::process::exit(2);
+                });
+                pokes.push((2, off, val));
             } else {
                 let rva = parse_num(tgt_s).unwrap_or_else(|| {
                     eprintln!("error: bad --poke rva {tgt_s:?}");
@@ -267,6 +306,27 @@ fn cmd_call(args: &[String]) -> i32 {
                 });
                 pokes.push((0, rva, val));
             }
+            continue;
+        }
+        if let Some(spec) = a.strip_prefix("--poke-ptr=") {
+            // --poke-ptr=RVA=VALUE: read the qword at guest RVA as a host
+            // pointer, then write VALUE to the pointed-to memory. Used to poke
+            // through the provisioning gate's double dereference.
+            let (rva_s, val_s) = spec.split_once('=').unwrap_or((spec, ""));
+            let rva = parse_num(rva_s).unwrap_or_else(|| {
+                eprintln!("error: bad --poke-ptr rva {rva_s:?}");
+                std::process::exit(2);
+            });
+            let val = resolve(val_s).unwrap_or_else(|| {
+                eprintln!("error: bad --poke-ptr value {val_s:?}");
+                std::process::exit(2);
+            });
+            let slot = (image.base() as u64).wrapping_add(rva) as *const u64;
+            let target = unsafe { std::ptr::read(slot) };
+            unsafe { std::ptr::write(target as *mut u64, val) };
+            println!(
+                "[perun] poke-ptr [RVA {rva:#x}] -> {target:#x} := {val:#x}"
+            );
             continue;
         }
         if ai < 4 {
@@ -278,16 +338,47 @@ fn cmd_call(args: &[String]) -> i32 {
         }
     }
 
-    // Apply pokes. kind 0 -> guest memory (image.base + rva); kind 1 -> ctx region.
+    // Apply pokes. kind 0 -> guest memory (image.base + rva); kind 1 -> ctx
+    // region; kind 2 -> scratch (parameter) region.
     for (kind, tgt, val) in &pokes {
-        let addr = if *kind == 0 {
-            (image.base() as u64).wrapping_add(*tgt) as *mut u64
-        } else {
-            (ctx as u64).wrapping_add(*tgt) as *mut u64
+        let addr = match kind {
+            0 => (image.base() as u64).wrapping_add(*tgt) as *mut u64,
+            1 => (ctx as u64).wrapping_add(*tgt) as *mut u64,
+            _ => (scratch as u64).wrapping_add(*tgt) as *mut u64,
         };
         unsafe { std::ptr::write(addr, *val) };
-        println!("[perun] poke {} = {val:#x} (abs {addr:p})",
-            if *kind == 0 { format!("[RVA {tgt:#x}]") } else { format!("ctx[{tgt:#x}]") });
+        let label = match kind {
+            0 => format!("[RVA {tgt:#x}]"),
+            1 => format!("ctx[{tgt:#x}]"),
+            _ => format!("scratch[{tgt:#x}]"),
+        };
+        println!("[perun] poke {label} = {val:#x} (abs {addr:p})");
+    }
+
+    // Apply raw code patches. The image sections are mapped RX, so flip the
+    // target page(s) to RWX, write the bytes, then restore RX.
+    for (rva, bytes) in &patches {
+        let addr = (image.base() as u64).wrapping_add(*rva) as *mut u8;
+        let page = (addr as usize) & !0xfff;
+        let end = (addr as usize) + bytes.len();
+        let npages = (end - page + 0xfff) / 0x1000;
+        unsafe {
+            libc::mprotect(
+                page as *mut libc::c_void,
+                npages * 0x1000,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+            );
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), addr, bytes.len());
+            libc::mprotect(
+                page as *mut libc::c_void,
+                npages * 0x1000,
+                libc::PROT_READ | libc::PROT_EXEC,
+            );
+        }
+        println!("[perun] patch RVA {rva:#x} <- {} bytes", bytes.len());
+        // Read back to confirm the write landed (mprotect may have failed).
+        let rb = unsafe { std::slice::from_raw_parts(addr, bytes.len().min(8)) };
+        println!("[perun]   readback: {}", hexdump(rb));
     }
 
     type ExportFn = unsafe extern "win64" fn(u64, u64, u64, u64) -> u64;
@@ -298,6 +389,51 @@ fn cmd_call(args: &[String]) -> i32 {
     );
     let r = unsafe { f(argv[0], argv[1], argv[2], argv[3]) };
     println!("[perun] {export_name} returned {r:#x} ({r})");
+
+    // Dump tracked gate candidates (PERUN_HEAP_FILL research hook) so the
+    // caller can correlate them with the --peek-ptr object address.
+    for (addr, v) in perun_shims::util::gate_candidates_snapshot() {
+        println!("[perun] gate-candidate {addr:#x} fill={v:#x}");
+    }
+
+    // --peek=RVA[,RVA...]: read qwords from guest memory after the call so the
+    // caller can watch globals (e.g. the provisioning gate) for writes.
+    for spec in peeks.iter() {
+        for part in spec.split(',') {
+            let part = part.trim();
+            if part.is_empty() { continue; }
+            let rva = parse_num(part).unwrap_or_else(|| {
+                eprintln!("error: bad --peek rva {part:?}");
+                std::process::exit(2);
+            });
+            let addr = (image.base() as u64).wrapping_add(rva) as *const u64;
+            let v = unsafe { std::ptr::read(addr) };
+            println!("[perun] peek [RVA {rva:#x}] = {v:#x}");
+        }
+    }
+
+    // --peek-ptr=RVA[,RVA...]: read the qword at each guest RVA as a host
+    // pointer and dump the first 64 bytes of the pointed-to object. This is
+    // how we inspect the provisioning-gate object behind the double deref.
+    for spec in peek_ptrs.iter() {
+        for part in spec.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let rva = parse_num(part).unwrap_or_else(|| {
+                eprintln!("error: bad --peek-ptr rva {part:?}");
+                std::process::exit(2);
+            });
+            let slot = (image.base() as u64).wrapping_add(rva) as *const u64;
+            let target = unsafe { std::ptr::read(slot) };
+            println!("[perun] peek-ptr [RVA {rva:#x}] -> {target:#x}");
+            if target != 0 {
+                let obj = unsafe { std::slice::from_raw_parts(target as *const u8, 64) };
+                println!("[perun]   object[0..64] = {}", hexdump(obj));
+            }
+        }
+    }
 
     // Dump the scratch page head in case the guest wrote output there.
     let head = unsafe { std::slice::from_raw_parts(scratch as *const u8, 64) };

@@ -86,6 +86,9 @@ win32_api! {
         if csidl & CSIDL_FLAG_CREATE != 0 {
             mkdirs(&dir);
         }
+        // Research hook: re-write PERUN_HEAP_FILL values into tracked
+        // allocations right before the dispatcher's provisioning gate runs.
+        crate::util::late_fill_gate_candidates();
         write_wide(out_path, &dir.to_string_lossy());
         eprintln!(
             "[perun] SHGetFolderPathW(csidl={csidl:#x}) -> {:?}",

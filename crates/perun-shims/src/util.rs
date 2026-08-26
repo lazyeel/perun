@@ -265,3 +265,37 @@ pub fn set_last_error(code: u32) {
         }
     }
 }
+
+// --- research hook: late gate-object fill -------------------------------
+// PERUN_HEAP_FILL=<size>:<qword> tracks matching HeapAlloc results here;
+// SHGetFolderPathW re-writes the value into each tracked allocation right
+// before returning, i.e. after the guest's own zero-init and just before the
+// provisioning gate reads the object's first qword.
+
+static GATE_CANDIDATES: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+
+/// Record an allocation (addr, fill-value) as a gate candidate.
+pub fn track_gate_candidate(addr: u64) {
+    if let Ok(spec) = std::env::var("PERUN_HEAP_FILL") {
+        if let Some((_, val)) = spec.split_once(':') {
+            let v = u64::from_str_radix(val.trim().trim_start_matches("0x"), 16)
+                .or_else(|_| val.trim().parse::<u64>())
+                .unwrap_or(0);
+            GATE_CANDIDATES.lock().unwrap().push((addr, v));
+        }
+    }
+}
+
+/// Re-write the fill value into every tracked allocation (late fill).
+pub fn late_fill_gate_candidates() {
+    for (addr, v) in GATE_CANDIDATES.lock().unwrap().iter() {
+        unsafe {
+            std::ptr::write_volatile(*addr as *mut u64, *v);
+        }
+    }
+}
+
+/// Snapshot of tracked (addr, value) pairs for diagnostics.
+pub fn gate_candidates_snapshot() -> Vec<(u64, u64)> {
+    GATE_CANDIDATES.lock().unwrap().clone()
+}
