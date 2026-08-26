@@ -118,12 +118,15 @@ win32_api! {
         let base = wide_to_string(path);
         let extra = wide_to_string(more);
         let joined = if base.is_empty() {
-            extra
+            extra.clone()
         } else if base.ends_with('\\') || base.ends_with('/') {
             format!("{base}{extra}")
         } else {
             format!("{base}\\{extra}")
         };
+        if std::env::var("PERUN_TRACE").is_ok() {
+            eprintln!("[perun] PathAppendW({:?} + {:?}) -> {:?}", base, extra, joined);
+        }
         write_wide(path, &joined);
         TRUE
     }
@@ -134,7 +137,11 @@ win32_api! {
     unsafe extern "win64" fn PathIsDirectoryW(path: LPCWSTR) -> BOOL {
         let p = wide_to_string(path);
         let unix = p.replace('\\', "/");
-        BOOL::from(std::path::Path::new(&unix).is_dir())
+        let is_dir = std::path::Path::new(&unix).is_dir();
+        if std::env::var("PERUN_TRACE").is_ok() {
+            eprintln!("[perun] PathIsDirectoryW({:?}) -> {}", p, is_dir);
+        }
+        BOOL::from(is_dir)
     }
 }
 

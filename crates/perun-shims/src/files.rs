@@ -302,7 +302,11 @@ win32_api! {
     /// DWORD GetFileAttributesW(LPCWSTR);
     unsafe extern "win64" fn GetFileAttributesW(name: LPCWSTR) -> DWORD {
         let path = String::from_utf16_lossy(&read_wide(name));
-        attributes_for_path(path.as_bytes())
+        let attrs = attributes_for_path(path.as_bytes());
+        if std::env::var("PERUN_TRACE").is_ok() {
+            eprintln!("[perun] GetFileAttributesW({:?}) -> {attrs:#x}", path);
+        }
+        attrs
     }
 }
 
@@ -310,7 +314,14 @@ win32_api! {
     /// DWORD GetFileAttributesA(LPCSTR);
     unsafe extern "win64" fn GetFileAttributesA(name: LPCSTR) -> DWORD {
         let path = read_narrow(name);
-        attributes_for_path(&path)
+        let attrs = attributes_for_path(&path);
+        if std::env::var("PERUN_TRACE").is_ok() {
+            eprintln!(
+                "[perun] GetFileAttributesA({:?}) -> {attrs:#x}",
+                String::from_utf8_lossy(&path)
+            );
+        }
+        attrs
     }
 }
 

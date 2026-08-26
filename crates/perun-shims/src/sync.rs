@@ -244,7 +244,11 @@ win32_api! {
         initial_owner: BOOL,
         name: LPCWSTR,
     ) -> HANDLE {
-        let _name = read_wide(name);
+        let name_s = String::from_utf16_lossy(&read_wide(name));
+        if std::env::var("PERUN_TRACE").is_ok() {
+            eprintln!("[perun] CreateMutexW({:?})", name_s);
+        }
+        let _ = name_s;
         CreateMutexA(sa, initial_owner, std::ptr::null())
     }
 }
