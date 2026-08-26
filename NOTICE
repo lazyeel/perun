@@ -1,0 +1,8 @@
+Perun
+Copyright 2026 lazyeel (https://github.com/lazyeel)
+
+This product includes software developed by lazyeel:
+- Native x86_64 PE32+ image loader and binary projection runtime (perun-core)
+- Win32 API to POSIX translation matrix / shim layer (perun-shims)
+- Command-line runner and image inspector (perun-cli)
+- C reference prototype of the loader and shim layer (prototype/)

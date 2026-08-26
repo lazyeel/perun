@@ -1,0 +1,10 @@
+[package]
+name = "perun-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native PE32+ loader core for the Perun Windows micro-runtime"
+
+[dependencies]
+libc = "0.2"

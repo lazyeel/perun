@@ -1,0 +1,7 @@
+/target/
+*.dll
+*.exe
+*.so
+core
+core.*
+/tmp/

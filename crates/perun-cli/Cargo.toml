@@ -1,0 +1,16 @@
+[package]
+name = "perun-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Runner, inspector and profiler for native PE images under Perun"
+
+[[bin]]
+name = "perun"
+path = "src/main.rs"
+
+[dependencies]
+perun-core = { workspace = true }
+perun-shims = { workspace = true }
+libc = "0.2"

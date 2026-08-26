@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/perun-core",
+    "crates/perun-shims",
+    "crates/perun-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/lazyeel/perun"
+
+[workspace.dependencies]
+perun-core = { path = "crates/perun-core" }
+perun-shims = { path = "crates/perun-shims" }
+
+[profile.release]
+debug = true
+lto = "thin"

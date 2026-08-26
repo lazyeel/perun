@@ -1,0 +1,12 @@
+[package]
+name = "perun-shims"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Win32 to POSIX translation shims for the Perun Windows micro-runtime"
+
+[dependencies]
+perun-core = { path = "../perun-core" }
+libc = "0.2"
+linkme = "0.3"
