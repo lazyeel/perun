@@ -58,6 +58,9 @@ win32_api! {
         let raw = read_narrow(pattern);
         let pattern = String::from_utf8_lossy(&raw).into_owned();
         let (dir_path, filter) = split_pattern(&pattern);
+        if std::env::var("PERUN_TRACE").is_ok() {
+            eprintln!("[perun] FindFirstFileExA({:?})", pattern);
+        }
 
         let cdir = match std::ffi::CString::new(dir_path.clone()) {
             Ok(c) => c,

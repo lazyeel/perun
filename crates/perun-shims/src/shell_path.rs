@@ -150,7 +150,11 @@ win32_api! {
     unsafe extern "win64" fn PathFileExistsW(path: LPCWSTR) -> BOOL {
         let p = wide_to_string(path);
         let unix = p.replace('\\', "/");
-        BOOL::from(std::path::Path::new(&unix).exists())
+        let exists = std::path::Path::new(&unix).exists();
+        if std::env::var("PERUN_TRACE").is_ok() {
+            eprintln!("[perun] PathFileExistsW({:?}) -> {}", p, exists);
+        }
+        BOOL::from(exists)
     }
 }
 
@@ -163,6 +167,9 @@ win32_api! {
     ) -> BOOL {
         let p = wide_to_string(name);
         let unix = p.replace('\\', "/");
+        if std::env::var("PERUN_TRACE").is_ok() {
+            eprintln!("[perun] CreateDirectoryExW({:?})", p);
+        }
         match std::fs::create_dir_all(&unix) {
             Ok(()) => TRUE,
             Err(_) => FALSE,

@@ -225,7 +225,11 @@ win32_api! {
         let sub = read_narrow(subkey);
         let sub = String::from_utf8_lossy(&sub);
         let path = format!("{root}\\{}", sub.replace('/', "\\"));
-        if Registry::global().key_exists(&path) {
+        let exists = Registry::global().key_exists(&path);
+        if std::env::var("PERUN_TRACE").is_ok() {
+            eprintln!("[perun] RegOpenKeyExA({:?}) -> {}", path, if exists { 0 } else { 2 });
+        }
+        if exists {
             if !result.is_null() {
                 *result = path.len() as HANDLE; // opaque key token
             }
@@ -251,6 +255,9 @@ win32_api! {
         let _ = key;
         let name = read_narrow(value_name);
         let name = String::from_utf8_lossy(&name);
+        if std::env::var("PERUN_TRACE").is_ok() {
+            eprintln!("[perun] RegQueryValueExA({:?})", name);
+        }
         match Registry::global().get(&name) {
             Some(v) => {
                 let need = v.data.len() as DWORD;
