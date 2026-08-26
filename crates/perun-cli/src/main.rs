@@ -213,18 +213,81 @@ fn cmd_call(args: &[String]) -> i32 {
     }
     unsafe { std::ptr::write_bytes(scratch as *mut u8, 0, 0x1000) };
 
-    // Parse up to 4 args. The token "scratch" resolves to the clean scratch
-    // page address, so callers can hand the guest a zeroed parameter block.
+    // A larger zeroed region to stand in for a guest context struct. The token
+    // "ctx" resolves to it, so callers can point a global at a fake context.
+    let ctx_size = 0x10000usize;
+    let ctx = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            ctx_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if ctx == libc::MAP_FAILED {
+        eprintln!("error: ctx mmap failed");
+        return 1;
+    }
+    unsafe { std::ptr::write_bytes(ctx as *mut u8, 0, ctx_size) };
+
+    // Parse up to 4 positional args. The token "scratch" resolves to the clean
+    // scratch page address, so callers can hand the guest a zeroed parameter
+    // block. Options of the form --poke RVA=VALUE write a qword into guest
+    // memory (image.base + RVA) before the call, letting us pre-fill globals.
     let mut argv = [0u64; 4];
-    for (i, a) in args[2..].iter().take(4).enumerate() {
-        argv[i] = if a == "scratch" {
-            scratch as u64
-        } else {
-            parse_num(a).unwrap_or_else(|| {
+    // (kind, target, value): kind 0 = guest RVA, kind 1 = ctx region offset
+    let mut pokes: Vec<(u8, u64, u64)> = Vec::new();
+    let mut ai = 0usize;
+    let resolve = |tok: &str| -> Option<u64> {
+        match tok {
+            "scratch" => Some(scratch as u64),
+            "ctx" => Some(ctx as u64),
+            _ => parse_num(tok),
+        }
+    };
+    for a in args[2..].iter() {
+        if let Some(spec) = a.strip_prefix("--poke=") {
+            let (tgt_s, val_s) = spec.split_once('=').unwrap_or((spec, ""));
+            let val = resolve(val_s).unwrap_or_else(|| {
+                eprintln!("error: bad --poke value {val_s:?}");
+                std::process::exit(2);
+            });
+            if let Some(off_s) = tgt_s.strip_prefix("ctx+") {
+                let off = parse_num(off_s).unwrap_or_else(|| {
+                    eprintln!("error: bad ctx offset {off_s:?}");
+                    std::process::exit(2);
+                });
+                pokes.push((1, off, val));
+            } else {
+                let rva = parse_num(tgt_s).unwrap_or_else(|| {
+                    eprintln!("error: bad --poke rva {tgt_s:?}");
+                    std::process::exit(2);
+                });
+                pokes.push((0, rva, val));
+            }
+            continue;
+        }
+        if ai < 4 {
+            argv[ai] = resolve(a).unwrap_or_else(|| {
                 eprintln!("error: bad argument {a:?}");
                 std::process::exit(2);
-            })
+            });
+            ai += 1;
+        }
+    }
+
+    // Apply pokes. kind 0 -> guest memory (image.base + rva); kind 1 -> ctx region.
+    for (kind, tgt, val) in &pokes {
+        let addr = if *kind == 0 {
+            (image.base() as u64).wrapping_add(*tgt) as *mut u64
+        } else {
+            (ctx as u64).wrapping_add(*tgt) as *mut u64
         };
+        unsafe { std::ptr::write(addr, *val) };
+        println!("[perun] poke {} = {val:#x} (abs {addr:p})",
+            if *kind == 0 { format!("[RVA {tgt:#x}]") } else { format!("ctx[{tgt:#x}]") });
     }
 
     type ExportFn = unsafe extern "win64" fn(u64, u64, u64, u64) -> u64;
