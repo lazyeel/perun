@@ -5,3 +5,14 @@ This product includes software developed by lazyeel:
 - Native x86_64 PE32+ image loader and binary projection runtime (perun-core)
 - Win32 API to POSIX translation matrix / shim layer (perun-shims)
 - Command-line runner and image inspector (perun-cli)
+
+This product bundles free and open source software developed by third
+parties, consumed from the crates.io registry under their own licenses:
+
+- libc (MIT OR Apache-2.0) — The Rust Project — https://github.com/rust-lang/libc
+- linkme, linkme-impl (MIT OR Apache-2.0) — David Tolnay — https://github.com/dtolnay/linkme
+- proc-macro2, quote, syn, unicode-ident (MIT OR Apache-2.0) — David Tolnay
+- bzip2-rs (MIT OR Apache-2.0) — Paolo Barbolini — https://github.com/paolobarbolini/bzip2-rs
+- crc32fast (MIT OR Apache-2.0) — srijs — https://github.com/srijs/rust-crc32fast
+- cfg-if (MIT OR Apache-2.0) — Alex Crichton — https://github.com/rust-lang/cfg-if
+- tinyvec (Zlib OR Apache-2.0 OR MIT) — Lokathor — https://github.com/Lokathor/tinyvec
