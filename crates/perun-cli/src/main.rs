@@ -285,11 +285,19 @@ fn cmd_run(args: &[String]) -> i32 {
 /// backed by a zeroed scratch page so the guest can read/write them safely.
 fn cmd_call(args: &[String]) -> i32 {
     if args.len() < 2 {
-        eprintln!("usage: perun call <image.dll> <export> [arg0 arg1 arg2 arg3]");
+        eprintln!("usage: perun call <image.dll> <export> [arg0 arg1 arg2 arg3] [--verbose] [--patch=RVA=HEX] [--poke=RVA=VAL] [--peek=RVA] [--peek-ptr=RVA]");
         return 2;
     }
-    let path = &args[0];
-    let export_name = &args[1];
+    // `--verbose` is accepted anywhere on the command line: pulled out of the
+    // stream entirely, it never lands in the positional-argument slots.
+    let verbose = args.iter().any(|a| a == "--verbose");
+    let pos: Vec<String> = args
+        .iter()
+        .filter(|a| **a != "--verbose")
+        .cloned()
+        .collect();
+    let path = &pos[0];
+    let export_name = &pos[1];
 
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
@@ -298,6 +306,17 @@ fn cmd_call(args: &[String]) -> i32 {
             return 1;
         }
     };
+
+    if verbose {
+        if let Ok(info) = perun_core::image::PeInfo::parse(&bytes) {
+            println!(
+                "[perun] image {path}: entry={:#x} base={:#x} sections={}",
+                info.opt.address_of_entry_point,
+                info.opt.image_base,
+                info.sections.len()
+            );
+        }
+    }
 
     let mut table = ShimTable::collect();
     let image = match Image::load(&bytes, &mut table) {
@@ -391,7 +410,9 @@ fn cmd_call(args: &[String]) -> i32 {
             _ => parse_num(tok),
         }
     };
-    for a in args[2..].iter() {
+    // The positional stream (with --verbose already filtered out) drives both
+    // the argument slots and the --patch/--poke/--peek option parsing below.
+    for a in pos[2..].iter() {
         if let Some(spec) = a.strip_prefix("--patch=") {
             let (rva_s, hex_s) = spec.split_once('=').unwrap_or((spec, ""));
             let rva = parse_num(rva_s).unwrap_or_else(|| {
