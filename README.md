@@ -89,11 +89,12 @@ cargo build --release -p perun-cli
 
 # Mach-O / FairPlay SAP (zero-config; first run fetches the images):
 ./target/release/perun sap --mac AA:BB:CC:DD:EE:FF
-#   or with an explicit assets directory holding CoreFP, CommerceCore,
-#   CommerceKit, CoreFP.icxs:
+#   explicit assets directory (CoreFP, CommerceCore, CommerceKit, CoreFP.icxs)
+#   instead of the cache:
 ./target/release/perun sap <assets-dir> --mac AA:BB:CC:DD:EE:FF
-#   sign a custom payload instead of the built-in smoke string:
-./target/release/perun sap <assets-dir> --sign <hex>   # or --file <path>
+#   sign a custom payload instead of the built-in smoke string
+#   (works with or without an assets directory):
+./target/release/perun sap --sign <hex>   # or --file <path>
 
 # Windows PE:
 ./target/release/perun info   /path/to/CoreADI64.dll
