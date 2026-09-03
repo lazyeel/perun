@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Native PE32+ loader core for the Perun Windows micro-runtime"
+description = "Loader core for the Perun native binary projection runtime: PE32+ (Win32) and Mach-O x86_64 (Darwin) images"
 
 [dependencies]
 libc = "0.2"

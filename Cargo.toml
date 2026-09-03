@@ -17,8 +17,15 @@ perun-core = { path = "crates/perun-core" }
 perun-shims = { path = "crates/perun-shims" }
 
 [profile.release]
-debug = true
+debug = false
+strip = true
 lto = "thin"
+# The release profile is stripped and carries no debug info. Panic Location
+# strings of registry crates still name the build host's cargo home; for
+# distributed binaries scrub them per invocation (works on any machine):
+#   RUSTFLAGS="--remap-path-prefix=$HOME=." cargo build --release
+# Local crash forensics instead wants symbols:
+#   CARGO_PROFILE_RELEASE_DEBUG=2 cargo build --release
 
 # Native-parity stack geometry for the shims: the obfuscated guest folds
 # "uninitialized" stack slots of shim frames into its pointer arithmetic,

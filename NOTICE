@@ -1,18 +1,20 @@
 Perun
 Copyright 2026 lazyeel (https://github.com/lazyeel)
 
-This product includes software developed by lazyeel:
-- Native x86_64 PE32+ image loader and binary projection runtime (perun-core)
-- Win32 API to POSIX translation matrix / shim layer (perun-shims)
-- Command-line runner and image inspector (perun-cli)
+This product compiles and links the following software developed by lazyeel:
+- Native binary projection runtime: PE32+ (Win32) and Mach-O x86_64
+  (Darwin) image loading, relocation, import binding (perun-core)
+- Guest API translation shims: Win32 to POSIX and macOS libSystem/Mach
+  to Linux, including the FairPlay SAP session runtime (perun-shims)
+- Command-line runner, image inspector, and FairPlay SAP session driver
+  (perun-cli)
 
-This product bundles free and open source software developed by third
-parties, consumed from the crates.io registry under their own licenses:
+This product contains third-party open source software in object form,
+under its own license:
 
-- libc (MIT OR Apache-2.0) — The Rust Project — https://github.com/rust-lang/libc
-- linkme, linkme-impl (MIT OR Apache-2.0) — David Tolnay — https://github.com/dtolnay/linkme
-- proc-macro2, quote, syn, unicode-ident (MIT OR Apache-2.0) — David Tolnay
-- bzip2-rs (MIT OR Apache-2.0) — Paolo Barbolini — https://github.com/paolobarbolini/bzip2-rs
-- crc32fast (MIT OR Apache-2.0) — srijs — https://github.com/srijs/rust-crc32fast
-- cfg-if (MIT OR Apache-2.0) — Alex Crichton — https://github.com/rust-lang/cfg-if
-- tinyvec (Zlib OR Apache-2.0 OR MIT) — Lokathor — https://github.com/Lokathor/tinyvec
+- libc 0.2.189 (MIT OR Apache-2.0) — The Rust Project — https://github.com/rust-lang/libc
+- linkme, linkme-impl 0.3.37 (MIT OR Apache-2.0) — David Tolnay — https://github.com/dtolnay/linkme
+- bzip2-rs 0.1.2 (MIT OR Apache-2.0) — Paolo Barbolini — https://github.com/paolobarbolini/bzip2-rs
+- crc32fast 1.5.1 (MIT OR Apache-2.0) — srijs — https://github.com/srijs/rust-crc32fast
+- cfg-if 1.0.4 (MIT OR Apache-2.0) — Alex Crichton — https://github.com/rust-lang/cfg-if
+- tinyvec 1.12.0 (Zlib OR Apache-2.0 OR MIT) — Lokathor — https://github.com/Lokathor/tinyvec

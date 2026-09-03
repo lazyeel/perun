@@ -645,55 +645,54 @@ invariants of § 4, the poison-test falsification of the FS/GS hazard, the
    download of the public update package, SHA-256-pinned extraction of the
    images). Its Unicorn runtime independently confirms the protocol steps of
    § 5.
-3. **Sorvigolova/ipatool** (MIT) and the wider ipatool C++ lineage — GSA/GrandSlam
-   SRP authentication research that anchors the adjacent (anisette) layer.
-4. **unicorn-engine/unicorn** (GPL-2.0) — the CPU-emulation framework the
+3. **unicorn-engine/unicorn** (GPL-2.0) — the CPU-emulation framework the
    reference oracle of § 6 runs on (version 2.1.1, vendored by the oracle's
    own build). It is credited here because the measurements of § 6 compare
    against it; no Unicorn code is linked into, derived from, or redistributed
    with perun. The runtime exists precisely because that engine's cost
    profile did not fit the target use.
-5. **capstone-engine/capstone** (BSD-3-Clause, © 2013 COSEINC, designed and
-   implemented by Nguyen Anh Quynh) — the disassembly framework behind the
-   offline static analysis of § 4.2 (the FS/GS prefix census) and the
-   entry-point byte verification of § 3. An analysis-time tool only, not a
-   runtime dependency.
-6. **blacktop/go-macho** (MIT) — the reference Mach-O decoder our parser was
-   verified against, bind-for-bind and rebase-for-rebase, during development.
-7. **The 2026-08 community RE wave** — issue threads on the commerce gate
+4. **The 2026-08 community RE wave** — issue threads on the commerce gate
    (#513/#520/#522/#523/#526/#528) and the Secure-Enclave PAT analysis that
    correctly described the modern client while (transiently) mispredicting the
    server's enforcement; both threads shaped the terminology audit of § 5.4.
-8. **lazyeel** — Perun itself: the native loader/shim runtime, the phase-1
+5. **lazyeel** — Perun itself: the native loader/shim runtime, the phase-1
    ADI provisioning-gate analysis (`CoreADI64.dll`), and this document.
 
 Perun's implementation shares no code with the above; the obfuscated names,
 offsets, and protocol facts are independently derived from Apple's public
 binaries and live endpoints (byte-verifiable with § 2's digests).
 
-### 8.1 Third-party crates in the codebase
+### 8.1 Third-party crates: runtime and compile-time
 
-The compiled dependency set (Cargo.lock), with licenses read from each
-crate's own manifest and upstream repository:
+The dependency set (Cargo.lock), with licenses read from each crate's own
+manifest. The split matters for compliance scanners (FOSSA, Black Duck) and
+for NOTICE obligations under Apache-2.0/MIT, which attach to code compiled
+into the distributed binary (object form):
+
+**Runtime — compiled into the `perun` ELF:**
 
 | Crate | Version | License | Author / repository | Role |
 |---|---|---|---|---|
 | `libc` | 0.2.189 | MIT OR Apache-2.0 | The Rust Project (rust-lang/libc) | host libc ABI: mmap, sigaction, ucontext, wait4 |
-| `linkme` + `linkme-impl` | 0.3.37 | MIT OR Apache-2.0 | David Tolnay (dtolnay/linkme) | `distributed_slice` — the shim-table registration macro |
+| `linkme` + `linkme-impl` | 0.3.37 | MIT OR Apache-2.0 | David Tolnay (dtolnay/linkme) | `distributed_slice` — the shim-table registration macro; the emitted linker sections and runtime slices land in the binary |
 | `bzip2-rs` | 0.1.2 | MIT OR Apache-2.0 | Paolo Barbolini (paolobarbolini/bzip2-rs) | pure-Rust bzip2 decoder in the first-run asset fetcher |
 | `crc32fast` | 1.5.1 | MIT OR Apache-2.0 | srijs (srijs/rust-crc32fast) | checksum primitive under bzip2-rs |
 | `cfg-if` | 1.0.4 | MIT OR Apache-2.0 | Alex Crichton (rust-lang/cfg-if) | conditional compilation under crc32fast |
 | `tinyvec` | 1.12.0 | Zlib OR Apache-2.0 OR MIT | Lokathor (Lokathor/tinyvec) | small-vector abstraction under bzip2-rs |
-| `proc-macro2`, `quote`, `syn` | — | MIT OR Apache-2.0 | David Tolnay (dtolnay) | build-time macro machinery behind linkme |
-| `unicode-ident` | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 | David Tolnay (dtolnay) | identifier data for the macro crates |
 
-Every runtime license above is MIT, Apache-2.0, or Zlib — all permissive and
+**Compile-time only — executed by rustc during the build, absent from the
+binary:**
+
+| Crate | Version | License | Author | Role |
+|---|---|---|---|---|
+| `proc-macro2`, `quote`, `syn` | — | MIT OR Apache-2.0 | David Tolnay | macro machinery behind linkme's `distributed_slice` |
+| `unicode-ident` | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 | David Tolnay | identifier tables for the macro crates |
+
+All runtime licenses are MIT, Apache-2.0, or Zlib — permissive and
 compatible with the Apache-2.0 terms perun's own code is distributed under.
-The crates are consumed from the crates.io registry, not vendored into this
-repository; their copyright and license notices live in each crate's
-registry payload and are carried by the standard cargo toolchain. The
-repository's NOTICE file lists the same set for anyone distributing
-binaries.
+The crates are consumed from the crates.io registry, not vendored; their
+license notices live in each crate's registry payload. The NOTICE file
+mirrors the runtime set for anyone distributing binaries.
 
 ## 9. License and Revision History
 
@@ -709,7 +708,7 @@ with a NOTICE file (see the repository root).
 |---|---|
 | 2026-09-01 | Initial public specification. Protocol closed end-to-end (init → exchange ×2 → sign, 501-byte signature) since 2026-08-31; all facts re-verified against binaries and live endpoints on 2026-09-01 (symbol-table audit, FS/GS census + poison experiment, cert re-fetch, benchmark re-run). |
 | 2026-09-02 | Optimization pass + zero-config fetcher. Streaming image loader (full image bytes never materialized; peak RSS 26.8 MiB), storeagent dropped from the mapped set (bind-graph cross-reference, live-verified), speculative certificate fetch with a 24 h on-disk cache, and a first-run asset fetcher that range-reads ~32 MB of the public 1.28 GB update package (8.4 s cold start, all digests pinned). |
-| 2026-09-03 | Benchmark hardening. Both sides re-benched against their public, unmodified artifacts: the oracle re-cloned from GitHub (commit 883ede5) and built with its own upstream Makefile (vendored Unicorn 2.1.1), perun as the shipped release binary. Per-round exchange rows retired — the stock oracle prints no phase timers and perun's release carries none for the split, so the public table now reports SAPExchange as the single combined Round 1 + Round 2 window and compares the oracle at the process level only (wall / CPU / peak RSS, N=3 per side, kernel rusage). Superseded instrumented figures (per-phase oracle timings, per-round exchange splits) removed; § 6.6 reproduces every number with one command per side. Third-party credits verified and expanded: every repository and crate the project builds on is now listed with its license (§ 8, § 8.1). |
+| 2026-09-03 | Benchmark hardening. Both sides re-benched against their public, unmodified artifacts: the oracle re-cloned from GitHub (commit 883ede5) and built with its own upstream Makefile (vendored Unicorn 2.1.1), perun as the shipped release binary. Per-round exchange rows retired — the stock oracle prints no phase timers and perun's release carries none for the split, so the public table now reports SAPExchange as the single combined Round 1 + Round 2 window and compares the oracle at the process level only (wall / CPU / peak RSS, N=3 per side, kernel rusage). Superseded instrumented figures (per-phase oracle timings, per-round exchange splits) removed; § 6.6 reproduces every number with one command per side. Third-party credits trimmed to what the law and the analysis actually require: NOTICE and § 8.1 now list only code compiled into the binary (runtime vs compile-time split, with unicode-ident's dual license kept distinct), and § 8 keeps the projects the work measured against or built on. Release profile hardened: no DWARF, stripped binaries, no build-host paths in distributed artifacts. |
 
 *Apple, macOS, OS X, StoreKit, FairPlay, iTunes and related marks are
 trademarks of Apple Inc. This independent research project is not affiliated

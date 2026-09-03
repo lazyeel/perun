@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Runner, inspector and profiler for native PE images under Perun"
+description = "Command-line runner, image inspector, and FairPlay SAP session driver for the Perun native binary projection runtime"
 
 [[bin]]
 name = "perun"
