@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! SEH surface, TLS and misc: minimal detect-and-report implementations by
-//! design (see ROADMAP "explicitly out of scope" for the unwinder).
+//! design (an unwinder is explicitly out of scope for this runtime).
 
 use crate::util::*;
 use crate::win32::*;

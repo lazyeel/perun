@@ -120,7 +120,6 @@ dependency — the whole runtime is pure Rust plus libc.
 |---|---|
 | [RESEARCH.md](RESEARCH.md) | Phase 2: the Mach-O/FairPlay SAP work — binary map, entry points, memory invariants, protocol specification, benchmarks, prior-art credits |
 | [STATUS.md](STATUS.md) | Phase 1: the Win32/PE runtime and the ADI provisioning-gate analysis, with a per-claim verification log |
-| [ROADMAP.md](ROADMAP.md) | What remains |
 
 ## Obtaining guest binaries
 
