@@ -13,7 +13,6 @@
 //!   └── Common/    CSIDL_COMMON_APPDATA (0x0023)
 //! ```
 
-use crate::util::*;
 use crate::win32::*;
 use crate::win32_api;
 
@@ -33,7 +32,9 @@ fn appdata_root() -> std::path::PathBuf {
         Ok(v) if !v.is_empty() => std::path::PathBuf::from(v),
         _ => {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            std::path::PathBuf::from(home).join(".perun").join("appdata")
+            std::path::PathBuf::from(home)
+                .join(".perun")
+                .join("appdata")
         }
     }
 }
@@ -86,9 +87,6 @@ win32_api! {
         if csidl & CSIDL_FLAG_CREATE != 0 {
             mkdirs(&dir);
         }
-        // Research hook: re-write PERUN_HEAP_FILL values into tracked
-        // allocations right before the dispatcher's provisioning gate runs.
-        crate::util::late_fill_gate_candidates();
         write_wide(out_path, &dir.to_string_lossy());
         eprintln!(
             "[perun] SHGetFolderPathW(csidl={csidl:#x}) -> {:?}",

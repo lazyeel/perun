@@ -5,18 +5,153 @@
 
 use perun_core::loader::{Image, LoadError, DLL_PROCESS_ATTACH};
 use perun_shims::table::ShimTable;
+use std::path::Path;
+
+mod fetcher;
+mod sap;
 
 fn main() {
+    unsafe { install_crash_probe() };
     let code = run();
     // Exit via C ABI to avoid unwinding across guest frames.
     unsafe { libc::_exit(code) }
+}
+
+/// POSIX signal handler: print guest-crash context (RIP, RSP, fault address)
+/// straight to stderr, without unwinding.
+///
+/// Async-signal-safe by construction: no allocation, no TLS access, no
+/// `format!` — everything runs on raw `write(2)`. (An earlier version read
+/// a thread-local call counter here, which faulted *again inside the
+/// handler* when the guest had clobbered the TLS block, destroying the
+/// primary fault context.) SIGTRAP is not expected in production: there are
+/// no int3 plants; it is reported and the process exits.
+unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
+    let si_addr = (*info).si_addr() as u64;
+    // ucontext_t.gregs layout (x86_64 glibc): REG_RIP=16, REG_RSP=19, etc.
+    let uc = ctx as *mut libc::ucontext_t;
+    let regs = (*uc).uc_mcontext.gregs.as_mut_ptr();
+    let rip = *regs.add(libc::REG_RIP as usize) as u64;
+    let rsp = *regs.add(libc::REG_RSP as usize) as u64;
+    let rdi = *regs.add(libc::REG_RDI as usize) as u64;
+    let rsi = *regs.add(libc::REG_RSI as usize) as u64;
+
+    // The reference thunk page executes `hlt` when the guest returns — a
+    // privileged instruction faults as SIGSEGV with rip at the hlt. Bounce
+    // to the trampoline landing pad instead of dying: the guest function
+    // has returned, and the landing restores the host frame.
+    const RETURN_HLT: u64 = 0x1_0000_0000;
+    if sig == libc::SIGSEGV && (rip == RETURN_HLT + 2 || rip == RETURN_HLT) {
+        // rax holds the guest's return value; the landing expects to be
+        // entered as if reached by `ret` from the thunk — rsp already sits
+        // at the guest stack top edge.
+        *regs.add(libc::REG_RIP as usize) = sap::guest_landing_for_signal() as i64;
+        return;
+    }
+
+    // SIGTRAP in production means an unexpected int3/ICEBP in the guest
+    // image — the debug watchpoint plants are gone. Report and die: the
+    // state at the trap is not recoverable.
+    if sig == libc::SIGTRAP {
+        let mut out: [u8; 128] = [0; 128];
+        let mut n = 0usize;
+        let push = |s: &[u8], out: &mut [u8], n: &mut usize| {
+            for &b in s {
+                if *n < out.len() {
+                    out[*n] = b;
+                    *n += 1;
+                }
+            }
+        };
+        push(
+            b"[perun] unexpected SIGTRAP (int3) at rip=",
+            &mut out,
+            &mut n,
+        );
+        push(&hex16(rip), &mut out, &mut n);
+        push(b"\n", &mut out, &mut n);
+        unsafe {
+            libc::write(2, out.as_ptr().cast(), n);
+            libc::_exit(128 + sig);
+        }
+    }
+
+    let mut out: [u8; 256] = [0; 256];
+    let mut n = 0usize;
+    let push = |s: &[u8], out: &mut [u8], n: &mut usize| {
+        for &b in s {
+            if *n < out.len() {
+                out[*n] = b;
+                *n += 1;
+            }
+        }
+    };
+    push(b"[perun] guest crash: signal ", &mut out, &mut n);
+    push(&hexdec(sig as u64, 2), &mut out, &mut n);
+    push(b" addr=", &mut out, &mut n);
+    push(&hex16(si_addr), &mut out, &mut n);
+    push(b" rip=", &mut out, &mut n);
+    push(&hex16(rip), &mut out, &mut n);
+    push(b" rsp=", &mut out, &mut n);
+    push(&hex16(rsp), &mut out, &mut n);
+    push(b" rdi=", &mut out, &mut n);
+    push(&hex16(rdi), &mut out, &mut n);
+    push(b" rsi=", &mut out, &mut n);
+    push(&hex16(rsi), &mut out, &mut n);
+    push(b"\n", &mut out, &mut n);
+    unsafe {
+        libc::write(2, out.as_ptr().cast(), n);
+        libc::_exit(128 + sig);
+    }
+}
+
+/// Fixed-width hex of a u64 into a static buffer — no allocator.
+unsafe fn hex16(v: u64) -> [u8; 18] {
+    let mut buf: [u8; 18] = [b'0'; 18];
+    buf[0] = b'0';
+    buf[1] = b'x';
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for i in 0..16 {
+        buf[2 + i] = HEX[((v >> (60 - 4 * i)) & 0xF) as usize];
+    }
+    buf
+}
+
+unsafe fn hexdec(v: u64, _pad: usize) -> [u8; 21] {
+    let mut buf: [u8; 21] = [0; 21];
+    let s = v.to_string();
+    for (i, b) in s.bytes().take(20).enumerate() {
+        buf[i] = b;
+    }
+    buf
+}
+
+/// # Safety
+/// Must be installed before any guest code runs; the alt-stack it
+/// registers must stay mapped for the process lifetime.
+pub unsafe fn install_crash_probe() {
+    // Alternate signal stack: the guest can leave the main stack pointer
+    // anywhere when it faults, so the handler must not rely on it.
+    static mut ALT: [u8; 64 * 1024] = [0; 64 * 1024];
+    let mut ss: libc::stack_t = std::mem::zeroed();
+    ss.ss_sp = std::ptr::addr_of_mut!(ALT).cast();
+    ss.ss_size = 64 * 1024;
+    libc::sigaltstack(&ss, std::ptr::null_mut());
+
+    let mut act: libc::sigaction = std::mem::zeroed();
+    act.sa_sigaction = crash_handler as *const () as usize;
+    act.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
+    libc::sigaction(libc::SIGSEGV, &act, std::ptr::null_mut());
+    libc::sigaction(libc::SIGFPE, &act, std::ptr::null_mut());
+    libc::sigaction(libc::SIGBUS, &act, std::ptr::null_mut());
+    libc::sigaction(libc::SIGTRAP, &act, std::ptr::null_mut());
 }
 
 fn run() -> i32 {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         eprintln!(
-            "usage: perun run <image.dll> [--verbose] [--trace] [--trace-file F] [--no-teb]\n       perun info <image.dll>"
+            "usage: perun run <image.dll> [--verbose] [--trace] [--trace-file F] [--no-teb]\n       perun info <image.dll>\n       perun mach info <macho>\n       perun sap <dir> [--mac AA:BB:CC:DD:EE:FF] [--sign HEX|--file F] [--exchange-hex H]"
         );
         return 2;
     }
@@ -25,6 +160,8 @@ fn run() -> i32 {
         "info" => cmd_info(&args[2]),
         "run" => cmd_run(&args[2..]),
         "call" => cmd_call(&args[2..]),
+        "mach" => cmd_mach(&args[2..]),
+        "sap" => cmd_sap(&args[2..]),
         _ => {
             eprintln!("unknown command: {}", args[1]);
             2
@@ -262,7 +399,7 @@ fn cmd_call(args: &[String]) -> i32 {
                 std::process::exit(2);
             });
             let clean: String = hex_s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-            if clean.len() % 2 != 0 || clean.is_empty() {
+            if !clean.len().is_multiple_of(2) || clean.is_empty() {
                 eprintln!("error: bad --patch bytes {hex_s:?}");
                 std::process::exit(2);
             }
@@ -324,9 +461,7 @@ fn cmd_call(args: &[String]) -> i32 {
             let slot = (image.base() as u64).wrapping_add(rva) as *const u64;
             let target = unsafe { std::ptr::read(slot) };
             unsafe { std::ptr::write(target as *mut u64, val) };
-            println!(
-                "[perun] poke-ptr [RVA {rva:#x}] -> {target:#x} := {val:#x}"
-            );
+            println!("[perun] poke-ptr [RVA {rva:#x}] -> {target:#x} := {val:#x}");
             continue;
         }
         if ai < 4 {
@@ -361,7 +496,7 @@ fn cmd_call(args: &[String]) -> i32 {
         let addr = (image.base() as u64).wrapping_add(*rva) as *mut u8;
         let page = (addr as usize) & !0xfff;
         let end = (addr as usize) + bytes.len();
-        let npages = (end - page + 0xfff) / 0x1000;
+        let npages = (end - page).div_ceil(0x1000);
         unsafe {
             libc::mprotect(
                 page as *mut libc::c_void,
@@ -390,18 +525,14 @@ fn cmd_call(args: &[String]) -> i32 {
     let r = unsafe { f(argv[0], argv[1], argv[2], argv[3]) };
     println!("[perun] {export_name} returned {r:#x} ({r})");
 
-    // Dump tracked gate candidates (PERUN_HEAP_FILL research hook) so the
-    // caller can correlate them with the --peek-ptr object address.
-    for (addr, v) in perun_shims::util::gate_candidates_snapshot() {
-        println!("[perun] gate-candidate {addr:#x} fill={v:#x}");
-    }
-
     // --peek=RVA[,RVA...]: read qwords from guest memory after the call so the
     // caller can watch globals (e.g. the provisioning gate) for writes.
     for spec in peeks.iter() {
         for part in spec.split(',') {
             let part = part.trim();
-            if part.is_empty() { continue; }
+            if part.is_empty() {
+                continue;
+            }
             let rva = parse_num(part).unwrap_or_else(|| {
                 eprintln!("error: bad --peek rva {part:?}");
                 std::process::exit(2);
@@ -467,7 +598,7 @@ fn cmd_call(args: &[String]) -> i32 {
 unsafe fn probe_read(p: *const u8, len: usize) -> bool {
     // mincore requires page-aligned addr; instead do a bounded read via
     // /dev/null write using write(2) on the pointer directly.
-    let fd = libc::open(b"/dev/null\0".as_ptr() as *const i8, libc::O_WRONLY);
+    let fd = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY);
     if fd < 0 {
         return false;
     }
@@ -528,4 +659,257 @@ fn cmd_info(path: &str) -> i32 {
             1
         }
     }
+}
+
+// ── Mach-O surface ──────────────────────────────────────────────────────────
+
+fn cmd_mach(args: &[String]) -> i32 {
+    if args.len() < 2 {
+        eprintln!("usage: perun mach info <macho-file>");
+        return 2;
+    }
+    match args[0].as_str() {
+        "info" => {
+            let data = match std::fs::read(&args[1]) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("read {}: {e}", args[1]);
+                    return 1;
+                }
+            };
+            match perun_core::macho::MachInfo::parse(&data) {
+                Ok(info) => {
+                    println!("preferred base: {:#x}", info.base);
+                    println!("segments:");
+                    for s in &info.segments {
+                        println!(
+                            "  {:16} vm={:#018x}+{:#x} file={:#x}+{:#x}",
+                            s.name_str(),
+                            s.vmaddr,
+                            s.vmsize,
+                            s.fileoff,
+                            s.filesize,
+                        );
+                    }
+                    println!(
+                        "fixups: {} rebases, {} binds, {} defined symbols",
+                        info.rebases.len(),
+                        info.binds.len(),
+                        info.symbols.len(),
+                    );
+                    let obf: Vec<&str> = info
+                        .symbols
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .filter(|n| {
+                            matches!(
+                                *n,
+                                "_cp2g1b9ro"
+                                    | "_Mib5yocT"
+                                    | "_Fc3vhtJDvr"
+                                    | "_IPaI1oem5iL"
+                                    | "_jEHf8Xzsv8K"
+                                    | "_jfkdDAjba3jd"
+                                    | "_gLg1CWr7p"
+                                    | "_WIn9UJ86JKdV4dM"
+                                    | "_X46O5IeS"
+                                    | "_YlCJ3lg"
+                                    | "_dku592fbFAj"
+                                    | "_fdjkDSAFjklaf2s"
+                                    | "_lxpgvVMLd0S7uRl"
+                            )
+                        })
+                        .collect();
+                    if !obf.is_empty() {
+                        println!("SAP symbols present: {}", obf.join(", "));
+                    }
+                    0
+                }
+                Err(e) => {
+                    eprintln!("parse failed: {e}");
+                    1
+                }
+            }
+        }
+        _ => {
+            eprintln!("unknown mach subcommand: {}", args[0]);
+            2
+        }
+    }
+}
+
+fn cmd_sap(args: &[String]) -> i32 {
+    if args.is_empty() {
+        eprintln!("usage: perun sap <assets-dir> [--mac AA:BB:..] [--sign HEX] [--file PATH]");
+        return 2;
+    }
+    // Guest obfuscated code keeps deep recursion and wide frames; run the
+    // whole sequence on a dedicated thread with a large stack, mirroring
+    // the reference emulator's separate 8MB guest stack.
+    let args = args.to_vec();
+    let handle = std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(move || {
+            // sigaltstack is per-thread: the crash/int3 handlers rely on
+            // SA_ONSTACK to survive guest-clobbered RSPs, but this spawned
+            // thread starts without one. Install it here, before any guest
+            // code runs on this thread.
+            unsafe { sap::install_thread_altstack() };
+            cmd_sap_inner(&args)
+        })
+        .expect("failed to spawn SAP thread");
+    match handle.join() {
+        Ok(code) => code,
+        Err(_) => {
+            eprintln!("[sap] thread panicked");
+            1
+        }
+    }
+}
+
+fn cmd_sap_inner(args: &[String]) -> i32 {
+    // Asset resolution: explicit dir wins; otherwise a complete pinned cache is
+    // used as-is; otherwise the zero-config fetcher downloads the missing
+    // assets (first run only) and the command continues from the cache.
+    let dir = if Path::new(&args[0]).is_dir() {
+        args[0].clone()
+    } else {
+        match fetcher::ensure_cache(true) {
+            Ok(cache) => cache.display().to_string(),
+            Err(e) => {
+                eprintln!("assets: {e}");
+                return 1;
+            }
+        }
+    };
+    let mut mac = [0x02u8, 0x00, 0x00, 0x00, 0x00, 0x01];
+    let mut sign_hex: Option<String> = None;
+    let mut sign_file: Option<String> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--mac" if i + 1 < args.len() => {
+                let parts: Vec<&str> = args[i + 1].split(':').collect();
+                if parts.len() == 6 {
+                    for (j, p) in parts.iter().enumerate() {
+                        mac[j] = u8::from_str_radix(p, 16).unwrap_or(mac[j]);
+                    }
+                }
+                i += 2;
+            }
+            "--sign" if i + 1 < args.len() => {
+                sign_hex = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--file" if i + 1 < args.len() => {
+                sign_file = Some(args[i + 1].clone());
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+
+    let assets = match sap::SapAssets::load_dir(&dir) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("assets: {e}");
+            return 1;
+        }
+    };
+
+    // Speculative TLS: the certificate download (~100-150 ms of network) runs
+    // concurrently with image mapping; the setup phase joins the result. The
+    // thread only performs the HTTPS fetch — it touches no guest state, no
+    // process-wide handlers, and its failure surfaces as a setup error below,
+    // exactly as a synchronous fetch would. The fetcher caches the certificate
+    // (TTL 24h), so on cache hits the thread is a file read and the hot path
+    // performs zero CDN round-trips before the protocol POST.
+    let cert_fetch = std::thread::spawn(|| -> Result<Vec<u8>, String> {
+        let path = fetcher::ensure_cert()?;
+        std::fs::read(&path).map_err(|e| format!("read cached certificate: {e}"))
+    });
+
+    let t0 = std::time::Instant::now();
+    let mut rt = match sap::SapRuntime::new(&assets) {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("runtime: {e}");
+            return 1;
+        }
+    };
+    println!("[sap] images loaded natively in {:?}", t0.elapsed());
+    println!("[sap] {}", rt.entry_report());
+
+    let t0 = std::time::Instant::now();
+    match rt.init(mac) {
+        Ok(ctx) => println!("[sap] SAPInit OK: context {:#x} ({:?})", ctx, t0.elapsed()),
+        Err(e) => {
+            eprintln!("[sap] SAPInit failed: {e}");
+            return 1;
+        }
+    }
+
+    // Join the speculative certificate fetch (started before image loading).
+    let cert = match cert_fetch.join() {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => {
+            eprintln!("[sap] setup failed: {e}");
+            return 1;
+        }
+        Err(_) => {
+            eprintln!("[sap] certificate fetch thread panicked");
+            return 1;
+        }
+    };
+
+    let t0 = std::time::Instant::now();
+    match rt.setup_with_cert(mac, cert) {
+        Ok(()) => println!("[sap] SAP setup complete ({:?})", t0.elapsed()),
+        Err(e) => {
+            eprintln!("[sap] SAP setup failed: {e}");
+            return 1;
+        }
+    }
+
+    let payload = if let Some(hex) = &sign_hex {
+        hex_decode(hex)
+    } else if let Some(path) = &sign_file {
+        match std::fs::read(path) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("read {path}: {e}");
+                return 1;
+            }
+        }
+    } else {
+        b"perun native SAP smoke test".to_vec()
+    };
+
+    let t0 = std::time::Instant::now();
+    match rt.sign(&payload) {
+        Ok(sig) => {
+            println!(
+                "[sap] SAPSign OK: {} bytes in {:?}",
+                sig.len(),
+                t0.elapsed()
+            );
+            let mut hex = String::with_capacity(sig.len() * 2);
+            for b in &sig {
+                hex.push_str(&format!("{b:02x}"));
+            }
+            println!("[sap] signature: {hex}");
+            0
+        }
+        Err(e) => {
+            eprintln!("[sap] SAPSign failed: {e}");
+            1
+        }
+    }
+}
+
+fn hex_decode(s: &str) -> Vec<u8> {
+    let clean: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    (0..clean.len() / 2)
+        .map(|i| u8::from_str_radix(&clean[i * 2..i * 2 + 2], 16).unwrap_or(0))
+        .collect()
 }

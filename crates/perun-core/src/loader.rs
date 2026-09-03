@@ -26,7 +26,6 @@ pub struct Image {
     /// Actual base minus preferred base (0 when mapped at preferred address).
     slide: u64,
     exports: Exports,
-    stub_count: usize,
 }
 
 struct Exports {
@@ -66,10 +65,16 @@ impl core::fmt::Display for LoadError {
         match self {
             Self::Parse(e) => write!(f, "parse failed: {e}"),
             Self::MapFailed { size } => write!(f, "mmap of {size} bytes failed"),
-            Self::BadImportRva { rva } => write!(f, "import directory points outside image: rva={rva:#x}"),
-            Self::BadExportRva { rva } => write!(f, "export directory points outside image: rva={rva:#x}"),
+            Self::BadImportRva { rva } => {
+                write!(f, "import directory points outside image: rva={rva:#x}")
+            }
+            Self::BadExportRva { rva } => {
+                write!(f, "export directory points outside image: rva={rva:#x}")
+            }
             Self::RvaOutOfBounds { rva } => write!(f, "image too small for rva={rva:#x}"),
-            Self::UnsupportedMachine { machine } => write!(f, "unsupported machine: {machine:#06x}"),
+            Self::UnsupportedMachine { machine } => {
+                write!(f, "unsupported machine: {machine:#06x}")
+            }
         }
     }
 }
@@ -131,7 +136,11 @@ impl Image {
                 }
                 let dst = base.add(s.virtual_address as usize);
                 let n = s.size_of_raw_data.min(size - s.virtual_address) as usize;
-                std::ptr::copy_nonoverlapping(file.as_ptr().add(s.pointer_to_raw_data as usize), dst, n);
+                std::ptr::copy_nonoverlapping(
+                    file.as_ptr().add(s.pointer_to_raw_data as usize),
+                    dst,
+                    n,
+                );
             }
         }
 
@@ -147,7 +156,6 @@ impl Image {
                 name_table_rva: 0,
                 ordinal_table_rva: 0,
             },
-            stub_count: 0,
         };
 
         // 4. Relocations.
@@ -198,11 +206,6 @@ impl Image {
         &self.info
     }
 
-    /// Number of imports that fell back to trap stubs during load.
-    pub fn stubbed_imports(&self) -> usize {
-        self.stub_count
-    }
-
     /// Entry point as `DllMain` (Win64 calling convention).
     ///
     /// # Safety
@@ -213,7 +216,7 @@ impl Image {
         if rva == 0 {
             return None;
         }
-        Some(std::mem::transmute(self.base.add(rva as usize)))
+        Some(unsafe { std::mem::transmute::<*mut u8, DllMainFn>(self.base.add(rva as usize)) })
     }
 
     /// Raw pointer to an export by name.
@@ -223,7 +226,8 @@ impl Image {
         }
         let names = self.slice_at::<u32>(self.exports.name_table_rva, self.exports.num_names)?;
         let ords = self.slice_at::<u16>(self.exports.ordinal_table_rva, self.exports.num_names)?;
-        let addrs = self.slice_at::<u32>(self.exports.addr_table_rva, self.exports.num_functions)?;
+        let addrs =
+            self.slice_at::<u32>(self.exports.addr_table_rva, self.exports.num_functions)?;
 
         for i in 0..self.exports.num_names as usize {
             let name_rva = names[i];
@@ -242,22 +246,6 @@ impl Image {
             }
         }
         None
-    }
-
-    /// List of exported function names.
-    pub fn export_names(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        if let (Some(names), Some(_ords)) = (
-            self.slice_at::<u32>(self.exports.name_table_rva, self.exports.num_names),
-            self.slice_at::<u16>(self.exports.ordinal_table_rva, self.exports.num_names),
-        ) {
-            for name_rva in names.iter().take(self.exports.num_names as usize) {
-                if let Some(s) = self.cstr_at(*name_rva) {
-                    out.push(String::from_utf8_lossy(s).into_owned());
-                }
-            }
-        }
-        out
     }
 
     // ── internals ────────────────────────────────────────────────────────
@@ -398,8 +386,7 @@ impl Image {
                 };
 
                 self.check_rva(iat_rva + idx * 8, 8)?;
-                let slot =
-                    unsafe { self.base.add((iat_rva + idx * 8) as usize) as *mut ExternPtr };
+                let slot = unsafe { self.base.add((iat_rva + idx * 8) as usize) as *mut ExternPtr };
                 match resolved {
                     Some(ptr) => unsafe { slot.write(ptr) },
                     None => {
@@ -410,10 +397,9 @@ impl Image {
                             .cstr_at(((entry & 0x7FFF_FFFF) as u32).wrapping_add(2))
                             .map(|b| String::from_utf8_lossy(b).into_owned())
                             .unwrap_or_default();
-                        let stub = crate::stub_pool()
-                            .allocate(format!("{dll_owned}!{fname_owned}"));
+                        let stub =
+                            crate::stub_pool().allocate(format!("{dll_owned}!{fname_owned}"));
                         unsafe { slot.write(stub as ExternPtr) };
-                        self.stub_count += 1;
                     }
                 }
                 idx += 1;
@@ -434,12 +420,12 @@ impl Image {
         let f = unsafe {
             let p = self.base.add(rva as usize) as *const u32;
             (
-                p.add(4).read_unaligned(),  // +16: ordinal base (skip chars/ts/ver)
-                p.add(5).read_unaligned(),  // +20: number of functions
-                p.add(6).read_unaligned(),  // +24: number of names
-                p.add(7).read_unaligned(),  // +28: address table RVA
-                p.add(8).read_unaligned(),  // +32: name table RVA
-                p.add(9).read_unaligned(),  // +36: ordinal table RVA
+                p.add(4).read_unaligned(), // +16: ordinal base (skip chars/ts/ver)
+                p.add(5).read_unaligned(), // +20: number of functions
+                p.add(6).read_unaligned(), // +24: number of names
+                p.add(7).read_unaligned(), // +28: address table RVA
+                p.add(8).read_unaligned(), // +32: name table RVA
+                p.add(9).read_unaligned(), // +36: ordinal table RVA
             )
         };
         self.exports = Exports {

@@ -4,9 +4,9 @@
 //! SEH surface, TLS and misc: minimal detect-and-report implementations by
 //! design (see ROADMAP "explicitly out of scope" for the unwinder).
 
-use crate::win32_api;
 use crate::util::*;
 use crate::win32::*;
+use crate::win32_api;
 
 // ── SEH surface (detect/report only) ─────────────────────────────────────
 
@@ -194,7 +194,11 @@ win32_api! {
                 s[index as usize] = value as usize;
             });
         }
-        ok.then_some(TRUE).unwrap_or(FALSE)
+        if ok {
+            TRUE
+        } else {
+            FALSE
+        }
     }
 }
 

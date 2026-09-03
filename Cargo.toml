@@ -19,3 +19,11 @@ perun-shims = { path = "crates/perun-shims" }
 [profile.release]
 debug = true
 lto = "thin"
+
+# Native-parity stack geometry for the shims: the obfuscated guest folds
+# "uninitialized" stack slots of shim frames into its pointer arithmetic,
+# so the shim frames must match the O2-compiled reference interposer's
+# shape (push rbp + call, 0x10 total). Debug Rust adds ~0x80 of locals;
+# O2 collapses the once-shim to the same 16-byte frame as O2 C.
+[profile.dev.package.perun-shims]
+opt-level = 2

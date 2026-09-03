@@ -3,10 +3,9 @@
 
 //! Memory management shims: heap + virtual memory over POSIX.
 
-use crate::win32_api;
-use crate::util;
 use crate::util::set_last_error;
 use crate::win32::*;
+use crate::win32_api;
 
 win32_api! {
     /// HANDLE GetProcessHeap(VOID);
@@ -25,35 +24,6 @@ win32_api! {
         } else {
             libc::malloc(size)
         };
-        // Research hooks (off unless enabled):
-        //   PERUN_HEAP_TRACE=1              -> log size/flags/result
-        //   PERUN_HEAP_FILL=<size>:<qword>  -> write <qword> at offset 0 of
-        //                                      every allocation of <size>
-        if let Ok(v) = std::env::var("PERUN_HEAP_TRACE") {
-            if v == "1" {
-                eprintln!("[perun] HeapAlloc size={size:#x} flags={flags:#x} -> {ptr:?}");
-            }
-        }
-        if let Ok(spec) = std::env::var("PERUN_HEAP_FILL") {
-            if let Some((sz, val)) = spec.split_once(':') {
-                let sz_hex = sz.trim().trim_start_matches("0x");
-                let sz: usize =
-                    usize::from_str_radix(sz_hex, 16).unwrap_or_else(|_| sz.trim().parse().unwrap_or(0));
-                let val: u64 = u64::from_str_radix(
-                    val.trim().trim_start_matches("0x"),
-                    16,
-                )
-                .or_else(|_| val.trim().parse())
-                .unwrap_or(0);
-                if size as usize == sz && !ptr.is_null() {
-                    std::ptr::write_volatile(ptr as *mut u64, val);
-                    // Late-fill support: remember this allocation so a later shim
-                    // (SHGetFolderPathW) can re-write the value AFTER the guest's own
-                    // zero-init ran. See shell_path.rs / PERUN_GATE_POKE.
-                    crate::util::track_gate_candidate(ptr as u64);
-                }
-            }
-        }
         ptr as LPVOID
     }
 }
@@ -149,9 +119,11 @@ win32_api! {
         const MEM_RELEASE: u32 = 0x8000;
         let _ = free_type;
         let len = if size == 0 { 0x1000 } else { round_up_page(size) };
-        (libc::munmap(addr, len) == 0)
-            .then_some(TRUE)
-            .unwrap_or(FALSE)
+        if libc::munmap(addr, len) == 0 {
+            TRUE
+        } else {
+            FALSE
+        }
     }
 }
 
@@ -178,7 +150,6 @@ win32_api! {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,7 +161,10 @@ mod tests {
             win_prot_to_posix(PAGE_EXECUTE_READWRITE),
             libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC
         );
-        assert_eq!(win_prot_to_posix(0xDEAD), libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC);
+        assert_eq!(
+            win_prot_to_posix(0xDEAD),
+            libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC
+        );
     }
 
     #[test]

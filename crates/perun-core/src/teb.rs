@@ -13,24 +13,24 @@ const ARCH_SET_GS: libc::c_int = 0x1001;
 /// Minimal FakeTEB backing structure (page-aligned in heap).
 #[repr(C, align(4096))]
 pub struct FakeTeb {
-    pub reserved_0: u64,           // +0x00
-    pub stack_base: u64,           // +0x08
-    pub stack_limit: u64,          // +0x10
-    pub sub_system_tib: u64,       // +0x18
-    pub fiber_data: u64,           // +0x20
-    pub arbitrary_data: u64,       // +0x28
-    pub self_ptr: u64,             // +0x30 NtCurrentTeb()
-    pub environment_pointer: u64,  // +0x38
-    pub client_id_pid: u64,        // +0x40
-    pub client_id_tid: u64,        // +0x48
-    pub rpc_handle: u64,           // +0x50
-    pub tls_array: u64,            // +0x58
-    pub peb_ptr: u64,              // +0x60
-    pub last_error: u32,           // +0x68
-    pub last_status: u32,          // +0x6C
-    pub reserved_1: [u64; 24],     // up to TLS slots
-    pub tls_slots: [u64; 64],      // inline TLS slots array
-    pub peb: FakePeb,              // inline PEB storage
+    pub reserved_0: u64,          // +0x00
+    pub stack_base: u64,          // +0x08
+    pub stack_limit: u64,         // +0x10
+    pub sub_system_tib: u64,      // +0x18
+    pub fiber_data: u64,          // +0x20
+    pub arbitrary_data: u64,      // +0x28
+    pub self_ptr: u64,            // +0x30 NtCurrentTeb()
+    pub environment_pointer: u64, // +0x38
+    pub client_id_pid: u64,       // +0x40
+    pub client_id_tid: u64,       // +0x48
+    pub rpc_handle: u64,          // +0x50
+    pub tls_array: u64,           // +0x58
+    pub peb_ptr: u64,             // +0x60
+    pub last_error: u32,          // +0x68
+    pub last_status: u32,         // +0x6C
+    pub reserved_1: [u64; 24],    // up to TLS slots
+    pub tls_slots: [u64; 64],     // inline TLS slots array
+    pub peb: FakePeb,             // inline PEB storage
 }
 
 /// Minimal FakePEB backing structure.
@@ -82,7 +82,10 @@ pub unsafe fn init_thread_teb(image_base: u64) -> *mut FakeTeb {
 
         let res = libc::syscall(libc::SYS_arch_prctl, ARCH_SET_GS, teb_ptr as u64);
         if res != 0 {
-            eprintln!("[perun] ARCH_SET_GS failed: errno={}", *libc::__errno_location());
+            eprintln!(
+                "[perun] ARCH_SET_GS failed: errno={}",
+                *libc::__errno_location()
+            );
         }
         teb_ptr
     })
@@ -130,9 +133,7 @@ pub unsafe fn get_last_error_ptr() -> *mut u32 {
 /// Must be called after `init_thread_teb`.
 pub unsafe fn get_tls_slot_ptr(index: usize) -> *mut u64 {
     CURRENT_TEB.with(|slot| match slot.borrow().as_ref() {
-        Some(b) if index < b.tls_slots.len() => {
-            b.tls_slots.as_ptr().add(index) as *mut u64
-        }
+        Some(b) if index < b.tls_slots.len() => b.tls_slots.as_ptr().add(index) as *mut u64,
         _ => std::ptr::null_mut(),
     })
 }

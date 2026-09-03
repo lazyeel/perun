@@ -4,30 +4,12 @@
 //! String, environment, module and console shims.
 
 use crate::files::{file_of, WriteFile};
-use crate::win32_api;
-use crate::util::*;
 use crate::util::set_last_error;
+use crate::util::*;
 use crate::win32::*;
+use crate::win32_api;
 
 // ── UTF conversion ───────────────────────────────────────────────────────
-
-fn utf16_to_utf8(src: &[u16], dst: *mut u8, cap: usize) -> usize {
-    let owned = String::from_utf16_lossy(src);
-    let bytes = owned.as_bytes();
-    if dst.is_null() {
-        return bytes.len() + 1; // include NUL in the requirement
-    }
-    if bytes.len() + 1 > cap {
-        set_last_error(ERROR_INSUFFICIENT_BUFFER);
-        return 0;
-    }
-    unsafe {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
-        *dst.add(bytes.len()) = 0;
-    }
-    bytes.len() + 1
-}
-
 
 win32_api! {
     /// int MultiByteToWideChar(UINT, DWORD, LPCSTR, int, LPWSTR, int);
@@ -103,7 +85,11 @@ win32_api! {
 // micro-runtime, and the target guests compare file names/keys case-wise.
 fn map_string_w(src: &[u16], upper: bool) -> Vec<u16> {
     let s = String::from_utf16_lossy(src);
-    let mapped = if upper { s.to_uppercase() } else { s.to_lowercase() };
+    let mapped = if upper {
+        s.to_uppercase()
+    } else {
+        s.to_lowercase()
+    };
     wide_from_str(&mapped)
 }
 

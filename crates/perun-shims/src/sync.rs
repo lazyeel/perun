@@ -5,9 +5,9 @@
 
 use std::sync::Condvar;
 
-use crate::win32_api;
 use crate::util::*;
 use crate::win32::*;
+use crate::win32_api;
 
 win32_api! {
     /// BOOL InitializeCriticalSectionAndSpinCount(PCRITICAL_SECTION, DWORD);
@@ -45,7 +45,7 @@ fn recursive_mutex_init() -> libc::pthread_mutex_t {
 /// `cs` must be a blob previously passed to InitializeCriticalSection*.
 unsafe fn cs_lock(cs: *mut core::ffi::c_void) -> &'static mut libc::pthread_mutex_t {
     let boxed = (cs as *mut Box<MutexHandle>).as_mut().expect("cs blob");
-    &mut **boxed
+    boxed
 }
 
 win32_api! {
@@ -162,10 +162,7 @@ fn wait_on_event(e: &EventState, timeout_ms: DWORD) -> DWORD {
                 if now >= dl {
                     return WAIT_TIMEOUT;
                 }
-                let (f2, res) = e
-                    .cond
-                    .wait_timeout(f, dl - now)
-                    .unwrap();
+                let (f2, res) = e.cond.wait_timeout(f, dl - now).unwrap();
                 f = f2;
                 if res.timed_out() && !f.signaled {
                     return WAIT_TIMEOUT;

@@ -97,7 +97,7 @@ pub(crate) fn handle_new(kind: HostKind) -> HANDLE {
 /// Validate a guest handle. Returns the object reference when live.
 ///
 /// # Safety
- /// Caller must not retain the reference beyond the call.
+/// Caller must not retain the reference beyond the call.
 pub(crate) unsafe fn handle_get(h: HANDLE) -> Option<&'static HostObject> {
     let p = h as usize;
     if p == 0 || p == usize::MAX || p == usize::MAX - 1 {
@@ -122,10 +122,8 @@ pub(crate) unsafe fn handle_free(h: HANDLE) -> bool {
                 libc::close(fd);
             }
         }
-        HostKind::Dir { dir, .. } => {
-            if !dir.is_null() {
-                libc::closedir(dir);
-            }
+        HostKind::Dir { dir: d, .. } if !d.is_null() => {
+            libc::closedir(d);
         }
         _ => {}
     }
@@ -217,6 +215,28 @@ pub(crate) fn unix_to_filetime(secs: i64, nanos: u32) -> u64 {
     ((secs + EPOCH_DIFF) as u64) * 10_000_000 + (nanos as u64) / 100
 }
 
+/// Read LastErrorValue from the active TEB.
+pub fn get_last_error() -> u32 {
+    unsafe {
+        let p = perun_core::teb::get_last_error_ptr();
+        if !p.is_null() {
+            *p
+        } else {
+            0
+        }
+    }
+}
+
+/// Write LastErrorValue to the active TEB.
+pub fn set_last_error(code: u32) {
+    unsafe {
+        let p = perun_core::teb::get_last_error_ptr();
+        if !p.is_null() {
+            *p = code;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,60 +262,4 @@ mod tests {
         let n = write_wide(buf.as_mut_ptr(), 2, &wide_from_str("abcd"));
         assert_eq!(n, 5);
     }
-}
-
-/// Read LastErrorValue from the active TEB.
-pub fn get_last_error() -> u32 {
-    unsafe {
-        let p = perun_core::teb::get_last_error_ptr();
-        if !p.is_null() {
-            *p
-        } else {
-            0
-        }
-    }
-}
-
-/// Write LastErrorValue to the active TEB.
-pub fn set_last_error(code: u32) {
-    unsafe {
-        let p = perun_core::teb::get_last_error_ptr();
-        if !p.is_null() {
-            *p = code;
-        }
-    }
-}
-
-// --- research hook: late gate-object fill -------------------------------
-// PERUN_HEAP_FILL=<size>:<qword> tracks matching HeapAlloc results here;
-// SHGetFolderPathW re-writes the value into each tracked allocation right
-// before returning, i.e. after the guest's own zero-init and just before the
-// provisioning gate reads the object's first qword.
-
-static GATE_CANDIDATES: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
-
-/// Record an allocation (addr, fill-value) as a gate candidate.
-pub fn track_gate_candidate(addr: u64) {
-    if let Ok(spec) = std::env::var("PERUN_HEAP_FILL") {
-        if let Some((_, val)) = spec.split_once(':') {
-            let v = u64::from_str_radix(val.trim().trim_start_matches("0x"), 16)
-                .or_else(|_| val.trim().parse::<u64>())
-                .unwrap_or(0);
-            GATE_CANDIDATES.lock().unwrap().push((addr, v));
-        }
-    }
-}
-
-/// Re-write the fill value into every tracked allocation (late fill).
-pub fn late_fill_gate_candidates() {
-    for (addr, v) in GATE_CANDIDATES.lock().unwrap().iter() {
-        unsafe {
-            std::ptr::write_volatile(*addr as *mut u64, *v);
-        }
-    }
-}
-
-/// Snapshot of tracked (addr, value) pairs for diagnostics.
-pub fn gate_candidates_snapshot() -> Vec<(u64, u64)> {
-    GATE_CANDIDATES.lock().unwrap().clone()
 }

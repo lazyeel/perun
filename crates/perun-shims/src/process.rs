@@ -3,9 +3,9 @@
 
 //! Process, thread info, entropy, crypto and time shims.
 
-use crate::win32_api;
 use crate::util::*;
 use crate::win32::*;
+use crate::win32_api;
 
 // ── Process / thread identity ─────────────────────────────────────────────
 

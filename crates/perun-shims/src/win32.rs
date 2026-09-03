@@ -193,7 +193,6 @@ pub struct SECURITY_ATTRIBUTES {
 
 /// Win32 error codes are stored per-thread in the TEB (`+0x68`); see
 /// `util::set_last_error` / `util::get_last_error` for the implementation.
-
 /// `STARTUPINFOW` (Win64 layout, 104 bytes).
 #[repr(C)]
 #[derive(Default, Clone, Copy)]

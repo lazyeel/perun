@@ -4,9 +4,9 @@
 //! Directory enumeration (Find* family), drive/volume queries and the
 //! remaining kernel32 surface the prototype's guests touched.
 
-use crate::win32_api;
 use crate::util::*;
 use crate::win32::*;
+use crate::win32_api;
 
 fn filetime_from_timespec(secs: i64, nanos: i64) -> FILETIME {
     FILETIME::from_u64(unix_to_filetime(secs, nanos.clamp(0, 999_999_999) as u32))
@@ -138,9 +138,11 @@ win32_api! {
 win32_api! {
     /// BOOL FindClose(HANDLE);
     unsafe extern "win64" fn FindClose(h: HANDLE) -> BOOL {
-        handle_free(h)
-            .then_some(TRUE)
-            .unwrap_or(FALSE)
+        if handle_free(h) {
+            TRUE
+        } else {
+            FALSE
+        }
     }
 }
 

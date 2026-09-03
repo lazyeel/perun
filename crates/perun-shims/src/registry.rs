@@ -23,20 +23,15 @@ pub struct RegValue {
     pub kind: RegType,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RegType {
     /// Null-terminated string.
     Sz,
     /// 32-bit number.
     Dword,
     /// Raw bytes.
+    #[default]
     Binary,
-}
-
-impl Default for RegType {
-    fn default() -> Self {
-        RegType::Binary
-    }
 }
 
 static REGISTRY: LazyLock<Registry> = LazyLock::new(|| Registry {
@@ -50,12 +45,6 @@ impl Registry {
 
     pub fn set(&self, path: &str, value: RegValue) {
         self.values.lock().unwrap().insert(path.to_string(), value);
-    }
-
-    pub fn set_sz(&self, path: &str, s: &str) {
-        let mut data = s.as_bytes().to_vec();
-        data.push(0);
-        self.set(path, RegValue { data, kind: RegType::Sz });
     }
 
     pub fn set_dword(&self, path: &str, v: u32) {

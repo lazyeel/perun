@@ -3,9 +3,9 @@
 
 //! File I/O and path shims over POSIX.
 
-use crate::win32_api;
 use crate::util::*;
 use crate::win32::*;
+use crate::win32_api;
 
 fn open_flags(access: DWORD, disposition: DWORD) -> (i32, i32) {
     let mut flags = match access & 0xF000_0000 {
@@ -202,9 +202,11 @@ win32_api! {
             None => return FALSE,
         };
         let pos = libc::lseek(fd, 0, libc::SEEK_CUR);
-        (libc::ftruncate(fd, pos) == 0)
-            .then_some(TRUE)
-            .unwrap_or(FALSE)
+        if libc::ftruncate(fd, pos) == 0 {
+            TRUE
+        } else {
+            FALSE
+        }
     }
 }
 
@@ -212,9 +214,13 @@ win32_api! {
     /// BOOL FlushFileBuffers(HANDLE);
     unsafe extern "win64" fn FlushFileBuffers(h: HANDLE) -> BOOL {
         match file_of(h) {
-            Some((fd, _)) => (libc::fsync(fd) == 0)
-                .then_some(TRUE)
-                .unwrap_or(FALSE),
+            Some((fd, _)) => {
+                if libc::fsync(fd) == 0 {
+                    TRUE
+                } else {
+                    FALSE
+                }
+            }
             None => FALSE,
         }
     }
@@ -257,9 +263,11 @@ win32_api! {
     unsafe extern "win64" fn DeleteFileW(name: LPCWSTR) -> BOOL {
         let path = String::from_utf16_lossy(&read_wide(name));
         let c = std::ffi::CString::new(path).unwrap_or_default();
-        (libc::unlink(c.as_ptr()) == 0)
-            .then_some(TRUE)
-            .unwrap_or(FALSE)
+        if libc::unlink(c.as_ptr()) == 0 {
+            TRUE
+        } else {
+            FALSE
+        }
     }
 }
 
@@ -271,9 +279,11 @@ win32_api! {
     ) -> BOOL {
         let path = String::from_utf16_lossy(&read_wide(name));
         let c = std::ffi::CString::new(path).unwrap_or_default();
-        (libc::mkdir(c.as_ptr(), 0o755) == 0)
-            .then_some(TRUE)
-            .unwrap_or(FALSE)
+        if libc::mkdir(c.as_ptr(), 0o755) == 0 {
+            TRUE
+        } else {
+            FALSE
+        }
     }
 }
 
@@ -306,9 +316,6 @@ win32_api! {
         if std::env::var("PERUN_TRACE").is_ok() {
             eprintln!("[perun] GetFileAttributesW({:?}) -> {attrs:#x}", path);
         }
-        // Research hook: latest possible pre-gate fill point (last call in the
-        // dir-walk, immediately before the gate reads the object).
-        crate::util::late_fill_gate_candidates();
         attrs
     }
 }

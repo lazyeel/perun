@@ -5,3 +5,24 @@
 core
 core.*
 /tmp/
+/test-sap/
+/HANDOVER.md
+
+# Diagnostic scratch (session artifacts, never for the public repo)
+/_*.py
+/_*.sh
+/_*.txt
+ck_trace*.txt
+*.log
+
+# Zero-config fetcher cache (downloaded Apple assets; never commit).
+# The default cache lives outside the repo (~/.cache/perun/sap), but PERUN_SAP_DIR
+# may point inside it; these patterns cover every cache layout.
+/sap-cache/
+/sap-cold-cache/
+CoreFP
+CoreFP.icxs
+CommerceKit
+CommerceCore
+setup.crt
+.*.part

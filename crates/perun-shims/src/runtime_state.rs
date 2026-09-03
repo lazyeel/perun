@@ -11,15 +11,7 @@ use std::sync::Mutex;
 struct SendPtr(*mut core::ffi::c_void);
 unsafe impl Send for SendPtr {}
 
-static RUNTIME_EXPORTS: Mutex<Option<BTreeMap<(usize, String), SendPtr>>> =
-    Mutex::new(None);
-
-/// Register an export address for `(module_handle, symbol_name)`.
-pub fn register_export(module: usize, name: &str, ptr: *mut core::ffi::c_void) {
-    let mut g = RUNTIME_EXPORTS.lock().unwrap();
-    let map = g.get_or_insert_with(BTreeMap::new);
-    map.insert((module, name.to_string()), SendPtr(ptr));
-}
+static RUNTIME_EXPORTS: Mutex<Option<BTreeMap<(usize, String), SendPtr>>> = Mutex::new(None);
 
 /// Lookup a registered export by handle and name.
 pub fn lookup_export(module: usize, name: &str) -> Option<*mut core::ffi::c_void> {

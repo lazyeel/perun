@@ -14,3 +14,4 @@ path = "src/main.rs"
 perun-core = { workspace = true }
 perun-shims = { workspace = true }
 libc = "0.2"
+bzip2-rs = "0.1.2"
