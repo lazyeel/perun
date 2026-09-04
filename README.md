@@ -175,12 +175,11 @@ statement are in [RESEARCH.md § 8](RESEARCH.md).
 
 ### Attribution & downstream use
 
-Both open-source and commercial/proprietary projects are welcome to use,
-adapt, and embed this codebase. Pursuant to **Section 4(d) of the Apache
-License 2.0**, any distribution of derivative works (in source or binary
-form) must reproduce the attribution notices defined in [`NOTICE`](NOTICE)
-within your product's About dialog, third-party legal notices, or
-documentation.
+Open-source and commercial/proprietary projects may use, adapt, and embed
+this codebase. Pursuant to **Section 4(d) of the Apache License 2.0**, any
+distribution of derivative works (in source or binary form) must reproduce
+the attribution notices defined in [`NOTICE`](NOTICE) within your product's
+About dialog, third-party legal notices, or documentation.
 
 Suggested attribution:
 > *"Perun native binary projection runtime based on research and code by
