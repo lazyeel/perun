@@ -8,7 +8,7 @@
 
 This document is a technical specification and research report for **Perun**, a
 native user-space runtime that projects and executes Apple's 2013-vintage x86_64
-Mach-O images directly on a Linux host — no CPU emulation — in order to run the
+Mach-O images directly on a Linux host — no CPU emulation — to run the
 StoreKit client-attestation handshake (FairPlay **SAP**) end-to-end against
 Apple's live storefront endpoints. It documents the binary map, calling
 interfaces, memory invariants, network protocol, and measured performance.
