@@ -94,7 +94,7 @@ of interest:
 
 These are the internal state anchor (context/session pointer chain) and the
 dispatch-selector table of the obfuscated control flow, respectively. The names
-are Apple's obfuscation, not our labels.
+are Apple's obfuscation, not my labels.
 
 **Stamper.** At `CommerceKit+0x94191`: `mov dword ptr [rax+0x2d8], ecx` — the
 exchange round-2 completion stamp; the reference run writes `0x12db3c9a` there at
