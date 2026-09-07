@@ -55,6 +55,7 @@ win32_api! {
         _filter: *const core::ffi::c_void,
         _flags: DWORD,
     ) -> HANDLE {
+    unsafe {
         let raw = read_narrow(pattern);
         let pattern = String::from_utf8_lossy(&raw).into_owned();
         let (dir_path, filter) = split_pattern(&pattern);
@@ -102,12 +103,14 @@ win32_api! {
             }
         }
     }
+    }
 }
 
 win32_api! {
     /// BOOL FindNextFileA(HANDLE, LPVOID);
     unsafe extern "win64" fn FindNextFileA(h: HANDLE, out_find_data: *mut core::ffi::c_void) -> BOOL {
-        let dir = match unsafe { handle_get(h) }.map(|o| &o.kind) {
+    unsafe {
+        let dir = match handle_get(h).map(|o| &o.kind) {
             Some(HostKind::Dir { dir, .. }) => *dir,
             _ => return FALSE,
         };
@@ -133,25 +136,30 @@ win32_api! {
             return TRUE;
         }
     }
+    }
 }
 
 win32_api! {
     /// BOOL FindClose(HANDLE);
     unsafe extern "win64" fn FindClose(h: HANDLE) -> BOOL {
+    unsafe {
         if handle_free(h) {
             TRUE
         } else {
             FALSE
         }
     }
+    }
 }
 
 win32_api! {
     /// UINT GetDriveTypeW(LPCWSTR);
     unsafe extern "win64" fn GetDriveTypeW(root: LPCWSTR) -> UINT {
+    unsafe {
         const DRIVE_FIXED: UINT = 3;
         let _ = read_wide(root);
         DRIVE_FIXED
+    }
     }
 }
 
@@ -168,6 +176,7 @@ win32_api! {
         fs_name: LPWSTR,
         fs_name_size: DWORD,
     ) -> BOOL {
+    unsafe {
         let _ = read_wide(root);
         let label = wide_from_str("PERUN");
         let written = write_wide(volume_name, volume_name_size as usize, &label);
@@ -184,6 +193,7 @@ win32_api! {
         }
         TRUE
     }
+    }
 }
 
 win32_api! {
@@ -196,7 +206,8 @@ win32_api! {
         avail: *mut DWORD,
         _left: *mut DWORD,
     ) -> BOOL {
-        let (fd, _) = match unsafe { handle_get(h) }.map(|o| &o.kind) {
+    unsafe {
+        let (fd, _) = match handle_get(h).map(|o| &o.kind) {
             Some(HostKind::File { fd, shared }) => (*fd, *shared),
             _ => return FALSE,
         };
@@ -210,6 +221,7 @@ win32_api! {
         }
         TRUE
     }
+    }
 }
 
 win32_api! {
@@ -218,7 +230,8 @@ win32_api! {
         h: HANDLE,
         info: *mut core::ffi::c_void,
     ) -> BOOL {
-        let (fd, _) = match unsafe { handle_get(h) }.map(|o| &o.kind) {
+    unsafe {
+        let (fd, _) = match handle_get(h).map(|o| &o.kind) {
             Some(HostKind::File { fd, shared }) => (*fd, *shared),
             _ => return FALSE,
         };
@@ -249,5 +262,6 @@ win32_api! {
         (*out).size_high = ((st.st_size as u64) >> 32) as DWORD;
         (*out).size_low = (st.st_size as u64) as DWORD;
         TRUE
+    }
     }
 }

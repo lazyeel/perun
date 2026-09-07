@@ -28,34 +28,57 @@ fn main() {
 /// primary fault context.) SIGTRAP is not expected in production: there are
 /// no int3 plants; it is reported and the process exits.
 unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
-    // Edition 2024: the fn is already unsafe; no inner wrapper needed.
-    let si_addr = (*info).si_addr() as u64;
-    // ucontext_t.gregs layout (x86_64 glibc): REG_RIP=16, REG_RSP=19, etc.
-    let uc = ctx as *mut libc::ucontext_t;
-    let regs = (*uc).uc_mcontext.gregs.as_mut_ptr();
-    let rip = *regs.add(libc::REG_RIP as usize) as u64;
-    let rsp = *regs.add(libc::REG_RSP as usize) as u64;
-    let rdi = *regs.add(libc::REG_RDI as usize) as u64;
-    let rsi = *regs.add(libc::REG_RSI as usize) as u64;
+    // Edition 2024: an unsafe fn body is no longer an unsafe context; the
+    // whole handler is one unsafe block by intent.
+    unsafe {
+        let si_addr = (*info).si_addr() as u64;
+        // ucontext_t.gregs layout (x86_64 glibc): REG_RIP=16, REG_RSP=19, etc.
+        let uc = ctx as *mut libc::ucontext_t;
+        let regs = (*uc).uc_mcontext.gregs.as_mut_ptr();
+        let rip = *regs.add(libc::REG_RIP as usize) as u64;
+        let rsp = *regs.add(libc::REG_RSP as usize) as u64;
+        let rdi = *regs.add(libc::REG_RDI as usize) as u64;
+        let rsi = *regs.add(libc::REG_RSI as usize) as u64;
 
-    // The reference thunk page executes `hlt` when the guest returns — a
-    // privileged instruction faults as SIGSEGV with rip at the hlt. Bounce
-    // to the trampoline landing pad instead of dying: the guest function
-    // has returned, and the landing restores the host frame.
-    const RETURN_HLT: u64 = 0x1_0000_0000;
-    if sig == libc::SIGSEGV && (rip == RETURN_HLT + 2 || rip == RETURN_HLT) {
-        // rax holds the guest's return value; the landing expects to be
-        // entered as if reached by `ret` from the thunk — rsp already sits
-        // at the guest stack top edge.
-        *regs.add(libc::REG_RIP as usize) = sap::guest_landing_for_signal() as i64;
-        return;
-    }
+        // The reference thunk page executes `hlt` when the guest returns — a
+        // privileged instruction faults as SIGSEGV with rip at the hlt. Bounce
+        // to the trampoline landing pad instead of dying: the guest function
+        // has returned, and the landing restores the host frame.
+        const RETURN_HLT: u64 = 0x1_0000_0000;
+        if sig == libc::SIGSEGV && (rip == RETURN_HLT + 2 || rip == RETURN_HLT) {
+            // rax holds the guest's return value; the landing expects to be
+            // entered as if reached by `ret` from the thunk — rsp already sits
+            // at the guest stack top edge.
+            *regs.add(libc::REG_RIP as usize) = sap::guest_landing_for_signal() as i64;
+            return;
+        }
 
-    // SIGTRAP in production means an unexpected int3/ICEBP in the guest
-    // image — the debug watchpoint plants are gone. Report and die: the
-    // state at the trap is not recoverable.
-    if sig == libc::SIGTRAP {
-        let mut out: [u8; 128] = [0; 128];
+        // SIGTRAP in production means an unexpected int3/ICEBP in the guest
+        // image — the debug watchpoint plants are gone. Report and die: the
+        // state at the trap is not recoverable.
+        if sig == libc::SIGTRAP {
+            let mut out: [u8; 128] = [0; 128];
+            let mut n = 0usize;
+            let push = |s: &[u8], out: &mut [u8], n: &mut usize| {
+                for &b in s {
+                    if *n < out.len() {
+                        out[*n] = b;
+                        *n += 1;
+                    }
+                }
+            };
+            push(
+                b"[perun] unexpected SIGTRAP (int3) at rip=",
+                &mut out,
+                &mut n,
+            );
+            push(&hex16(rip), &mut out, &mut n);
+            push(b"\n", &mut out, &mut n);
+            libc::write(2, out.as_ptr().cast(), n);
+            libc::_exit(128 + sig);
+        }
+
+        let mut out: [u8; 256] = [0; 256];
         let mut n = 0usize;
         let push = |s: &[u8], out: &mut [u8], n: &mut usize| {
             for &b in s {
@@ -65,44 +88,22 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
                 }
             }
         };
-        push(
-            b"[perun] unexpected SIGTRAP (int3) at rip=",
-            &mut out,
-            &mut n,
-        );
+        push(b"[perun] guest crash: signal ", &mut out, &mut n);
+        push(&hexdec(sig as u64, 2), &mut out, &mut n);
+        push(b" addr=", &mut out, &mut n);
+        push(&hex16(si_addr), &mut out, &mut n);
+        push(b" rip=", &mut out, &mut n);
         push(&hex16(rip), &mut out, &mut n);
+        push(b" rsp=", &mut out, &mut n);
+        push(&hex16(rsp), &mut out, &mut n);
+        push(b" rdi=", &mut out, &mut n);
+        push(&hex16(rdi), &mut out, &mut n);
+        push(b" rsi=", &mut out, &mut n);
+        push(&hex16(rsi), &mut out, &mut n);
         push(b"\n", &mut out, &mut n);
-        unsafe {
-            libc::write(2, out.as_ptr().cast(), n);
-            libc::_exit(128 + sig);
-        }
+        libc::write(2, out.as_ptr().cast(), n);
+        libc::_exit(128 + sig);
     }
-
-    let mut out: [u8; 256] = [0; 256];
-    let mut n = 0usize;
-    let push = |s: &[u8], out: &mut [u8], n: &mut usize| {
-        for &b in s {
-            if *n < out.len() {
-                out[*n] = b;
-                *n += 1;
-            }
-        }
-    };
-    push(b"[perun] guest crash: signal ", &mut out, &mut n);
-    push(&hexdec(sig as u64, 2), &mut out, &mut n);
-    push(b" addr=", &mut out, &mut n);
-    push(&hex16(si_addr), &mut out, &mut n);
-    push(b" rip=", &mut out, &mut n);
-    push(&hex16(rip), &mut out, &mut n);
-    push(b" rsp=", &mut out, &mut n);
-    push(&hex16(rsp), &mut out, &mut n);
-    push(b" rdi=", &mut out, &mut n);
-    push(&hex16(rdi), &mut out, &mut n);
-    push(b" rsi=", &mut out, &mut n);
-    push(&hex16(rsi), &mut out, &mut n);
-    push(b"\n", &mut out, &mut n);
-    libc::write(2, out.as_ptr().cast(), n);
-    libc::_exit(128 + sig);
 }
 
 /// Fixed-width hex of a u64 into a static buffer — no allocator.

@@ -74,19 +74,23 @@ win32_api! {
 win32_api! {
     /// void GetSystemTimeAsFileTime(LPFILETIME);
     unsafe extern "win64" fn GetSystemTimeAsFileTime(ft: *mut FILETIME) {
+    unsafe {
         let mut ts: libc::timespec = std::mem::zeroed();
-        unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts) };
+        libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts);
         *ft = FILETIME::from_u64(unix_to_filetime(ts.tv_sec as i64, ts.tv_nsec as u32));
+    }
     }
 }
 
 win32_api! {
     /// BOOL QueryPerformanceCounter(LARGE_INTEGER*);
     unsafe extern "win64" fn QueryPerformanceCounter(counter: *mut i64) -> BOOL {
+    unsafe {
         let mut ts: libc::timespec = std::mem::zeroed();
-        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
         *counter = (ts.tv_sec as i64) * 1_000_000_000 + ts.tv_nsec as i64;
         TRUE
+    }
     }
 }
 
@@ -107,19 +111,22 @@ fn systemtime_from_tm(tm: &libc::tm, millis: u16) -> SYSTEMTIME {
 win32_api! {
     /// void GetLocalTime(LPSYSTEMTIME);
     unsafe extern "win64" fn GetLocalTime(st: *mut SYSTEMTIME) {
+    unsafe {
         let t = libc::time(std::ptr::null_mut());
         let mut tm: libc::tm = std::mem::zeroed();
-        unsafe { libc::localtime_r(&t, &mut tm) };
+        libc::localtime_r(&t, &mut tm);
         *st = systemtime_from_tm(&tm, 0);
+    }
     }
 }
 
 win32_api! {
     /// DWORD GetTimeZoneInformation(LPTIME_ZONE_INFORMATION);
     unsafe extern "win64" fn GetTimeZoneInformation(tz: *mut TIME_ZONE_INFORMATION) -> DWORD {
+    unsafe {
         let t = libc::time(std::ptr::null_mut());
         let mut tm: libc::tm = std::mem::zeroed();
-        unsafe { libc::localtime_r(&t, &mut tm) };
+        libc::localtime_r(&t, &mut tm);
         // Windows Bias is minutes west of UTC; tm_gmtoff is seconds east.
         (*tz).Bias = -((tm.tm_gmtoff / 60) as LONG);
         (*tz).StandardBias = 0;
@@ -127,6 +134,7 @@ win32_api! {
         // apply daylight corrections against empty strings.
         (*tz).DaylightBias = 0;
         TIME_ZONE_ID_UNKNOWN
+    }
     }
 }
 
@@ -141,6 +149,7 @@ win32_api! {
         prov_type: DWORD,
         flags: DWORD,
     ) -> BOOL {
+    unsafe {
         const CRYPT_VERIFYCONTEXT: DWORD = 0xF000_0000;
         let _ = (prov_type, CRYPT_VERIFYCONTEXT);
         if !prov.is_null() {
@@ -148,6 +157,7 @@ win32_api! {
             *prov = 0x0000_C1F0usize as HANDLE;
         }
         TRUE
+    }
     }
 }
 
@@ -160,8 +170,10 @@ win32_api! {
         prov_type: DWORD,
         flags: DWORD,
     ) -> BOOL {
+    unsafe {
         let _ = (read_wide(container), read_wide(provider));
         CryptAcquireContextA(prov, std::ptr::null(), std::ptr::null(), prov_type, flags)
+    }
     }
 }
 
@@ -215,6 +227,7 @@ win32_api! {
         _access: u32,
         result: *mut HANDLE,
     ) -> LONG {
+    unsafe {
         let root = if key == HKEY_LOCAL_MACHINE {
             "HKEY_LOCAL_MACHINE"
         } else if key == HKEY_CURRENT_USER {
@@ -238,6 +251,7 @@ win32_api! {
             2 // ERROR_FILE_NOT_FOUND
         }
     }
+    }
 }
 
 win32_api! {
@@ -250,6 +264,7 @@ win32_api! {
         out_data: *mut BYTE,
         inout_size: *mut DWORD,
     ) -> LONG {
+    unsafe {
         // The key token is the path length; we cannot recover the path from it
         // in phase 1, so queries succeed only for preseeded lookups by name.
         let _ = key;
@@ -284,6 +299,7 @@ win32_api! {
             None => 2, // ERROR_FILE_NOT_FOUND
         }
     }
+    }
 }
 
 win32_api! {
@@ -297,12 +313,14 @@ win32_api! {
 win32_api! {
     /// void GetStartupInfoW(LPSTARTUPINFOW);
     unsafe extern "win64" fn GetStartupInfoW(si: *mut STARTUPINFOW) {
+    unsafe {
         // Zeroed startup info with cb set; no console, no std handles.
         // CRT only needs a valid block here during DLL init.
         if !si.is_null() {
             std::ptr::write_bytes(si as *mut u8, 0, std::mem::size_of::<STARTUPINFOW>());
             (*si).cb = std::mem::size_of::<STARTUPINFOW>() as DWORD;
         }
+    }
     }
 }
 
