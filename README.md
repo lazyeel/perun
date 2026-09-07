@@ -23,7 +23,7 @@ applies relocations, resolves imports against the shim table, installs a
 per-thread TEB, and runs `DllMain`. On Apple's `CoreADI64.dll` (iTunes for
 Windows, x86_64, static MSVC CRT) the image initializes with every import
 resolved — 111 Win32 APIs implemented — and the ADI dispatcher runs
-end-to-end up to its provisioning gate. See [STATUS.md](STATUS.md).
+end-to-end up to its provisioning gate. The full analysis — binary ground truth, runtime invariants, the provisioning-gate RVA chain, and the per-claim verification log — is [RESEARCH.md](RESEARCH.md) (§ 2.2, § 4.7, § 5.8, § 6.7).
 
 **macOS side (`perun sap`)** — maps the 2013 commerce pair (CoreFP,
 CommerceCore, CommerceKit) from Apple's public OS X 10.9 update package,
@@ -128,7 +128,7 @@ cargo build --release -p perun-cli
 The `call` command accepts `--verbose` (image summary), `--patch=RVA=HEX`
 (in-memory code patch), `--poke=RVA=VALUE`, `--peek=RVA` and
 `--peek-ptr=RVA` (read guest memory / dereference and dump after the call) —
-the inspection tooling used in STATUS.md is part of the shipped binary.
+the same inspection tooling the RESEARCH.md verification log (§ 6.7) runs on.
 
 Building SAP binaries requires `curl` on PATH (the fetcher and the protocol
 shells out to it) and network access to Apple endpoints. A stable Rust
@@ -139,8 +139,7 @@ dependency — the whole runtime is pure Rust plus libc.
 
 | File | What it covers |
 |---|---|
-| [RESEARCH.md](RESEARCH.md) | Phase 2: the Mach-O/FairPlay SAP work — binary map, entry points, memory invariants, protocol specification, benchmarks, prior-art credits |
-| [STATUS.md](STATUS.md) | Phase 1: the Win32/PE runtime and the ADI provisioning-gate analysis, with a per-claim verification log |
+| [RESEARCH.md](RESEARCH.md) | The unified research specification: Phase 2 (Mach-O/FairPlay SAP — binary map, entry points, memory invariants, protocol, benchmarks, prior-art credits) and Phase 1 (Win32/PE runtime, ADI provisioning-gate analysis, per-claim verification log — § 2.2, § 4.7, § 5.8, § 6.7) |
 
 ## Obtaining guest binaries
 
@@ -171,7 +170,7 @@ Requires `cabextract` and `msiextract` (package `msitools`).
 * **Code:** the loader, shim, and CLI code authored by **lazyeel** is
   licensed under the **[Apache License, Version 2.0](LICENSE)** with a
   **[`NOTICE`](NOTICE)** file.
-* **Research & documentation** (RESEARCH.md, STATUS.md, and the analysis
+* **Research & documentation** (RESEARCH.md and the analysis
   herein) by **lazyeel** is licensed under
   **[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)**.
 

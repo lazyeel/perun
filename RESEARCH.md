@@ -1,17 +1,25 @@
-# RESEARCH.md — Perun: Native Mach-O Compatibility Runtime for StoreKit Client Attestation (FairPlay SAP)
+# RESEARCH.md — Perun: Native Binary-Projection Runtime for Apple Client Attestation (FairPlay SAP and ADI)
 
-**Project:** [lazyeel/perun](https://github.com/lazyeel/perun) · **Document class:** Interoperability research specification & reverse-engineering report · **Status:** Working end-to-end implementation (protocol closed 2026-08-31; live StoreKit client lane E2E 2026-09-07) · **License:** [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
+**Project:** [lazyeel/perun](https://github.com/lazyeel/perun) · **Document class:** Interoperability research specification & reverse-engineering report · **Status:** Working end-to-end implementation (SAP protocol closed 2026-08-31; ADI dispatcher end-to-end to its provisioning gate 2026-09-03; live StoreKit client lane E2E 2026-09-07) · **License:** [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
 
 ---
 
 ## 1. Scope, Purpose, and Interoperability Basis
 
 This document is a technical specification and research report for **Perun**, a
-native user-space runtime that projects and executes Apple's 2013-vintage x86_64
-Mach-O images directly on a Linux host — no CPU emulation — to run the
-StoreKit client-attestation handshake (FairPlay **SAP**) end-to-end against
-Apple's live storefront endpoints. It documents the binary map, calling
-interfaces, memory invariants, network protocol, and measured performance.
+native user-space runtime that projects and executes Apple's binary images
+directly on a Linux host — no CPU emulation — covering two target families:
+
+- the 2013-vintage x86_64 **Mach-O** commerce images (CoreFP, CommerceCore,
+  CommerceKit) that run the StoreKit client-attestation handshake (FairPlay
+  **SAP**) end-to-end against Apple's live storefront endpoints;
+- the Windows **PE32+** image `CoreADI64.dll` (iTunes for Windows, x86_64),
+  whose ADI v3 attestation dispatcher runs end-to-end up to its provisioning
+  gate.
+
+It documents the binary maps, calling interfaces, memory invariants, network
+protocols, and measured performance of both lanes, and the verification
+commands that reproduce every claim with the shipped binary and stock tools.
 
 The purpose of this work is **interoperability**: enabling an independently
 created program (a native Linux runtime) to interoperate with the public
@@ -102,7 +110,19 @@ session-key finalization. Byte-verified: opcode bytes `89 88 d8 02 00 00` at fil
 offset `0x94191` in `__TEXT,__text` (vaddr == file offset for this image's
 `__TEXT`).
 
+### 2.2 The PE32+ target: `CoreADI64.dll`
+
+The Windows-side target is Apple's `CoreADI64.dll` from iTunes for Windows (x86_64, statically linked MSVC CRT).
+Ground truth, all reproduced with `perun info` / `perun call --verbose` and `objdump -x` on the shipped binary:
+
+- PE32+ x86_64 image, **7 sections** (`.text .rdata .data .pdata .gfids .rsrc .reloc`), preferred load base `0x7c800000` (entry at `0x131b00`).
+- **Exactly two exports**: `vdfut768ig` (the ADI dispatcher entry, used by the dispatch tests) and `cvu8io98wun` (the sibling entry point).
+- Import surface: **KERNEL32 93 / ADVAPI32 7 / SHLWAPI 2 / SHELL32 1** — 103 imports total, statically linked CRT, zero CRT DLLs, and **zero network-related imports** (the fpinit provisioning handshake lives in the caller, iTunes, not in this DLL).
+- Before the dispatcher runs, the statically linked CRT startup probes `LoadLibraryExW("api-ms-win-core-synch-l1-2-0")` and `("api-ms-win-core-fibers-l1-1-1")` (two calls each); the shim answers both with the main-module token during the static-init phase.
+The DLL is not committed or distributed; users obtain it locally from Apple's public iTunes distribution (extraction steps in the README).
+
 ---
+
 
 ## 3. Entry-Point Specification (CommerceKit, System V AMD64 ABI)
 
@@ -368,6 +388,17 @@ parity was verified decision-by-decision: 2 353/2 353 obfuscated-CFG dispatch
 choices match the oracle across init/x1/sign (2127+218+8), and the FNV wave
 seeds match byte-for-byte (0x6094ba41ca7bf5a8 at x1; 0x12db3c9a stamper at x2).
 
+### 4.7 Win32/PE32+ runtime invariants (the ADI lane)
+
+The PE32+ lane runs the same native-execution doctrine with Win64 semantics:
+
+- **FakeTEB behind `GS_BASE`.** A per-thread fake TEB/PEB pair is installed via `arch_prctl(ARCH_SET_GS)`; `FS` is left untouched because glibc owns it. FLS slots are backed by the TEB inline TLS slots.
+- **Real stack bounds.** Stack limits are derived from pthread so MSVC `__chkstk` probes the real stack rather than a fiction.
+- **111 Win32 APIs** implemented as shims — plain Rust functions compiled as `extern "win64"`, so a resolved import is a direct `call` with no per-call trampoline. `DllMain(DLL_PROCESS_ATTACH)` returns TRUE on `CoreADI64.dll` with zero unresolved-import traps.
+- **Trap micro-stubs are absolute `jmp [rip+0]`** with an embedded 64-bit target, never `jmp rel32`: the RWX stub page and the guest image can be terabytes apart under ASLR, and rel32 only reaches ±2 GB. An unresolved import lands on such a stub, which reports the missing symbol with its arguments instead of crashing (fail-closed design).
+- Base relocations are applied (delta is 0 when the preferred base is free); PE32+ headers and all sections are mapped at the preferred base via `mmap(MAP_FIXED)` with per-page protections.
+- No Wine, no QEMU, no instruction emulation anywhere; overhead exists only at each Win32 boundary crossing.
+
 ---
 
 ## 5. StoreKit / FairPlay SAP Protocol Specification
@@ -526,6 +557,50 @@ same credentials+code flow into a working login. The failure code maps to
 two distinct conditions; do not debug the protocol when the account is
 simply unprovisioned.
 
+### 5.8 ADI provisioning-gate analysis (`CoreADI64.dll`, Phase 1)
+
+The ADI lane stops at a provisioning gate, fully characterized by measurement (the PE-side companion to the SAP protocol above; every claim here reproduces with the shipped binary and stock tools — § 6.7).
+
+**The wall.** `perun call CoreADI64.dll vdfut768ig <cmd> scratch` executes the dispatcher's full provisioning logic and returns a clean ADI error code instead of crashing:
+`0xffff5016` for every command code tested, 0..255 inclusive — uniform, with no file, registry, mutex, or enumeration access in the trace.
+The result is checked **before** command dispatch, so it is an in-memory provisioning-state flag, not a per-command result.
+The dispatcher's control flow is control-flow-flattened (obfuscated), but the entry sequence is decoded:
+
+- First-level dispatch is a pure `rdx` NULL check (`test %rdx,%rdx` early in the export): param NULL → `0xffff5036` (invalid param, the default error loaded at entry); param non-null → the provisioning loader path.
+- The command code (`rcx`) is run through an obfuscated arithmetic transform and stored for a second-level dispatch that only runs once provisioning passes.
+**What the gate actually is (measured, not guessed).**
+
+- The gate global is the qword at RVA `0x19dda0` (`.data`). It is read via an obfuscated pointer table at RVA `0x17eca0` (entry `[0x157]` stores `ImageBase + real + 0x4f7e9322`; subtracting the base and the key yields the target). The check at RVA `0x5b20f` is a double dereference: `cmp qword ptr [rcx - 0x4f7e9322], 0`.
+- At runtime the global holds a host heap pointer to a 0x28-byte object the guest allocates during the call itself — observable live with the shipped `--peek-ptr=0x19dda0`: the object's first qword is the flag the gate reads (zeroed at allocation); `[0x8]`, `[0x10]`, `[0x18]` are pointers into a small graph of sub-allocations.
+- The provisioning loader walks `<CommonAppData>\Apple Computer\iTunes\adi` (resolved via `SHGetFolderPathW(CSIDL_COMMON_APPDATA | CSIDL_FLAG_CREATE)` — csidl `0x8023` — plus `PathAppendW` + `PathIsDirectoryW` + `GetFileAttributesW`, confirming each directory) but returns `0xffff5016` whether or not `adi` exists — re-verified with the directory present and absent, and with a dummy blob file inside: identical result, and no `CreateFile` fires. The blob filename is built at runtime (obfuscated); the only "adi" string in the image is the named-object prefix `Global\adi-pb-unique`.
+- All real file I/O (`CreateFileW`/`ReadFile`/`WriteFile`/`SetFilePointerEx`) is concentrated in routines at RVA `0x1339d0`–`0x13f6c5` (15 indirect call sites total: CreateFileW 5, ReadFile 3, WriteFile 6, SetFilePointerEx 1), reached only after the gate passes.
+**Cross-reference with prior ADI/FairPlay research.** `0xffff5016` = signed `-45034`, adjacent to `-45061 kADINotProvisioned` ("ADI machine not provisioned, expected pre-init") — the documented ADI error family.
+The circular dependency is already characterized:
+
+```
+bag-request -> needs FairPlay context
+InitContext -> needs FPDICreate
+FPDICreate  -> needs subscription bag from server
+bag-request -> needs context        <- cycle
+```
+
+The real app breaks the cycle by calling the `fpinit.itunes.apple.com/v1/fpdi` endpoints (init/setup) **before** any native FairPlay call — both endpoints are live (HTTP 405 on bare GET, i.e. present and POST-expecting).
+The provisioning blob is device-specific cryptographic material issued during that handshake; on a fresh offline system there is no blob, so ADI faithfully reports not-provisioned.
+This is the provisioning layer of the same Apple client-attestation family the project exists to understand. (Scope note: the August-2026 commerce gate on storefront traffic — § 5.6 — is a different, later thing; this section describes the classic ADI provisioning cycle, unchanged since the iTunes era.)
+
+**The two-trampoline experiment.** Two error-reporting trampolines sit at RVA `0x66c2d` (`mov edi,0xffff5016` — the only one of 37 sites that runs for cmd=0) and `0xb5b49` (`mov edi,0xffff5026`, the next failure exit).
+Neutralizing the immediates with the shipped `--patch` token (5 bytes each, instruction lengths preserved) makes cmd=0 return `0x0`, but the success is hollow: the API trace is byte-identical to the unpatched run — no additional API fires, so the trampolines are reporting stubs on a fixed not-provisioned path, not branch selectors.
+Zeroing only the first trampoline yields `0xffff5026` (the next exit fires).
+The gate cannot be passed offline by poking memory.
+
+**Ways forward** (recorded as of 2026-09-03):
+
+1. Obtain a real provisioning blob from a provisioned machine (`C:\ProgramData\Apple Computer\iTunes\adi\`), then feed it to the loader — the direct oracle: it reveals every context field the dispatcher reads after the gate.
+2. Replicate the server handshake (`fpinit.itunes.apple.com/v1/fpdi/init` + `/setup`) in the caller layer to provision a fresh machine, matching how the real app breaks the circular dependency. Requires GSA session tokens and the exact request format.
+3. Reconstruct the context object graph: the gate object references sub-allocations reachable via the shipped `--peek-ptr`; mapping every field the validator touches would enumerate what a real blob must contain — expensive against control-flow flattening.
+4. Grow the shim surface as real guests exercise more APIs (the trap reporter names each missing symbol with its arguments).
+5. A `perun scaffold` command to generate a ready-to-fill shim stub from a trap report.
+
 ## 6. Benchmarks
 
 ### 6.1 Methodology
@@ -650,6 +725,46 @@ cd <perun-checkout> && cargo build --release -p perun-cli
 The first perun command without an assets directory fetches the images itself
 (~32 MB from the public package, one-time, § 6.4); every later run is warm.
 
+### 6.7 ADI lane: reproduction and the verification log (2026-09-03, tree at the then-HEAD)
+
+Every Phase-1 claim reproduces with the shipped binary or a stock tool; the method column names it.
+No source modification, no one-off instrumentation.
+
+```bash
+cargo build --release -p perun-cli
+./target/release/perun info  /path/to/CoreADI64.dll
+./target/release/perun run   /path/to/CoreADI64.dll --verbose
+./target/release/perun call  /path/to/CoreADI64.dll vdfut768ig 0 scratch --verbose
+
+# live object behind the provisioning gate: ./target/release/perun call /path/to/CoreADI64.dll vdfut768ig 0 scratch \ --peek=0x19dda0 --peek-ptr=0x19dda0
+
+# the two-trampoline experiment (immediates zeroed, lengths preserved): ./target/release/perun call /path/to/CoreADI64.dll vdfut768ig 0 scratch \ --patch=0x66c2d=bf00000000 --patch=0xb5b49=bf00000000 ```
+
+| # | Assertion | Method (command family) | Result |
+|---|---|---|---|
+| 1 | PE32+ x86_64, 7 sections, base 0x7c800000 | `perun info` / `perun call --verbose` | Confirmed (entry 0x131b00, sections .text .rdata .data .pdata .gfids .rsrc .reloc) |
+| 2 | Statically linked MSVC CRT, no network imports | `objdump -x` import tables | Confirmed (kernel32 93 / advapi32 7 / shlwapi 2 / shell32 1; zero network names; zero CRT DLLs) |
+| 3 | Exports: vdfut768ig + cvu8io98wun | `perun call` on both names resolves | Confirmed (2 exports) |
+| 4 | DllMain TRUE, 0 traps, 111 APIs | `perun run --verbose` | Confirmed ("DllMain returned TRUE", no trap lines, "shim table 111 APIs") |
+| 5 | cargo test 11/11, clippy clean, fmt clean | `cargo test/clippy/fmt` | Confirmed |
+| 6 | cmd 0..255 → 0xffff5016, uniform; no file/registry/mutex/enum API in the trace | 256 × `perun call <cmd> scratch`, trace scan | Confirmed (256/256 uniform; all forbidden families absent) |
+| 7 | NULL param → 0xffff5036 | `perun call` without scratch | Confirmed |
+| 8 | Trampoline bytes: `bf 16 50 ff ff` @ 0x66c2d, `bf 26 50 ff ff` @ 0xb5b49, each followed by `jmp rcx` | `objdump -d --start-address` | Confirmed |
+| 9 | 37 sites of the 5016 immediate in .text | `objdump -d` textual scan | Confirmed (37) |
+| 10 | Gate: `test %rdx,%rdx` early; default error `0xffff5036` | `objdump -d` entry region | Confirmed |
+| 11 | Gate check double deref: `cmp qword ptr [rcx − 0x4f7e9322], 0` @ 0x5b20f | `objdump -d --start-address` | Confirmed |
+| 12 | Runtime gate global → heap object; live dump | `perun call ... --peek=0x19dda0 --peek-ptr=0x19dda0` | Confirmed (object[0..64]: first qword 0, then sub-object pointers) |
+| 13 | adi dir present/absent/dummy-blob → same 0xffff5016, no CreateFile | create/remove directory + `perun call` | Confirmed |
+| 14 | File I/O concentrated at 0x1339d0–0x13f6c5 (15 indirect sites) | `objdump -x` IAT + `objdump -d` call-site scan | Confirmed (CreateFileW 5, ReadFile 3, WriteFile 6, SetFilePointerEx 1 — all inside the span) |
+| 15 | Single-trampoline zeroing → 0xffff5026; both → 0x0, hollow success | `--patch=0x66c2d=…` / both `--patch=` | Confirmed (returns 0xffff5026 / 0x0; API trace identical to baseline) |
+| 16 | fpinit fpdi endpoints live | `curl` GET probe | Confirmed (HTTP 405 — present, POST-expecting) |
+| 17 | −45034 = 0xffff5016 (signed); −45061 = kADINotProvisioned per prior ADI research | arithmetic + project's Android-ADI research notes | Confirmed |
+| 18 | Only "adi" string in image: `Global\adi-pb-unique` | `strings`/binary scan | Confirmed |
+| 19 | Trap stubs absolute `jmp [rip+0]`; FakeTEB via ARCH_SET_GS, FS untouched | source inspection (stub.rs, teb.rs) | Confirmed |
+
+Artifacts from the sweep (the 256-command histogram and the objdump-based verifiers) are diagnostic and untracked; none ships with the repository.
+
+
 ---
 
 ## 7. Ecosystem Context
@@ -756,6 +871,7 @@ with a NOTICE file (see the repository root).
 | 2026-09-02 | Optimization pass + zero-config fetcher. Streaming image loader (full image bytes never materialized; peak RSS 26.8 MiB), storeagent dropped from the mapped set (bind-graph cross-reference, live-verified), speculative certificate fetch with a 24 h on-disk cache, and a first-run asset fetcher that range-reads ~32 MB of the public 1.28 GB update package (8.4 s cold start, all digests pinned). |
 | 2026-09-03 | Benchmark hardening. Both sides re-benched against their public, unmodified artifacts: the oracle re-cloned from GitHub (commit 883ede5) and built with its own upstream Makefile (vendored Unicorn 2.1.1), perun as the shipped release binary. Per-round exchange rows retired — the stock oracle prints no phase timers and perun's release carries none for the split, so the public table now reports SAPExchange as the single combined Round 1 + Round 2 window and compares the oracle at the process level only (wall / CPU / peak RSS, N=3 per side, kernel rusage). Superseded instrumented figures (per-phase oracle timings, per-round exchange splits) removed; § 6.6 reproduces every number with one command per side. Third-party credits trimmed to what the law and the analysis actually require: NOTICE and § 8.1 now list only code compiled into the binary (runtime vs compile-time split, with unicode-ident's dual license kept distinct), and § 8 keeps the projects the work measured against or built on. Release profile hardened: no DWARF, stripped binaries, no build-host paths in distributed artifacts. |
 | 2026-09-07 | Storefront-path additions from the live StoreKit client lane (built on this runtime, E2E the same day: login+2FA → search → purchase → download). New § 5.6 maps which requests the action signature actually gates (login body and the DAAP history body — and nothing else on the storefront surface; purchase/download ride the session cookies+token). New § 5.7 records the 5005 account-state lesson: the code covers both invalid-2FA and unprovisioned-account, and ToS acceptance on any Apple web property flips the same flow to a working login. § 7 gains the 2026-09 Rust-rewrite family (ipatool-rs) and this work's StoreKit client status. |
+| 2026-09-07 | Unified specification: the Phase-1 document (STATUS.md) merged into this file and retired. The ADI/PE32+ lane is now first-class here — § 2.2 (CoreADI64.dll ground truth), § 4.7 (Win32 runtime invariants: FakeTEB/ARCH_SET_GS, 111 shims, absolute-jmp trap stubs), § 5.8 (the provisioning-gate analysis: status 0xffff5016, the RVA chain 0x19dda0/0x17eca0/0x5b20f with key 0x4f7e9322, the circular fpdi dependency, the two-trampoline experiment, ways forward), and § 6.7 (the 19-row verification log with reproduction commands). All facts, addresses, and measurements carried over verbatim; nothing dropped. |
 
 *Apple, macOS, OS X, StoreKit, FairPlay, iTunes and related marks are
 trademarks of Apple Inc. This independent research project is not affiliated
