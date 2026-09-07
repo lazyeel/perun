@@ -99,44 +99,48 @@ pub(crate) fn handle_new(kind: HostKind) -> HANDLE {
 /// # Safety
 /// Caller must not retain the reference beyond the call.
 pub(crate) unsafe fn handle_get(h: HANDLE) -> Option<&'static HostObject> {
-    let p = h as usize;
-    if p == 0 || p == usize::MAX || p == usize::MAX - 1 {
-        return None;
+    unsafe {
+        let p = h as usize;
+        if p == 0 || p == usize::MAX || p == usize::MAX - 1 {
+            return None;
+        }
+        if !live_contains(p) {
+            return None;
+        }
+        Some(&*(p as *const HostObject))
     }
-    if !live_contains(p) {
-        return None;
-    }
-    Some(&*(p as *const HostObject))
 }
 
 /// Free a host object (CloseHandle path).
 pub(crate) unsafe fn handle_free(h: HANDLE) -> bool {
-    let p = h as usize;
-    if !live_contains(p) {
-        return false;
-    }
-    let obj = &*(p as *const HostObject);
-    match obj.kind {
-        HostKind::File { fd, shared } => {
-            if !shared {
-                libc::close(fd);
+    unsafe {
+        let p = h as usize;
+        if !live_contains(p) {
+            return false;
+        }
+        let obj = &*(p as *const HostObject);
+        match obj.kind {
+            HostKind::File { fd, shared } => {
+                if !shared {
+                    libc::close(fd);
+                }
             }
+            HostKind::Dir { dir: d, .. } if !d.is_null() => {
+                libc::closedir(d);
+            }
+            _ => {}
         }
-        HostKind::Dir { dir: d, .. } if !d.is_null() => {
-            libc::closedir(d);
-        }
-        _ => {}
+        live_remove(p);
+        let layout = std::alloc::Layout::from_size_align_unchecked(
+            std::mem::size_of::<HostObject>(),
+            std::mem::align_of::<HostObject>(),
+        );
+        // SAFETY: allocated in handle_new with the same base layout; the tag pad
+        // only extends the block, dealloc with the original layout is sound for
+        // alloc-created blocks (excess size is allowed).
+        std::alloc::dealloc(p as *mut u8, layout);
+        true
     }
-    live_remove(p);
-    let layout = std::alloc::Layout::from_size_align_unchecked(
-        std::mem::size_of::<HostObject>(),
-        std::mem::align_of::<HostObject>(),
-    );
-    // SAFETY: allocated in handle_new with the same base layout; the tag pad
-    // only extends the block, dealloc with the original layout is sound for
-    // alloc-created blocks (excess size is allowed).
-    std::alloc::dealloc(p as *mut u8, layout);
-    true
 }
 
 // ── Pseudo handles ───────────────────────────────────────────────────────
@@ -151,23 +155,25 @@ pub(crate) const PSEUDO_THREAD: HANDLE = -2isize as HANDLE;
 /// # Safety
 /// `p` must point to valid guest memory.
 pub(crate) unsafe fn read_wide(p: LPCWSTR) -> Vec<u16> {
-    if p.is_null() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    let mut i = 0usize;
-    loop {
-        let ch = *p.add(i);
-        if ch == 0 {
-            break;
+    unsafe {
+        if p.is_null() {
+            return Vec::new();
         }
-        out.push(ch);
-        i += 1;
-        if i > 0x100_000 {
-            break; // runaway-string guard
+        let mut out = Vec::new();
+        let mut i = 0usize;
+        loop {
+            let ch = *p.add(i);
+            if ch == 0 {
+                break;
+            }
+            out.push(ch);
+            i += 1;
+            if i > 0x100_000 {
+                break; // runaway-string guard
+            }
         }
+        out
     }
-    out
 }
 
 /// Copy a wide string (with NUL) into a guest buffer.
@@ -197,14 +203,16 @@ pub(crate) fn wide_from_str(s: &str) -> Vec<u16> {
 /// # Safety
 /// `p` must point to valid guest memory.
 pub(crate) unsafe fn read_narrow(p: LPCSTR) -> Vec<u8> {
-    if p.is_null() {
-        return Vec::new();
+    unsafe {
+        if p.is_null() {
+            return Vec::new();
+        }
+        let mut i = 0usize;
+        while *p.add(i) != 0 && i < 0x10_000 {
+            i += 1;
+        }
+        std::slice::from_raw_parts(p, i).to_vec()
     }
-    let mut i = 0usize;
-    while *p.add(i) != 0 && i < 0x10_000 {
-        i += 1;
-    }
-    std::slice::from_raw_parts(p, i).to_vec()
 }
 
 // ── Time conversion ──────────────────────────────────────────────────────
@@ -219,11 +227,7 @@ pub(crate) fn unix_to_filetime(secs: i64, nanos: u32) -> u64 {
 pub fn get_last_error() -> u32 {
     unsafe {
         let p = perun_core::teb::get_last_error_ptr();
-        if !p.is_null() {
-            *p
-        } else {
-            0
-        }
+        if !p.is_null() { *p } else { 0 }
     }
 }
 

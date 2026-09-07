@@ -16,7 +16,7 @@ win32_api! {
 
 win32_api! {
     /// LPVOID HeapAlloc(HANDLE, DWORD, SIZE_T);
-    unsafe extern "win64" fn HeapAlloc(heap: HANDLE, flags: DWORD, size: SIZE_T) -> LPVOID {
+    unsafe extern "win64" fn HeapAlloc(heap: HANDLE, flags: DWORD, size: SIZE_T) -> LPVOID { unsafe {
         let _ = heap;
         // calloc gives zeroing for free; HEAP_ZERO_MEMORY (0x8) wants zeros.
         let ptr = if flags & HEAP_ZERO_MEMORY != 0 {
@@ -25,7 +25,7 @@ win32_api! {
             libc::malloc(size)
         };
         ptr as LPVOID
-    }
+    }}
 }
 
 win32_api! {
@@ -46,19 +46,19 @@ win32_api! {
         flags: DWORD,
         ptr: LPVOID,
         size: SIZE_T,
-    ) -> LPVOID {
+    ) -> LPVOID { unsafe {
         let _ = (heap, flags);
         libc::realloc(ptr, size) as LPVOID
-    }
+    }}
 }
 
 win32_api! {
     /// BOOL HeapFree(HANDLE, DWORD, LPVOID);
-    unsafe extern "win64" fn HeapFree(heap: HANDLE, flags: DWORD, ptr: LPVOID) -> BOOL {
+    unsafe extern "win64" fn HeapFree(heap: HANDLE, flags: DWORD, ptr: LPVOID) -> BOOL { unsafe {
         let _ = (heap, flags);
         libc::free(ptr);
         TRUE
-    }
+    }}
 }
 
 fn win_prot_to_posix(protect: DWORD) -> i32 {
@@ -84,7 +84,7 @@ win32_api! {
         size: SIZE_T,
         alloc_type: DWORD,
         protect: DWORD,
-    ) -> LPVOID {
+    ) -> LPVOID { unsafe {
         if size == 0 {
             return core::ptr::null_mut();
         }
@@ -108,12 +108,12 @@ win32_api! {
             set_last_error(ERROR_INVALID_PARAMETER);
         }
         p
-    }
+    }}
 }
 
 win32_api! {
     /// BOOL VirtualFree(LPVOID, SIZE_T, DWORD);
-    unsafe extern "win64" fn VirtualFree(addr: LPVOID, size: SIZE_T, free_type: DWORD) -> BOOL {
+    unsafe extern "win64" fn VirtualFree(addr: LPVOID, size: SIZE_T, free_type: DWORD) -> BOOL { unsafe {
         // MEM_RELEASE ignores the size on Windows; we must supply one for
         // munmap. Track nothing: unmap one page granularity chunk at minimum.
         const MEM_RELEASE: u32 = 0x8000;
@@ -124,7 +124,7 @@ win32_api! {
         } else {
             FALSE
         }
-    }
+    }}
 }
 
 win32_api! {
@@ -134,7 +134,7 @@ win32_api! {
         size: SIZE_T,
         new_protect: DWORD,
         old_protect: *mut DWORD,
-    ) -> BOOL {
+    ) -> BOOL { unsafe {
         if old_protect.is_null() {
             set_last_error(ERROR_INVALID_PARAMETER);
             return FALSE;
@@ -147,7 +147,7 @@ win32_api! {
         } else {
             FALSE
         }
-    }
+    }}
 }
 
 #[cfg(test)]

@@ -85,10 +85,10 @@ win32_api! {
             let ent = &*ent;
             let name = std::slice::from_raw_parts(ent.d_name.as_ptr() as *const u8, libc::strlen(ent.d_name.as_ptr()));
             if name != b"." && name != b".." {
-                if let Some(f) = filter.as_ref() {
-                    if !name.to_ascii_lowercase().ends_with(f.as_bytes()) {
-                        continue;
-                    }
+                if let Some(f) = filter.as_ref()
+                    && !name.to_ascii_lowercase().ends_with(f.as_bytes())
+                {
+                    continue;
                 }
                 let full = format!("{}/{}", dir_path, String::from_utf8_lossy(name));
                 if let Ok(c) = std::ffi::CString::new(full) {

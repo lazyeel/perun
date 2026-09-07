@@ -35,7 +35,7 @@ macro_rules! win32_api {
         ) -> $ret:ty $body:block
     ) => {
         $(#[$meta])*
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "win64" fn $name($($arg: $ty),*) -> $ret $body
 
         const _: () = {
@@ -65,7 +65,7 @@ macro_rules! win32_api {
         ) $body:block
     ) => {
         $(#[$meta])*
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "win64" fn $name($($arg: $ty),*) $body
 
         const _: () = {

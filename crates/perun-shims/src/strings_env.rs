@@ -3,7 +3,7 @@
 
 //! String, environment, module and console shims.
 
-use crate::files::{file_of, WriteFile};
+use crate::files::{WriteFile, file_of};
 use crate::util::set_last_error;
 use crate::util::*;
 use crate::win32::*;
@@ -20,7 +20,7 @@ win32_api! {
         src_len: i32,
         dst: LPWSTR,
         dst_len: i32,
-    ) -> i32 {
+    ) -> i32 { unsafe {
         let _ = (codepage & 0xFFFF, flags);
         let bytes = if src_len < 0 {
             read_narrow(src)
@@ -41,7 +41,7 @@ win32_api! {
         std::ptr::copy_nonoverlapping(wide.as_ptr(), dst, wide.len());
         *dst.add(wide.len()) = 0;
         need as i32
-    }
+    }}
 }
 
 win32_api! {
@@ -55,7 +55,7 @@ win32_api! {
         dst_len: i32,
         default_char: *const u8,
         used_default: *mut BOOL,
-    ) -> i32 {
+    ) -> i32 { unsafe {
         let _ = (codepage, flags, default_char);
         let wide = if src_len < 0 {
             read_wide(src)
@@ -78,7 +78,7 @@ win32_api! {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
         *dst.add(bytes.len()) = 0;
         need as i32
-    }
+    }}
 }
 
 // Case mapping is ASCII-only by design: locale tables are out of scope for a
@@ -102,7 +102,7 @@ win32_api! {
         src_len: i32,
         dst: LPWSTR,
         dst_len: i32,
-    ) -> i32 {
+    ) -> i32 { unsafe {
         const LCMAP_UPPERCASE: DWORD = 0x0000_0200;
         const LCMAP_LOWERCASE: DWORD = 0x0000_0100;
         let _ = locale;
@@ -129,7 +129,7 @@ win32_api! {
         std::ptr::copy_nonoverlapping(mapped.as_ptr(), dst, mapped.len());
         *dst.add(mapped.len()) = 0;
         need as i32
-    }
+    }}
 }
 
 win32_api! {
@@ -141,7 +141,7 @@ win32_api! {
         l1: i32,
         s2: LPCWSTR,
         l2: i32,
-    ) -> i32 {
+    ) -> i32 { unsafe {
         const CSTR_LESS_THAN: i32 = 1;
         const CSTR_EQUAL: i32 = 2;
         const CSTR_GREATER_THAN: i32 = 3;
@@ -154,7 +154,7 @@ win32_api! {
             std::cmp::Ordering::Equal => CSTR_EQUAL,
             std::cmp::Ordering::Greater => CSTR_GREATER_THAN,
         }
-    }
+    }}
 }
 
 win32_api! {
@@ -164,7 +164,7 @@ win32_api! {
         src: LPCWSTR,
         len: i32,
         out: *mut WORD,
-    ) -> BOOL {
+    ) -> BOOL { unsafe {
         const CT_CTYPE1: DWORD = 1;
         let _ = CT_CTYPE1;
         let wide = if len < 0 { read_wide(src) } else { std::slice::from_raw_parts(src, len as usize).to_vec() };
@@ -186,7 +186,7 @@ win32_api! {
             *out.add(i) = cls;
         }
         TRUE
-    }
+    }}
 }
 
 // ── Environment / command line ───────────────────────────────────────────
@@ -212,7 +212,7 @@ win32_api! {
 
 win32_api! {
     /// LPCWSTR GetEnvironmentStringsW(VOID);
-    unsafe extern "win64" fn GetEnvironmentStringsW() -> LPCWSTR {
+    unsafe extern "win64" fn GetEnvironmentStringsW() -> LPCWSTR { unsafe {
         // Build a double-NUL-terminated block of NAME=VALUE\0 pairs.
         let mut block: Vec<u16> = Vec::new();
         for (k, v) in std::env::vars_os() {
@@ -229,7 +229,7 @@ win32_api! {
         let p = libc::malloc(block.len() * 2) as *mut u16;
         std::ptr::copy_nonoverlapping(block.as_ptr(), p, block.len());
         p as LPCWSTR
-    }
+    }}
 }
 
 win32_api! {
@@ -242,7 +242,7 @@ win32_api! {
 
 win32_api! {
     /// BOOL SetEnvironmentVariableA(LPCSTR, LPCSTR);
-    unsafe extern "win64" fn SetEnvironmentVariableA(name: LPCSTR, value: LPCSTR) -> BOOL {
+    unsafe extern "win64" fn SetEnvironmentVariableA(name: LPCSTR, value: LPCSTR) -> BOOL { unsafe {
         let n = String::from_utf8_lossy(&read_narrow(name)).into_owned();
         if value.is_null() {
             std::env::remove_var(&n);
@@ -251,7 +251,7 @@ win32_api! {
             std::env::set_var(&n, v);
         }
         TRUE
-    }
+    }}
 }
 
 // ── Modules ──────────────────────────────────────────────────────────────
@@ -271,13 +271,13 @@ win32_api! {
         flags: DWORD,
         name: LPCWSTR,
         result: *mut HANDLE,
-    ) -> BOOL {
+    ) -> BOOL { unsafe {
         let _ = flags;
         if !result.is_null() {
             *result = GetModuleHandleW(name);
         }
         TRUE
-    }
+    }}
 }
 
 win32_api! {
@@ -286,7 +286,7 @@ win32_api! {
         name: LPCWSTR,
         _file: HANDLE,
         _flags: DWORD,
-    ) -> HANDLE {
+    ) -> HANDLE { unsafe {
         // Phase 1: dependent DLL loading is not implemented; report the main
         // module so init proceeds, traps will surface anything actually used.
         eprintln!(
@@ -294,12 +294,12 @@ win32_api! {
             String::from_utf16_lossy(&read_wide(name))
         );
         GetModuleHandleW(std::ptr::null())
-    }
+    }}
 }
 
 win32_api! {
     /// FARPROC GetProcAddress(HMODULE, LPCSTR);
-    unsafe extern "win64" fn GetProcAddress(module: HANDLE, name: LPCSTR) -> *mut core::ffi::c_void {
+    unsafe extern "win64" fn GetProcAddress(module: HANDLE, name: LPCSTR) -> *mut core::ffi::c_void { unsafe {
         let n = read_narrow(name);
         let n = String::from_utf8_lossy(&n);
         // 1. Explicitly registered runtime exports (per-module overrides).
@@ -317,7 +317,7 @@ win32_api! {
         }
         eprintln!("[perun] GetProcAddress({:?}) -> NULL (not implemented)", n);
         std::ptr::null_mut()
-    }
+    }}
 }
 
 win32_api! {
@@ -334,7 +334,7 @@ win32_api! {
         _module: HANDLE,
         buf: LPSTR,
         cap: DWORD,
-    ) -> DWORD {
+    ) -> DWORD { unsafe {
         let exe = std::env::current_exe()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| "perun".into());
@@ -347,7 +347,7 @@ win32_api! {
         }
         set_last_error(ERROR_INSUFFICIENT_BUFFER);
         0
-    }
+    }}
 }
 
 // ── Error / console ──────────────────────────────────────────────────────
@@ -368,7 +368,7 @@ win32_api! {
 
 win32_api! {
     /// BOOL GetConsoleMode(HANDLE, LPDWORD);
-    unsafe extern "win64" fn GetConsoleMode(h: HANDLE, mode: *mut DWORD) -> BOOL {
+    unsafe extern "win64" fn GetConsoleMode(h: HANDLE, mode: *mut DWORD) -> BOOL { unsafe {
         match file_of(h) {
             Some((fd, shared)) => {
                 if !shared && libc::isatty(fd) != 1 {
@@ -382,7 +382,7 @@ win32_api! {
             }
             None => FALSE,
         }
-    }
+    }}
 }
 
 win32_api! {
@@ -400,7 +400,7 @@ win32_api! {
         chars: DWORD,
         written: *mut DWORD,
         _reserved: *mut core::ffi::c_void,
-    ) -> BOOL {
+    ) -> BOOL { unsafe {
         let wide = std::slice::from_raw_parts(text, chars as usize);
         let s = String::from_utf16_lossy(wide);
         let bytes = s.as_bytes();
@@ -411,5 +411,5 @@ win32_api! {
             written,
             std::ptr::null_mut(),
         )
-    }
+    }}
 }

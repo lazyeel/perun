@@ -7,7 +7,7 @@
 //! validated): parse → map → copy headers/sections → relocate → patch IAT →
 //! expose exports. After loading, guest code runs natively on the CPU.
 
-use crate::image::{dir_index, ParseError, PeInfo};
+use crate::image::{ParseError, PeInfo, dir_index};
 
 /// Function pointer stored into an IAT slot.
 pub type ExternPtr = usize;
@@ -159,10 +159,10 @@ impl Image {
         };
 
         // 4. Relocations.
-        if img.slide != 0 {
-            if let Some((rva, cb)) = img.info.opt.data_dirs[dir_index::BASE_RELOC] {
-                unsafe { img.apply_relocations(rva, cb) };
-            }
+        if img.slide != 0
+            && let Some((rva, cb)) = img.info.opt.data_dirs[dir_index::BASE_RELOC]
+        {
+            unsafe { img.apply_relocations(rva, cb) };
         }
 
         // 5. Imports.
@@ -237,10 +237,11 @@ impl Image {
                 let func_rva = addrs.get(ord_idx).copied()?;
                 // Export forwarding: an RVA pointing inside the export
                 // directory itself is a forwarded string ("other.dll.fn").
-                if let Some((erva, ecb)) = self.info.opt.data_dirs[dir_index::EXPORT] {
-                    if func_rva >= erva && func_rva < erva + ecb {
-                        return None; // forwarders not followed in phase 1
-                    }
+                if let Some((erva, ecb)) = self.info.opt.data_dirs[dir_index::EXPORT]
+                    && func_rva >= erva
+                    && func_rva < erva + ecb
+                {
+                    return None; // forwarders not followed in phase 1
                 }
                 return Some(unsafe { self.base.add(func_rva as usize) } as *const u8);
             }
@@ -294,43 +295,45 @@ impl Image {
     /// # Safety
     /// Caller guarantees relocation dir fits in the image.
     unsafe fn apply_relocations(&mut self, rva: u32, total_size: u32) {
-        self.check_rva(rva, total_size)
-            .expect("relocation dir bounds checked by caller");
-        let mut off = 0u32;
-        while off + 8 <= total_size {
-            let block = self.base.add((rva + off) as usize) as *const u32;
-            let page_rva = block.read_unaligned();
-            let block_size = block.add(1).read_unaligned();
-            if block_size < 8 || off + block_size > total_size {
-                break;
-            }
-            let count = (block_size - 8) / 2;
-            let entries = self.base.add((rva + off + 8) as usize) as *const u16;
-            for j in 0..count as usize {
-                let entry = entries.add(j).read_unaligned();
-                let ty = entry >> 12;
-                let in_page = (entry & 0x0FFF) as u32;
-                let target_rva = page_rva + in_page;
-                if target_rva + 8 > self.size {
-                    continue;
+        unsafe {
+            self.check_rva(rva, total_size)
+                .expect("relocation dir bounds checked by caller");
+            let mut off = 0u32;
+            while off + 8 <= total_size {
+                let block = self.base.add((rva + off) as usize) as *const u32;
+                let page_rva = block.read_unaligned();
+                let block_size = block.add(1).read_unaligned();
+                if block_size < 8 || off + block_size > total_size {
+                    break;
                 }
-                match ty {
-                    10 => {
-                        // IMAGE_REL_BASED_DIR64
-                        let p = self.base.add(target_rva as usize) as *mut u64;
-                        let v = p.read_unaligned();
-                        p.write_unaligned(v.wrapping_add(self.slide));
+                let count = (block_size - 8) / 2;
+                let entries = self.base.add((rva + off + 8) as usize) as *const u16;
+                for j in 0..count as usize {
+                    let entry = entries.add(j).read_unaligned();
+                    let ty = entry >> 12;
+                    let in_page = (entry & 0x0FFF) as u32;
+                    let target_rva = page_rva + in_page;
+                    if target_rva + 8 > self.size {
+                        continue;
                     }
-                    3 => {
-                        // IMAGE_REL_BASED_HIGHLOW (rare in PE32+, kept for safety)
-                        let p = self.base.add(target_rva as usize) as *mut u32;
-                        let v = p.read_unaligned();
-                        p.write_unaligned(v.wrapping_add(self.slide as u32));
+                    match ty {
+                        10 => {
+                            // IMAGE_REL_BASED_DIR64
+                            let p = self.base.add(target_rva as usize) as *mut u64;
+                            let v = p.read_unaligned();
+                            p.write_unaligned(v.wrapping_add(self.slide));
+                        }
+                        3 => {
+                            // IMAGE_REL_BASED_HIGHLOW (rare in PE32+, kept for safety)
+                            let p = self.base.add(target_rva as usize) as *mut u32;
+                            let v = p.read_unaligned();
+                            p.write_unaligned(v.wrapping_add(self.slide as u32));
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
+                off += block_size;
             }
-            off += block_size;
         }
     }
 

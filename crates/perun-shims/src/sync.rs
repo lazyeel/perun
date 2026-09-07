@@ -14,14 +14,14 @@ win32_api! {
     unsafe extern "win64" fn InitializeCriticalSectionAndSpinCount(
         cs: *mut CRITICAL_SECTION,
         spin: DWORD,
-    ) -> BOOL {
+    ) -> BOOL { unsafe {
         let _ = spin;
         // Guest allocates the CRITICAL_SECTION blob; we require it to be at
         // least pointer-sized and store a boxed recursive mutex inside.
         let inner = Box::new(recursive_mutex_init());
         std::ptr::write(cs as *mut Box<MutexHandle>, inner);
         TRUE
-    }
+    }}
 }
 
 type MutexHandle = pthread_mutex_t_boxed;
@@ -44,15 +44,14 @@ fn recursive_mutex_init() -> libc::pthread_mutex_t {
 /// # Safety
 /// `cs` must be a blob previously passed to InitializeCriticalSection*.
 unsafe fn cs_lock(cs: *mut core::ffi::c_void) -> &'static mut libc::pthread_mutex_t {
-    let boxed = (cs as *mut Box<MutexHandle>).as_mut().expect("cs blob");
-    boxed
+    unsafe { ((cs as *mut Box<MutexHandle>).as_mut().expect("cs blob")) as _ }
 }
 
 win32_api! {
     /// void InitializeCriticalSection(PCRITICAL_SECTION);
-    unsafe extern "win64" fn InitializeCriticalSection(cs: *mut CRITICAL_SECTION) {
+    unsafe extern "win64" fn InitializeCriticalSection(cs: *mut CRITICAL_SECTION) { unsafe {
         InitializeCriticalSectionAndSpinCount(cs, 0);
-    }
+    }}
 }
 
 // Keep the raw signature callable from Enter/Leave via the same storage.
@@ -60,25 +59,25 @@ type CRITICAL_SECTION = core::ffi::c_void;
 
 win32_api! {
     /// void EnterCriticalSection(PCRITICAL_SECTION);
-    unsafe extern "win64" fn EnterCriticalSection(cs: *mut CRITICAL_SECTION) {
+    unsafe extern "win64" fn EnterCriticalSection(cs: *mut CRITICAL_SECTION) { unsafe {
         libc::pthread_mutex_lock(cs_lock(cs));
-    }
+    }}
 }
 
 win32_api! {
     /// void LeaveCriticalSection(PCRITICAL_SECTION);
-    unsafe extern "win64" fn LeaveCriticalSection(cs: *mut CRITICAL_SECTION) {
+    unsafe extern "win64" fn LeaveCriticalSection(cs: *mut CRITICAL_SECTION) { unsafe {
         libc::pthread_mutex_unlock(cs_lock(cs));
-    }
+    }}
 }
 
 win32_api! {
     /// void DeleteCriticalSection(PCRITICAL_SECTION);
-    unsafe extern "win64" fn DeleteCriticalSection(cs: *mut CRITICAL_SECTION) {
+    unsafe extern "win64" fn DeleteCriticalSection(cs: *mut CRITICAL_SECTION) { unsafe {
         let mut boxed = Box::from_raw(cs as *mut Box<MutexHandle>);
         libc::pthread_mutex_destroy(&mut **boxed);
         drop(boxed);
-    }
+    }}
 }
 
 win32_api! {
@@ -106,16 +105,16 @@ win32_api! {
         manual_reset: BOOL,
         initial_state: BOOL,
         name: LPCWSTR,
-    ) -> HANDLE {
+    ) -> HANDLE { unsafe {
         // Named events are not shared across guests in phase 1.
         let _name = read_wide(name);
         CreateEventA(sa, manual_reset, initial_state, std::ptr::null())
-    }
+    }}
 }
 
 win32_api! {
     /// BOOL SetEvent(HANDLE);
-    unsafe extern "win64" fn SetEvent(h: HANDLE) -> BOOL {
+    unsafe extern "win64" fn SetEvent(h: HANDLE) -> BOOL { unsafe {
         match handle_get(h).map(|o| &o.kind) {
             Some(HostKind::Event(e)) => {
                 let mut f = e.state.lock().unwrap();
@@ -129,12 +128,12 @@ win32_api! {
             }
             _ => FALSE,
         }
-    }
+    }}
 }
 
 win32_api! {
     /// BOOL ResetEvent(HANDLE);
-    unsafe extern "win64" fn ResetEvent(h: HANDLE) -> BOOL {
+    unsafe extern "win64" fn ResetEvent(h: HANDLE) -> BOOL { unsafe {
         match handle_get(h).map(|o| &o.kind) {
             Some(HostKind::Event(e)) => {
                 e.state.lock().unwrap().signaled = false;
@@ -142,7 +141,7 @@ win32_api! {
             }
             _ => FALSE,
         }
-    }
+    }}
 }
 
 fn wait_on_event(e: &EventState, timeout_ms: DWORD) -> DWORD {
@@ -178,7 +177,7 @@ fn wait_on_event(e: &EventState, timeout_ms: DWORD) -> DWORD {
 
 win32_api! {
     /// DWORD WaitForSingleObject(HANDLE, DWORD);
-    unsafe extern "win64" fn WaitForSingleObject(h: HANDLE, timeout_ms: DWORD) -> DWORD {
+    unsafe extern "win64" fn WaitForSingleObject(h: HANDLE, timeout_ms: DWORD) -> DWORD { unsafe {
         match handle_get(h).map(|o| &o.kind) {
             Some(HostKind::Event(e)) => wait_on_event(e, timeout_ms),
             Some(HostKind::Mutex { state, cond }) => {
@@ -203,7 +202,7 @@ win32_api! {
             // the validated prototype behavior for this guest class.
             _ => WAIT_OBJECT_0,
         }
-    }
+    }}
 }
 
 win32_api! {
@@ -213,11 +212,11 @@ win32_api! {
         to_wait: HANDLE,
         timeout_ms: DWORD,
         alertable: BOOL,
-    ) -> DWORD {
+    ) -> DWORD { unsafe {
         let _ = alertable;
         SetEvent(to_signal);
         WaitForSingleObject(to_wait, timeout_ms)
-    }
+    }}
 }
 
 win32_api! {
@@ -240,19 +239,19 @@ win32_api! {
         sa: *const SECURITY_ATTRIBUTES,
         initial_owner: BOOL,
         name: LPCWSTR,
-    ) -> HANDLE {
+    ) -> HANDLE { unsafe {
         let name_s = String::from_utf16_lossy(&read_wide(name));
         if std::env::var("PERUN_TRACE").is_ok() {
             eprintln!("[perun] CreateMutexW({:?})", name_s);
         }
         let _ = name_s;
         CreateMutexA(sa, initial_owner, std::ptr::null())
-    }
+    }}
 }
 
 win32_api! {
     /// BOOL ReleaseMutex(HANDLE);
-    unsafe extern "win64" fn ReleaseMutex(h: HANDLE) -> BOOL {
+    unsafe extern "win64" fn ReleaseMutex(h: HANDLE) -> BOOL { unsafe {
         match handle_get(h).map(|o| &o.kind) {
             Some(HostKind::Mutex { state, cond }) => {
                 let mut l = state.lock().unwrap();
@@ -266,5 +265,5 @@ win32_api! {
             }
             _ => FALSE,
         }
-    }
+    }}
 }

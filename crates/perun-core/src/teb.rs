@@ -57,38 +57,40 @@ thread_local! {
 /// # Safety
 /// Invokes `syscall(SYS_arch_prctl, ARCH_SET_GS, ptr)`. Safe on x86_64 Linux.
 pub unsafe fn init_thread_teb(image_base: u64) -> *mut FakeTeb {
-    CURRENT_TEB.with(|slot| {
-        let mut b = Box::new(std::mem::zeroed::<FakeTeb>());
-        let p = &mut *b as *mut FakeTeb as u64;
+    unsafe {
+        CURRENT_TEB.with(|slot| {
+            let mut b = Box::new(std::mem::zeroed::<FakeTeb>());
+            let p = &mut *b as *mut FakeTeb as u64;
 
-        // Stack bounds must reflect the REAL Linux stack. MSVC's __chkstk
-        // reads gs:[0x10] (StackLimit) and probes pages downward toward it;
-        // a fake limit above the actual stack makes the probe run into
-        // unmapped memory and fault. Query pthread for the true range.
-        let (stack_base, stack_limit) = real_stack_bounds();
-        b.stack_base = stack_base;
-        b.stack_limit = stack_limit;
+            // Stack bounds must reflect the REAL Linux stack. MSVC's __chkstk
+            // reads gs:[0x10] (StackLimit) and probes pages downward toward it;
+            // a fake limit above the actual stack makes the probe run into
+            // unmapped memory and fault. Query pthread for the true range.
+            let (stack_base, stack_limit) = real_stack_bounds();
+            b.stack_base = stack_base;
+            b.stack_limit = stack_limit;
 
-        b.self_ptr = p;
-        b.tls_array = (p + 0x100) as u64; // points to tls_slots array
-        b.peb_ptr = (p + std::mem::offset_of!(FakeTeb, peb) as u64) as u64;
-        b.last_error = 0;
-        b.peb.image_base_address = image_base;
-        b.peb.being_debugged = 0;
-        b.peb.process_heap = 1; // matches GetProcessHeap shim
+            b.self_ptr = p;
+            b.tls_array = (p + 0x100) as u64; // points to tls_slots array
+            b.peb_ptr = (p + std::mem::offset_of!(FakeTeb, peb) as u64) as u64;
+            b.last_error = 0;
+            b.peb.image_base_address = image_base;
+            b.peb.being_debugged = 0;
+            b.peb.process_heap = 1; // matches GetProcessHeap shim
 
-        let teb_ptr = &mut *b as *mut FakeTeb;
-        *slot.borrow_mut() = Some(b);
+            let teb_ptr = &mut *b as *mut FakeTeb;
+            *slot.borrow_mut() = Some(b);
 
-        let res = libc::syscall(libc::SYS_arch_prctl, ARCH_SET_GS, teb_ptr as u64);
-        if res != 0 {
-            eprintln!(
-                "[perun] ARCH_SET_GS failed: errno={}",
-                *libc::__errno_location()
-            );
-        }
-        teb_ptr
-    })
+            let res = libc::syscall(libc::SYS_arch_prctl, ARCH_SET_GS, teb_ptr as u64);
+            if res != 0 {
+                eprintln!(
+                    "[perun] ARCH_SET_GS failed: errno={}",
+                    *libc::__errno_location()
+                );
+            }
+            teb_ptr
+        })
+    }
 }
 
 /// Return `(stack_base, stack_limit)` = (top, bottom) of the current thread's
@@ -132,10 +134,12 @@ pub unsafe fn get_last_error_ptr() -> *mut u32 {
 /// # Safety
 /// Must be called after `init_thread_teb`.
 pub unsafe fn get_tls_slot_ptr(index: usize) -> *mut u64 {
-    CURRENT_TEB.with(|slot| match slot.borrow().as_ref() {
-        Some(b) if index < b.tls_slots.len() => b.tls_slots.as_ptr().add(index) as *mut u64,
-        _ => std::ptr::null_mut(),
-    })
+    unsafe {
+        CURRENT_TEB.with(|slot| match slot.borrow().as_ref() {
+            Some(b) if index < b.tls_slots.len() => b.tls_slots.as_ptr().add(index) as *mut u64,
+            _ => std::ptr::null_mut(),
+        })
+    }
 }
 
 /// Number of inline TLS slots available for FLS backing.

@@ -17,7 +17,7 @@ win32_api! {
         flags: DWORD,
         nargs: DWORD,
         args: *const usize,
-    ) {
+    ) { unsafe {
         let mut a = [0usize; 4];
         if !args.is_null() && nargs > 0 {
             for (i, slot) in a.iter_mut().enumerate().take(nargs.min(4) as usize) {
@@ -29,7 +29,7 @@ win32_api! {
         );
         // No unwinding: phase-1 guests must not raise in normal flow. If one
         // does, execution continues here — the caller sees a normal return.
-    }
+    }}
 }
 
 win32_api! {
@@ -55,11 +55,11 @@ win32_api! {
 
 win32_api! {
     /// void RtlCaptureContext(PCONTEXT);
-    unsafe extern "win64" fn RtlCaptureContext(ctx: *mut core::ffi::c_void) {
+    unsafe extern "win64" fn RtlCaptureContext(ctx: *mut core::ffi::c_void) { unsafe {
         // Zero the CONTEXT blob (1232 bytes on x64): callers only need it to
         // be valid-shaped before they poke specific fields.
         std::ptr::write_bytes(ctx as *mut u8, 0, 1232);
-    }
+    }}
 }
 
 win32_api! {
@@ -68,14 +68,14 @@ win32_api! {
         control_pc: u64,
         image_base: *mut u64,
         _table: *mut core::ffi::c_void,
-    ) -> *mut core::ffi::c_void {
+    ) -> *mut core::ffi::c_void { unsafe {
         // Report "not found" (null) with base 0: callers treat this as leaf
         // function and stop walking — exactly what our no-unwind policy wants.
         if !image_base.is_null() {
             *image_base = 0;
         }
         std::ptr::null_mut()
-    }
+    }}
 }
 
 win32_api! {
@@ -116,21 +116,21 @@ win32_api! {
 
 win32_api! {
     /// void InitializeSListHead(PSLIST_HEADER);
-    unsafe extern "win64" fn InitializeSListHead(head: *mut core::ffi::c_void) {
+    unsafe extern "win64" fn InitializeSListHead(head: *mut core::ffi::c_void) { unsafe {
         // SLIST_HEADER is 16 bytes on x64.
         std::ptr::write_bytes(head as *mut u8, 0, 16);
-    }
+    }}
 }
 
 win32_api! {
     /// PSLIST_ENTRY InterlockedFlushSList(PSLIST_HEADER);
-    unsafe extern "win64" fn InterlockedFlushSList(head: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
+    unsafe extern "win64" fn InterlockedFlushSList(head: *mut core::ffi::c_void) -> *mut core::ffi::c_void { unsafe {
         let first = head as *mut std::sync::atomic::AtomicUsize;
         let old = (*first).swap(0, std::sync::atomic::Ordering::AcqRel);
         // Second quad holds depth/sequence; reset both halves honestly.
         *(head as *mut usize).add(1) = 0;
         old as *mut core::ffi::c_void
-    }
+    }}
 }
 
 // ── TLS ──────────────────────────────────────────────────────────────────
@@ -218,7 +218,7 @@ win32_api! {
 
 win32_api! {
     /// BOOL GetUserNameA(LPSTR, LPDWORD);
-    unsafe extern "win64" fn GetUserNameA(buf: LPSTR, size: *mut DWORD) -> BOOL {
+    unsafe extern "win64" fn GetUserNameA(buf: LPSTR, size: *mut DWORD) -> BOOL { unsafe {
         let user = std::env::var("USER").unwrap_or_else(|_| "perun".into());
         let bytes = user.as_bytes();
         let need = bytes.len() + 1;
@@ -233,24 +233,24 @@ win32_api! {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len());
         *buf.add(bytes.len()) = 0;
         TRUE
-    }
+    }}
 }
 
 win32_api! {
     /// void ExitProcess(UINT);
-    unsafe extern "win64" fn ExitProcess(code: UINT) {
+    unsafe extern "win64" fn ExitProcess(code: UINT) { unsafe {
         eprintln!("[perun] ExitProcess({code})");
         libc::_exit(code as i32);
-    }
+    }}
 }
 
 win32_api! {
     /// BOOL TerminateProcess(HANDLE, UINT);
-    unsafe extern "win64" fn TerminateProcess(h: HANDLE, code: UINT) -> BOOL {
+    unsafe extern "win64" fn TerminateProcess(h: HANDLE, code: UINT) -> BOOL { unsafe {
         let _ = h;
         eprintln!("[perun] TerminateProcess({code})");
         libc::_exit(code as i32);
-    }
+    }}
 }
 
 // ── FLS (Fiber Local Storage) ────────────────────────────────────────────
@@ -277,7 +277,7 @@ win32_api! {
 
 win32_api! {
     /// BOOL FlsSetValue(DWORD, PVOID);
-    unsafe extern "win64" fn FlsSetValue(index: DWORD, data: *mut core::ffi::c_void) -> BOOL {
+    unsafe extern "win64" fn FlsSetValue(index: DWORD, data: *mut core::ffi::c_void) -> BOOL { unsafe {
         let p = perun_core::teb::get_tls_slot_ptr(index as usize);
         if p.is_null() {
             set_last_error(ERROR_INVALID_PARAMETER);
@@ -285,19 +285,19 @@ win32_api! {
         }
         *p = data as u64;
         TRUE
-    }
+    }}
 }
 
 win32_api! {
     /// PVOID FlsGetValue(DWORD);
-    unsafe extern "win64" fn FlsGetValue(index: DWORD) -> *mut core::ffi::c_void {
+    unsafe extern "win64" fn FlsGetValue(index: DWORD) -> *mut core::ffi::c_void { unsafe {
         let p = perun_core::teb::get_tls_slot_ptr(index as usize);
         if p.is_null() {
             set_last_error(ERROR_INVALID_PARAMETER);
             return std::ptr::null_mut();
         }
         *p as *mut core::ffi::c_void
-    }
+    }}
 }
 
 win32_api! {
@@ -318,7 +318,7 @@ win32_api! {
         cs: *mut core::ffi::c_void,
         spin: DWORD,
         _flags: DWORD,
-    ) -> BOOL {
+    ) -> BOOL { unsafe {
         crate::sync::InitializeCriticalSectionAndSpinCount(cs, spin)
-    }
+    }}
 }

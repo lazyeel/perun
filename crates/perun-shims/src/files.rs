@@ -35,7 +35,7 @@ win32_api! {
         disposition: DWORD,
         attrs: DWORD,
         template: HANDLE,
-    ) -> HANDLE {
+    ) -> HANDLE { unsafe {
         let _ = (sa, template);
         let wide = read_wide(name);
         let path = String::from_utf16_lossy(&wide);
@@ -78,7 +78,7 @@ win32_api! {
         } else {
             INVALID_HANDLE_VALUE
         }
-    }
+    }}
 }
 
 win32_api! {
@@ -91,7 +91,7 @@ win32_api! {
         disposition: DWORD,
         attrs: DWORD,
         template: HANDLE,
-    ) -> HANDLE {
+    ) -> HANDLE { unsafe {
         let narrow = read_narrow(name);
         let wide = narrow
             .iter()
@@ -104,7 +104,7 @@ win32_api! {
         let wname = wide_from_str(&String::from_utf8_lossy(cname.as_bytes()));
         let wname_ptr = wname.as_ptr();
         CreateFileW(wname_ptr, access, share, sa, disposition, attrs, template)
-    }
+    }}
 }
 
 pub(crate) fn file_of(h: HANDLE) -> Option<(i32, bool)> {
@@ -122,7 +122,7 @@ win32_api! {
         to_read: DWORD,
         out_read: *mut DWORD,
         overlapped: *mut OVERLAPPED,
-    ) -> BOOL {
+    ) -> BOOL { unsafe {
         let (fd, _) = match file_of(h) {
             Some(f) => f,
             None => {
@@ -153,7 +153,7 @@ win32_api! {
             *out_read = n as DWORD;
         }
         TRUE
-    }
+    }}
 }
 
 win32_api! {
@@ -164,7 +164,7 @@ win32_api! {
         to_write: DWORD,
         out_written: *mut DWORD,
         _overlapped: *mut OVERLAPPED,
-    ) -> BOOL {
+    ) -> BOOL { unsafe {
         let (fd, _) = match file_of(h) {
             Some(f) => f,
             None => {
@@ -181,22 +181,22 @@ win32_api! {
             *out_written = n as DWORD;
         }
         TRUE
-    }
+    }}
 }
 
 win32_api! {
     /// BOOL CloseHandle(HANDLE);
-    unsafe extern "win64" fn CloseHandle(h: HANDLE) -> BOOL {
+    unsafe extern "win64" fn CloseHandle(h: HANDLE) -> BOOL { unsafe {
         match handle_free(h) {
             true => TRUE,
             false => FALSE,
         }
-    }
+    }}
 }
 
 win32_api! {
     /// BOOL SetEndOfFile(HANDLE);
-    unsafe extern "win64" fn SetEndOfFile(h: HANDLE) -> BOOL {
+    unsafe extern "win64" fn SetEndOfFile(h: HANDLE) -> BOOL { unsafe {
         let (fd, _) = match file_of(h) {
             Some(f) => f,
             None => return FALSE,
@@ -207,12 +207,12 @@ win32_api! {
         } else {
             FALSE
         }
-    }
+    }}
 }
 
 win32_api! {
     /// BOOL FlushFileBuffers(HANDLE);
-    unsafe extern "win64" fn FlushFileBuffers(h: HANDLE) -> BOOL {
+    unsafe extern "win64" fn FlushFileBuffers(h: HANDLE) -> BOOL { unsafe {
         match file_of(h) {
             Some((fd, _)) => {
                 if libc::fsync(fd) == 0 {
@@ -223,7 +223,7 @@ win32_api! {
             }
             None => FALSE,
         }
-    }
+    }}
 }
 
 win32_api! {
@@ -233,7 +233,7 @@ win32_api! {
         dist: i64,
         new_pos: *mut i64,
         method: DWORD,
-    ) -> BOOL {
+    ) -> BOOL { unsafe {
         let (fd, _) = match file_of(h) {
             Some(f) => f,
             None => return FALSE,
@@ -255,12 +255,12 @@ win32_api! {
             *new_pos = pos;
         }
         TRUE
-    }
+    }}
 }
 
 win32_api! {
     /// BOOL DeleteFileW(LPCWSTR);
-    unsafe extern "win64" fn DeleteFileW(name: LPCWSTR) -> BOOL {
+    unsafe extern "win64" fn DeleteFileW(name: LPCWSTR) -> BOOL { unsafe {
         let path = String::from_utf16_lossy(&read_wide(name));
         let c = std::ffi::CString::new(path).unwrap_or_default();
         if libc::unlink(c.as_ptr()) == 0 {
@@ -268,7 +268,7 @@ win32_api! {
         } else {
             FALSE
         }
-    }
+    }}
 }
 
 win32_api! {
@@ -276,7 +276,7 @@ win32_api! {
     unsafe extern "win64" fn CreateDirectoryW(
         name: LPCWSTR,
         _sa: *const SECURITY_ATTRIBUTES,
-    ) -> BOOL {
+    ) -> BOOL { unsafe {
         let path = String::from_utf16_lossy(&read_wide(name));
         let c = std::ffi::CString::new(path).unwrap_or_default();
         if libc::mkdir(c.as_ptr(), 0o755) == 0 {
@@ -284,7 +284,7 @@ win32_api! {
         } else {
             FALSE
         }
-    }
+    }}
 }
 
 fn attributes_for_path(path: &[u8]) -> DWORD {
@@ -310,19 +310,19 @@ pub const INVALID_FILE_ATTRIBUTES: DWORD = 0xFFFF_FFFF;
 
 win32_api! {
     /// DWORD GetFileAttributesW(LPCWSTR);
-    unsafe extern "win64" fn GetFileAttributesW(name: LPCWSTR) -> DWORD {
+    unsafe extern "win64" fn GetFileAttributesW(name: LPCWSTR) -> DWORD { unsafe {
         let path = String::from_utf16_lossy(&read_wide(name));
         let attrs = attributes_for_path(path.as_bytes());
         if std::env::var("PERUN_TRACE").is_ok() {
             eprintln!("[perun] GetFileAttributesW({:?}) -> {attrs:#x}", path);
         }
         attrs
-    }
+    }}
 }
 
 win32_api! {
     /// DWORD GetFileAttributesA(LPCSTR);
-    unsafe extern "win64" fn GetFileAttributesA(name: LPCSTR) -> DWORD {
+    unsafe extern "win64" fn GetFileAttributesA(name: LPCSTR) -> DWORD { unsafe {
         let path = read_narrow(name);
         let attrs = attributes_for_path(&path);
         if std::env::var("PERUN_TRACE").is_ok() {
@@ -332,12 +332,12 @@ win32_api! {
             );
         }
         attrs
-    }
+    }}
 }
 
 win32_api! {
     /// DWORD GetFileSize(HANDLE, LPDWORD);
-    unsafe extern "win64" fn GetFileSize(h: HANDLE, high: *mut DWORD) -> DWORD {
+    unsafe extern "win64" fn GetFileSize(h: HANDLE, high: *mut DWORD) -> DWORD { unsafe {
         let (fd, _) = match file_of(h) {
             Some(f) => f,
             None => return 0xFFFF_FFFF, // INVALID_FILE_SIZE
@@ -351,12 +351,12 @@ win32_api! {
             *high = (size >> 32) as DWORD;
         }
         size as DWORD
-    }
+    }}
 }
 
 win32_api! {
     /// DWORD GetFileType(HANDLE);
-    unsafe extern "win64" fn GetFileType(h: HANDLE) -> DWORD {
+    unsafe extern "win64" fn GetFileType(h: HANDLE) -> DWORD { unsafe {
         const FILE_TYPE_CHAR: DWORD = 0x0002;
         const FILE_TYPE_DISK: DWORD = 0x0001;
         match file_of(h) {
@@ -369,7 +369,7 @@ win32_api! {
             }
             None => 0,
         }
-    }
+    }}
 }
 
 // ── Std streams ──────────────────────────────────────────────────────────

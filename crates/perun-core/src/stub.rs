@@ -133,7 +133,7 @@ pub(crate) fn stub_pool() -> StubPoolGuard {
 ///
 /// # Safety
 /// Called only from the asm dispatcher with valid register snapshots.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "win64" fn perun_trap_report(
     arg0: u64,
     arg1: u64,
@@ -174,11 +174,11 @@ core::arch::global_asm!(
     "
 );
 
-extern "win64" {
+unsafe extern "win64" {
     fn perun_trap_dispatcher() -> i32;
 }
 
-extern "C" {
+unsafe extern "C" {
     fn perun_trap_dispatcher_sysv();
 }
 
@@ -280,7 +280,7 @@ pub(crate) fn stub_pool_sysv() -> SysVStubPoolGuard {
 ///
 /// # Safety
 /// Called only from the asm dispatcher with valid register snapshots.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn perun_trap_report_sysv(
     arg0: u64,
     arg1: u64,
@@ -317,9 +317,11 @@ pub unsafe extern "C" fn perun_trap_report_sysv(
 }
 
 unsafe fn get_rbp() -> u64 {
-    let r;
-    core::arch::asm!("mov {}, rbp", out(reg) r);
-    r
+    unsafe {
+        let r;
+        core::arch::asm!("mov {}, rbp", out(reg) r);
+        r
+    }
 }
 
 fn region_name(addr: u64) -> &'static str {

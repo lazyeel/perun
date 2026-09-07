@@ -591,11 +591,12 @@ impl MachInfo {
             off += cmdsize;
         }
 
-        if let Some((symoff, nsyms, stroff, strsize)) = symtab {
-            if nsyms > 0 && strsize > 0 {
-                fetch_ranges.push((symoff as usize, nsyms as usize * 16));
-                fetch_ranges.push((stroff as usize, strsize as usize));
-            }
+        if let Some((symoff, nsyms, stroff, strsize)) = symtab
+            && nsyms > 0
+            && strsize > 0
+        {
+            fetch_ranges.push((symoff as usize, nsyms as usize * 16));
+            fetch_ranges.push((stroff as usize, strsize as usize));
         }
         if let Some(f) = dyld {
             for idx in [0usize, 2, 4, 6] {

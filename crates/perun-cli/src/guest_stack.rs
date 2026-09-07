@@ -125,7 +125,7 @@ perun_guest_host_rsp:
     ",
 );
 
-extern "C" {
+unsafe extern "C" {
     static perun_guest_return_magic: u64;
     // Referenced from the inline-asm trampoline below (lea r11, [rip +
     // perun_guest_host_rsp]); the compiler cannot see that use.
@@ -133,7 +133,7 @@ extern "C" {
     static perun_guest_host_rsp: u64;
 }
 
-extern "C" {
+unsafe extern "C" {
     fn perun_guest_landing();
 }
 
@@ -175,7 +175,7 @@ pub unsafe fn set_return_magic(addr: u64) {
 /// least 8 MiB, and the guest function must return normally.
 #[allow(clippy::missing_safety_doc)]
 pub unsafe fn guest_trampoline(f: u64, rsp0: u64, nargs: usize, a: [u64; 8]) -> i64 {
-    extern "C" {
+    unsafe extern "C" {
         fn perun_guest_trampoline_ex();
     }
     let go: unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> i64 =

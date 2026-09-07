@@ -377,10 +377,12 @@ unsafe extern "C" fn shim_statfs(
     _path: *const core::ffi::c_char,
     buf: *mut core::ffi::c_void,
 ) -> i32 {
-    if !buf.is_null() {
-        std::ptr::write_bytes(buf as *mut u8, 0, 432);
+    unsafe {
+        if !buf.is_null() {
+            std::ptr::write_bytes(buf as *mut u8, 0, 432);
+        }
+        0
     }
-    0
 }
 
 unsafe extern "C" fn shim_errno_ptr() -> *mut i32 {
@@ -408,16 +410,18 @@ unsafe extern "C" fn shim_getenv(_name: *const core::ffi::c_char) -> *const core
 }
 
 unsafe extern "C" fn shim_gettimeofday(tv: *mut u8, tz: *mut u8) -> i32 {
-    if !tv.is_null() {
-        // Fixed timestamp, mirroring the reference interposer: SAP
-        // key material must be reproducible across runs.
-        tv.cast::<u64>().write_unaligned(1_717_000_000);
-        tv.add(8).cast::<u32>().write_unaligned(0);
+    unsafe {
+        if !tv.is_null() {
+            // Fixed timestamp, mirroring the reference interposer: SAP
+            // key material must be reproducible across runs.
+            tv.cast::<u64>().write_unaligned(1_717_000_000);
+            tv.add(8).cast::<u32>().write_unaligned(0);
+        }
+        if !tz.is_null() {
+            std::ptr::write_bytes(tz, 0, 8);
+        }
+        0
     }
-    if !tz.is_null() {
-        std::ptr::write_bytes(tz, 0, 8);
-    }
-    0
 }
 
 unsafe extern "C" fn shim_arc4random() -> u32 {
@@ -436,24 +440,28 @@ unsafe extern "C" fn shim_sysctlbyname(
     _new: *const core::ffi::c_void,
     _newlen: usize,
 ) -> i32 {
-    // "How many bytes would you like?" — "zero" keeps the guest's UUID
-    // plumbing happy without fabricating a serial number.
-    if !oldlen.is_null() {
-        std::ptr::write(oldlen, 0);
+    unsafe {
+        // "How many bytes would you like?" — "zero" keeps the guest's UUID
+        // plumbing happy without fabricating a serial number.
+        if !oldlen.is_null() {
+            std::ptr::write(oldlen, 0);
+        }
+        0
     }
-    0
 }
 
 unsafe extern "C" fn shim_compare_and_swap32(old: i32, new: i32, ptr: *mut i32) -> bool {
-    if ptr.is_null() {
-        return false;
-    }
-    let cur = ptr.read();
-    if cur == old {
-        ptr.write(new);
-        true
-    } else {
-        false
+    unsafe {
+        if ptr.is_null() {
+            return false;
+        }
+        let cur = ptr.read();
+        if cur == old {
+            ptr.write(new);
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -465,19 +473,21 @@ unsafe extern "C" fn shim_cfstring_create(
     cstr: *const core::ffi::c_char,
     _enc: u32,
 ) -> usize {
-    if cstr.is_null() {
-        return 0;
+    unsafe {
+        if cstr.is_null() {
+            return 0;
+        }
+        // Mirror the reference interposer: a fake non-null CFString only for
+        // the IOPlatform identity keys the FairPlay code probes; everything
+        // else gets NULL so the guest takes its absence branches.
+        const KEYS: [&[u8]; 3] = [b"IOPlatformSerialNumber", b"IOPlatformUUID", b"board-id"];
+        let len = host_strlen(cstr);
+        let bytes = std::slice::from_raw_parts(cstr as *const u8, len);
+        if KEYS.contains(&bytes) {
+            return FAKE_HANDLE;
+        }
+        0
     }
-    // Mirror the reference interposer: a fake non-null CFString only for
-    // the IOPlatform identity keys the FairPlay code probes; everything
-    // else gets NULL so the guest takes its absence branches.
-    const KEYS: [&[u8]; 3] = [b"IOPlatformSerialNumber", b"IOPlatformUUID", b"board-id"];
-    let len = host_strlen(cstr);
-    let bytes = std::slice::from_raw_parts(cstr as *const u8, len);
-    if KEYS.contains(&bytes) {
-        return FAKE_HANDLE;
-    }
-    0
 }
 
 /// CFStringGetCString(cfstr, buffer, bufferSize, encoding): the reference
@@ -509,11 +519,13 @@ unsafe extern "C" fn shim_io_iterator_next() -> u32 {
 }
 
 unsafe extern "C" fn shim_io_registry_parent(_entry: u32, parent: *mut u32) -> i32 {
-    if parent.is_null() {
-        return -1;
+    unsafe {
+        if parent.is_null() {
+            return -1;
+        }
+        std::ptr::write(parent, u32::MAX);
+        0
     }
-    std::ptr::write(parent, u32::MAX);
-    0
 }
 
 /// objc_msgSend: the only selector the guest sends during SAP signing is
@@ -523,41 +535,47 @@ unsafe extern "C" fn shim_objc_msgsend(
     _self: *mut core::ffi::c_void,
     sel: *const core::ffi::c_char,
 ) -> usize {
-    // NOTE: never dereference the guest's selector pointer here — the
-    // obfuscated control flow probes shims with junk arguments, and a
-    // bounded compare needs raw byte access, not CStr.
-    if !sel.is_null() {
-        let s = std::ffi::CStr::from_ptr(sel).to_bytes();
-        if s == b"objectForKey:" {
-            return FAKE_HANDLE;
+    unsafe {
+        // NOTE: never dereference the guest's selector pointer here — the
+        // obfuscated control flow probes shims with junk arguments, and a
+        // bounded compare needs raw byte access, not CStr.
+        if !sel.is_null() {
+            let s = std::ffi::CStr::from_ptr(sel).to_bytes();
+            if s == b"objectForKey:" {
+                return FAKE_HANDLE;
+            }
         }
+        0
     }
-    0
 }
 
 unsafe extern "C" fn shim_dlopen(path: *const core::ffi::c_char, _mode: i32) -> usize {
-    if path.is_null() {
-        return 0;
-    }
-    let s = std::ffi::CStr::from_ptr(path).to_bytes();
-    if s == b"/System/Library/PrivateFrameworks/CoreFP.framework/CoreFP" {
-        FAKE_HANDLE
-    } else {
-        0
+    unsafe {
+        if path.is_null() {
+            return 0;
+        }
+        let s = std::ffi::CStr::from_ptr(path).to_bytes();
+        if s == b"/System/Library/PrivateFrameworks/CoreFP.framework/CoreFP" {
+            FAKE_HANDLE
+        } else {
+            0
+        }
     }
 }
 
 /// dlsym(handle, name): answer CoreFP's own six obfuscated exports from the
 /// table built at load time.
 unsafe extern "C" fn shim_dlsym(_handle: usize, name: *const core::ffi::c_char) -> usize {
-    if name.is_null() {
-        return 0;
+    unsafe {
+        if name.is_null() {
+            return 0;
+        }
+        let s = std::ffi::CStr::from_ptr(name).to_bytes();
+        let key = format!("_{}", String::from_utf8_lossy(s));
+        DLSYM_TABLE
+            .with(|t| t.borrow().get(&key).copied())
+            .unwrap_or(0)
     }
-    let s = std::ffi::CStr::from_ptr(name).to_bytes();
-    let key = format!("_{}", String::from_utf8_lossy(s));
-    DLSYM_TABLE
-        .with(|t| t.borrow().get(&key).copied())
-        .unwrap_or(0)
 }
 
 thread_local! {
@@ -722,13 +740,13 @@ unsafe extern "C" fn shim_bzero(s: *mut core::ffi::c_void, n: usize) {
 /// zeroing the old shim did is DROPPED: the reference never zeroes, and
 /// fresh mmap pages are already zero.
 unsafe extern "C" fn shim_malloc(size: usize) -> *mut core::ffi::c_void {
-    let aligned_size_t_size = good_size(core::mem::size_of::<usize>());
-    let aligned_size = good_size(size);
-    let head = HEAP_HEAD.load(std::sync::atomic::Ordering::Relaxed);
-    let tail = HEAP_TAIL.load(std::sync::atomic::Ordering::Relaxed);
-    if head == 0 {
-        // First call maps the arena, exactly like the emulator's setupHeap.
-        unsafe {
+    unsafe {
+        let aligned_size_t_size = good_size(core::mem::size_of::<usize>());
+        let aligned_size = good_size(size);
+        let head = HEAP_HEAD.load(std::sync::atomic::Ordering::Relaxed);
+        let tail = HEAP_TAIL.load(std::sync::atomic::Ordering::Relaxed);
+        if head == 0 {
+            // First call maps the arena, exactly like the emulator's setupHeap.
             let p = libc::mmap(
                 HEAP_BASE as *mut _,
                 HEAP_SIZE as usize,
@@ -738,15 +756,13 @@ unsafe extern "C" fn shim_malloc(size: usize) -> *mut core::ffi::c_void {
                 0,
             );
             assert!(p != libc::MAP_FAILED, "SAP guest heap mmap failed");
+            HEAP_HEAD.store(HEAP_BASE, std::sync::atomic::Ordering::Relaxed);
+            HEAP_TAIL.store(HEAP_BASE, std::sync::atomic::Ordering::Relaxed);
+            return shim_malloc(size);
         }
-        HEAP_HEAD.store(HEAP_BASE, std::sync::atomic::Ordering::Relaxed);
-        HEAP_TAIL.store(HEAP_BASE, std::sync::atomic::Ordering::Relaxed);
-        return shim_malloc(size);
-    }
-    if tail + (aligned_size_t_size as u64) + (aligned_size as u64) > head + HEAP_SIZE {
-        return core::ptr::null_mut();
-    }
-    unsafe {
+        if tail + (aligned_size_t_size as u64) + (aligned_size as u64) > head + HEAP_SIZE {
+            return core::ptr::null_mut();
+        }
         let p = tail as *mut usize;
         p.write_unaligned(size);
         let user = tail + aligned_size_t_size as u64;
@@ -759,8 +775,10 @@ unsafe extern "C" fn shim_malloc(size: usize) -> *mut core::ffi::c_void {
 }
 
 unsafe extern "C" fn shim_calloc(count: usize, size: usize) -> *mut core::ffi::c_void {
-    let total = count.wrapping_mul(size);
-    shim_malloc(total)
+    unsafe {
+        let total = count.wrapping_mul(size);
+        shim_malloc(total)
+    }
 }
 
 /// Read the size prefix of a heap block.
@@ -786,46 +804,54 @@ unsafe extern "C" fn shim_realloc(
     ptr: *mut core::ffi::c_void,
     new_size: usize,
 ) -> *mut core::ffi::c_void {
-    if ptr.is_null() {
-        return shim_malloc(new_size);
-    }
-    let old = unsafe { block_size(ptr).unwrap_or(0) };
-    let dst = shim_malloc(new_size);
-    if !dst.is_null() && old > 0 {
-        unsafe {
+    unsafe {
+        if ptr.is_null() {
+            return shim_malloc(new_size);
+        }
+        let old = block_size(ptr).unwrap_or(0);
+        let dst = shim_malloc(new_size);
+        if !dst.is_null() && old > 0 {
             std::ptr::copy_nonoverlapping(ptr as *const u8, dst as *mut u8, old.min(new_size));
         }
+        dst
     }
-    dst
 }
 
 // ── the ICXS file service ─────────────────────────────────────────────────
 
 unsafe extern "C" fn shim_open(path: *const core::ffi::c_char, _flags: i32) -> i32 {
-    if path.is_null() {
-        return -1;
+    unsafe {
+        if path.is_null() {
+            return -1;
+        }
+        let s = std::ffi::CStr::from_ptr(path).to_bytes();
+        if s == b"./../CoreFP.icxs" {
+            with_state(|st| st.icxs_cursor = 0);
+            return ICXS_FD;
+        }
+        -1
     }
-    let s = std::ffi::CStr::from_ptr(path).to_bytes();
-    if s == b"./../CoreFP.icxs" {
-        with_state(|st| st.icxs_cursor = 0);
-        return ICXS_FD;
-    }
-    -1
 }
 
 unsafe extern "C" fn shim_read(fd: i32, buf: *mut core::ffi::c_void, count: usize) -> isize {
-    if fd != ICXS_FD || buf.is_null() {
-        return -1;
-    }
-    with_state(|st| {
-        let remaining = st.icxs.len().saturating_sub(st.icxs_cursor);
-        let n = remaining.min(count);
-        if n > 0 {
-            std::ptr::copy_nonoverlapping(st.icxs.as_ptr().add(st.icxs_cursor), buf as *mut u8, n);
-            st.icxs_cursor += n;
+    unsafe {
+        if fd != ICXS_FD || buf.is_null() {
+            return -1;
         }
-        n as isize
-    })
+        with_state(|st| {
+            let remaining = st.icxs.len().saturating_sub(st.icxs_cursor);
+            let n = remaining.min(count);
+            if n > 0 {
+                std::ptr::copy_nonoverlapping(
+                    st.icxs.as_ptr().add(st.icxs_cursor),
+                    buf as *mut u8,
+                    n,
+                );
+                st.icxs_cursor += n;
+            }
+            n as isize
+        })
+    }
 }
 
 /// pthread_once(control, init): run the guest's one-time initializer.
@@ -844,16 +870,18 @@ unsafe extern "C" fn shim_read(fd: i32, buf: *mut core::ffi::c_void, count: usiz
 /// to this function.
 #[inline(never)]
 unsafe extern "C" fn shim_pthread_once(control: *mut core::ffi::c_void, init: usize) -> i32 {
-    if control.is_null() {
-        return 0;
-    }
-    let ctl = control as *mut u64;
-    if ctl.read_unaligned() != 0 {
-        ctl.write_unaligned(0);
-        if init != 0 {
-            let f: unsafe extern "C" fn() = std::mem::transmute(init);
-            f();
+    unsafe {
+        if control.is_null() {
+            return 0;
         }
+        let ctl = control as *mut u64;
+        if ctl.read_unaligned() != 0 {
+            ctl.write_unaligned(0);
+            if init != 0 {
+                let f: unsafe extern "C" fn() = std::mem::transmute(init);
+                f();
+            }
+        }
+        0
     }
-    0
 }

@@ -236,91 +236,89 @@ impl MachImage {
         load_base: u64,
         resolver: &mut dyn MachImportResolver,
     ) -> Result<MachImage, MachLoadError> {
-        use std::os::unix::fs::FileExt;
+        unsafe {
+            use std::os::unix::fs::FileExt;
 
-        // Segment contents: pread straight into the mapping (fat slice offset
-        // first, then the slice-relative segment fileoff).
-        let slice_off = Self::fat_slice_offset(&mut file)?;
-        for s in &info.segments {
-            if s.name_str() == "__PAGEZERO" || s.filesize == 0 {
-                continue;
-            }
-            let dst_off = (s.vmaddr - info.base) as usize;
-            let n = (s.filesize as usize).min(span.saturating_sub(dst_off));
-            if n == 0 {
-                continue;
-            }
-            let mut done = 0usize;
-            while done < n {
-                let got = file
-                    .read_at(
-                        std::slice::from_raw_parts_mut(base.add(dst_off + done), n - done),
-                        slice_off + s.fileoff + done as u64,
-                    )
-                    .map_err(|e| MachLoadError::Parse(e.into()))?;
-                if got == 0 {
-                    return Err(MachLoadError::Parse(MachError::Truncated));
+            // Segment contents: pread straight into the mapping (fat slice offset
+            // first, then the slice-relative segment fileoff).
+            let slice_off = Self::fat_slice_offset(&mut file)?;
+            for s in &info.segments {
+                if s.name_str() == "__PAGEZERO" || s.filesize == 0 {
+                    continue;
                 }
-                done += got;
+                let dst_off = (s.vmaddr - info.base) as usize;
+                let n = (s.filesize as usize).min(span.saturating_sub(dst_off));
+                if n == 0 {
+                    continue;
+                }
+                let mut done = 0usize;
+                while done < n {
+                    let got = file
+                        .read_at(
+                            std::slice::from_raw_parts_mut(base.add(dst_off + done), n - done),
+                            slice_off + s.fileoff + done as u64,
+                        )
+                        .map_err(|e| MachLoadError::Parse(e.into()))?;
+                    if got == 0 {
+                        return Err(MachLoadError::Parse(MachError::Truncated));
+                    }
+                    done += got;
+                }
             }
-        }
 
-        // Rebases against mapped memory.
-        let slide = load_base.wrapping_sub(info.base);
-        for r in &info.rebases {
-            // dyld semantics: slot holds its preferred-layout value; add slide.
-            let off = info
-                .segment_map_offset(&r.segment, r.seg_off, span)?
-                .ok_or(MachLoadError::Parse(MachError::MissingSegment {
-                    name: String::from_utf8_lossy(&r.segment)
-                        .trim_end_matches('\0')
-                        .to_string(),
-                }))?;
-            unsafe {
+            // Rebases against mapped memory.
+            let slide = load_base.wrapping_sub(info.base);
+            for r in &info.rebases {
+                // dyld semantics: slot holds its preferred-layout value; add slide.
+                let off = info
+                    .segment_map_offset(&r.segment, r.seg_off, span)?
+                    .ok_or(MachLoadError::Parse(MachError::MissingSegment {
+                        name: String::from_utf8_lossy(&r.segment)
+                            .trim_end_matches('\0')
+                            .to_string(),
+                    }))?;
                 let slot = base.add(off).cast::<u64>();
                 let old = slot.read_unaligned();
                 slot.write_unaligned(old.wrapping_add(slide));
             }
-        }
 
-        // Binds against mapped memory.
-        let zero_page = zero_data_page();
-        for b in &info.binds {
-            let value = resolver
-                .resolve(&b.name)
-                .map(|p| (p as u64).wrapping_add(b.addend as u64))
-                .or_else(|| {
-                    if is_data_symbol(&b.name) {
-                        Some(zero_page as u64)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_else(|| {
-                    let label = b.name.clone();
-                    crate::stub_pool_sysv().allocate(label) as u64
-                });
-            let off = info
-                .segment_map_offset(&b.segment, b.seg_off, span)?
-                .ok_or(MachLoadError::Parse(MachError::MissingSegment {
-                    name: String::from_utf8_lossy(&b.segment)
-                        .trim_end_matches('\0')
-                        .to_string(),
-                }))?;
-            unsafe {
+            // Binds against mapped memory.
+            let zero_page = zero_data_page();
+            for b in &info.binds {
+                let value = resolver
+                    .resolve(&b.name)
+                    .map(|p| (p as u64).wrapping_add(b.addend as u64))
+                    .or_else(|| {
+                        if is_data_symbol(&b.name) {
+                            Some(zero_page as u64)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| {
+                        let label = b.name.clone();
+                        crate::stub_pool_sysv().allocate(label) as u64
+                    });
+                let off = info
+                    .segment_map_offset(&b.segment, b.seg_off, span)?
+                    .ok_or(MachLoadError::Parse(MachError::MissingSegment {
+                        name: String::from_utf8_lossy(&b.segment)
+                            .trim_end_matches('\0')
+                            .to_string(),
+                    }))?;
                 base.add(off).cast::<u64>().write_unaligned(value);
             }
+
+            // rdtsc neutralization against mapped __TEXT,__text.
+            Self::neutralize_rdtsc_mapped(&info, base, span);
+
+            Ok(MachImage {
+                slide,
+                info,
+                base,
+                size: span,
+            })
         }
-
-        // rdtsc neutralization against mapped __TEXT,__text.
-        Self::neutralize_rdtsc_mapped(&info, base, span);
-
-        Ok(MachImage {
-            slide,
-            info,
-            base,
-            size: span,
-        })
     }
 
     /// x86_64 slice offset of a fat container, 0 for thin files.
@@ -506,7 +504,9 @@ impl MachImage {
     /// # Safety
     /// `addr..addr+len` must be writable guest memory.
     pub unsafe fn write(&self, addr: u64, data: &[u8]) {
-        std::ptr::copy_nonoverlapping(data.as_ptr(), addr as *mut u8, data.len());
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr(), addr as *mut u8, data.len());
+        }
     }
 
     /// Read `len` bytes of guest memory.
@@ -514,9 +514,11 @@ impl MachImage {
     /// # Safety
     /// `addr..addr+len` must be mapped.
     pub unsafe fn read(&self, addr: u64, len: usize) -> Vec<u8> {
-        let mut out = vec![0u8; len];
-        std::ptr::copy_nonoverlapping(addr as *const u8, out.as_mut_ptr(), len);
-        out
+        unsafe {
+            let mut out = vec![0u8; len];
+            std::ptr::copy_nonoverlapping(addr as *const u8, out.as_mut_ptr(), len);
+            out
+        }
     }
 }
 
