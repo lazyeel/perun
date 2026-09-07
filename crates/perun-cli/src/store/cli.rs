@@ -204,7 +204,7 @@ fn print_progress(downloaded: u64, total: u64) {
 
 fn cmd_sign_debug(args: &[String]) -> i32 {
     let hex = args.first().cloned().unwrap_or_else(|| "0102".into());
-    let mac = crate::store::primary_mac().unwrap_or([2, 0, 0, 0, 0, 1]);
+    let mac = crate::store::primary_mac();
     let guid = appstore::guid_from_mac(&mac);
     let config = match bag::Bag::fetch(&guid) {
         Ok(b) => b.sap,
@@ -337,13 +337,7 @@ fn cmd_auth_login(args: &[String]) -> i32 {
         password
     };
 
-    let mac = match crate::store::primary_mac() {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("[store] {e}");
-            return 1;
-        }
-    };
+    let mac = crate::store::primary_mac();
     let guid = appstore::guid_from_mac(&mac);
     println!("[store] machine guid: {guid}");
 
@@ -479,13 +473,7 @@ fn cmd_purchase(args: &[String]) -> i32 {
         eprintln!("[store] purchasing paid apps is not supported");
         return 1;
     }
-    let mac = match crate::store::primary_mac() {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("[store] {e}");
-            return 1;
-        }
-    };
+    let mac = crate::store::primary_mac();
     let guid = appstore::guid_from_mac(&mac);
     match appstore::purchase(&acc, &app, &guid, true) {
         Ok(()) => {
@@ -524,13 +512,7 @@ fn cmd_download(args: &[String]) -> i32 {
         .or_else(|| flags.get("-o"))
         .unwrap_or("")
         .to_string();
-    let mac = match crate::store::primary_mac() {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("[store] {e}");
-            return 1;
-        }
-    };
+    let mac = crate::store::primary_mac();
     let guid = appstore::guid_from_mac(&mac);
     let mut progress = print_progress;
     match appstore::download(&acc, &app, &output, "", &guid, &mut progress) {
@@ -566,13 +548,7 @@ fn cmd_list_purchases(args: &[String]) -> i32 {
         Ok(a) => a,
         Err(c) => return c,
     };
-    let mac = match crate::store::primary_mac() {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("[store] {e}");
-            return 1;
-        }
-    };
+    let mac = crate::store::primary_mac();
     let guid = appstore::guid_from_mac(&mac);
 
     // The DAAP update/items bodies are SAP-signed: bag + signer.
@@ -623,13 +599,7 @@ fn cmd_list_versions(args: &[String]) -> i32 {
         Ok(a) => a,
         Err(c) => return c,
     };
-    let mac = match crate::store::primary_mac() {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("[store] {e}");
-            return 1;
-        }
-    };
+    let mac = crate::store::primary_mac();
     let guid = appstore::guid_from_mac(&mac);
     match appstore::list_versions(&acc, app.id, &guid) {
         Ok(out) => {
@@ -674,13 +644,7 @@ fn cmd_get_version_metadata(args: &[String]) -> i32 {
         Ok(a) => a,
         Err(c) => return c,
     };
-    let mac = match crate::store::primary_mac() {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("[store] {e}");
-            return 1;
-        }
-    };
+    let mac = crate::store::primary_mac();
     let guid = appstore::guid_from_mac(&mac);
     match appstore::get_version_metadata(&acc, app.id, &guid, &version_id) {
         Ok(meta) => {

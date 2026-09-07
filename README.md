@@ -28,12 +28,20 @@ end-to-end up to its provisioning gate. The full analysis — binary ground trut
 **macOS side (`perun sap`)** — maps the 2013 commerce pair (CoreFP,
 CommerceCore, CommerceKit) from Apple's public OS X 10.9 update package,
 drives the FairPlay SAP protocol against `play.itunes.apple.com`, and
-produces the 501-byte action signature. One command, no arguments beyond
-the MAC you want to sign with:
+produces the 501-byte action signature. One command, no arguments:
 
 ```bash
-./target/release/perun sap --mac AA:BB:CC:DD:EE:FF
+./target/release/perun sap
 ```
+
+The machine address is auto-detected: the first physical, up interface
+(veth/bridge/tunnel links are skipped), or — on hosts without one, like
+containers — a deterministic pseudo-MAC derived from the machine anchor
+(machine ID, else hostname). The first resolution is pinned under
+`~/.local/state/perun/machine`, so the identity (and the account store
+keyed by it) survives NIC changes and container restarts. `--mac` still
+forces a specific address per-run, for differential testing, and never
+touches the pin.
 
 The first run fetches the required images itself (~32 MB range-read from
 Apple's public 1.28 GB update package, SHA-256-pinned, cached under
@@ -57,9 +65,9 @@ version metadata. The command grammar matches the reference tool's:
 ```
 
 Endpoints are bag-driven (fetched per session, never hardcoded past the
-fallback), the account is stored encrypted (AES-256-GCM, machine-bound),
-and every signature-gated request is signed natively — the same runtime,
-one binary.
+fallback), the account is stored encrypted (AES-256-GCM, machine-bound
+through the pinned address), and every signature-gated request is signed
+natively — the same runtime, one binary.
 
 ## Performance
 
@@ -108,10 +116,13 @@ in its own file; contributors never need to understand the loader.
 cargo build --release -p perun-cli
 
 # Mach-O / FairPlay SAP (zero-config; first run fetches the images):
+./target/release/perun sap
+#   force a specific machine address for one run (differential testing;
+#   the auto-detected pin under ~/.local/state/perun/machine is kept):
 ./target/release/perun sap --mac AA:BB:CC:DD:EE:FF
 #   explicit assets directory (CoreFP, CommerceCore, CommerceKit, CoreFP.icxs)
 #   instead of the cache:
-./target/release/perun sap <assets-dir> --mac AA:BB:CC:DD:EE:FF
+./target/release/perun sap <assets-dir>
 #   sign a custom payload instead of the built-in smoke string
 #   (works with or without an assets directory):
 ./target/release/perun sap --sign <hex>   # or --file <path>

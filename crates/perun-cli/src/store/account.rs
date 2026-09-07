@@ -97,9 +97,10 @@ pub fn account_file() -> Result<PathBuf, String> {
     Ok(state_dir()?.join("account"))
 }
 
-/// Machine binding: the host's first hardware MAC (same source as the
-/// `guid` used for Store requests).
-pub fn machine_id() -> Result<String, String> {
+/// Machine binding: the machine MAC as lowercase colon hex (same source
+/// as the `guid` used for Store requests). Pinned on first use, so the
+/// file stays decryptable across NIC and namespace changes.
+pub fn machine_id() -> String {
     super::primary_mac_hex()
 }
 
@@ -159,7 +160,7 @@ pub fn decrypt(blob: &[u8], machine: &str, passphrase: &str) -> Result<String, S
 }
 
 pub fn save(account: &Account, passphrase: &str) -> Result<(), String> {
-    let machine = machine_id()?;
+    let machine = machine_id();
     let blob = encrypt(&account.to_json(), &machine, passphrase)?;
     let path = account_file()?;
     if let Some(parent) = path.parent() {
@@ -171,7 +172,7 @@ pub fn save(account: &Account, passphrase: &str) -> Result<(), String> {
 pub fn load(passphrase: &str) -> Result<Account, String> {
     let path = account_file()?;
     let blob = std::fs::read(&path).map_err(|_| "not logged in — run 'auth login'".to_string())?;
-    let machine = machine_id()?;
+    let machine = machine_id();
     let json = decrypt(&blob, &machine, passphrase)?;
     Account::from_json(&json)
 }

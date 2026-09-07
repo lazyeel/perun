@@ -154,7 +154,7 @@ fn run() -> i32 {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!(
-            "usage: perun run <image.dll> [--verbose] [--trace] [--trace-file F] [--no-teb]\n       perun info <image.dll>\n       perun mach info <macho>\n       perun sap <dir> [--mac AA:BB:CC:DD:EE:FF] [--sign HEX|--file F] [--exchange-hex H]\n       perun store <auth|search|purchase|download|list-purchases|list-versions|get-version-metadata> ...\n       ipatool aliases: perun auth login|info|revoke · perun search -t ... · perun purchase -i ...\n                        perun download -i ... · perun list-purchases · perun list-versions ..."
+            "usage: perun run <image.dll> [--verbose] [--trace] [--trace-file F] [--no-teb]\n       perun info <image.dll>\n       perun mach info <macho>\n       perun sap [--mac AA:BB:CC:DD:EE:FF] [--sign HEX|--file F]\n       perun store <auth|search|purchase|download|list-purchases|list-versions|get-version-metadata> ...\n       ipatool aliases: perun auth login|info|revoke · perun search -t ... · perun purchase -i ...\n                        perun download -i ... · perun list-purchases · perun list-versions ..."
         );
         return 2;
     }
@@ -778,10 +778,8 @@ fn cmd_mach(args: &[String]) -> i32 {
 }
 
 fn cmd_sap(args: &[String]) -> i32 {
-    if args.is_empty() {
-        eprintln!("usage: perun sap <assets-dir> [--mac AA:BB:..] [--sign HEX] [--file PATH]");
-        return 2;
-    }
+    // Bare `perun sap` is the zero-config smoke test: cached (or freshly
+    // fetched) assets, auto-detected machine address, built-in payload.
     // Guest obfuscated code keeps deep recursion and wide frames; run the
     // whole sequence on a dedicated thread with a large stack, mirroring
     // the reference emulator's separate 8MB guest stack.
@@ -807,10 +805,12 @@ fn cmd_sap(args: &[String]) -> i32 {
 }
 
 fn cmd_sap_inner(args: &[String]) -> i32 {
-    // Asset resolution: explicit dir wins; otherwise a complete pinned cache is
-    // used as-is; otherwise the zero-config fetcher downloads the missing
-    // assets (first run only) and the command continues from the cache.
-    let dir = if Path::new(&args[0]).is_dir() {
+    // Asset resolution: an explicit directory wins; otherwise a complete
+    // pinned cache is used as-is; otherwise the zero-config fetcher
+    // downloads the missing assets (first run only) and the command
+    // continues from the cache. A directory is recognized positionally
+    // (first non-flag argument), so flag-only invocations work.
+    let dir = if !args.is_empty() && Path::new(&args[0]).is_dir() {
         args[0].clone()
     } else {
         match fetcher::ensure_cache(true) {
@@ -821,17 +821,20 @@ fn cmd_sap_inner(args: &[String]) -> i32 {
             }
         }
     };
-    let mut mac = [0x02u8, 0x00, 0x00, 0x00, 0x00, 0x01];
+    // Machine address: auto-detected (pinned on first use), or forced
+    // per-run with --mac for differential-testing the FairPlay identity.
+    let mut mac: Option<[u8; 6]> = None;
     let mut sign_hex: Option<String> = None;
     let mut sign_file: Option<String> = None;
-    let mut i = 1;
+    let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--mac" if i + 1 < args.len() => {
-                let parts: Vec<&str> = args[i + 1].split(':').collect();
-                if parts.len() == 6 {
-                    for (j, p) in parts.iter().enumerate() {
-                        mac[j] = u8::from_str_radix(p, 16).unwrap_or(mac[j]);
+                match store::parse_mac_text(&args[i + 1]) {
+                    Ok(m) => mac = Some(m),
+                    Err(e) => {
+                        eprintln!("--mac: {e}: {}", args[i + 1]);
+                        return 2;
                     }
                 }
                 i += 2;
@@ -847,6 +850,12 @@ fn cmd_sap_inner(args: &[String]) -> i32 {
             _ => i += 1,
         }
     }
+    let mac = match mac {
+        Some(m) => m,
+        None => store::primary_mac(),
+    };
+    let guid = store::appstore::guid_from_mac(&mac);
+    println!("[sap] machine guid: {guid}");
 
     let assets = match sap::SapAssets::load_dir(&dir) {
         Ok(a) => a,
