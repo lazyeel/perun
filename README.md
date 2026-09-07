@@ -41,6 +41,26 @@ Apple's public 1.28 GB update package, SHA-256-pinned, cached under
 binary map, memory invariants, protocol wire format, benchmarks — is
 [RESEARCH.md](RESEARCH.md).
 
+**App Store client (`perun store` / bare aliases)** — a full Store lane on
+top of the same native SAP session: login via MZFinance with 2FA (the code
+arrives by push/SMS out of band and is appended to the password on the
+retry round), iTunes Search API lookup, free-app purchase, streaming IPA
+download with a progress bar, sinf replication, purchase history, and
+version metadata. The command grammar matches the reference tool's:
+
+```bash
+./target/release/perun auth login -e you@example.com   # then a 2FA code
+./target/release/perun search -t telegram -l 5
+./target/release/perun purchase -b org.whispersystems.signal
+./target/release/perun download -b org.whispersystems.signal -o .
+./target/release/perun list-purchases
+```
+
+Endpoints are bag-driven (fetched per session, never hardcoded past the
+fallback), the account is stored encrypted (AES-256-GCM, machine-bound),
+and every signature-gated request is signed natively — the same runtime,
+one binary.
+
 ## Performance
 
 Against the reference Unicorn-based signer (stock build of

@@ -38,10 +38,12 @@ use guest_stack::guest_trampoline;
 /// # Safety
 /// The runtime must have mapped the guest stack and return-thunk pages.
 unsafe fn guest_call_on_stack(f: u64, rsp0: u64, args: &[u64]) -> i64 {
-    let mut a = [0u64; 8];
-    let n = args.len().min(8);
-    a[..n].copy_from_slice(&args[..n]);
-    guest_trampoline(f, rsp0, n, a)
+    unsafe {
+        let mut a = [0u64; 8];
+        let n = args.len().min(8);
+        a[..n].copy_from_slice(&args[..n]);
+        guest_trampoline(f, rsp0, n, a)
+    }
 }
 
 /// Landing-pad address for the signal handler's hlt bounce (async-signal-
@@ -140,7 +142,11 @@ const SCRATCH_SIZE: usize = 1 << 20;
 /// obfuscated code folds into its scratch-pointer arithmetic, so the range
 /// must match (unlike the scratch arena, which the guest never sees).
 const BRIDGE_BASE: u64 = 0x6000_0000_0000;
-const BRIDGE_SIZE: usize = 1 << 20;
+/// 64 MiB: the bridge cursor only grows (a page per argument buffer, ~5 pages
+/// per SAP call). Long CLI sessions (login retries + DAAP + signing) make
+/// hundreds of calls; the old 1 MiB region ran out after ~200 pages and the
+/// next allocation wrote past the mapping (SIGSEGV in the guest).
+const BRIDGE_SIZE: usize = 64 << 20;
 
 /// The reference emulator's guest entry thunk page (`callq *%rax; hlt`)
 /// lives at 0x1_0000_0000; the guest sees 0x1_0000_0002 as its return

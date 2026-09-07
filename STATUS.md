@@ -168,7 +168,48 @@ network APIs (KERNEL32 93 / ADVAPI32 7 / SHLWAPI 2 / SHELL32 1 — none of the
   strings/env, registry, process, SEH/TLS/FLS, shell/path); macOS
   libSystem/Mach shims for SAP guests (phase 2).
 - `crates/perun-cli` — `perun run` / `perun info` / `perun call` runner;
-  `perun mach` inspector; `perun sap` session driver (phase 2).
+  `perun mach` inspector; `perun sap` session driver (phase 2);
+  `perun store` / ipatool-compatible aliases (phase 3, see below).
+
+## The Store lane (phase 3, 2026-09-04)
+
+`crates/perun-cli/src/store/` is an App Store client whose every
+signature-gated request (login, purchase-history DAAP) is signed by the
+native SAP runtime — no emulator, no external signer. The command surface
+mirrors the reference tool (`auth login|info|revoke`, `search`, `purchase`,
+`download`, `list-purchases`, `list-versions`, `get-version-metadata`),
+usable both as `perun store <cmd>` and as bare top-level aliases
+(`perun search …`).
+
+Wire behavior (verified against live Apple endpoints on 2026-09-04):
+
+- The bag (`init.itunes.apple.com/bag.xml`) is fetched per session with the
+  Configurator User-Agent; SAP endpoints come from its `urlBag` sub-dict
+  (`sign-sap-setup` → `fpinit…/v1/signSapSetup/legacy`, cert →
+  `s.mzstatic.com/sap/setupCert.plist`, version 200).
+- Login POSTs to MZFinance `authenticate` with the body XML plist signed as
+  `X-Apple-ActionSignature` (501 bytes, base64). Apple's 2FA arrives out of
+  band (push/SMS) and the code is appended to the password on the retry
+  round — `BadLogin.Configurator_message` on the first round requests it.
+  The session account is stored encrypted (AES-256-GCM, PBKDF2 machine-bound,
+  format compatible with the C++ ipatool fork) under `~/.local/state/perun/`.
+- Search/lookup use the public iTunes Search API keyed off the account's
+  storefront.
+- Purchase (`buyProduct`), download (`volumeStoreDownloadProduct`), the
+  purchase history (DAAP at `pd.itunes.apple.com`), and version listing all
+  walk the same signed-request path; downloads stream to disk with a
+  progress bar and are patched in place (raw zip replication, sinf
+  injection, iTunesMetadata.plist).
+- Live smoke (no valid account): bag parse → native SAP setup against
+  fpinit → signed login POST → Apple answers `BadLogin` (commerce gate
+  passed; empty 403/204 walls are gone) → 2FA prompt; `search -t telegram`
+  returns real results through the full Rust path.
+
+Known boundaries, stated plainly: purchase/download with a real account is
+untested from this container (needs credentials the user would supply);
+the interactive phone-SMS sub-flow of the GSA layer (choosing which trusted
+number receives the code) does not exist on MZFinance — Apple sends the
+code to the default number on its own.
 
 ## Reproduce
 

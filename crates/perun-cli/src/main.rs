@@ -3,12 +3,13 @@
 
 //! `perun` — runner and inspector for native PE images under the runtime.
 
-use perun_core::loader::{Image, LoadError, DLL_PROCESS_ATTACH};
+use perun_core::loader::{DLL_PROCESS_ATTACH, Image, LoadError};
 use perun_shims::table::ShimTable;
 use std::path::Path;
 
 mod fetcher;
 mod sap;
+mod store;
 
 fn main() {
     unsafe { install_crash_probe() };
@@ -27,6 +28,7 @@ fn main() {
 /// primary fault context.) SIGTRAP is not expected in production: there are
 /// no int3 plants; it is reported and the process exits.
 unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
+    // Edition 2024: the fn is already unsafe; no inner wrapper needed.
     let si_addr = (*info).si_addr() as u64;
     // ucontext_t.gregs layout (x86_64 glibc): REG_RIP=16, REG_RSP=19, etc.
     let uc = ctx as *mut libc::ucontext_t;
@@ -99,10 +101,8 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
     push(b" rsi=", &mut out, &mut n);
     push(&hex16(rsi), &mut out, &mut n);
     push(b"\n", &mut out, &mut n);
-    unsafe {
-        libc::write(2, out.as_ptr().cast(), n);
-        libc::_exit(128 + sig);
-    }
+    libc::write(2, out.as_ptr().cast(), n);
+    libc::_exit(128 + sig);
 }
 
 /// Fixed-width hex of a u64 into a static buffer — no allocator.
@@ -130,28 +130,30 @@ unsafe fn hexdec(v: u64, _pad: usize) -> [u8; 21] {
 /// Must be installed before any guest code runs; the alt-stack it
 /// registers must stay mapped for the process lifetime.
 pub unsafe fn install_crash_probe() {
-    // Alternate signal stack: the guest can leave the main stack pointer
-    // anywhere when it faults, so the handler must not rely on it.
-    static mut ALT: [u8; 64 * 1024] = [0; 64 * 1024];
-    let mut ss: libc::stack_t = std::mem::zeroed();
-    ss.ss_sp = std::ptr::addr_of_mut!(ALT).cast();
-    ss.ss_size = 64 * 1024;
-    libc::sigaltstack(&ss, std::ptr::null_mut());
+    unsafe {
+        // Alternate signal stack: the guest can leave the main stack pointer
+        // anywhere when it faults, so the handler must not rely on it.
+        static mut ALT: [u8; 64 * 1024] = [0; 64 * 1024];
+        let mut ss: libc::stack_t = std::mem::zeroed();
+        ss.ss_sp = std::ptr::addr_of_mut!(ALT).cast();
+        ss.ss_size = 64 * 1024;
+        libc::sigaltstack(&ss, std::ptr::null_mut());
 
-    let mut act: libc::sigaction = std::mem::zeroed();
-    act.sa_sigaction = crash_handler as *const () as usize;
-    act.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
-    libc::sigaction(libc::SIGSEGV, &act, std::ptr::null_mut());
-    libc::sigaction(libc::SIGFPE, &act, std::ptr::null_mut());
-    libc::sigaction(libc::SIGBUS, &act, std::ptr::null_mut());
-    libc::sigaction(libc::SIGTRAP, &act, std::ptr::null_mut());
+        let mut act: libc::sigaction = std::mem::zeroed();
+        act.sa_sigaction = crash_handler as *const () as usize;
+        act.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
+        libc::sigaction(libc::SIGSEGV, &act, std::ptr::null_mut());
+        libc::sigaction(libc::SIGFPE, &act, std::ptr::null_mut());
+        libc::sigaction(libc::SIGBUS, &act, std::ptr::null_mut());
+        libc::sigaction(libc::SIGTRAP, &act, std::ptr::null_mut());
+    }
 }
 
 fn run() -> i32 {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 {
+    if args.len() < 2 {
         eprintln!(
-            "usage: perun run <image.dll> [--verbose] [--trace] [--trace-file F] [--no-teb]\n       perun info <image.dll>\n       perun mach info <macho>\n       perun sap <dir> [--mac AA:BB:CC:DD:EE:FF] [--sign HEX|--file F] [--exchange-hex H]"
+            "usage: perun run <image.dll> [--verbose] [--trace] [--trace-file F] [--no-teb]\n       perun info <image.dll>\n       perun mach info <macho>\n       perun sap <dir> [--mac AA:BB:CC:DD:EE:FF] [--sign HEX|--file F] [--exchange-hex H]\n       perun store <auth|search|purchase|download|list-purchases|list-versions|get-version-metadata> ...\n       ipatool aliases: perun auth login|info|revoke · perun search -t ... · perun purchase -i ...\n                        perun download -i ... · perun list-purchases · perun list-versions ..."
         );
         return 2;
     }
@@ -162,6 +164,15 @@ fn run() -> i32 {
         "call" => cmd_call(&args[2..]),
         "mach" => cmd_mach(&args[2..]),
         "sap" => cmd_sap(&args[2..]),
+        "store" => store::cli::run(&args[2..]),
+        // ipatool-compatible top-level aliases: same grammar, no "store".
+        "auth" => store::cli::run(&args[1..]),
+        "search" => store::cli::run(&args[1..]),
+        "purchase" => store::cli::run(&args[1..]),
+        "download" => store::cli::run(&args[1..]),
+        "list-purchases" | "purchases" => store::cli::run(&args[1..]),
+        "list-versions" => store::cli::run(&args[1..]),
+        "get-version-metadata" => store::cli::run(&args[1..]),
         _ => {
             eprintln!("unknown command: {}", args[1]);
             2
@@ -212,15 +223,15 @@ fn cmd_run(args: &[String]) -> i32 {
         }
     };
 
-    if opts.verbose {
-        if let Ok(info) = perun_core::image::PeInfo::parse(&bytes) {
-            println!(
-                "[perun] image {path}: entry={:#x} base={:#x} sections={}",
-                info.opt.address_of_entry_point,
-                info.opt.image_base,
-                info.sections.len()
-            );
-        }
+    if opts.verbose
+        && let Ok(info) = perun_core::image::PeInfo::parse(&bytes)
+    {
+        println!(
+            "[perun] image {path}: entry={:#x} base={:#x} sections={}",
+            info.opt.address_of_entry_point,
+            info.opt.image_base,
+            info.sections.len()
+        );
     }
 
     let mut table = ShimTable::collect();
@@ -251,9 +262,13 @@ fn cmd_run(args: &[String]) -> i32 {
 
     if opts.trace {
         let file = opts.trace_file.clone().unwrap_or_default();
-        std::env::set_var("PERUN_TRACE", "1");
-        if !file.is_empty() {
-            std::env::set_var("PERUN_TRACE_FILE", file);
+        // Edition 2024: set_var touches global state, now unsafe.
+        // We run this before any guest threads exist.
+        unsafe {
+            std::env::set_var("PERUN_TRACE", "1");
+            if !file.is_empty() {
+                std::env::set_var("PERUN_TRACE_FILE", file);
+            }
         }
         println!("[perun] tracing enabled");
     }
@@ -285,7 +300,9 @@ fn cmd_run(args: &[String]) -> i32 {
 /// backed by a zeroed scratch page so the guest can read/write them safely.
 fn cmd_call(args: &[String]) -> i32 {
     if args.len() < 2 {
-        eprintln!("usage: perun call <image.dll> <export> [arg0 arg1 arg2 arg3] [--verbose] [--patch=RVA=HEX] [--poke=RVA=VAL] [--peek=RVA] [--peek-ptr=RVA]");
+        eprintln!(
+            "usage: perun call <image.dll> <export> [arg0 arg1 arg2 arg3] [--verbose] [--patch=RVA=HEX] [--poke=RVA=VAL] [--peek=RVA] [--peek-ptr=RVA]"
+        );
         return 2;
     }
     // `--verbose` is accepted anywhere on the command line: pulled out of the
@@ -307,15 +324,13 @@ fn cmd_call(args: &[String]) -> i32 {
         }
     };
 
-    if verbose {
-        if let Ok(info) = perun_core::image::PeInfo::parse(&bytes) {
-            println!(
-                "[perun] image {path}: entry={:#x} base={:#x} sections={}",
-                info.opt.address_of_entry_point,
-                info.opt.image_base,
-                info.sections.len()
-            );
-        }
+    if verbose && let Ok(info) = perun_core::image::PeInfo::parse(&bytes) {
+        println!(
+            "[perun] image {path}: entry={:#x} base={:#x} sections={}",
+            info.opt.address_of_entry_point,
+            info.opt.image_base,
+            info.sections.len()
+        );
     }
 
     let mut table = ShimTable::collect();
@@ -617,16 +632,18 @@ fn cmd_call(args: &[String]) -> i32 {
 /// to attempt the read under a SIGSEGV guard. Here we use a process_vm-style
 /// self-read via a pipe: write the memory to a pipe and see if it succeeds.
 unsafe fn probe_read(p: *const u8, len: usize) -> bool {
-    // mincore requires page-aligned addr; instead do a bounded read via
-    // /dev/null write using write(2) on the pointer directly.
-    let fd = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY);
-    if fd < 0 {
-        return false;
+    unsafe {
+        // mincore requires page-aligned addr; instead do a bounded read via
+        // /dev/null write using write(2) on the pointer directly.
+        let fd = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY);
+        if fd < 0 {
+            return false;
+        }
+        // write(2) will return EFAULT instead of crashing if the range is bad.
+        let n = libc::write(fd, p as *const core::ffi::c_void, len);
+        libc::close(fd);
+        n == len as isize
     }
-    // write(2) will return EFAULT instead of crashing if the range is bad.
-    let n = libc::write(fd, p as *const core::ffi::c_void, len);
-    libc::close(fd);
-    n == len as isize
 }
 
 fn parse_num(s: &str) -> Option<u64> {
