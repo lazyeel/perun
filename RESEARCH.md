@@ -1,6 +1,6 @@
 # RESEARCH.md — Perun: Native Mach-O Compatibility Runtime for StoreKit Client Attestation (FairPlay SAP)
 
-**Project:** [lazyeel/perun](https://github.com/lazyeel/perun) · **Document class:** Interoperability research specification & reverse-engineering report · **Status:** Working end-to-end implementation (protocol closed 2026-08-31) · **License:** [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
+**Project:** [lazyeel/perun](https://github.com/lazyeel/perun) · **Document class:** Interoperability research specification & reverse-engineering report · **Status:** Working end-to-end implementation (protocol closed 2026-08-31; live StoreKit client lane E2E 2026-09-07) · **License:** [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
 
 ---
 
@@ -481,6 +481,51 @@ convention), the prior art is credited in § 9.
 
 ---
 
+### 5.6 What the signature actually gates on the storefront path (live-verified 2026-09-07)
+
+The StoreKit client lane built on this runtime (Phase 3) exercises the full
+storefront path against live Apple endpoints. Which requests require the
+action signature and which do not — established empirically, not from
+upstream documentation:
+
+- **MZFinance `authenticate` (login) — signature-gated.** The login body is
+  the payload SAPSign signs; it rides as `X-Apple-ActionSignature` (base64 of
+  the 501-byte block). Without it the request dies in the empty-403/204 gate;
+  with it, the endpoint answers protocol-level (BadLogin on bad credentials,
+  a 2FA challenge on good ones, `passwordToken` on completion). The
+  signature is *only* required on the login body: the retry round with the
+  2FA code appended to the password is signed fresh per attempt.
+- **`buyProduct` / `volumeStoreDownloadProduct` — cookie+token, not signed.**
+  Once MZFinance authentication has run, purchase and download requests ride
+  on the established session (`mz_at_ssl`/`mz_at0_fr` cookies, `X-Token`
+  header) with no per-request action signature. The attestation is a
+  *session-establishment* gate, not a per-call toll.
+- **The DAAP purchase-history endpoint — signature-gated.** The
+  `pd.itunes.apple.com` history request (per-account) requires the signature
+  on its body, same as login. This is the second signed call site found
+  behind the commerce gate.
+- **The rest of the storefront surface — open.** Bag fetch
+  (`init.itunes.apple.com/bag.xml`), iTunes Search/lookup (public APIs), and
+  the signed-asset download host (`iosapps.itunes.apple.com`) all answer
+  anonymous or session-authenticated requests without the signature.
+
+In sum: the August-2026 gate is a login-shape gate on the two
+identity/ownership endpoints (authenticate, DAAP history), not a blanket
+requirement across the storefront API surface.
+
+### 5.7 A 5005 post-script: account state, not protocol state
+
+Live testing surfaced one more operational fact worth recording for anyone
+reproducing this path. A freshly created Apple ID that has never completed
+first-login terms acceptance can pass 2FA (correct code, server-accepted)
+and still be refused a `passwordToken` with `failureType 5005` — the
+endpoint's answer for "2FA invalid **or** account not yet provisioned for
+storefront use." The account-state cause dominates: completing ToS acceptance
+once (any Apple web property, e.g. music.apple.com) immediately turns the
+same credentials+code flow into a working login. The failure code maps to
+two distinct conditions; do not debug the protocol when the account is
+simply unprovisioned.
+
 ## 6. Benchmarks
 
 ### 6.1 Methodology
@@ -617,7 +662,8 @@ independent solution families emerged within days of each other:
 |---|---|---|---|
 | Emulated SAP (Unicorn TCG over the 10.9 images) | reference signer (2024, § 8); majd/ipatool v2.4.0 (2026-08-28) | QEMU-derived JIT | works, minutes-scale first login, external C dependency |
 | Native system CommerceKit | ipatool-sapfix (macOS-only, cgo `CKSigningSession`) | host OS | macOS-only, intermittent |
-| **Native projection (this work)** | Perun | Linux `mmap` + SysV shims, pure Rust | same protocol, 0.25 s warm session incl. live network (see § 6.3) |
+| Rust rewrites of the reference tool | ipatool-rs (uncor3, Kosthi) | vendored emulator / native | early-stage (2026-09); drive the same wire |
+| **Native projection (this work)** | Perun | Linux `mmap` + SysV shims, pure Rust | same protocol, 0.25 s warm session incl. live network (see § 6.3); full StoreKit client lane on top (login+2FA → search → purchase → download, live E2E 2026-09-07) |
 
 The commerce gate is a client-attestation gate, not a content-decryption
 mechanism, and the same 2013 engine satisfies it — the August community
@@ -709,6 +755,7 @@ with a NOTICE file (see the repository root).
 | 2026-09-01 | Initial public specification. Protocol closed end-to-end (init → exchange ×2 → sign, 501-byte signature) since 2026-08-31; all facts re-verified against binaries and live endpoints on 2026-09-01 (symbol-table audit, FS/GS census + poison experiment, cert re-fetch, benchmark re-run). |
 | 2026-09-02 | Optimization pass + zero-config fetcher. Streaming image loader (full image bytes never materialized; peak RSS 26.8 MiB), storeagent dropped from the mapped set (bind-graph cross-reference, live-verified), speculative certificate fetch with a 24 h on-disk cache, and a first-run asset fetcher that range-reads ~32 MB of the public 1.28 GB update package (8.4 s cold start, all digests pinned). |
 | 2026-09-03 | Benchmark hardening. Both sides re-benched against their public, unmodified artifacts: the oracle re-cloned from GitHub (commit 883ede5) and built with its own upstream Makefile (vendored Unicorn 2.1.1), perun as the shipped release binary. Per-round exchange rows retired — the stock oracle prints no phase timers and perun's release carries none for the split, so the public table now reports SAPExchange as the single combined Round 1 + Round 2 window and compares the oracle at the process level only (wall / CPU / peak RSS, N=3 per side, kernel rusage). Superseded instrumented figures (per-phase oracle timings, per-round exchange splits) removed; § 6.6 reproduces every number with one command per side. Third-party credits trimmed to what the law and the analysis actually require: NOTICE and § 8.1 now list only code compiled into the binary (runtime vs compile-time split, with unicode-ident's dual license kept distinct), and § 8 keeps the projects the work measured against or built on. Release profile hardened: no DWARF, stripped binaries, no build-host paths in distributed artifacts. |
+| 2026-09-07 | Storefront-path additions from the live StoreKit client lane (built on this runtime, E2E the same day: login+2FA → search → purchase → download). New § 5.6 maps which requests the action signature actually gates (login body and the DAAP history body — and nothing else on the storefront surface; purchase/download ride the session cookies+token). New § 5.7 records the 5005 account-state lesson: the code covers both invalid-2FA and unprovisioned-account, and ToS acceptance on any Apple web property flips the same flow to a working login. § 7 gains the 2026-09 Rust-rewrite family (ipatool-rs) and this work's StoreKit client status. |
 
 *Apple, macOS, OS X, StoreKit, FairPlay, iTunes and related marks are
 trademarks of Apple Inc. This independent research project is not affiliated
