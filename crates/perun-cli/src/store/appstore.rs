@@ -728,8 +728,9 @@ pub fn download(
     drop(file);
 
     // Replicate: copy entries, inject iTunesMetadata.plist and the sinfs.
+    // On failure keep the .tmp file for offline debugging.
     let patched = super::ipa::replicate(&tmp_path, &destination, &info, account).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp_path);
+        let _ = std::fs::rename(&tmp_path, format!("{}.badzip", destination));
         StoreError::Other(format!("replicate: {e}"))
     })?;
     if !patched {
