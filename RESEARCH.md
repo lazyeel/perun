@@ -112,14 +112,25 @@ offset `0x94191` in `__TEXT,__text` (vaddr == file offset for this image's
 
 ### 2.2 The PE32+ target: `CoreADI64.dll`
 
-The Windows-side target is Apple's `CoreADI64.dll` from iTunes for Windows (x86_64, statically linked MSVC CRT).
-Ground truth, all reproduced with `perun info` / `perun call --verbose` and `objdump -x` on the shipped binary:
+The Windows-side target is Apple's `CoreADI64.dll` from iTunes for Windows
+(x86_64, statically linked MSVC CRT). Ground truth, all reproduced with
+`perun info` / `perun call --verbose` and `objdump -x` on the shipped binary:
 
-- PE32+ x86_64 image, **7 sections** (`.text .rdata .data .pdata .gfids .rsrc .reloc`), preferred load base `0x7c800000` (entry at `0x131b00`).
-- **Exactly two exports**: `vdfut768ig` (the ADI dispatcher entry, used by the dispatch tests) and `cvu8io98wun` (the sibling entry point).
-- Import surface: **KERNEL32 93 / ADVAPI32 7 / SHLWAPI 2 / SHELL32 1** — 103 imports total, statically linked CRT, zero CRT DLLs, and **zero network-related imports** (the fpinit provisioning handshake lives in the caller, iTunes, not in this DLL).
-- Before the dispatcher runs, the statically linked CRT startup probes `LoadLibraryExW("api-ms-win-core-synch-l1-2-0")` and `("api-ms-win-core-fibers-l1-1-1")` (two calls each); the shim answers both with the main-module token during the static-init phase.
-The DLL is not committed or distributed; users obtain it locally from Apple's public iTunes distribution (extraction steps in the README).
+- PE32+ x86_64 image, **7 sections** (`.text .rdata .data .pdata .gfids .rsrc
+  .reloc`), preferred load base `0x7c800000` (entry at `0x131b00`).
+- **Exactly two exports**: `vdfut768ig` (the ADI dispatcher entry, used by
+  the dispatch tests) and `cvu8io98wun` (the sibling entry point).
+- Import surface: **KERNEL32 93 / ADVAPI32 7 / SHLWAPI 2 / SHELL32 1** —
+  103 imports total, statically linked CRT, zero CRT DLLs, and **zero
+  network-related imports** (the fpinit provisioning handshake lives in the
+  caller, iTunes, not in this DLL).
+- Before the dispatcher runs, the statically linked CRT startup probes
+  `LoadLibraryExW("api-ms-win-core-synch-l1-2-0")` and
+  `("api-ms-win-core-fibers-l1-1-1")` (two calls each); the shim answers both
+  with the main-module token during the static-init phase.
+
+The DLL is not committed or distributed; users obtain it locally from Apple's
+public iTunes distribution (extraction steps in the README).
 
 ---
 
@@ -392,12 +403,25 @@ seeds match byte-for-byte (0x6094ba41ca7bf5a8 at x1; 0x12db3c9a stamper at x2).
 
 The PE32+ lane runs the same native-execution doctrine with Win64 semantics:
 
-- **FakeTEB behind `GS_BASE`.** A per-thread fake TEB/PEB pair is installed via `arch_prctl(ARCH_SET_GS)`; `FS` is left untouched because glibc owns it. FLS slots are backed by the TEB inline TLS slots.
-- **Real stack bounds.** Stack limits are derived from pthread so MSVC `__chkstk` probes the real stack rather than a fiction.
-- **111 Win32 APIs** implemented as shims — plain Rust functions compiled as `extern "win64"`, so a resolved import is a direct `call` with no per-call trampoline. `DllMain(DLL_PROCESS_ATTACH)` returns TRUE on `CoreADI64.dll` with zero unresolved-import traps.
-- **Trap micro-stubs are absolute `jmp [rip+0]`** with an embedded 64-bit target, never `jmp rel32`: the RWX stub page and the guest image can be terabytes apart under ASLR, and rel32 only reaches ±2 GB. An unresolved import lands on such a stub, which reports the missing symbol with its arguments instead of crashing (fail-closed design).
-- Base relocations are applied (delta is 0 when the preferred base is free); PE32+ headers and all sections are mapped at the preferred base via `mmap(MAP_FIXED)` with per-page protections.
-- No Wine, no QEMU, no instruction emulation anywhere; overhead exists only at each Win32 boundary crossing.
+- **FakeTEB behind `GS_BASE`.** A per-thread fake TEB/PEB pair is installed via
+  `arch_prctl(ARCH_SET_GS)`; `FS` is left untouched because glibc owns it. FLS
+  slots are backed by the TEB inline TLS slots.
+- **Real stack bounds.** Stack limits are derived from pthread so MSVC
+  `__chkstk` probes the real stack rather than a fiction.
+- **111 Win32 APIs** implemented as shims — plain Rust functions compiled as
+  `extern "win64"`, so a resolved import is a direct `call` with no per-call
+  trampoline. `DllMain(DLL_PROCESS_ATTACH)` returns TRUE on `CoreADI64.dll`
+  with zero unresolved-import traps.
+- **Trap micro-stubs are absolute `jmp [rip+0]`** with an embedded 64-bit
+  target, never `jmp rel32`: the RWX stub page and the guest image can be
+  terabytes apart under ASLR, and rel32 only reaches ±2 GB. An unresolved
+  import lands on such a stub, which reports the missing symbol with its
+  arguments instead of crashing (fail-closed design).
+- Base relocations are applied (delta is 0 when the preferred base is free);
+  PE32+ headers and all sections are mapped at the preferred base via
+  `mmap(MAP_FIXED)` with per-page protections.
+- No Wine, no QEMU, no instruction emulation anywhere; overhead exists only
+  at each Win32 boundary crossing.
 
 ---
 
@@ -559,23 +583,55 @@ simply unprovisioned.
 
 ### 5.8 ADI provisioning-gate analysis (`CoreADI64.dll`, Phase 1)
 
-The ADI lane stops at a provisioning gate, fully characterized by measurement (the PE-side companion to the SAP protocol above; every claim here reproduces with the shipped binary and stock tools — § 6.7).
+The ADI lane stops at a provisioning gate, fully characterized by measurement
+(the PE-side companion to the SAP protocol above; every claim here reproduces
+with the shipped binary and stock tools — § 6.7).
 
-**The wall.** `perun call CoreADI64.dll vdfut768ig <cmd> scratch` executes the dispatcher's full provisioning logic and returns a clean ADI error code instead of crashing:
-`0xffff5016` for every command code tested, 0..255 inclusive — uniform, with no file, registry, mutex, or enumeration access in the trace.
-The result is checked **before** command dispatch, so it is an in-memory provisioning-state flag, not a per-command result.
-The dispatcher's control flow is control-flow-flattened (obfuscated), but the entry sequence is decoded:
+**The wall.** `perun call CoreADI64.dll vdfut768ig <cmd> scratch` executes the
+dispatcher's full provisioning logic and returns a clean ADI error code instead
+of crashing: `0xffff5016` for every command code tested, 0..255 inclusive —
+uniform, with no file, registry, mutex, or enumeration access in the trace.
+The result is checked **before** command dispatch, so it is an in-memory
+provisioning-state flag, not a per-command result. The dispatcher's control
+flow is control-flow-flattened (obfuscated), but the entry sequence is decoded:
 
-- First-level dispatch is a pure `rdx` NULL check (`test %rdx,%rdx` early in the export): param NULL → `0xffff5036` (invalid param, the default error loaded at entry); param non-null → the provisioning loader path.
-- The command code (`rcx`) is run through an obfuscated arithmetic transform and stored for a second-level dispatch that only runs once provisioning passes.
+- First-level dispatch is a pure `rdx` NULL check (`test %rdx,%rdx` early in
+  the export): param NULL → `0xffff5036` (invalid param, the default error
+  loaded at entry); param non-null → the provisioning loader path.
+- The command code (`rcx`) is run through an obfuscated arithmetic transform
+  and stored for a second-level dispatch that only runs once provisioning
+  passes.
+
 **What the gate actually is (measured, not guessed).**
 
-- The gate global is the qword at RVA `0x19dda0` (`.data`). It is read via an obfuscated pointer table at RVA `0x17eca0` (entry `[0x157]` stores `ImageBase + real + 0x4f7e9322`; subtracting the base and the key yields the target). The check at RVA `0x5b20f` is a double dereference: `cmp qword ptr [rcx - 0x4f7e9322], 0`.
-- At runtime the global holds a host heap pointer to a 0x28-byte object the guest allocates during the call itself — observable live with the shipped `--peek-ptr=0x19dda0`: the object's first qword is the flag the gate reads (zeroed at allocation); `[0x8]`, `[0x10]`, `[0x18]` are pointers into a small graph of sub-allocations.
-- The provisioning loader walks `<CommonAppData>\Apple Computer\iTunes\adi` (resolved via `SHGetFolderPathW(CSIDL_COMMON_APPDATA | CSIDL_FLAG_CREATE)` — csidl `0x8023` — plus `PathAppendW` + `PathIsDirectoryW` + `GetFileAttributesW`, confirming each directory) but returns `0xffff5016` whether or not `adi` exists — re-verified with the directory present and absent, and with a dummy blob file inside: identical result, and no `CreateFile` fires. The blob filename is built at runtime (obfuscated); the only "adi" string in the image is the named-object prefix `Global\adi-pb-unique`.
-- All real file I/O (`CreateFileW`/`ReadFile`/`WriteFile`/`SetFilePointerEx`) is concentrated in routines at RVA `0x1339d0`–`0x13f6c5` (15 indirect call sites total: CreateFileW 5, ReadFile 3, WriteFile 6, SetFilePointerEx 1), reached only after the gate passes.
-**Cross-reference with prior ADI/FairPlay research.** `0xffff5016` = signed `-45034`, adjacent to `-45061 kADINotProvisioned` ("ADI machine not provisioned, expected pre-init") — the documented ADI error family.
-The circular dependency is already characterized:
+- The gate global is the qword at RVA `0x19dda0` (`.data`). It is read via an
+  obfuscated pointer table at RVA `0x17eca0` (entry `[0x157]` stores
+  `ImageBase + real + 0x4f7e9322`; subtracting the base and the key yields
+  the target). The check at RVA `0x5b20f` is a double dereference:
+  `cmp qword ptr [rcx - 0x4f7e9322], 0`.
+- At runtime the global holds a host heap pointer to a 0x28-byte object the
+  guest allocates during the call itself — observable live with the shipped
+  `--peek-ptr=0x19dda0`: the object's first qword is the flag the gate reads
+  (zeroed at allocation); `[0x8]`, `[0x10]`, `[0x18]` are pointers into a
+  small graph of sub-allocations.
+- The provisioning loader walks `<CommonAppData>\Apple Computer\iTunes\adi`
+  (resolved via `SHGetFolderPathW(CSIDL_COMMON_APPDATA | CSIDL_FLAG_CREATE)` —
+  csidl `0x8023` — plus `PathAppendW` + `PathIsDirectoryW` +
+  `GetFileAttributesW`, confirming each directory) but returns `0xffff5016`
+  whether or not `adi` exists — re-verified with the directory present and
+  absent, and with a dummy blob file inside: identical result, and no
+  `CreateFile` fires. The blob filename is built at runtime (obfuscated); the
+  only "adi" string in the image is the named-object prefix
+  `Global\adi-pb-unique`.
+- All real file I/O (`CreateFileW`/`ReadFile`/`WriteFile`/`SetFilePointerEx`)
+  is concentrated in routines at RVA `0x1339d0`–`0x13f6c5` (15 indirect call
+  sites total: CreateFileW 5, ReadFile 3, WriteFile 6, SetFilePointerEx 1),
+  reached only after the gate passes.
+
+**Cross-reference with prior ADI/FairPlay research.** `0xffff5016` = signed
+`-45034`, adjacent to `-45061 kADINotProvisioned` ("ADI machine not
+provisioned, expected pre-init") — the documented ADI error family. The
+circular dependency is already characterized:
 
 ```
 bag-request -> needs FairPlay context
@@ -584,22 +640,46 @@ FPDICreate  -> needs subscription bag from server
 bag-request -> needs context        <- cycle
 ```
 
-The real app breaks the cycle by calling the `fpinit.itunes.apple.com/v1/fpdi` endpoints (init/setup) **before** any native FairPlay call — both endpoints are live (HTTP 405 on bare GET, i.e. present and POST-expecting).
-The provisioning blob is device-specific cryptographic material issued during that handshake; on a fresh offline system there is no blob, so ADI faithfully reports not-provisioned.
-This is the provisioning layer of the same Apple client-attestation family the project exists to understand. (Scope note: the August-2026 commerce gate on storefront traffic — § 5.6 — is a different, later thing; this section describes the classic ADI provisioning cycle, unchanged since the iTunes era.)
+The real app breaks the cycle by calling the
+`fpinit.itunes.apple.com/v1/fpdi` endpoints (init/setup) **before** any native
+FairPlay call — both endpoints are live (HTTP 405 on bare GET, i.e. present
+and POST-expecting). The provisioning blob is device-specific cryptographic
+material issued during that handshake; on a fresh offline system there is no
+blob, so ADI faithfully reports not-provisioned. This is the provisioning
+layer of the same Apple client-attestation family the project exists to
+understand. (Scope note: the August-2026 commerce gate on storefront traffic
+— § 5.6 — is a different, later thing; this section describes the classic ADI
+provisioning cycle, unchanged since the iTunes era.)
 
-**The two-trampoline experiment.** Two error-reporting trampolines sit at RVA `0x66c2d` (`mov edi,0xffff5016` — the only one of 37 sites that runs for cmd=0) and `0xb5b49` (`mov edi,0xffff5026`, the next failure exit).
-Neutralizing the immediates with the shipped `--patch` token (5 bytes each, instruction lengths preserved) makes cmd=0 return `0x0`, but the success is hollow: the API trace is byte-identical to the unpatched run — no additional API fires, so the trampolines are reporting stubs on a fixed not-provisioned path, not branch selectors.
-Zeroing only the first trampoline yields `0xffff5026` (the next exit fires).
-The gate cannot be passed offline by poking memory.
+**The two-trampoline experiment.** Two error-reporting trampolines sit at RVA
+`0x66c2d` (`mov edi,0xffff5016` — the only one of 37 sites that runs for
+cmd=0) and `0xb5b49` (`mov edi,0xffff5026`, the next failure exit).
+Neutralizing the immediates with the shipped `--patch` token (5 bytes each,
+instruction lengths preserved) makes cmd=0 return `0x0`, but the success is
+hollow: the API trace is byte-identical to the unpatched run — no additional
+API fires, so the trampolines are reporting stubs on a fixed not-provisioned
+path, not branch selectors. Zeroing only the first trampoline yields
+`0xffff5026` (the next exit fires). The gate cannot be passed offline by
+poking memory.
 
 **Ways forward** (recorded as of 2026-09-03):
 
-1. Obtain a real provisioning blob from a provisioned machine (`C:\ProgramData\Apple Computer\iTunes\adi\`), then feed it to the loader — the direct oracle: it reveals every context field the dispatcher reads after the gate.
-2. Replicate the server handshake (`fpinit.itunes.apple.com/v1/fpdi/init` + `/setup`) in the caller layer to provision a fresh machine, matching how the real app breaks the circular dependency. Requires GSA session tokens and the exact request format.
-3. Reconstruct the context object graph: the gate object references sub-allocations reachable via the shipped `--peek-ptr`; mapping every field the validator touches would enumerate what a real blob must contain — expensive against control-flow flattening.
-4. Grow the shim surface as real guests exercise more APIs (the trap reporter names each missing symbol with its arguments).
-5. A `perun scaffold` command to generate a ready-to-fill shim stub from a trap report.
+1. Obtain a real provisioning blob from a provisioned machine
+   (`C:\ProgramData\Apple Computer\iTunes\adi\`), then feed it to the loader —
+   the direct oracle: it reveals every context field the dispatcher reads
+   after the gate.
+2. Replicate the server handshake (`fpinit.itunes.apple.com/v1/fpdi/init` +
+   `/setup`) in the caller layer to provision a fresh machine, matching how
+   the real app breaks the circular dependency. Requires GSA session tokens
+   and the exact request format.
+3. Reconstruct the context object graph: the gate object references
+   sub-allocations reachable via the shipped `--peek-ptr`; mapping every field
+   the validator touches would enumerate what a real blob must contain —
+   expensive against control-flow flattening.
+4. Grow the shim surface as real guests exercise more APIs (the trap reporter
+   names each missing symbol with its arguments).
+5. A `perun scaffold` command to generate a ready-to-fill shim stub from a
+   trap report.
 
 ## 6. Benchmarks
 
@@ -736,9 +816,14 @@ cargo build --release -p perun-cli
 ./target/release/perun run   /path/to/CoreADI64.dll --verbose
 ./target/release/perun call  /path/to/CoreADI64.dll vdfut768ig 0 scratch --verbose
 
-# live object behind the provisioning gate: ./target/release/perun call /path/to/CoreADI64.dll vdfut768ig 0 scratch \ --peek=0x19dda0 --peek-ptr=0x19dda0
+# live object behind the provisioning gate:
+./target/release/perun call  /path/to/CoreADI64.dll vdfut768ig 0 scratch \
+    --peek=0x19dda0 --peek-ptr=0x19dda0
 
-# the two-trampoline experiment (immediates zeroed, lengths preserved): ./target/release/perun call /path/to/CoreADI64.dll vdfut768ig 0 scratch \ --patch=0x66c2d=bf00000000 --patch=0xb5b49=bf00000000 ```
+# the two-trampoline experiment (immediates zeroed, lengths preserved):
+./target/release/perun call  /path/to/CoreADI64.dll vdfut768ig 0 scratch \
+    --patch=0x66c2d=bf00000000 --patch=0xb5b49=bf00000000
+```
 
 | # | Assertion | Method (command family) | Result |
 |---|---|---|---|
