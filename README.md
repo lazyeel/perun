@@ -64,6 +64,20 @@ version metadata. The command grammar matches the reference tool's:
 ./target/release/perun list-purchases
 ```
 
+The perun persona adds search scopes on top of the plain search, each with
+the optional `-l/--limit` (default 5):
+
+- `search Telegram --developer` — client filter on the developer's name
+  (`artistName`/`sellerName`); the backend gets the full page and the
+  requested limit is applied after the filter, so a filter can never
+  shrink the page you asked for.
+- `search 686450210 --id` — the full catalog of one developer via the
+  Lookup API by artist id.
+- `search encrypted --description` — client filter on the description text.
+- plain `search` stays the default Apple search across all fields.
+
+The scopes are mutually exclusive; the ipatool persona does not carry them.
+
 ### ipatool persona
 
 The same binary, invoked as `ipatool`, runs the strict majd/ipatool v2

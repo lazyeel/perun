@@ -88,6 +88,9 @@ pub struct App {
     pub version: String,
     pub price: f64,
     pub purchase_date: Option<String>,
+    /// artistName | sellerName (the App Store sets both to the same value).
+    pub developer: String,
+    pub description: String,
 }
 
 impl App {
@@ -100,6 +103,16 @@ impl App {
             version: get("version").to_string(),
             price: item.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0),
             purchase_date: None,
+            developer: {
+                let a = get("artistName");
+                let s = get("sellerName");
+                if !s.is_empty() && s != a {
+                    format!("{a} ({s})")
+                } else {
+                    a.to_string()
+                }
+            },
+            description: get("description").to_string(),
         }
     }
 }
@@ -964,6 +977,50 @@ pub fn owned_apps(
         total,
         apps: apps[start..end].to_vec(),
     })
+}
+
+/// The full app catalog of one developer: Lookup API by artist id
+/// (`lookup?id=<artistId>&entity=software`). The response mixes the artist
+/// record with the software entries; only the software rows are returned.
+pub fn lookup_artist_apps(account: &Account, artist_id: i64, platform: &str) -> Result<Vec<App>> {
+    let country = country_code_from_storefront(&account.store_front)?;
+    // The mixed default entity ("software,iPadSoftware") makes Apple repeat
+    // each app once per entity; a developer catalog must ask for a single
+    // software entity so each bundle appears exactly once.
+    let entity = if platform.is_empty() {
+        "software"
+    } else {
+        lookup_entity(platform)
+    };
+    let url = format!(
+        "{ITUNES_LOOKUP}?entity={entity}&id={artist_id}&limit=200&country={}",
+        country
+    );
+    let res = http::send(Request::new("GET", &url))
+        .map_err(|e| StoreError::Other(format!("developer lookup: {e}")))?;
+    if res.status != 200 {
+        return Err(StoreError::Other(format!(
+            "developer lookup: HTTP {}",
+            res.status
+        )));
+    }
+    let text = String::from_utf8_lossy(&res.body);
+    let doc =
+        json::parse(&text).map_err(|e| StoreError::Other(format!("developer lookup json: {e}")))?;
+    let mut apps = Vec::new();
+    if let Some(results) = doc.get("results").and_then(|v| v.as_array()) {
+        for item in results {
+            // Skip the artist record itself (wrapperType "artist" has no trackId).
+            if item.get("wrapperType").and_then(|v| v.as_str()) == Some("artist") {
+                continue;
+            }
+            let app = App::from_search_json(item);
+            if app.id != 0 {
+                apps.push(app);
+            }
+        }
+    }
+    Ok(apps)
 }
 
 /// visionOS search (majd searchVisionOS): the storefront search page's

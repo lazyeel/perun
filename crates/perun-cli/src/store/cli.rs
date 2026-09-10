@@ -454,6 +454,7 @@ fn usage_perun() {
     eprintln!(
         "usage: perun store auth login|info|revoke\n\
          \x20      perun store search TERM [-l LIMIT] [--platform P]\n\
+         \x20                        [--developer | --id | --description]\n\
          \x20      perun store purchase -b BUNDLE_ID\n\
          \x20      perun store download -i APP_ID | -b BUNDLE_ID [-o PATH] [--purchase]\n\
          \x20      perun store list-purchases [-l MAX] [-p PAGE]\n\
@@ -1068,6 +1069,12 @@ fn cmd_search(persona: Persona, args: &[String]) -> i32 {
             ("--platform", true),
             ("-t", true),
             ("--term", true),
+            // perun superset: search scopes.
+            ("--developer", false),
+            ("-dev", false),
+            ("--id", false),
+            ("--description", false),
+            ("-desc", false),
         ]
     };
     let Some(res) = begin(persona, args, locals, help_search) else {
@@ -1108,7 +1115,59 @@ fn cmd_search(persona: Persona, args: &[String]) -> i32 {
         Ok(a) => a,
         Err(c) => return c,
     };
-    let apps = if platform == "visionos" {
+
+    // perun search scopes. The ipatool persona never has these flags; the
+    // default (no scope) stays the plain Apple search.
+    let dev_scope = ctx.inv.has("--developer") || ctx.inv.has("-dev");
+    let id_scope = ctx.inv.has("--id");
+    let desc_scope = ctx.inv.has("--description") || ctx.inv.has("-desc");
+    let scopes = [dev_scope, id_scope, desc_scope]
+        .iter()
+        .filter(|s| **s)
+        .count();
+    if scopes > 1 {
+        return ctx.usage_fail("--developer, --id and --description are mutually exclusive");
+    }
+
+    let apps = if id_scope {
+        // Developer catalog: Lookup API by artist id, full list.
+        let artist_id: i64 = match term.parse() {
+            Ok(v) => v,
+            Err(_) => {
+                return ctx.usage_fail(
+                    "--id expects a numeric artist id (from artistId in search results)",
+                );
+            }
+        };
+        match appstore::lookup_artist_apps(&acc, artist_id, &platform) {
+            Ok(a) => a,
+            Err(e) => return ctx.fail(e),
+        }
+    } else if dev_scope || desc_scope {
+        // Client-side scopes: fetch the server maximum, filter, THEN slice
+        // to --limit — so a filter never shrinks the requested page.
+        let probe = if platform == "visionos" {
+            appstore::search_visionos(&acc, &term, 12)
+        } else {
+            appstore::search(&acc, &term, 200, &platform)
+        };
+        let all = match probe {
+            Ok(a) => a,
+            Err(e) => return ctx.fail(e),
+        };
+        let needle = term.to_lowercase();
+        let matched: Vec<appstore::App> = all
+            .into_iter()
+            .filter(|a| {
+                if dev_scope {
+                    a.developer.to_lowercase().contains(&needle)
+                } else {
+                    a.description.to_lowercase().contains(&needle)
+                }
+            })
+            .collect();
+        matched.into_iter().take(limit.max(1) as usize).collect()
+    } else if platform == "visionos" {
         match appstore::search_visionos(&acc, &term, limit) {
             Ok(a) => a,
             Err(e) => return ctx.fail(e),
