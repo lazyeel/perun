@@ -246,7 +246,7 @@ fn parse(argv: &[String], locals: &[(&str, bool)]) -> Invocation {
                 "h" => inv.help_requested = true,
                 "v" => inv.version_requested = true,
                 _ => {
-                    inv.usage_error = Some(format!("unknown shorthand flag: '{short}'"));
+                    inv.usage_error = Some(format!("unknown shorthand flag: '{short}' in -{short}"));
                     return inv;
                 }
             }
@@ -979,25 +979,42 @@ fn cmd_auth_revoke(persona: Persona, args: &[String]) -> i32 {
 // ── search ────────────────────────────────────────────────────────────────
 
 fn cmd_search(persona: Persona, args: &[String]) -> i32 {
-    let Some(res) = begin(
-        persona,
-        args,
-        &[("-l", true), ("--limit", true), ("--platform", true)],
-        help_search,
-    ) else {
+    // The perun grammar keeps its native `-t/--term` flag; the ipatool
+    // persona is strictly positional (majd's ExactArgs(1)).
+    let locals: &[(&str, bool)] = if persona == Persona::Ipatool {
+        &[("-l", true), ("--limit", true), ("--platform", true)]
+    } else {
+        &[
+            ("-l", true),
+            ("--limit", true),
+            ("--platform", true),
+            ("-t", true),
+            ("--term", true),
+        ]
+    };
+    let Some(res) = begin(persona, args, locals, help_search) else {
         return 1;
     };
     let ctx = match res {
         Ok(c) => c,
         Err(code) => return code,
     };
-    if ctx.inv.positional.len() != 1 {
-        return ctx.usage_fail(&format!(
-            "accepts 1 arg(s), received {}",
-            ctx.inv.positional.len()
-        ));
-    }
-    let term = ctx.inv.positional[0].clone();
+    let term = match ctx.persona {
+        Persona::Ipatool => {
+            if ctx.inv.positional.len() != 1 {
+                return ctx.usage_fail(&format!(
+                    "accepts 1 arg(s), received {}",
+                    ctx.inv.positional.len()
+                ));
+            }
+            ctx.inv.positional[0].clone()
+        }
+        Persona::Perun => ctx
+            .inv
+            .get(&["-t", "--term"])
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| ctx.inv.positional.first().cloned().unwrap_or_default()),
+    };
     let limit: i64 = ctx
         .inv
         .get(&["-l", "--limit"])
