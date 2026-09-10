@@ -33,6 +33,7 @@ pub mod dmap;
 pub mod http;
 pub mod ipa;
 pub mod json;
+pub mod out;
 pub mod plist;
 pub mod signer;
 pub mod storefronts;
@@ -237,9 +238,11 @@ pub fn primary_mac_hex() -> String {
 }
 
 /// Resolve the SAP assets (fetcher cache), shared with the bare
-/// `perun sap` command.
+/// `perun sap` command. The fetcher's progress lines go to stderr, but
+/// the cached fast-path line must stay silent in the ipatool persona
+/// (majd's stdout is protocol output only).
 pub fn ensure_sap_assets() -> Result<crate::sap::SapAssets, String> {
-    let dir = crate::fetcher::ensure_cache(true)?;
+    let dir = crate::fetcher::ensure_cache(false)?;
     crate::sap::SapAssets::load_dir(&dir.display().to_string())
 }
 
@@ -254,8 +257,8 @@ mod tests {
     /// (name, physical?, flags, address).
     fn synth_tree(specs: &[(&str, bool, &str, &str)]) -> std::path::PathBuf {
         let n = DIR_N.fetch_add(1, Ordering::SeqCst);
-        let root = std::env::temp_dir()
-            .join(format!("perun-mac-test-{}-{}", std::process::id(), n));
+        let root =
+            std::env::temp_dir().join(format!("perun-mac-test-{}-{}", std::process::id(), n));
         for (name, physical, flags, addr) in specs {
             let if_dir = root.join(name);
             std::fs::create_dir_all(&if_dir).unwrap();
@@ -324,7 +327,7 @@ mod tests {
     fn hardware_scan_skips_down_and_zero() {
         let tree = synth_tree(&[
             ("eth0", true, "0x1002", "aa:bb:cc:00:11:22\n"), // physical, down
-            ("eth1", true, "0x1003", "00:00:00:00:00:00\n"),  // physical, zero
+            ("eth1", true, "0x1003", "00:00:00:00:00:00\n"), // physical, zero
             ("wlan0", true, "0x1003", "11:22:33:44:55:66\n"),
         ]);
         assert_eq!(

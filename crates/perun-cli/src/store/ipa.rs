@@ -74,8 +74,15 @@ fn find_eocd(data: &[u8]) -> Result<(usize, Eocd), String> {
 }
 
 fn parse_central(data: &[u8], eocd: &Eocd) -> Result<Vec<CentralEntry>, String> {
+    parse_central_at(data, eocd.cd_offset as usize, eocd)
+}
+
+/// Parse with an explicit start offset: the full-file callers pass the
+/// EOCD's absolute `cd_offset`; the range-fetched central-directory buffer
+/// (`fetch_info_plist`) starts at its own zero.
+fn parse_central_at(data: &[u8], start: usize, eocd: &Eocd) -> Result<Vec<CentralEntry>, String> {
     let mut entries = Vec::with_capacity(eocd.entry_count as usize);
-    let mut pos = eocd.cd_offset as usize;
+    let mut pos = start;
     for _ in 0..eocd.entry_count {
         if pos + 46 > data.len() {
             return Err("zip: truncated central directory".into());
@@ -785,12 +792,14 @@ fn crc32_ieee(data: &[u8]) -> u32 {
 
 /// Fetch `Payload/*.app/Info.plist` from a remote zip URL using range
 /// requests: last 64 KB (EOCD) → central directory → the entry's bytes.
-pub fn fetch_info_plist(url: &str) -> Result<Vec<u8>, String> {
+/// The Info.plist bytes plus the entry's unix mtime (majd reads the
+/// plist's releaseDate, else the zip entry's modified time, UTC).
+pub fn fetch_info_plist(url: &str) -> Result<(Vec<u8>, i64), String> {
     let tail = http_range(url, Range::Last(66_000))?;
     let (_, eocd) = find_eocd(&tail)?;
     let absolute_cd = eocd.cd_offset;
     let cd = http_range(url, Range::Span(absolute_cd, eocd.cd_size))?;
-    let entries = parse_central(&cd, &eocd)?;
+    let entries = parse_central_at(&cd, 0, &eocd)?;
     let entry = entries
         .iter()
         .find(|e| is_main_app_info_plist(&e.name))
@@ -801,6 +810,9 @@ pub fn fetch_info_plist(url: &str) -> Result<Vec<u8>, String> {
     }
     let name_len = u16::from_le_bytes([local[26], local[27]]) as usize;
     let extra_len = u16::from_le_bytes([local[28], local[29]]) as usize;
+    let extra =
+        &local[(30 + name_len).min(local.len())..(30 + name_len + extra_len).min(local.len())];
+    let mtime = extra_mtime_unix(extra).unwrap_or_else(|| dos_to_unix(entry.modified));
     let data_start = 30 + name_len + extra_len;
     let data = http_range(
         url,
@@ -809,11 +821,54 @@ pub fn fetch_info_plist(url: &str) -> Result<Vec<u8>, String> {
             entry.compressed_size,
         ),
     )?;
-    match entry.method {
-        0 => Ok(data),
-        8 => inflate(&data, entry.uncompressed_size as usize),
-        other => Err(format!("remote package: unsupported method {other}")),
+    let bytes = match entry.method {
+        0 => data,
+        8 => inflate(&data, entry.uncompressed_size as usize)?,
+        other => return Err(format!("remote package: unsupported method {other}")),
+    };
+    Ok((bytes, mtime))
+}
+
+/// mtime from the local-header extras: `UT` (0x5455) or the old Info-ZIP
+/// `UX` (0x5855) atime+mtime pair (Apple's packager writes UX).
+fn extra_mtime_unix(extra: &[u8]) -> Option<i64> {
+    let mut off = 0;
+    while off + 4 <= extra.len() {
+        let id = u16::from_le_bytes([extra[off], extra[off + 1]]);
+        let size = u16::from_le_bytes([extra[off + 2], extra[off + 3]]) as usize;
+        let body = extra.get(off + 4..off + 4 + size)?;
+        match id {
+            0x5455 if !body.is_empty() && body[0] & 1 != 0 && body.len() >= 5 => {
+                return Some(i32::from_le_bytes([body[1], body[2], body[3], body[4]]) as i64);
+            }
+            0x5855 if body.len() >= 8 => {
+                // [atime u32][mtime u32] (+ optional uid/gid u16s)
+                return Some(i32::from_le_bytes([body[4], body[5], body[6], body[7]]) as i64);
+            }
+            _ => {}
+        }
+        off += 4 + size;
     }
+    None
+}
+
+/// DOS date/time → Unix seconds (the zip convention).
+pub fn dos_to_unix((date, time): (u16, u16)) -> i64 {
+    let year = 1980 + ((date >> 9) & 0x7f) as i64;
+    let month = ((date >> 5) & 0x0f) as i64;
+    let day = (date & 0x1f) as i64;
+    let hour = ((time >> 11) & 0x1f) as i64;
+    let minute = ((time >> 5) & 0x3f) as i64;
+    let second = ((time & 0x1f) * 2) as i64;
+    // days since epoch (Howard Hinnant, civil_from_days inverted)
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    days * 86_400 + hour * 3_600 + minute * 60 + second
 }
 
 fn is_main_app_info_plist(name: &str) -> bool {

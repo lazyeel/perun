@@ -689,6 +689,7 @@ fn fetch_download_info(
 
 pub struct DownloadOutput {
     pub destination: String,
+    #[allow(dead_code)]
     pub sinfs: Vec<Sinf>,
 }
 
@@ -775,6 +776,7 @@ fn resolve_destination(app: &App, version: &str, output: &str) -> Result<String>
 
 pub struct ListVersionsOutput {
     pub external_version_identifiers: Vec<String>,
+    #[allow(dead_code)]
     pub latest_external_version_id: String,
 }
 
@@ -821,11 +823,11 @@ pub struct VersionMetadata {
 pub fn get_version_metadata(
     account: &Account,
     app_id: i64,
-    external_version_id: &str,
     guid: &str,
+    external_version_id: &str,
 ) -> Result<VersionMetadata> {
     let info = fetch_download_info(account, app_id, guid, external_version_id)?;
-    let plist_data = super::ipa::fetch_info_plist(&info.url)
+    let (plist_data, modified) = super::ipa::fetch_info_plist(&info.url)
         .map_err(|e| StoreError::Other(format!("version metadata: {e}")))?;
     let doc = plist::parse_binary(&plist_data)
         .or_else(|_| plist::parse_xml(&plist_data))
@@ -837,10 +839,32 @@ pub fn get_version_metadata(
     let date = ["releaseDate", "ReleaseDate"]
         .iter()
         .find_map(|key| doc.get(key).and_then(|v| v.as_str()))
-        .unwrap_or("");
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            // majd falls back to the zip entry's modified time, UTC.
+            let t = modified;
+            let days = t.div_euclid(86_400);
+            let secs = t.rem_euclid(86_400);
+            let z = days + 719_468;
+            let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+            let doe = z - era * 146_097;
+            let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+            let y = yoe + era * 400;
+            let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+            let mp = (5 * doy + 2) / 153;
+            let d = doy - (153 * mp + 2) / 5 + 1;
+            let m = if mp < 10 { mp + 3 } else { mp - 9 };
+            let y = if m <= 2 { y + 1 } else { y };
+            format!(
+                "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+                secs / 3600,
+                (secs % 3600) / 60,
+                secs % 60
+            )
+        });
     Ok(VersionMetadata {
         display_version: version.to_string(),
-        release_date: date.to_string(),
+        release_date: date,
     })
 }
 
@@ -942,6 +966,325 @@ pub fn owned_apps(
     })
 }
 
+/// visionOS search (majd searchVisionOS): the storefront search page's
+/// serialized-server-data yields app ids; iTunes lookup hydrates them.
+pub fn search_visionos(account: &Account, term: &str, limit: i64) -> Result<Vec<App>> {
+    let country = country_code_from_storefront(&account.store_front)?;
+    let url = format!(
+        "https://apps.apple.com/{}/vision/search?term={}",
+        url_encode(&country.to_lowercase()),
+        url_encode(term)
+    );
+    let res = http::send(Request::new("GET", &url))
+        .map_err(|e| StoreError::Other(format!("visionOS search request failed: {e}")))?;
+    if res.status != 200 {
+        // majd: NewErrorWithMetadata — the status rides as metadata, not text.
+        return Err(StoreError::Other("visionOS search request failed".into()));
+    }
+    let apps = storefront_vision_apps(&res.body, limit)?;
+    if apps.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids: Vec<String> = apps.iter().map(|a| a.id.to_string()).collect();
+    let hydrated = lookup_ids(account, &ids, "visionos")?;
+    let by_id: std::collections::HashMap<i64, App> =
+        hydrated.into_iter().map(|a| (a.id, a)).collect();
+    Ok(apps
+        .into_iter()
+        .map(|a| by_id.get(&a.id).cloned().unwrap_or(a))
+        .collect())
+}
+
+/// Walk the storefront search page's shelves for AppSearchResult lockups
+/// carrying a vision purchaseConfiguration (majd storefrontVisionApps).
+fn storefront_vision_apps(body: &[u8], limit: i64) -> Result<Vec<App>> {
+    let text = String::from_utf8_lossy(body);
+    let script = extract_serialized_server_data(&text).ok_or_else(|| {
+        StoreError::Other("failed to parse visionOS search results: serialized server data was not found".into())
+    })?;
+    let doc = json::parse(script).map_err(|e| {
+        StoreError::Other(format!("failed to decode serialized server data: {e}"))
+    })?;
+    if limit <= 0 {
+        return Ok(Vec::new());
+    }
+    let limit = limit.min(12);
+    let mut apps: Vec<App> = Vec::new();
+    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    if let Some(top) = doc.get("data").and_then(|d| d.as_array()) {
+        for page_data in top {
+            let Some(shelves) = page_data
+                .get("data")
+                .and_then(|d| d.get("shelves"))
+                .and_then(|s| s.as_array())
+            else {
+                continue;
+            };
+            for shelf in shelves {
+                let Some(items) = shelf.get("items").and_then(|i| i.as_array()) else {
+                    continue;
+                };
+                for item in items {
+                    if item.get("$kind").and_then(|k| k.as_str()) != Some("AppSearchResult") {
+                        continue;
+                    }
+                    let Some(lockup) = item.get("lockup") else { continue };
+                    let id = lockup.get("adamId").and_then(|v| v.as_i64()).unwrap_or(0);
+                    if id == 0 || !seen.insert(id) {
+                        continue;
+                    }
+                    if !contains_vision_purchase_config(item, id) {
+                        continue;
+                    }
+                    apps.push(App {
+                        id,
+                        bundle_id: lockup
+                            .get("bundleId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        name: lockup
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        ..App::default()
+                    });
+                    if apps.len() as i64 == limit {
+                        return Ok(apps);
+                    }
+                }
+            }
+        }
+    }
+    Ok(apps)
+}
+
+fn contains_vision_purchase_config(item: &json::Json, app_id: i64) -> bool {
+    find_vision_external(item, app_id).is_some()
+}
+
+/// iTunes lookup by explicit id list (majd lookupIDsRequest).
+pub fn lookup_ids(account: &Account, ids: &[String], platform: &str) -> Result<Vec<App>> {
+    let country = country_code_from_storefront(&account.store_front)?;
+    let url = format!(
+        "{ITUNES_LOOKUP}?entity={}&id={}&country={}",
+        lookup_entity(platform),
+        ids.join(","),
+        country
+    );
+    let res = http::send(Request::new("GET", &url))
+        .map_err(|e| StoreError::Other(format!("visionOS metadata request failed: {e}")))?;
+    if res.status != 200 {
+        return Err(StoreError::Other(format!(
+            "visionOS metadata request failed: HTTP {}",
+            res.status
+        )));
+    }
+    let text = String::from_utf8_lossy(&res.body);
+    let doc = json::parse(&text)
+        .map_err(|e| StoreError::Other(format!("visionOS metadata json: {e}")))?;
+    let mut apps = Vec::new();
+    if let Some(results) = doc.get("results").and_then(|v| v.as_array()) {
+        for item in results {
+            let app = App::from_search_json(item);
+            if app.id != 0 {
+                apps.push(app);
+            }
+        }
+    }
+    Ok(apps)
+}
+
+// ── platform version lookup (MDM): latest external version id for tvOS /
+// visionOS downloads without an explicit `--external-version-id` ──────────
+
+/// MZStorePlatform lookup (the MDM flow): returns the first offer's
+/// external version id, falling back to `appExtVrsId` in its buy params.
+pub fn lookup_latest_external_version_id(
+    app_id: i64,
+    country: &str,
+    metadata_platform: &str,
+) -> Result<String> {
+    let url = format!(
+        "https://uclient-api.itunes.apple.com/WebObjects/MZStorePlatform.woa/wa/lookup\
+         ?version=2&id={app_id}&p=mdm-lockup&caller=MDM&platform={metadata_platform}\
+         &cc={}&l=en",
+        url_encode(country)
+    );
+    let res = http::send(Request::new("GET", &url))
+        .map_err(|e| StoreError::Other(format!("platform version lookup: {e}")))?;
+    if res.status != 200 {
+        return Err(StoreError::Other(format!(
+            "platform version lookup request failed: HTTP {}",
+            res.status
+        )));
+    }
+    let text = String::from_utf8_lossy(&res.body);
+    let doc = json::parse(&text)
+        .map_err(|e| StoreError::Other(format!("platform version lookup json: {e}")))?;
+    let key = app_id.to_string();
+    let item = doc
+        .get("results")
+        .and_then(|v| v.get(&key))
+        .ok_or_else(|| StoreError::Other("platform version lookup returned no app".into()))?;
+    let offers = item
+        .get("offers")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| StoreError::Other("platform version lookup returned no offers".into()))?;
+    let offer = offers
+        .first()
+        .ok_or_else(|| StoreError::Other("platform version lookup returned no offers".into()))?;
+    let mut external = offer
+        .get("version")
+        .and_then(|v| v.get("externalId"))
+        .and_then(|v| v.as_number().or_else(|| v.as_str()))
+        .unwrap_or_default()
+        .to_string();
+    if external.is_empty() {
+        let buy = offer
+            .get("buyParams")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        for pair in buy.split('&') {
+            if let Some(value) = pair.strip_prefix("appExtVrsId=") {
+                external = value.to_string();
+            }
+        }
+    }
+    if external.is_empty() {
+        return Err(StoreError::Other(
+            "platform version lookup returned no external version id".into(),
+        ));
+    }
+    Ok(external)
+}
+
+/// visionOS variant: the storefront HTML carries the version in a
+/// `serialized-server-data` script's purchaseConfiguration buy params.
+pub fn lookup_latest_visionos_external_version_id(app_id: i64, country: &str) -> Result<String> {
+    let url = format!(
+        "https://apps.apple.com/{}/app/id{}?platform=vision",
+        url_encode(&country.to_lowercase()),
+        app_id
+    );
+    let res = http::send(Request::new("GET", &url))
+        .map_err(|e| StoreError::Other(format!("visionOS version lookup: {e}")))?;
+    if res.status != 200 {
+        return Err(StoreError::Other(format!(
+            "visionOS version lookup request failed: HTTP {}",
+            res.status
+        )));
+    }
+    let external = vision_external_version_id(&res.body, app_id)
+        .ok_or_else(|| StoreError::Other("visionOS purchase configuration was not found".into()))?;
+    if external.is_empty() {
+        return Err(StoreError::Other(
+            "visionOS purchase configuration has no external version id".into(),
+        ));
+    }
+    Ok(external)
+}
+
+/// Extract the `serialized-server-data` JSON and walk it for a vision
+/// purchaseConfiguration whose `salableAdamId` matches the app id.
+/// majd's serializedServerData: the JSON inside the
+/// `<script id="serialized-server-data">…</script>` tag.
+fn extract_serialized_server_data(text: &str) -> Option<&str> {
+    let marker = text.find("id=\"serialized-server-data\"").or_else(|| {
+        let cut = text.find("id='serialized-server-data'")?;
+        Some(cut)
+    })?;
+    text[..marker].rfind("<script")?;
+    let content_start = marker + text[marker..].find('>')?;
+    let content_end = text[content_start..].find("</script>")? + content_start;
+    Some(text[content_start + 1..content_end].trim())
+}
+
+fn vision_external_version_id(body: &[u8], app_id: i64) -> Option<String> {
+    let text = String::from_utf8_lossy(body);
+    let script = extract_serialized_server_data(&text)?;
+    let doc = json::parse(script).ok()?;
+    find_vision_external(&doc, app_id)
+}
+
+/// Recursive walk matching majd's findVisionExternalVersionID: any nested
+/// object with purchaseConfiguration{metricsPlatformDisplayStyle=vision,
+/// appPlatforms∋vision, buyParams.salableAdamId=appID} yields its
+/// appExtVrsId.
+fn find_vision_external(doc: &json::Json, app_id: i64) -> Option<String> {
+    if let Some(config) = doc
+        .get("purchaseConfiguration")
+        .and_then(|c| vision_config_external(c, app_id))
+        && !config.is_empty()
+    {
+        return Some(config);
+    }
+    match doc {
+        json::Json::Array(items) => {
+            for item in items {
+                if let Some(found) = find_vision_external(item, app_id)
+                    && !found.is_empty()
+                {
+                    return Some(found);
+                }
+            }
+        }
+        json::Json::Object(entries) => {
+            for (_, value) in entries {
+                if let Some(found) = find_vision_external(value, app_id)
+                    && !found.is_empty()
+                {
+                    return Some(found);
+                }
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+fn vision_config_external(config: &json::Json, app_id: i64) -> Option<String> {
+    if config
+        .get("metricsPlatformDisplayStyle")
+        .and_then(|v| v.as_str())
+        != Some("vision")
+    {
+        return None;
+    }
+    let platforms = config.get("appPlatforms")?;
+    let mut is_vision = false;
+    if let Some(items) = platforms.as_array() {
+        for p in items {
+            if p.as_str() == Some("vision") {
+                is_vision = true;
+            }
+        }
+    }
+    if !is_vision {
+        return None;
+    }
+    let buy = config
+        .get("buyParams")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())?;
+    let mut external = String::new();
+    let mut salable = String::new();
+    for pair in buy.split('&') {
+        if let Some(v) = pair.strip_prefix("salableAdamId=") {
+            salable = v.to_string();
+        }
+        if let Some(v) = pair.strip_prefix("appExtVrsId=") {
+            external = v.to_string();
+        }
+    }
+    if salable != app_id.to_string() {
+        return None;
+    }
+    Some(external)
+}
+
 // ── URL encoding ─────────────────────────────────────────────────────────
 
 pub fn url_encode(s: &str) -> String {
@@ -957,7 +1300,6 @@ pub fn url_encode(s: &str) -> String {
     }
     out
 }
-
 // silence unused warnings for items kept for CLI parity
 #[allow(unused)]
 fn _ui_stub() {}

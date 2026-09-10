@@ -152,6 +152,22 @@ pub unsafe fn install_crash_probe() {
 
 fn run() -> i32 {
     let args: Vec<String> = std::env::args().collect();
+    // argv[0] persona: a binary invoked as `ipatool` (basename) runs the
+    // strict majd/ipatool grammar for EVERYTHING, including the bare
+    // `--help`/`--version` root flags; `perun` keeps its native grammar.
+    let argv0 = args
+        .first()
+        .map(|s| {
+            std::path::Path::new(s)
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    let ipatool_persona = argv0 == "ipatool";
+    if ipatool_persona {
+        return store::cli::run(&args[1..]);
+    }
     if args.len() < 2 {
         eprintln!(
             "usage: perun run <image.dll> [--verbose] [--trace] [--trace-file F] [--no-teb]\n       perun info <image.dll>\n       perun mach info <macho>\n       perun sap [--mac AA:BB:CC:DD:EE:FF] [--sign HEX|--file F]\n       perun store <auth|search|purchase|download|list-purchases|list-versions|get-version-metadata> ...\n       ipatool aliases: perun auth login|info|revoke · perun search -t ... · perun purchase -i ...\n                        perun download -i ... · perun list-purchases · perun list-versions ..."

@@ -64,6 +64,37 @@ version metadata. The command grammar matches the reference tool's:
 ./target/release/perun list-purchases
 ```
 
+### ipatool persona
+
+The same binary, invoked as `ipatool`, runs the strict majd/ipatool v2
+grammar instead — command for command, flag for flag, output format for
+output format. Two personas, one file:
+
+```bash
+cargo build --release        # produces BOTH target/release/perun and ipatool
+ln -s perun ipatool          # or just use the second binary / any symlink
+ipatool search telegram --limit 3 --format json
+```
+
+The persona is picked from argv[0] (busybox-style), so symlinks and copies
+both work. In this mode the tool is a drop-in replacement: the exact cobra
+command surface (`auth login|info|revoke`, `search <term>`, `purchase`,
+`download`, `list-purchases`, `list-versions`, `get-version-metadata`,
+`completion`, `help`), the global flags (`--format text|json`, `--verbose`,
+`--non-interactive`, `--keychain-passphrase`, `-h/--help`, `-v/--version`),
+all platform synonyms (`ios`, `ipados`, `apple-tv`, `tvos`, `vision`,
+`visionpro`, `xros`, `realitydevice`, `mac`, `osx`), the zerolog text and
+JSON output shapes byte-for-byte, the progress bar, the exit codes (cobra's
+flat 1), and the silent relogin on password-token expiry. `--purchase`
+acquires a license mid-download when Apple demands one; tvOS and visionOS
+downloads resolve the latest external version id on their own (the MDM
+lockup API and the storefront product page respectively). The `perun`
+name keeps the native grammar and its stricter usage errors (exit 2).
+
+macOS packages (`.pkg` download via StoreAgent) are the one gap; running
+`download --platform macos` fails with an explicit message instead of
+pretending.
+
 Endpoints are bag-driven (fetched per session, never hardcoded past the
 fallback), the account is stored encrypted (AES-256-GCM, machine-bound
 through the pinned address), and every signature-gated request is signed

@@ -10,6 +10,13 @@ description = "Command-line runner, image inspector, and FairPlay SAP session dr
 name = "perun"
 path = "src/main.rs"
 
+# The same entry point installed under the ipatool name: argv[0] detection
+# switches the CLI to the majd/ipatool persona (strict v2 grammar). A symlink
+# `ln -s perun ipatool` works identically.
+[[bin]]
+name = "ipatool"
+path = "src/main.rs"
+
 [dependencies]
 perun-core = { workspace = true }
 perun-shims = { workspace = true }
