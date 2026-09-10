@@ -1000,11 +1000,12 @@ pub fn search_visionos(account: &Account, term: &str, limit: i64) -> Result<Vec<
 fn storefront_vision_apps(body: &[u8], limit: i64) -> Result<Vec<App>> {
     let text = String::from_utf8_lossy(body);
     let script = extract_serialized_server_data(&text).ok_or_else(|| {
-        StoreError::Other("failed to parse visionOS search results: serialized server data was not found".into())
+        StoreError::Other(
+            "failed to parse visionOS search results: serialized server data was not found".into(),
+        )
     })?;
-    let doc = json::parse(script).map_err(|e| {
-        StoreError::Other(format!("failed to decode serialized server data: {e}"))
-    })?;
+    let doc = json::parse(script)
+        .map_err(|e| StoreError::Other(format!("failed to decode serialized server data: {e}")))?;
     if limit <= 0 {
         return Ok(Vec::new());
     }
@@ -1028,7 +1029,9 @@ fn storefront_vision_apps(body: &[u8], limit: i64) -> Result<Vec<App>> {
                     if item.get("$kind").and_then(|k| k.as_str()) != Some("AppSearchResult") {
                         continue;
                     }
-                    let Some(lockup) = item.get("lockup") else { continue };
+                    let Some(lockup) = item.get("lockup") else {
+                        continue;
+                    };
                     let id = lockup.get("adamId").and_then(|v| v.as_i64()).unwrap_or(0);
                     if id == 0 || !seen.insert(id) {
                         continue;

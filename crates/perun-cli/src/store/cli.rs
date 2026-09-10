@@ -246,7 +246,8 @@ fn parse(argv: &[String], locals: &[(&str, bool)]) -> Invocation {
                 "h" => inv.help_requested = true,
                 "v" => inv.version_requested = true,
                 _ => {
-                    inv.usage_error = Some(format!("unknown shorthand flag: '{short}' in -{short}"));
+                    inv.usage_error =
+                        Some(format!("unknown shorthand flag: '{short}' in -{short}"));
                     return inv;
                 }
             }
@@ -305,6 +306,14 @@ pub fn run(args: &[String]) -> i32 {
 
 fn dispatch(args: &[String]) -> i32 {
     let persona = Persona::detect();
+    // Legacy-name nudge: only for a real human on an interactive terminal.
+    // Any automation signal — a pipe on stderr, --format json, or
+    // --non-interactive — keeps the output byte-identical to the reference.
+    if persona == Persona::Ipatool && interactive_orchestration(args) {
+        eprintln!(
+            "[perun] Note: Running via legacy 'ipatool' alias. Consider switching to 'perun'."
+        );
+    }
     if args.is_empty() {
         print_root_help(persona);
         return if persona == Persona::Ipatool { 0 } else { 2 };
@@ -384,6 +393,34 @@ fn dispatch(args: &[String]) -> i32 {
         }
         _ => unknown_command(persona, cmd),
     }
+}
+
+/// "Live human" heuristic for the ipatool alias notice: stderr must be a
+/// TTY (pipes/CI stay clean), and the argv must not carry --format json or
+/// --non-interactive (scripted invocations get byte-parity).
+fn interactive_orchestration(args: &[String]) -> bool {
+    let is_tty = unsafe { libc::isatty(libc::STDERR_FILENO) == 1 };
+    if !is_tty {
+        return false;
+    }
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--non-interactive" => return false,
+            "--format" => {
+                // --format json silences the hint (bots); --format text does not.
+                if args.get(i + 1).map(|v| v == "json").unwrap_or(false) {
+                    return false;
+                }
+                i += 2;
+                continue;
+            }
+            "--format=json" => return false,
+            _ => {}
+        }
+        i += 1;
+    }
+    true
 }
 
 /// Cobra prints `Error: unknown command "x" for "ipatool"` and the usage
@@ -679,6 +716,19 @@ fn relogin_if_possible(ctx: &Ctx, acc: &Account) -> Option<Account> {
 fn resolve_app(ctx: &Ctx, acc: &Account) -> Result<appstore::App, i32> {
     let bundle = ctx.inv.get(&["-b", "--bundle-identifier"]);
     let app_id = ctx.inv.get(&["-i", "--app-id"]);
+    // perun superset: a positional term resolves like the search UX —
+    // id / bundle id / free-text (first hit). Strict ipatool ignores it.
+    let positional = if ctx.persona == Persona::Perun {
+        ctx.inv.positional.first().map(|s| s.as_str())
+    } else {
+        None
+    };
+    if bundle.is_none()
+        && app_id.is_none()
+        && let Some(term) = positional.filter(|t| !t.is_empty())
+    {
+        return resolve_positional_term(ctx, acc, term);
+    }
     let platform = ctx.inv.get(&["--platform"]).unwrap_or("");
     let platform = match parse_platform(platform) {
         Ok(p) => p,
@@ -696,6 +746,34 @@ fn resolve_app(ctx: &Ctx, acc: &Account) -> Result<appstore::App, i32> {
         return appstore::lookup_by_id(acc, id, &platform).map_err(|e| ctx.fail(e));
     }
     Err(ctx.usage_fail("either the app ID or the bundle identifier must be specified"))
+}
+
+/// perun superset: positional term → app. A bare number is an app id, a
+/// value containing a dot is a bundle id, anything else is a display-name
+/// search whose first hit wins (matching majd's `search` UX).
+fn resolve_positional_term(ctx: &Ctx, acc: &Account, term: &str) -> Result<appstore::App, i32> {
+    let platform = ctx.inv.get(&["--platform"]).unwrap_or("");
+    let platform = match parse_platform(platform) {
+        Ok(p) => p,
+        Err(e) => return Err(ctx.usage_fail(&e)),
+    };
+    if term.chars().all(|c| c.is_ascii_digit()) && !term.is_empty() {
+        let id: i64 = match term.parse() {
+            Ok(v) => v,
+            Err(_) => return Err(ctx.usage_fail("invalid app id")),
+        };
+        return appstore::lookup_by_id(acc, id, &platform).map_err(|e| ctx.fail(e));
+    }
+    if term.contains('.') {
+        return appstore::lookup(acc, term, &platform).map_err(|e| ctx.fail(e));
+    }
+    let apps = match appstore::search(acc, term, 1, &platform) {
+        Ok(a) => a,
+        Err(e) => return Err(ctx.fail(e)),
+    };
+    apps.into_iter()
+        .next()
+        .ok_or_else(|| ctx.usage_fail("no results found"))
 }
 
 /// Fresh guid (majd recomputes per operation).
