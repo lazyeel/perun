@@ -20,6 +20,8 @@ pub const PATH_PURCHASE: &str = "/WebObjects/MZFinance.woa/wa/buyProduct";
 pub const PATH_DOWNLOAD: &str = "/WebObjects/MZFinance.woa/wa/volumeStoreDownloadProduct";
 pub const PURCHASE_DAAP_BASE: &str =
     "https://pd.itunes.apple.com/WebObjects/MZPurchaseDaap.woa/purchase";
+pub const REDOWNLOAD_BASE: &str = "https://downloaddispatch.itunes.apple.com/r/redownload";
+pub const UPDATE_PRODUCT_BASE: &str = "https://downloaddispatch.itunes.apple.com/up/updateProduct";
 
 // Failure types the store reports in-band.
 pub const FAILURE_INVALID_CREDENTIALS: &str = "-5000";
@@ -604,17 +606,109 @@ fn fetch_download_info(
     guid: &str,
     external_version_id: &str,
 ) -> Result<DownloadInfo> {
+    // The 2026 App Store migration: the legacy MZFinance
+    // volumeStoreDownloadProduct stopped serving download URLs for newer
+    // apps — it "purchases" (purchaseSuccess, queue-item-count=1) and returns
+    // an empty songList. The bag's download family now lives on
+    // downloaddispatch (redownloadProduct /r/redownload, updateProduct
+    // /up/updateProduct). Mirror the reference tool's recovery chain:
+    //   1. legacy vSDP (externalVersionId);
+    //   2. on a silent empty songList, resolve the latest version and try
+    //      redownload (appExtVrsId);
+    //   3. on an empty HTTP 500 from redownload, updateProduct.
+    match fetch_download_info_from(
+        buy_url(account, PATH_DOWNLOAD, guid),
+        account,
+        app_id,
+        guid,
+        external_version_id,
+        "externalVersionId",
+    ) {
+        Ok(info) => Ok(info),
+        Err(StoreError::Other(msg)) if msg == "download info: empty songList" => {
+            eprintln!(
+                "[store] download: legacy volumeStore returned an empty songList; \
+                 falling back to downloaddispatch"
+            );
+            fallback_download_info(account, app_id, guid, external_version_id)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// The DownloadDispatch recovery chain (see fetch_download_info).
+fn fallback_download_info(
+    account: &Account,
+    app_id: i64,
+    guid: &str,
+    external_version_id: &str,
+) -> Result<DownloadInfo> {
+    // Both dispatch endpoints require a pinned version (appExtVrsId); the
+    // unpinned form 500s. Resolve the current external version id when the
+    // caller did not pin one.
+    let external_version_id = if external_version_id.is_empty() {
+        let country = country_code_from_storefront(&account.store_front)?;
+        match lookup_latest_ios_external_version_id(app_id, country) {
+            Ok(id) => id,
+            Err(e) => {
+                return Err(StoreError::Other(format!(
+                    "download fallback: no --external-version-id and the platform lookup failed: {e}"
+                )));
+            }
+        }
+    } else {
+        external_version_id.to_string()
+    };
+
+    // 1) redownload. Its silent empty-500 shape is the documented trigger
+    //    for updateProduct; propagate everything else as-is.
+    match fetch_download_info_from(
+        format!("{REDOWNLOAD_BASE}?guid={guid}"),
+        account,
+        app_id,
+        guid,
+        &external_version_id,
+        "appExtVrsId",
+    ) {
+        Ok(info) => return Ok(info),
+        Err(StoreError::Other(msg)) if msg.starts_with("download info parse") => {
+            // fall through to updateProduct
+        }
+        Err(e) => return Err(e),
+    }
+
+    // 2) updateProduct.
+    fetch_download_info_from(
+        format!("{UPDATE_PRODUCT_BASE}?guid={guid}"),
+        account,
+        app_id,
+        guid,
+        &external_version_id,
+        "appExtVrsId",
+    )
+}
+
+/// One download-product call against a concrete URL. `version_key` picks
+/// externalVersionId (legacy) vs appExtVrsId (dispatch family).
+fn fetch_download_info_from(
+    url: String,
+    account: &Account,
+    app_id: i64,
+    guid: &str,
+    external_version_id: &str,
+    version_key: &str,
+) -> Result<DownloadInfo> {
     let mut payload = Plist::dict();
     payload.set("creditDisplay", Plist::string(""));
     payload.set("guid", Plist::string(guid));
     payload.set("salableAdamId", Plist::Integer(app_id));
     payload.set("serialNumber", Plist::string("0"));
     if !external_version_id.is_empty() {
-        payload.set("externalVersionId", Plist::string(external_version_id));
+        payload.set(version_key, Plist::string(external_version_id));
     }
     let body = plist::to_xml(&payload).into_bytes();
     let res = http::send(
-        Request::new("POST", &buy_url(account, PATH_DOWNLOAD, guid))
+        Request::new("POST", &url)
             .header("Content-Type", "application/x-apple-plist")
             .header("iCloud-DSID", &account.directory_services_id)
             .header("X-Dsid", &account.directory_services_id)
@@ -1172,6 +1266,66 @@ pub fn lookup_latest_external_version_id(
         "https://uclient-api.itunes.apple.com/WebObjects/MZStorePlatform.woa/wa/lookup\
          ?version=2&id={app_id}&p=mdm-lockup&caller=MDM&platform={metadata_platform}\
          &cc={}&l=en",
+        url_encode(country)
+    );
+    let res = http::send(Request::new("GET", &url))
+        .map_err(|e| StoreError::Other(format!("platform version lookup: {e}")))?;
+    if res.status != 200 {
+        return Err(StoreError::Other(format!(
+            "platform version lookup request failed: HTTP {}",
+            res.status
+        )));
+    }
+    let text = String::from_utf8_lossy(&res.body);
+    let doc = json::parse(&text)
+        .map_err(|e| StoreError::Other(format!("platform version lookup json: {e}")))?;
+    let key = app_id.to_string();
+    let item = doc
+        .get("results")
+        .and_then(|v| v.get(&key))
+        .ok_or_else(|| StoreError::Other("platform version lookup returned no app".into()))?;
+    let offers = item
+        .get("offers")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| StoreError::Other("platform version lookup returned no offers".into()))?;
+    let offer = offers
+        .first()
+        .ok_or_else(|| StoreError::Other("platform version lookup returned no offers".into()))?;
+    let mut external = offer
+        .get("version")
+        .and_then(|v| v.get("externalId"))
+        .and_then(|v| v.as_number().or_else(|| v.as_str()))
+        .unwrap_or_default()
+        .to_string();
+    if external.is_empty() {
+        let buy = offer
+            .get("buyParams")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        for pair in buy.split('&') {
+            if let Some(value) = pair.strip_prefix("appExtVrsId=") {
+                external = value.to_string();
+            }
+        }
+    }
+    if external.is_empty() {
+        return Err(StoreError::Other(
+            "platform version lookup returned no external version id".into(),
+        ));
+    }
+    Ok(external)
+}
+
+/// iOS variant for the DownloadDispatch fallback. The MDM lockup WITH a
+/// platform parameter returns an empty result set on today's backend (the
+/// reference tool's `enterprisestore` probe hits the same wall); WITHOUT the
+/// platform parameter the same lockup serves the full record, offers
+/// included. Use the platform-less form (verified live 2026-09-13).
+pub fn lookup_latest_ios_external_version_id(app_id: i64, country: &str) -> Result<String> {
+    let url = format!(
+        "https://uclient-api.itunes.apple.com/WebObjects/MZStorePlatform.woa/wa/lookup\
+         ?version=2&id={app_id}&p=mdm-lockup&caller=MDM&cc={}&l=en",
         url_encode(country)
     );
     let res = http::send(Request::new("GET", &url))

@@ -715,7 +715,11 @@ fn relogin_if_possible(ctx: &Ctx, acc: &Account) -> Option<Account> {
     let guid = appstore::guid_from_mac(&mac);
     let config = bag::Bag::fetch(&guid).ok()?.sap;
     let mut sign = signer::Signer::new(&config, mac).ok()?;
-    let fresh = appstore::login(&acc.email, &acc.password, "", mac, &mut sign, &config).ok()?;
+    let mut fresh = appstore::login(&acc.email, &acc.password, "", mac, &mut sign, &config).ok()?;
+    // login() returns a bare account (no password field); carry the stored
+    // one over so the NEXT silent relogin is still possible — otherwise the
+    // first relogin silently erases the remembered password.
+    fresh.password = acc.password.clone();
     let _ = account::save(&fresh, &ctx.inv.keychain_passphrase);
     Some(fresh)
 }
@@ -1501,8 +1505,12 @@ fn cmd_download(persona: Persona, args: &[String]) -> i32 {
         |_, _| {}
     };
 
-    // The majd retry loop: license-needed + --purchase → buy, retry once.
+    // The majd retry loop (retry.Do, Attempts(3)): license-needed +
+    // --purchase → buy, retry once; token expiry → one silent relogin round
+    // (the stored password replays the login, session cookies carry the 2FA).
     let mut retried_after_purchase = false;
+    let mut relogined_after_expiry = false;
+    let mut acc = acc;
     loop {
         match appstore::download(
             &acc,
@@ -1530,7 +1538,31 @@ fn cmd_download(persona: Persona, args: &[String]) -> i32 {
                             ("msg", out::Field::Str("purchase".into())),
                         ]);
                     }
+                    // A fresh license purchase can itself be gated on a
+                    // fresh token (2034 Sign In): relogin once and retry
+                    // the whole round, like the reference's outer retry.Do.
+                    Err(StoreError::PasswordTokenExpired) if !relogined_after_expiry => {
+                        match relogin_if_possible(&ctx, &acc) {
+                            Some(fresh) => {
+                                acc = fresh;
+                                relogined_after_expiry = true;
+                            }
+                            None => {
+                                return ctx.fail(StoreError::PasswordTokenExpired);
+                            }
+                        }
+                    }
                     Err(e) => return ctx.fail(e),
+                }
+            }
+            Err(StoreError::PasswordTokenExpired) if !relogined_after_expiry => {
+                let e = StoreError::PasswordTokenExpired;
+                match relogin_if_possible(&ctx, &acc) {
+                    Some(fresh) => {
+                        acc = fresh;
+                        relogined_after_expiry = true;
+                    }
+                    None => return ctx.fail(e),
                 }
             }
             Err(e) => return ctx.fail(e),
