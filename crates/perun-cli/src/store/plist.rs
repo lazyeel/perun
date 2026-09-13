@@ -97,25 +97,42 @@ pub fn parse_xml(input: &[u8]) -> Result<Plist, String> {
     let text = std::str::from_utf8(input).map_err(|e| format!("plist utf8: {e}"))?;
     // Trim anything outside the outermost dict/array. The store wraps plist
     // documents in XML envelopes; the payload we need is always a dict.
-    let start = text
-        .find("<dict>")
-        .or_else(|| text.find("<array>"))
-        .ok_or("no <dict> or <array> in document")?;
-    let end_tag = if text[start..].starts_with("<dict>") {
-        "</dict>"
-    } else {
-        "</array>"
-    };
-    let end = text[start..]
-        .rfind(end_tag)
-        .ok_or("unterminated plist container")?
-        + start
-        + end_tag.len();
-    parse_value(&text[start..end])
+    // Self-closed roots (<dict/>, <array/>) are empty containers.
+    for (open, close) in [("<dict>", "</dict>"), ("<array>", "</array>")] {
+        if let Some(start) = text.find(open) {
+            let end = text[start..]
+                .rfind(close)
+                .ok_or("unterminated plist container")?
+                + start
+                + close.len();
+            return parse_value(&text[start..end]);
+        }
+    }
+    for tag in ["<dict/>", "<array/>"] {
+        if let Some(start) = text.find(tag) {
+            return parse_value(&text[start..start + tag.len()]);
+        }
+    }
+    Err("no <dict> or <array> in document".into())
 }
 
 fn parse_value(xml: &str) -> Result<Plist, String> {
     let xml = xml.trim_start();
+    // Self-closed containers: Xcode/Swift templates emit empty <dict/> and
+    // <array/> values (e.g. UILaunchScreen, UISceneConfigurations in a
+    // Swift-generated Info.plist). Empty container, nothing to descend into.
+    if is_self_closed(xml, "dict") {
+        return Ok(Plist::Dict(Vec::new()));
+    }
+    if is_self_closed(xml, "array") {
+        return Ok(Plist::Array(Vec::new()));
+    }
+    if is_self_closed(xml, "string") {
+        return Ok(Plist::String(String::new()));
+    }
+    if is_self_closed(xml, "data") {
+        return Ok(Plist::Data(Vec::new()));
+    }
     if let Some(rest) = xml.strip_prefix("<dict>") {
         let body = strip_suffix(rest, "</dict>")?;
         return Ok(Plist::Dict(parse_entries(body)?));
@@ -177,6 +194,13 @@ fn strip_suffix<'a>(body: &'a str, suffix: &str) -> Result<&'a str, String> {
         .rfind(suffix)
         .ok_or_else(|| format!("missing {suffix}"))?;
     Ok(&body[..end])
+}
+
+/// `<dict/>`, `<dict />` (whitespace before the slash) — an empty container.
+fn is_self_closed(xml: &str, tag: &str) -> bool {
+    let open = format!("<{tag}");
+    xml.strip_prefix(&open)
+        .is_some_and(|after| after.trim_start().starts_with('/'))
 }
 
 /// Split a dict body into `(key, value-xml)` pairs.
@@ -902,6 +926,55 @@ mod bag_tests {
         for input in bad {
             assert!(parse_xml(input.as_bytes()).is_err(), "accepted: {input:?}");
         }
+    }
+
+    #[test]
+    fn xml_self_closed_containers() {
+        // Swift/Xcode templates emit <dict/> and <array/> values — the
+        // regression that killed replicate on a live multi-framework IPA
+        // (UILaunchScreen, UISceneConfigurations in Info.plist).
+        let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\
+<plist version=\"1.0\"><dict>\
+<key>UILaunchScreen</key><dict/>\
+<key>UISceneConfigurations</key><dict/>\
+<key>EmptyArray</key><array/>\
+<key>Real</key><dict><key>inside</key><string>yes</string></dict>\
+<key>EmptyString</key><string/>\
+<key>EmptyData</key><data/>\
+</dict></plist>";
+        let doc = parse_xml(xml.as_bytes()).unwrap();
+        assert!(matches!(
+            doc.get("UILaunchScreen"),
+            Some(Plist::Dict(entries)) if entries.is_empty()
+        ));
+        assert!(matches!(
+            doc.get("UISceneConfigurations"),
+            Some(Plist::Dict(entries)) if entries.is_empty()
+        ));
+        assert!(matches!(
+            doc.get("EmptyArray"),
+            Some(Plist::Array(items)) if items.is_empty()
+        ));
+        assert_eq!(
+            doc.get("Real")
+                .and_then(|v| v.get("inside"))
+                .and_then(|v| v.as_str()),
+            Some("yes")
+        );
+        assert_eq!(doc.get("EmptyString").and_then(|v| v.as_str()), Some(""));
+        assert_eq!(
+            doc.get("EmptyData").and_then(|v| v.as_data()),
+            Some(&[][..])
+        );
+        // Space before the slash is accepted too.
+        let spaced = "<plist><dict><key>a</key><dict /></dict></plist>";
+        let doc = parse_xml(spaced.as_bytes()).unwrap();
+        assert!(matches!(doc.get("a"), Some(Plist::Dict(entries)) if entries.is_empty()));
+        // A self-closed root parses as an empty container.
+        let root = "<plist version=\"1.0\"><dict/></plist>";
+        let doc = parse_xml(root.as_bytes()).unwrap();
+        assert!(matches!(doc, Plist::Dict(entries) if entries.is_empty()));
     }
 
     #[test]

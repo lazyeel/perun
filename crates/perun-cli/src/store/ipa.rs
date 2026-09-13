@@ -326,22 +326,37 @@ pub fn replicate(
     let mut out = std::fs::File::create(dst_path).map_err(|e| format!("create {dst_path}: {e}"))?;
     let mut zip = ZipWriter::new(&mut out);
 
-    // Which sinf paths? Manifest.plist inside SC_Info lists them; without
-    // it, the single sinf goes to SC_Info/<CFBundleExecutable>.sinf.
+    // Which sinf paths? Manifest.plist inside SC_Info lists them. Apple's
+    // fairplayd semantics: every protected binary (the app executable AND
+    // each FairPlay-wrapped framework) gets a copy of the sinf receipt at
+    // its own SC_Info/ dir. `SinfPaths` holds the primary locations (the
+    // classic single-binary case: 1 entry); `SinfReplicationPaths` (since
+    // iOS 10.3) lists EVERY destination — for a multi-framework app it can
+    // be 20+ entries while SinfPaths stays at 1. The downloaded package
+    // ships zero .sinf files; the license (one sinf from the server) must
+    // be replicated to every listed path, verbatim, like fairplayd does.
     let mut sinf_paths: Vec<String> = Vec::new();
+    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(manifest_entry) = entries
         .iter()
         .find(|e| e.name == format!("{sc_dir}Manifest.plist"))
     {
-        let (data_start, _) = local_span(&src, manifest_entry)?;
         let raw = decompress_entry(&src, manifest_entry)?;
-        let _ = data_start;
-        if let Ok(doc) = plist::parse_binary(&raw).or_else(|_| plist::parse_xml(&raw))
-            && let Some(list) = doc.get("SinfPaths").and_then(|v| v.as_array())
-        {
-            for item in list {
-                if let Some(p) = item.as_str() {
-                    sinf_paths.push(format!("Payload/{bundle_name}.app/{p}"));
+        if let Ok(doc) = plist::parse_binary(&raw).or_else(|_| plist::parse_xml(&raw)) {
+            // Replication destinations first (the full set); SinfPaths fills
+            // in anything it lists that replication did not (defensive:
+            // manifests seen in the wild have SinfPaths ⊆ SinfReplicationPaths,
+            // but do not assume it).
+            for key in ["SinfReplicationPaths", "SinfPaths"] {
+                if let Some(list) = doc.get(key).and_then(|v| v.as_array()) {
+                    for item in list {
+                        if let Some(p) = item.as_str()
+                            && !p.is_empty()
+                            && seen_paths.insert(p.to_string())
+                        {
+                            sinf_paths.push(format!("Payload/{bundle_name}.app/{p}"));
+                        }
+                    }
                 }
             }
         }
@@ -368,24 +383,40 @@ pub fn replicate(
     }
     zip.add_stored("iTunesMetadata.plist", &itunes_meta, (ddate, dtime))?;
 
-    if info.sinfs.is_empty() {
-        zip.finish()?;
-        return Ok(true);
-    }
-
-    if !sinf_paths.is_empty() {
-        for (i, sinf) in info.sinfs.iter().enumerate() {
-            if sinf.data.is_empty() {
-                continue;
+    // Sinf injection. Apple hands down a small set of license receipts
+    // (typically ONE sinf for the whole package); fairplayd replicates that
+    // receipt to EVERY destination the manifest declares — one copy per
+    // protected binary. Map them the way fairplayd does:
+    //   1 sinf  → replicated to all manifest paths (SinfReplicationPaths);
+    //   N sinfs → zip(sinfs, paths) positional, like the reference tool.
+    let sinf_data: Vec<&[u8]> = info
+        .sinfs
+        .iter()
+        .filter(|s| !s.data.is_empty())
+        .map(|s| s.data.as_slice())
+        .collect();
+    if !sinf_data.is_empty() {
+        if sinf_paths.is_empty() {
+            // No manifest destinations: the single classic fallback path.
+            zip.add_stored(&fallback_sinf_path, sinf_data[0], (ddate, dtime))?;
+        } else if sinf_data.len() == 1 || sinf_paths.len() == 1 {
+            // The common shapes: one receipt spread over all destinations,
+            // or (legacy single-path manifest) many receipts with the
+            // first winning — matching fairplayd's spread.
+            for path in &sinf_paths {
+                zip.add_stored(path, sinf_data[0], (ddate, dtime))?;
             }
-            let path = sinf_paths
-                .get(i)
-                .cloned()
-                .unwrap_or_else(|| fallback_sinf_path.clone());
-            zip.add_stored(&path, &sinf.data, (ddate, dtime))?;
+        } else {
+            // Multiple receipts against multiple destinations: positional
+            // zip (the reference's util.Zip semantics), extra paths beyond
+            // the receipt count get the last receipt (fairplayd's spread).
+            for (path, data) in sinf_paths.iter().zip(sinf_data.iter()) {
+                zip.add_stored(path, data, (ddate, dtime))?;
+            }
+            for path in sinf_paths.iter().skip(sinf_data.len()) {
+                zip.add_stored(path, sinf_data[sinf_data.len() - 1], (ddate, dtime))?;
+            }
         }
-    } else if let Some(sinf) = info.sinfs.iter().find(|s| !s.data.is_empty()) {
-        zip.add_stored(&fallback_sinf_path, &sinf.data, (ddate, dtime))?;
     }
 
     zip.finish()?;
@@ -1115,6 +1146,119 @@ mod tests {
         let _ = std::fs::remove_file("/tmp/perun-replicate-src.zip");
         let _ = std::fs::remove_file("/tmp/perun-replicate-out.ipa");
         let _ = std::fs::remove_file("/tmp/perun-replicate-mac");
+    }
+
+    #[test]
+    fn ipa_replicate_sinf_replication_paths() {
+        // A multi-framework bundle shape: Manifest.plist carries
+        // SinfPaths = 1 entry but SinfReplicationPaths = 22+ (every
+        // FairPlay-wrapped framework's SC_Info). Apple hands down ONE sinf;
+        // fairplayd replicates it to every destination. Regression for both
+        // the <dict/> parse crash (Info.plist is XML with empty dict values)
+        // and the single-path sinf write.
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut zip = ZipWriter::new(&mut buf);
+            let (d, t) = (0x5A21, 0x0C00);
+
+            // Info.plist as XML — the Swift/Xcode template shape with
+            // self-closed <dict/> values (UILaunchScreen and friends). This
+            // exact shape crashed the parser on the live package.
+            let info_plist = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\
+<plist version=\"1.0\"><dict>\
+<key>CFBundleExecutable</key><string>MultiApp</string>\
+<key>UILaunchScreen</key><dict/>\
+<key>UISceneConfigurations</key><dict/>\
+</dict></plist>";
+            zip.add_stored(
+                "Payload/Multi.app/Info.plist",
+                info_plist.as_bytes(),
+                (d, t),
+            )
+            .unwrap();
+
+            // Manifest.plist with both keys: one primary sinf path, a long
+            // replication list (framework SC_Info dirs), overlapping on the
+            // main path — dedupe must collapse the overlap.
+            let mut replication: Vec<Plist> = Vec::new();
+            for fw in ["Alpha", "Beta", "Gamma"] {
+                replication.push(Plist::string(format!(
+                    "Frameworks/{fw}.framework/SC_Info/{fw}.sinf"
+                )));
+            }
+            replication.push(Plist::string("SC_Info/MultiApp.sinf".to_string()));
+            let mut manifest = Plist::dict();
+            manifest.set(
+                "SinfPaths",
+                Plist::Array(vec![Plist::string("SC_Info/MultiApp.sinf")]),
+            );
+            manifest.set("SinfReplicationPaths", Plist::Array(replication));
+            zip.add_stored(
+                "Payload/Multi.app/SC_Info/Manifest.plist",
+                plist::to_xml(&manifest).as_bytes(),
+                (d, t),
+            )
+            .unwrap();
+            zip.add_stored("Payload/Multi.app/MultiApp", b"BIN2", (d, t))
+                .unwrap();
+            zip.finish().unwrap();
+        }
+        std::fs::write("/tmp/perun-replicate2-src.zip", &buf).unwrap();
+
+        let info = DownloadInfo {
+            url: String::new(),
+            sinfs: vec![Sinf {
+                id: 7,
+                data: b"ONESINF".to_vec(),
+                dp_info: Vec::new(),
+            }],
+            metadata: {
+                let mut m = Plist::dict();
+                m.set("bundleShortVersionString", Plist::string("2.0"));
+                m
+            },
+            version: "2.0".into(),
+        };
+        let account = crate::store::account::Account {
+            email: "multi@example.com".into(),
+            ..Default::default()
+        };
+        replicate(
+            "/tmp/perun-replicate2-src.zip",
+            "/tmp/perun-replicate2-out.ipa",
+            &info,
+            &account,
+        )
+        .unwrap();
+
+        let out = std::fs::read("/tmp/perun-replicate2-out.ipa").unwrap();
+        let (_, eocd) = find_eocd(&out).unwrap();
+        let entries = parse_central(&out, &eocd).unwrap();
+        let expected_sinf_paths = [
+            "Payload/Multi.app/Frameworks/Alpha.framework/SC_Info/Alpha.sinf",
+            "Payload/Multi.app/Frameworks/Beta.framework/SC_Info/Beta.sinf",
+            "Payload/Multi.app/Frameworks/Gamma.framework/SC_Info/Gamma.sinf",
+            "Payload/Multi.app/SC_Info/MultiApp.sinf",
+        ];
+        for path in expected_sinf_paths {
+            let entry = entries.iter().find(|e| e.name == path).unwrap_or_else(|| {
+                panic!(
+                    "missing {path}: {:?}",
+                    entries.iter().map(|e| &e.name).collect::<Vec<_>>()
+                )
+            });
+            let data = decompress_entry(&out, entry).unwrap();
+            assert_eq!(data, b"ONESINF", "sinf bytes at {path}");
+        }
+        // No duplicate entries: exactly four sinf files in the output.
+        let sinf_count = entries.iter().filter(|e| e.name.ends_with(".sinf")).count();
+        assert_eq!(sinf_count, 4, "duplicate sinf entries: {sinf_count}");
+        // iTunesMetadata is present with the account identity.
+        assert!(entries.iter().any(|e| e.name == "iTunesMetadata.plist"));
+
+        let _ = std::fs::remove_file("/tmp/perun-replicate2-src.zip");
+        let _ = std::fs::remove_file("/tmp/perun-replicate2-out.ipa");
     }
 
     #[test]

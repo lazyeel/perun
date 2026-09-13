@@ -572,6 +572,13 @@ fn help_auth_login() {
         "auth login [flags]",
         "      --auth-code string   2FA code for the Apple ID\n  -e, --email string       email address for the Apple ID (required)\n  -h, --help               help for login\n  -p, --password string    password for the Apple ID (required)",
     );
+    // perun superset: the flag exists only in the perun persona; ipatool
+    // help must stay byte-identical to the reference.
+    if Persona::detect() == Persona::Perun {
+        println!(
+            "      --remember-password  store the password in the encrypted account (enables unattended relogin)"
+        );
+    }
 }
 
 fn help_auth_info() {
@@ -724,29 +731,152 @@ fn resolve_app(ctx: &Ctx, acc: &Account) -> Result<appstore::App, i32> {
     } else {
         None
     };
-    if bundle.is_none()
-        && app_id.is_none()
-        && let Some(term) = positional.filter(|t| !t.is_empty())
-    {
-        return resolve_positional_term(ctx, acc, term);
-    }
     let platform = ctx.inv.get(&["--platform"]).unwrap_or("");
     let platform = match parse_platform(platform) {
         Ok(p) => p,
         Err(e) => return Err(ctx.usage_fail(&e)),
     };
+    if bundle.is_none()
+        && app_id.is_none()
+        && let Some(term) = positional.filter(|t| !t.is_empty())
+    {
+        // Positional term: id / bundle / free-text, one cache entry.
+        let key = cache_key(acc, &platform, "t", term);
+        if let Some(app) = resolve_cache_read(&key) {
+            return Ok(app);
+        }
+        let app = resolve_positional_term(ctx, acc, term)?;
+        resolve_cache_write(&key, &app);
+        return Ok(app);
+    }
     if let Some(b) = bundle {
         let b = b.to_string();
-        return appstore::lookup(acc, &b, &platform).map_err(|e| ctx.fail(e));
+        let key = cache_key(acc, &platform, "b", &b);
+        if let Some(app) = resolve_cache_read(&key) {
+            return Ok(app);
+        }
+        let app = appstore::lookup(acc, &b, &platform).map_err(|e| ctx.fail(e))?;
+        resolve_cache_write(&key, &app);
+        return Ok(app);
     }
     if let Some(id) = app_id {
         let id: i64 = match id.parse() {
             Ok(v) => v,
             Err(_) => return Err(ctx.usage_fail(&format!("invalid argument \"{id}\" for \"-i, --app-id\" flag: strconv.ParseInt: parsing \"{id}\": invalid syntax"))),
         };
-        return appstore::lookup_by_id(acc, id, &platform).map_err(|e| ctx.fail(e));
+        let key = cache_key(acc, &platform, "i", &id.to_string());
+        if let Some(app) = resolve_cache_read(&key) {
+            return Ok(app);
+        }
+        let app = appstore::lookup_by_id(acc, id, &platform).map_err(|e| ctx.fail(e))?;
+        resolve_cache_write(&key, &app);
+        return Ok(app);
     }
     Err(ctx.usage_fail("either the app ID or the bundle identifier must be specified"))
+}
+
+// ── resolve cache ─────────────────────────────────────────────────────────
+// Cross-invocation memo for app resolution. Apple's anti-fraud tracks request
+// cadence per identity; a `purchase -b X && download -b X` chain resolving
+// the same app twice hits itunes.apple.com/lookup twice for one workflow.
+// Entries live in the state dir, keyed by (country, platform, kind, term),
+// and expire quickly: storefront data is near-static but not contractual.
+// A cache miss never masks an error — only successful resolves are stored.
+
+const RESOLVE_CACHE_TTL_SECS: u64 = 3600;
+
+fn resolve_cache_dir() -> Option<std::path::PathBuf> {
+    let dir = super::state_dir().ok()?.join("resolve-cache");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+fn cache_key(acc: &Account, platform: &str, kind: &str, term: &str) -> String {
+    let country = appstore::country_code_from_storefront(&acc.store_front).unwrap_or("xx");
+    format!("{country}|{platform}|{kind}:{term}")
+}
+
+fn resolve_cache_read(key: &str) -> Option<appstore::App> {
+    let path = resolve_cache_dir()?.join(format!("{}.json", sanitize_cache_name(key)));
+    let text = std::fs::read_to_string(path).ok()?;
+    let entry = super::json::parse(&text).ok()?;
+    let ts = entry.get("ts").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    if now.saturating_sub(ts) > RESOLVE_CACHE_TTL_SECS {
+        return None;
+    }
+    let get = |k: &str| {
+        entry
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    Some(appstore::App {
+        id: entry.get("id").and_then(|v| v.as_i64()).unwrap_or(0),
+        bundle_id: get("bundleId"),
+        name: get("name"),
+        version: get("version"),
+        price: entry.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        purchase_date: None,
+        developer: get("developer"),
+        description: get("description"),
+    })
+}
+
+fn resolve_cache_write(key: &str, app: &appstore::App) {
+    let Some(dir) = resolve_cache_dir() else {
+        return;
+    };
+    let json = format!(
+        "{{\"id\":{},\"bundleId\":{},\"name\":{},\"version\":{},\"price\":{},\"developer\":{},\"description\":{},\"ts\":{}}}",
+        app.id,
+        json_quote(&app.bundle_id),
+        json_quote(&app.name),
+        json_quote(&app.version),
+        app.price,
+        json_quote(&app.developer),
+        json_quote(&app.description),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    );
+    let _ = std::fs::write(dir.join(format!("{}.json", sanitize_cache_name(key))), json);
+}
+
+/// Filesystem-safe cache name: keep the common characters, map the rest.
+fn sanitize_cache_name(key: &str) -> String {
+    key.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '@' | ' ') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn json_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// perun superset: positional term → app. A bare number is an app id, a
@@ -880,9 +1010,11 @@ fn cmd_auth(persona: Persona, args: &[String]) -> i32 {
 }
 
 fn cmd_auth_login(persona: Persona, args: &[String]) -> i32 {
-    let Some(res) = begin(
-        persona,
-        args,
+    // perun superset: --remember-password persists the password inside the
+    // encrypted account store so unattended relogin (token expiry mid-chain)
+    // can replay the full login. The ipatool persona always remembers (majd
+    // semantics) and has no such flag.
+    let locals: &[(&str, bool)] = if persona == Persona::Ipatool {
         &[
             ("-e", true),
             ("--email", true),
@@ -890,9 +1022,19 @@ fn cmd_auth_login(persona: Persona, args: &[String]) -> i32 {
             ("--password", true),
             ("-a", true),
             ("--auth-code", true),
-        ],
-        help_auth_login,
-    ) else {
+        ]
+    } else {
+        &[
+            ("-e", true),
+            ("--email", true),
+            ("-p", true),
+            ("--password", true),
+            ("-a", true),
+            ("--auth-code", true),
+            ("--remember-password", false),
+        ]
+    };
+    let Some(res) = begin(persona, args, locals, help_auth_login) else {
         return 1;
     };
     let ctx = match res {
@@ -955,9 +1097,11 @@ fn cmd_auth_login(persona: Persona, args: &[String]) -> i32 {
         match appstore::login(&email, &password, &auth_code, mac, &mut sign, &config) {
             Ok(mut acc) => {
                 // majd always persists the password (its retry loops relogin
-                // silently on token expiry); the perun persona keeps the
-                // no-password-at-rest stance.
-                if ctx.persona == Persona::Ipatool {
+                // silently on token expiry). The perun persona defaults to
+                // no-password-at-rest; --remember-password opts in.
+                let remember =
+                    ctx.persona == Persona::Ipatool || ctx.inv.has("--remember-password");
+                if remember {
                     acc.password = password.clone();
                 }
                 if let Err(e) = account::save(&acc, &ctx.inv.keychain_passphrase) {
@@ -1235,9 +1379,18 @@ fn cmd_purchase(persona: Persona, args: &[String]) -> i32 {
         Ok(a) => a,
         Err(c) => return c,
     };
-    let app = match appstore::lookup(&acc, &bundle, &platform) {
-        Ok(a) => a,
-        Err(e) => return ctx.fail(e),
+    // Resolve through the shared cache: a `purchase -b X && download -b X`
+    // chain must not hit itunes.apple.com/lookup twice for one workflow.
+    let key = cache_key(&acc, &platform, "b", &bundle);
+    let app = match resolve_cache_read(&key) {
+        Some(app) => app,
+        None => match appstore::lookup(&acc, &bundle, &platform) {
+            Ok(app) => {
+                resolve_cache_write(&key, &app);
+                app
+            }
+            Err(e) => return ctx.fail(e),
+        },
     };
     if app.price > 0.0 {
         return ctx.fail_msg("purchasing paid apps is not supported");

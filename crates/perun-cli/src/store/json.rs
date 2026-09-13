@@ -91,6 +91,9 @@ pub fn parse(input: &str) -> Result<Json, String> {
         pos: 0,
     };
     p.skip_ws();
+    if p.pos == p.bytes.len() {
+        return Err("empty json body".into());
+    }
     let value = p.value()?;
     p.skip_ws();
     if p.pos != p.bytes.len() {
@@ -109,6 +112,16 @@ impl<'a> Parser<'a> {
         while let Some(b) = self.bytes.get(self.pos) {
             if b.is_ascii_whitespace() {
                 self.pos += 1;
+            } else if self.pos == 0
+                && self.bytes.len() >= 3
+                && self.bytes[0] == 0xEF
+                && self.bytes[1] == 0xBB
+                && self.bytes[2] == 0xBF
+            {
+                // UTF-8 BOM at the very start: Apple's MZStoreServices edge
+                // occasionally emits one; skip it (only at position 0 so a
+                // mid-body 0xEF stays a string error, as it should).
+                self.pos = 3;
             } else {
                 break;
             }
@@ -372,6 +385,26 @@ mod tests {
         for input in bad {
             assert!(parse(input).is_err(), "accepted: {input:?}");
         }
+    }
+
+    #[test]
+    fn leading_whitespace_and_bom() {
+        // MZStoreServices prefixes lookup bodies with stray newlines (seen
+        // live: \n\n\n{...}); the parser's skip_ws already handles ASCII
+        // whitespace — this pins it, plus a UTF-8 BOM variant.
+        let dirty = "\n\n\n{\"resultCount\":0,\"results\":[]}";
+        let v = parse(dirty).unwrap();
+        assert_eq!(v.get("resultCount").unwrap().as_i64(), Some(0));
+        // Stray trailing newlines (the same edge emits them after the body).
+        let dirty2 = "{\"resultCount\":1,\"results\":[]}\n\n\n";
+        let v = parse(dirty2).unwrap();
+        assert_eq!(v.get("resultCount").unwrap().as_i64(), Some(1));
+        let bom = "\u{FEFF}{\"a\":1}";
+        let v = parse(bom).unwrap();
+        assert_eq!(v.get("a").unwrap().as_i64(), Some(1));
+        // An empty body is an explicit error, not a misleading position.
+        assert_eq!(parse("").unwrap_err(), "empty json body");
+        assert_eq!(parse("   \n").unwrap_err(), "empty json body");
     }
 
     #[test]

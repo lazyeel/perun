@@ -742,9 +742,11 @@ pub fn download(
     drop(file);
 
     // Replicate: copy entries, inject iTunesMetadata.plist and the sinfs.
-    // On failure keep the .tmp file for offline debugging.
+    // On failure keep the raw download for offline debugging. The suffix
+    // says WHAT the file is (pre-replication package), not a corruption
+    // verdict — the zip itself is fine, only the sinf/metadata pass failed.
     let patched = super::ipa::replicate(&tmp_path, &destination, &info, account).map_err(|e| {
-        let _ = std::fs::rename(&tmp_path, format!("{}.badzip", destination));
+        let _ = std::fs::rename(&tmp_path, format!("{destination}.pre-replication"));
         StoreError::Other(format!("replicate: {e}"))
     })?;
     if !patched {
