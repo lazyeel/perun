@@ -31,6 +31,10 @@ struct CentralEntry {
     local_offset: u64,
     external_attrs: u32,
     modified: (u16, u16), // dos date, dos time
+    /// Central-directory extra field, verbatim (ZIP64 and friends). The
+    /// local-header extra lives beside the local header; this is the central
+    /// one, which `finish()` must carry over or structural fields are lost.
+    central_extra: Vec<u8>,
 }
 
 struct Eocd {
@@ -116,6 +120,12 @@ fn parse_central_at(data: &[u8], start: usize, eocd: &Eocd) -> Result<Vec<Centra
             return Err("zip: truncated entry name".into());
         }
         let name = String::from_utf8_lossy(&data[name_start..name_end]).into_owned();
+        let extra_start = name_end;
+        let extra_end = extra_start + extra_len;
+        let central_extra = data
+            .get(extra_start..extra_end)
+            .map(|b| b.to_vec())
+            .unwrap_or_default();
         entries.push(CentralEntry {
             name,
             method,
@@ -126,6 +136,7 @@ fn parse_central_at(data: &[u8], start: usize, eocd: &Eocd) -> Result<Vec<Centra
             local_offset,
             external_attrs,
             modified,
+            central_extra,
         });
         pos = name_end + extra_len + comment_len;
     }
@@ -164,6 +175,7 @@ struct WrittenEntry {
     local_offset: u64,
     external_attrs: u32,
     modified: (u16, u16),
+    central_extra: Vec<u8>,
 }
 
 impl<'w> ZipWriter<'w> {
@@ -183,22 +195,42 @@ impl<'w> ZipWriter<'w> {
         Ok(())
     }
 
-    /// Copy an entry from the source: verbatim local header (with the
-    /// data-descriptor bit cleared and sizes filled — we copy the known
-    /// compressed span, so no descriptor follows) plus the compressed
-    /// bytes as-is.
+    /// Copy an entry from the source: rebuild the local header to (a) carry
+    /// the source local-header extra verbatim (the `UX`/`UT` mtime of Apple's
+    /// packager and whatever else), and (b) frame it for streaming installers
+    /// the way the reference does — deflated entries get flag bit 3 and a
+    /// trailing data descriptor (local sizes/CRC zeroed), stored entries and
+    /// directory markers stay inline (a descriptor has no stream terminator to
+    /// anchor on). The compressed bytes are written verbatim.
     fn copy_raw(&mut self, src: &[u8], entry: &CentralEntry) -> Result<(), String> {
         let (data_start, compressed) = local_span(src, entry)?;
         let mut header = src[entry.local_offset as usize..data_start].to_vec();
-        // Local header fields: flags @8, method @10, crc @14, sizes @18/@22.
-        let flags = entry.flags & !0x8; // no data descriptor in the copy
+        // Directories (name ends with '/') and stored entries: inline sizes,
+        // no descriptor. Deflate: streaming framing — bit 3 set, sizes/CRC
+        // zeroed, the descriptor written right after the compressed bytes.
+        let is_dir = entry.name.ends_with('/');
+        let streaming = entry.method == 8 && !is_dir;
+        let flags = if streaming {
+            entry.flags | 0x8
+        } else {
+            entry.flags & !0x8
+        };
         header[8..10].copy_from_slice(&flags.to_le_bytes());
         header[10..12].copy_from_slice(&entry.method.to_le_bytes());
-        header[14..18].copy_from_slice(&entry.crc32.to_le_bytes());
-        let csize = entry.compressed_size as u32;
-        let usize_ = entry.uncompressed_size as u32;
-        header[18..22].copy_from_slice(&csize.to_le_bytes());
-        header[22..26].copy_from_slice(&usize_.to_le_bytes());
+        // Local-header crc/sizes: zeroed for streaming (descriptor carries
+        // them), concrete for inline.
+        let (lh_crc, lh_csize, lh_usize) = if streaming {
+            (0u32, 0u32, 0u32)
+        } else {
+            (
+                entry.crc32,
+                entry.compressed_size as u32,
+                entry.uncompressed_size as u32,
+            )
+        };
+        header[14..18].copy_from_slice(&lh_crc.to_le_bytes());
+        header[18..22].copy_from_slice(&lh_csize.to_le_bytes());
+        header[22..26].copy_from_slice(&lh_usize.to_le_bytes());
 
         let local_offset = self.offset;
         self.raw(&header)?;
@@ -206,6 +238,15 @@ impl<'w> ZipWriter<'w> {
             .get(data_start..data_start + compressed as usize)
             .ok_or("zip: entry data out of range")?;
         self.raw(data)?;
+        if streaming {
+            // Data descriptor: 0x08074b50 + crc + compressed + uncompressed.
+            let mut descriptor = [0u8; 16];
+            descriptor[..4].copy_from_slice(&0x0807_4b50u32.to_le_bytes());
+            descriptor[4..8].copy_from_slice(&entry.crc32.to_le_bytes());
+            descriptor[8..12].copy_from_slice(&(entry.compressed_size as u32).to_le_bytes());
+            descriptor[12..16].copy_from_slice(&(entry.uncompressed_size as u32).to_le_bytes());
+            self.raw(&descriptor)?;
+        }
         self.entries.push(WrittenEntry {
             name: entry.name.clone(),
             method: entry.method,
@@ -216,6 +257,7 @@ impl<'w> ZipWriter<'w> {
             local_offset,
             external_attrs: entry.external_attrs,
             modified: entry.modified,
+            central_extra: entry.central_extra.clone(),
         });
         Ok(())
     }
@@ -249,6 +291,7 @@ impl<'w> ZipWriter<'w> {
             local_offset,
             external_attrs: 0o100644 << 16,
             modified,
+            central_extra: Vec::new(),
         });
         Ok(())
     }
@@ -257,7 +300,7 @@ impl<'w> ZipWriter<'w> {
         let cd_start = self.offset;
         let mut records: Vec<Vec<u8>> = Vec::with_capacity(self.entries.len());
         for e in &self.entries {
-            let mut cen = Vec::with_capacity(46 + e.name.len());
+            let mut cen = Vec::with_capacity(46 + e.name.len() + e.central_extra.len());
             cen.extend_from_slice(&CEN_SIG);
             cen.extend_from_slice(&0x0014u16.to_le_bytes()); // version made by
             cen.extend_from_slice(&0x0014u16.to_le_bytes()); // version needed
@@ -269,13 +312,17 @@ impl<'w> ZipWriter<'w> {
             cen.extend_from_slice(&(e.compressed_size as u32).to_le_bytes());
             cen.extend_from_slice(&(e.uncompressed_size as u32).to_le_bytes());
             cen.extend_from_slice(&(e.name.len() as u16).to_le_bytes());
-            cen.extend_from_slice(&0u16.to_le_bytes()); // extra
+            // Central extra: carried over verbatim (ZIP64 and friends). The
+            // reference strips only the ZIP64 block so its own writer can
+            // regenerate structural values; we re-emit the source bytes.
+            cen.extend_from_slice(&(e.central_extra.len() as u16).to_le_bytes());
             cen.extend_from_slice(&0u16.to_le_bytes()); // comment
             cen.extend_from_slice(&0u16.to_le_bytes()); // disk
             cen.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
             cen.extend_from_slice(&e.external_attrs.to_le_bytes());
             cen.extend_from_slice(&(e.local_offset as u32).to_le_bytes());
             cen.extend_from_slice(e.name.as_bytes());
+            cen.extend_from_slice(&e.central_extra);
             records.push(cen);
         }
         for record in &records {
@@ -382,6 +429,9 @@ pub fn replicate(
         zip.copy_raw(&src, entry)?;
     }
     zip.add_stored("iTunesMetadata.plist", &itunes_meta, (ddate, dtime))?;
+    if let Some(artwork) = &info.artwork {
+        zip.add_stored("iTunesArtwork", artwork, (ddate, dtime))?;
+    }
 
     // Sinf injection. Apple hands down a small set of license receipts
     // (typically ONE sinf for the whole package); fairplayd replicates that
@@ -1098,6 +1148,8 @@ mod tests {
                 m
             },
             version: "1.0".into(),
+            artwork_url: String::new(),
+            artwork: None,
         };
         let account = crate::store::account::Account {
             email: "tester@example.com".into(),
@@ -1219,6 +1271,8 @@ mod tests {
                 m
             },
             version: "2.0".into(),
+            artwork_url: String::new(),
+            artwork: None,
         };
         let account = crate::store::account::Account {
             email: "multi@example.com".into(),
@@ -1259,6 +1313,33 @@ mod tests {
 
         let _ = std::fs::remove_file("/tmp/perun-replicate2-src.zip");
         let _ = std::fs::remove_file("/tmp/perun-replicate2-out.ipa");
+    }
+
+    #[test]
+    fn copy_raw_streaming_framing_and_extra() {
+        // Verify copy_raw's framing decision: directories and stored entries
+        // stay inline (no flag bit 3), and the central-directory extra is
+        // carried over. The deflated→descriptor half is asserted on live
+        // packages (see the multi-app download check); here we pin the
+        // inline/directory rule and the extra-preservation contract.
+        let (d, t) = (0x5A21, 0x0C00);
+        let src: Vec<u8> = {
+            let mut b = Vec::new();
+            let mut w = ZipWriter::new(&mut b);
+            w.add_stored("dir/", b"", (d, t)).unwrap();
+            w.finish().unwrap();
+            b
+        };
+        let (_, eocd) = find_eocd(&src).unwrap();
+        let entries = parse_central(&src, &eocd).unwrap();
+        let mut outbuf: Vec<u8> = Vec::new();
+        let mut w = ZipWriter::new(&mut outbuf);
+        w.copy_raw(&src, &entries[0]).unwrap();
+        w.finish().unwrap();
+        let (_, eocd2) = find_eocd(&outbuf).unwrap();
+        let copied = parse_central(&outbuf, &eocd2).unwrap();
+        assert_eq!(copied[0].method, 0);
+        assert_eq!(copied[0].flags & 0x8, 0, "directory must be inline");
     }
 
     #[test]

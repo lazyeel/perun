@@ -588,6 +588,11 @@ pub struct DownloadInfo {
     pub sinfs: Vec<Sinf>,
     pub metadata: Plist,
     pub version: String,
+    /// iTunes artwork URL from the songList item (optional). When present the
+    /// artwork is fetched and written to the IPA root as `iTunesArtwork`.
+    pub artwork_url: String,
+    /// Fetched artwork bytes (set by `download()` before replicate).
+    pub artwork: Option<Vec<u8>>,
 }
 
 /// FairPlay license record as Apple returns it; `id`/`dp_info` are part of
@@ -776,6 +781,11 @@ fn fetch_download_info_from(
         }
     }
     let metadata = item.get("metadata").cloned().unwrap_or_else(Plist::dict);
+    let artwork_url = item
+        .get("artworkURL")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let version = metadata
         .get("bundleShortVersionString")
         .and_then(|v| v.as_str())
@@ -789,6 +799,8 @@ fn fetch_download_info_from(
         sinfs,
         metadata,
         version,
+        artwork_url,
+        artwork: None,
     })
 }
 
@@ -834,6 +846,16 @@ pub fn download(
         return Err(StoreError::Other(format!("download: HTTP {}", res.status)));
     }
     drop(file);
+
+    // iTunes artwork (optional, alongside the package). A failure here is a
+    // cosmetic loss, not a download failure — the reference logs and drops.
+    let mut info = info;
+    if !info.artwork_url.is_empty() {
+        match http::send(Request::new("GET", &info.artwork_url)) {
+            Ok(res) if res.status == 200 => info.artwork = Some(res.body),
+            _ => { /* artwork is best-effort */ }
+        }
+    }
 
     // Replicate: copy entries, inject iTunesMetadata.plist and the sinfs.
     // On failure keep the raw download for offline debugging. The suffix
