@@ -470,6 +470,11 @@ pub fn replicate(
     }
 
     zip.finish()?;
+    // Zip finalization: flush and sync explicitly. File::drop cannot report
+    // errors (majd e3dea14 fixed the same silent-close loss in Go's defers);
+    // a failed close here would otherwise leave a truncated package behind.
+    out.sync_all().map_err(|e| format!("replicate sync: {e}"))?;
+    drop(out);
     Ok(true)
 }
 

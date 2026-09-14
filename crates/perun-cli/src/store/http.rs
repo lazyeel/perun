@@ -51,6 +51,11 @@ pub struct Request<'a> {
     /// stays empty; `progress` is called with `(downloaded, total)`.
     pub sink: Option<&'a mut dyn std::io::Write>,
     pub progress: Option<&'a mut dyn FnMut(u64, u64)>,
+    /// e6acb9c: when set together with `sink`, the caller expects a range
+    /// continuation starting at this offset. The response is validated
+    /// against Content-Range BEFORE any body byte reaches the sink; a
+    /// non-matching 206/416 aborts the transfer leaving the sink untouched.
+    pub range_start: Option<u64>,
 }
 
 impl<'a> Request<'a> {
@@ -63,6 +68,7 @@ impl<'a> Request<'a> {
             stop_on_redirect: false,
             sink: None,
             progress: None,
+            range_start: None,
         }
     }
 
@@ -130,9 +136,79 @@ impl<'a> Request<'a> {
         self.progress = Some(progress);
         self
     }
+
+    /// Resume gate: stream into the sink only after the server's range
+    /// answer validates against `start` (the current partial size).
+    pub fn with_range_resume(mut self, start: u64) -> Self {
+        self.range_start = Some(start);
+        self
+    }
 }
 
 /// Cookie-jar path shared by all Store requests.
+/// e6acb9c: mirror of the reference downloadResponseRange. Validates the
+/// status + Content-Range against the local partial size BEFORE any byte
+/// is appended. 200 = fresh full body (caller truncates); 206 = continuation
+/// (start must equal the local size); 416 with matching `bytes */N` = the
+/// file is already complete.
+fn check_range_response(status: u16, headers: &HashMap<String, String>, local: u64) -> Result<(), String> {
+    let get = |name: &str| {
+        headers
+            .get(&name.to_ascii_lowercase())
+            .map(|s| s.as_str())
+    };
+    match status {
+        200 => Ok(()),
+        416 => {
+            let range = get("content-range").unwrap_or("");
+            let value = range
+                .strip_prefix("bytes */")
+                .and_then(|v| v.parse::<u64>().ok());
+            match value {
+                Some(size) if size == local => Ok(()),
+                _ => Err(format!(
+                    "download range rejected: local size {local} does not match server range {range:?}"
+                )),
+            }
+        }
+        206 => {
+            let header = get("content-range").unwrap_or("").to_string();
+            let value = header.strip_prefix("bytes ").unwrap_or("");
+            let (bounds, total_text) = value.split_once('/').ok_or_else(|| {
+                format!("invalid download content range {header:?} for local size {local}")
+            })?;
+            let (start_text, end_text) =
+                bounds.split_once('-').ok_or_else(|| {
+                    format!("invalid download content range {header:?} for local size {local}")
+                })?;
+            let start = start_text.parse::<u64>().map_err(|_| {
+                format!("invalid download content range {header:?} for local size {local}")
+            })?;
+            let end = end_text.parse::<u64>().map_err(|_| {
+                format!("invalid download content range {header:?} for local size {local}")
+            })?;
+            let size = total_text.parse::<u64>().map_err(|_| {
+                format!("invalid download content range {header:?} for local size {local}")
+            })?;
+            if start != local || end < start || size <= end {
+                return Err(format!(
+                    "invalid download content range {header:?} for local size {local}"
+                ));
+            }
+            let length = end - start + 1;
+            if let Some(len) = get("content-length").and_then(|v| v.parse::<u64>().ok()) {
+                if len != length {
+                    return Err(format!(
+                        "download content length {len} does not match range length {length}"
+                    ));
+                }
+            }
+            Ok(())
+        }
+        other => Err(format!("unexpected download response status: {other}")),
+    }
+}
+
 pub fn cookie_jar_path() -> Result<PathBuf, String> {
     Ok(state_dir()?.join("cookies.txt"))
 }
@@ -223,10 +299,16 @@ pub fn send(mut req: Request) -> Result<Response, String> {
         // curl writes the response headers to the file before the first
         // body byte arrives — read the progress hint once, lazily.
         if !hint_read && req.sink.is_some() {
-            if let Ok(raw) = std::fs::read(&hdr_path)
-                && let Some(len) = content_length_of_last_hop(&raw)
-            {
-                total_hint = Some(len);
+            if let Ok(raw) = std::fs::read(&hdr_path) {
+                let (st, hdrs) = parse_header_file(&raw);
+                if let Some(start) = req.range_start {
+                    // e6acb9c: validate the range answer before the first
+                    // byte reaches the sink.
+                    check_range_response(st, &hdrs, start)?;
+                }
+                if let Some(len) = content_length_of_last_hop(&raw) {
+                    total_hint = Some(len);
+                }
             }
             hint_read = true;
         }
@@ -305,6 +387,56 @@ fn content_length_of_last_hop(raw: &[u8]) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn range_hdrs(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn range_gate_fresh_200() {
+        assert!(check_range_response(200, &range_hdrs(&[]), 0).is_ok());
+        // 200 with a partial on disk: allowed, the caller truncates first.
+        assert!(check_range_response(200, &range_hdrs(&[]), 1000).is_ok());
+    }
+
+    #[test]
+    fn range_gate_partial_206_validates_start() {
+        let h = range_hdrs(&[("content-range", "bytes 1000-28410/28411"), ("content-length", "27411")]);
+        assert!(check_range_response(206, &h, 1000).is_ok());
+        assert!(check_range_response(206, &h, 999).is_err());
+        assert!(check_range_response(206, &h, 0).is_err());
+    }
+
+    #[test]
+    fn range_gate_partial_206_rejects_malformed() {
+        let no_total = range_hdrs(&[("content-range", "bytes 1000-28410")]);
+        assert!(check_range_response(206, &no_total, 1000).is_err());
+        let reversed = range_hdrs(&[("content-range", "bytes 5000-1000/28411")]);
+        assert!(check_range_response(206, &reversed, 5000).is_err());
+        let len_mismatch = range_hdrs(&[
+            ("content-range", "bytes 1000-28410/28411"),
+            ("content-length", "12345"),
+        ]);
+        assert!(check_range_response(206, &len_mismatch, 1000).is_err());
+    }
+
+    #[test]
+    fn range_gate_not_satisfiable_416() {
+        let h = range_hdrs(&[("content-range", "bytes */28411")]);
+        assert!(check_range_response(416, &h, 28411).is_ok());
+        assert!(check_range_response(416, &h, 28410).is_err());
+        assert!(check_range_response(416, &range_hdrs(&[]), 28411).is_err());
+    }
+
+    #[test]
+    fn range_gate_unexpected_status() {
+        assert!(check_range_response(403, &range_hdrs(&[]), 0).is_err());
+        assert!(check_range_response(500, &range_hdrs(&[]), 0).is_err());
+        assert!(check_range_response(302, &range_hdrs(&[]), 0).is_err());
+    }
 
     #[test]
     fn header_file_edge_cases() {

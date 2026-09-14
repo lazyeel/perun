@@ -93,11 +93,16 @@ pub struct App {
     /// artistName | sellerName (the App Store sets both to the same value).
     pub developer: String,
     pub description: String,
+    /// Supported device families, derived from the iTunes lookup
+    /// `supportedDevices` prefixes (iPhone/iPod → "iphone", iPad → "ipad",
+    /// AppleTV → "appletv", RealityDevice → "visionos", Mac → "macos").
+    pub platforms: Vec<String>,
 }
 
 impl App {
     fn from_search_json(item: &Json) -> App {
         let get = |key: &str| item.get(key).and_then(|v| v.as_str()).unwrap_or("");
+        let platforms = platforms_from_item(item);
         App {
             id: item.get("trackId").and_then(|v| v.as_i64()).unwrap_or(0),
             bundle_id: get("bundleId").to_string(),
@@ -115,8 +120,43 @@ impl App {
                 }
             },
             description: get("description").to_string(),
+            platforms,
         }
     }
+}
+
+/// Derive device families from iTunes `supportedDevices` prefixes
+/// (majd 7b4913a derives the same set from the search-item metadata).
+fn platforms_from_item(item: &Json) -> Vec<String> {
+    let mut platforms = Vec::new();
+    let devices = match item.get("supportedDevices").and_then(|v| v.as_array()) {
+        Some(d) => d,
+        None => return platforms,
+    };
+    for d in devices {
+        if let Some(name) = d.as_str() {
+            let family = if name.starts_with("iPhone") || name.starts_with("iPod") {
+                Some("iphone")
+            } else if name.starts_with("iPad") {
+                Some("ipad")
+            } else if name.starts_with("AppleTV") {
+                Some("appletv")
+            } else if name.starts_with("RealityDevice") {
+                Some("visionos")
+            } else if name.starts_with("Mac") {
+                Some("macos")
+            } else {
+                None
+            };
+            if let Some(f) = family {
+                let f = f.to_string();
+                if !platforms.contains(&f) {
+                    platforms.push(f);
+                }
+            }
+        }
+    }
+    platforms
 }
 
 /// guid: upper-case hex MAC without separators.
@@ -146,8 +186,8 @@ pub fn login(
     }
 
     'attempts: loop {
-        if attempt > 4 {
-            return Err(StoreError::Other("too many attempts".into()));
+        if attempt >= 3 {
+            return Err(StoreError::Other("too many auth attempts".into()));
         }
 
         let mut payload = Plist::dict();
@@ -180,9 +220,8 @@ pub fn login(
                 .stop_on_redirect_marker(),
         )
         .map_err(|e| StoreError::Other(format!("login request: {e}")))?;
-        for resend in 1..=2 {
-            let has_store_verdict = res.status == 403
-                || res.status == 429
+        for resend in 0..=2 {
+            let has_store_verdict = res.status == 429
                 || res.body.starts_with(b"<?xml")
                 || res.body.starts_with(b"<plist")
                 || res.body.starts_with(b"<Document")
@@ -192,14 +231,40 @@ pub fn login(
                 || ((301..=399).contains(&res.status)
                     && res.status != 304
                     && res.header("location").is_none());
-            if has_store_verdict || !dropped {
+
+            if has_store_verdict {
+                if res.status == 429 {
+                    let delay = res
+                        .header("retry-after")
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .map(std::time::Duration::from_secs)
+                        .unwrap_or_else(|| std::time::Duration::from_secs(1 << resend));
+                    eprintln!(
+                        "[store] login rate limited (HTTP 429), retrying in {:?}",
+                        delay
+                    );
+                    std::thread::sleep(delay);
+                    if resend == 2 {
+                        return Err(StoreError::Other(
+                            "apple rate limited authentication; try again later (HTTP 429)".into(),
+                        ));
+                    }
+                    continue;
+                }
+                // 403/signature-rejected or a real plist reply: stop resending.
+                break;
+            }
+
+            if !dropped {
                 break;
             }
             eprintln!(
                 "[store] login send {} dropped by the edge (HTTP {}), resending",
                 resend, res.status
             );
-            std::thread::sleep(std::time::Duration::from_millis(250));
+            let delay = std::time::Duration::from_secs(1 << resend)
+                .min(std::time::Duration::from_secs(8));
+            std::thread::sleep(delay);
             res = http::send(
                 Request::new("POST", &url)
                     .header(&name, &value)
@@ -228,8 +293,16 @@ pub fn login(
 
         if res.status == 204 || res.status == 404 || res.status >= 500 {
             // Retryable: Apple's LBs occasionally shed requests.
+            // Exponential backoff (1s, 2s, 4s — capped at 8s), smaller than
+            // majd's 10-30s: enough for edge shedding without stalling scripted runs.
             attempt += 1;
-            std::thread::sleep(std::time::Duration::from_millis(250 * attempt as u64));
+            let delay = std::time::Duration::from_secs(1u64 << (attempt - 1).min(3))
+                .min(std::time::Duration::from_secs(8));
+            eprintln!(
+                "[store] login attempt {attempt} shed by the edge (HTTP {}), backing off {delay:?}",
+                res.status
+            );
+            std::thread::sleep(delay);
             continue 'attempts;
         }
 
@@ -254,10 +327,12 @@ pub fn login(
             .unwrap_or("")
             .to_string();
 
-        // -5000 on attempt 1 = Apple wants the 2FA-augmented password.
+        // -5000 on attempt 1 = Apple wants the 2FA-augmented password:
+        // surface it to the caller (the CLI prompts for the code and calls
+        // login again with it appended). Apple pushes the code to the
+        // trusted devices at this point.
         if attempt == 1 && failure_type == FAILURE_INVALID_CREDENTIALS && auth_code.is_empty() {
-            attempt += 1;
-            continue 'attempts;
+            return Err(StoreError::AuthCodeRequired);
         }
         // Invalid or expired 2FA code — the three shapes Apple reports it
         // in (upstream's fix, mapped the same way):
@@ -273,7 +348,14 @@ pub fn login(
             return Err(StoreError::InvalidAuthCode);
         }
         if failure_type.is_empty() && auth_code.is_empty() && customer_message == MSG_BAD_LOGIN {
-            return Err(StoreError::AuthCodeRequired);
+            // Empty failureType with BadLogin is an outright rejection, not
+            // a 2FA challenge: Apple never sends a code for this shape (an
+            // A/B test with a deliberately wrong password yields the exact
+            // same body). Report it as a hard failure instead of prompting
+            // for a code that will never arrive (majd d1845ba semantics).
+            return Err(StoreError::Other(
+                "apple rejected the login (MZFinance.BadLogin, no failureType); try again later or from another network".into(),
+            ));
         }
         if failure_type.is_empty() && customer_message == MSG_ACCOUNT_DISABLED {
             return Err(StoreError::AccountDisabled);
@@ -641,6 +723,26 @@ fn fetch_download_info(
     }
 }
 
+/// Process-local memo for the MDM version lookup: the download retry loop
+/// re-enters the fallback chain with the same app id; version ids change
+/// only when Apple ships an app update, so one resolve per process is fine.
+fn lookup_latest_ios_external_version_id_cached(app_id: i64, country: &str) -> Result<String> {
+    use std::sync::OnceLock;
+    use std::sync::Mutex;
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<i64, String>>> = OnceLock::new();
+    let lock = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Ok(guard) = lock.lock() {
+        if let Some(hit) = guard.get(&app_id) {
+            return Ok(hit.clone());
+        }
+    }
+    let fresh = lookup_latest_ios_external_version_id(app_id, country)?;
+    if let Ok(mut guard) = lock.lock() {
+        guard.insert(app_id, fresh.clone());
+    }
+    Ok(fresh)
+}
+
 /// The DownloadDispatch recovery chain (see fetch_download_info).
 fn fallback_download_info(
     account: &Account,
@@ -650,10 +752,14 @@ fn fallback_download_info(
 ) -> Result<DownloadInfo> {
     // Both dispatch endpoints require a pinned version (appExtVrsId); the
     // unpinned form 500s. Resolve the current external version id when the
-    // caller did not pin one.
+    // caller did not pin one. Memoized: the download retry loop (purchase →
+    // retry, token expiry → relogin → retry) re-enters this fallback with
+    // the same app id; the version id is near-static, so re-querying the
+    // MDM lookup per retry is wasted anti-fraud surface.
     let external_version_id = if external_version_id.is_empty() {
         let country = country_code_from_storefront(&account.store_front)?;
-        match lookup_latest_ios_external_version_id(app_id, country) {
+        let resolved = lookup_latest_ios_external_version_id_cached(app_id, &country);
+        match resolved {
             Ok(id) => id,
             Err(e) => {
                 return Err(StoreError::Other(format!(
@@ -827,25 +933,52 @@ pub fn download(
     let destination = resolve_destination(app, &info.version, output)?;
     let tmp_path = format!("{}.tmp", destination);
 
-    // Stream to disk.
-    let mut file = std::fs::File::create(&tmp_path)
+    // Stream to disk — resumable (abdb590 + e6acb9c).
+    // A partial `{dst}.tmp` from an interrupted run resumes via a Range
+    // request. The http layer validates the 206/416/200 answer BEFORE the
+    // first byte reaches the file, so a rejected range never corrupts the
+    // partial.
+    let local_size = std::fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(local_size == 0)
+        .open(&tmp_path)
         .map_err(|e| StoreError::Other(format!("create {tmp_path}: {e}")))?;
+    if local_size > 0 {
+        // abdb590: append the continuation at the end of the partial.
+        use std::io::Seek;
+        file.seek(std::io::SeekFrom::End(0))
+            .map_err(|e| StoreError::Other(format!("seek {tmp_path}: {e}")))?;
+    }
     let mut sink = std::io::BufWriter::new(&mut file);
+    let mut req = Request::new("GET", &info.url);
+    if local_size > 0 {
+        req = req
+            .header("Range", &format!("bytes={local_size}-"))
+            .with_range_resume(local_size);
+    }
     let res = http::send(
-        Request::new("GET", &info.url)
-            .with_sink(&mut sink)
-            .with_progress(progress),
+        req.with_sink(&mut sink).with_progress(progress),
     )
     .map_err(|e| {
-        let _ = std::fs::remove_file(&tmp_path);
+        // Keep the partial: an aborted resume must not lose the bytes
+        // already on disk (e6acb9c leaves validated 206 tails resumable).
         StoreError::Other(format!("download: {e}"))
     })?;
     drop(sink);
-    if res.status != 200 {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(StoreError::Other(format!("download: HTTP {}", res.status)));
+    if res.status == 416 {
+        // `bytes */N` matched the local size: the package is already whole.
+        drop(file);
+    } else {
+        // 200 (fresh full body, sink wrote from offset 0 because the file
+        // was truncated) or 206 (appended continuation). Both are final
+        // here; sync before the replicate pass reads it back.
+        use std::io::Write;
+        let _ = file.flush();
+        drop(file);
     }
-    drop(file);
 
     // iTunes artwork (optional, alongside the package). A failure here is a
     // cosmetic loss, not a download failure — the reference logs and drops.

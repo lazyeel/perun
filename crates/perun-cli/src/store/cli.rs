@@ -18,7 +18,6 @@
 //! geometry as `perun sap` (the obfuscated guest requires it), so every
 //! command that signs ships through `store::run_on_sap_thread`.
 
-use std::io::Write as _;
 
 use crate::store::account::{self, Account};
 use crate::store::appstore::StoreError;
@@ -517,7 +516,7 @@ fn help_purchase() {
     print_command_help(
         "Obtain a license for the app from the App Store",
         "purchase [flags]",
-        "  -b, --bundle-identifier string   Bundle identifier of the target app (required)\n  -h, --help                       help for purchase\n      --platform string            Platform to purchase for: iphone (iOS), ipad (iPadOS), appletv (tvOS), visionos, or macos",
+        "  -i, --app-id int                 ID of the target app\n  -b, --bundle-identifier string   The bundle identifier of the target app (overrides the app ID)\n  -h, --help                       help for purchase\n      --platform string            Platform to purchase for: iphone (iOS), ipad (iPadOS), appletv (tvOS), visionos, or macos",
     );
 }
 
@@ -630,7 +629,7 @@ Flags:\n  -h, --help   help for completion\n\n{GLOBAL_FLAGS_BLOCK}\n"
 
 /// Everything a command handler needs: parsed invocation + output.
 /// One app row for the output layer: (id, bundle, name, version, price, purchase date).
-pub type AppRow<'a> = (i64, &'a str, &'a str, &'a str, f64, Option<&'a str>);
+pub type AppRow<'a> = (i64, &'a str, &'a str, &'a str, f64, Option<&'a str>, Vec<&'a str>);
 
 struct Ctx {
     inv: Invocation,
@@ -828,6 +827,7 @@ fn resolve_cache_read(key: &str) -> Option<appstore::App> {
         purchase_date: None,
         developer: get("developer"),
         description: get("description"),
+        platforms: vec![],
     })
 }
 
@@ -955,12 +955,115 @@ fn human_size(b: u64) -> String {
 }
 
 fn read_line(prompt: &str) -> std::io::Result<String> {
+    read_prompt(prompt, false)
+}
+
+/// fb1ca35: prompts stay inline (stderr), passwords read masked over a raw
+/// terminal. Mirrors the reference readPrompt(prompt, masked): printable
+/// runes echo '*', backspace erases, Ctrl-U clears, Ctrl-C aborts, escape
+/// sequences (arrows) are swallowed whole.
+fn read_password(prompt: &str) -> std::io::Result<String> {
+    read_prompt(prompt, true)
+}
+
+fn read_prompt(prompt: &str, masked: bool) -> std::io::Result<String> {
+    use std::io::Write;
     let mut out = std::io::stderr();
     write!(out, "{prompt}")?;
     out.flush()?;
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+    if !masked {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        return Ok(line.trim_end_matches(['\r', '\n']).to_string());
+    }
+    // Raw terminal: stdin echoes nothing; we render the mask ourselves.
+    let mut term: Option<libc::termios> = None;
+    unsafe {
+        let mut t: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(libc::STDIN_FILENO, &mut t) == 0 {
+            term = Some(t);
+            let mut raw = t;
+            libc::cfmakeraw(&mut raw);
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw);
+        }
+    }
+    let restore = |saved: &Option<libc::termios>| unsafe {
+        if let Some(t) = saved {
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, t);
+        }
+    };
+    let result = masked_read_line(&mut out);
+    let _ = writeln!(out);
+    let _ = out.flush();
+    restore(&term);
+    result
+}
+
+/// Byte-at-a-time masked input; call sites pass stderr for echo.
+fn masked_read_line(out: &mut std::io::Stderr) -> std::io::Result<String> {
+    use std::io::{Read, Write};
+    let mut input = std::io::stdin();
+    let mut password: Vec<char> = Vec::new();
+    let mut escape = 0u8;
+    let mut buf = [0u8; 1];
+    loop {
+        if input.read(&mut buf)? == 0 {
+            return Ok(password.into_iter().collect());
+        }
+        let key = buf[0];
+        // Swallow escape sequences (arrows etc.) like the reference.
+        if escape != 0 {
+            if escape == 1 && (key == b'[' || key == b'O') {
+                escape = 2;
+            } else if escape == 1 || (0x40..=0x7e).contains(&key) {
+                escape = 0;
+            }
+            continue;
+        }
+        let mut echo: &[u8] = &[];
+        let back_bsp: &[u8] = b"\x08 \x08";
+        let mut clear = Vec::new();
+        match key {
+            b'\r' | b'\n' => return Ok(password.into_iter().collect()),
+            3 => {
+                return Err(std::io::Error::other("input interrupted"));
+            }
+            4 => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "EOF on stdin",
+                ));
+            }
+            27 => escape = 1,
+            8 | 127 => {
+                if !password.is_empty() {
+                    password.pop();
+                    echo = back_bsp;
+                }
+            }
+            21 => {
+                for _ in 0..password.len() {
+                    clear.extend_from_slice(back_bsp);
+                }
+                password.clear();
+                out.write_all(&clear)?;
+                out.flush()?;
+                continue;
+            }
+            _ => {
+                // Printable ASCII only in raw byte mode; UTF-8 passwords
+                // still work when the terminal is not raw (restore path).
+                if (0x20..0x7f).contains(&key) {
+                    password.push(key as char);
+                    echo = b"*";
+                }
+            }
+        }
+        if !echo.is_empty() {
+            out.write_all(echo)?;
+            out.flush()?;
+        }
+    }
 }
 
 // ── auth ──────────────────────────────────────────────────────────────────
@@ -1053,16 +1156,25 @@ fn cmd_auth_login(persona: Persona, args: &[String]) -> i32 {
         .unwrap_or("")
         .to_string();
 
-    if email.is_empty() {
-        return ctx.usage_fail("required flag(s) \"email\" not set");
-    }
+    let email = if email.is_empty() {
+        if !ctx.inv.interactive {
+            return ctx.usage_fail("required flag(s) \"email\" not set");
+        }
+        match read_line("enter Apple ID email: ") {
+            Ok(v) if !v.is_empty() => v,
+            _ => return ctx.usage_fail("required flag(s) \"email\" not set"),
+        }
+    } else {
+        email
+    };
+
     if password.is_empty() && !ctx.inv.interactive {
         return ctx.usage_fail(
             "password is required when not running in interactive mode; use the \"--password\" flag",
         );
     }
     let password = if password.is_empty() {
-        match read_line("enter password: ") {
+        match read_password("enter password: ") {
             Ok(v) => v,
             Err(_) => return 1,
         }
@@ -1336,6 +1448,7 @@ fn cmd_search(persona: Persona, args: &[String]) -> i32 {
                 a.version.as_str(),
                 a.price,
                 None,
+                a.platforms.iter().map(|s| s.as_str()).collect::<Vec<&str>>(),
             )
         })
         .collect();
@@ -1359,6 +1472,8 @@ fn cmd_purchase(persona: Persona, args: &[String]) -> i32 {
         persona,
         args,
         &[
+            ("-i", true),
+            ("--app-id", true),
             ("-b", true),
             ("--bundle-identifier", true),
             ("--platform", true),
@@ -1371,9 +1486,25 @@ fn cmd_purchase(persona: Persona, args: &[String]) -> i32 {
         Ok(c) => c,
         Err(code) => return code,
     };
-    let bundle = match ctx.inv.get(&["-b", "--bundle-identifier"]) {
-        Some(b) => b.to_string(),
-        None => return ctx.usage_fail("required flag(s) \"bundle-identifier\" not set"),
+    let bundle = ctx.inv.get(&["-b", "--bundle-identifier"]).unwrap_or("").to_string();
+    // 91d4294: purchase by app id, no bundle lookup required.
+    let app_id = ctx.inv.get(&["-i", "--app-id"]).unwrap_or("").to_string();
+    if bundle.is_empty() && app_id.is_empty() {
+        return ctx.usage_fail(
+            "either the app ID or the bundle identifier must be specified",
+        );
+    }
+    let app_id: i64 = if app_id.is_empty() {
+        0
+    } else {
+        match app_id.parse() {
+            Ok(v) => v,
+            Err(_) => {
+                return ctx.usage_fail(&format!(
+                    "invalid argument \"{app_id}\" for \"-i, --app-id\" flag: strconv.ParseInt: parsing \"{app_id}\": invalid syntax"
+                ));
+            }
+        }
     };
     let platform = match parse_platform(ctx.inv.get(&["--platform"]).unwrap_or("")) {
         Ok(p) => p,
@@ -1385,16 +1516,36 @@ fn cmd_purchase(persona: Persona, args: &[String]) -> i32 {
     };
     // Resolve through the shared cache: a `purchase -b X && download -b X`
     // chain must not hit itunes.apple.com/lookup twice for one workflow.
-    let key = cache_key(&acc, &platform, "b", &bundle);
-    let app = match resolve_cache_read(&key) {
-        Some(app) => app,
-        None => match appstore::lookup(&acc, &bundle, &platform) {
-            Ok(app) => {
-                resolve_cache_write(&key, &app);
-                app
-            }
-            Err(e) => return ctx.fail(e),
-        },
+    let app = if app_id != 0 {
+        // 91d4294: app-id purchase. Hydrate price via the shared anonymous
+        // lookup (cached) so the paid-app guard stays meaningful; the id
+        // itself is authoritative, a lookup miss does not block purchase.
+        let key = cache_key(&acc, &platform, "i", &app_id.to_string());
+        match resolve_cache_read(&key) {
+            Some(app) => app,
+            None => match appstore::lookup_by_id(&acc, app_id, &platform) {
+                Ok(app) => {
+                    resolve_cache_write(&key, &app);
+                    app
+                }
+                Err(_) => appstore::App {
+                    id: app_id,
+                    ..appstore::App::default()
+                },
+            },
+        }
+    } else {
+        let key = cache_key(&acc, &platform, "b", &bundle);
+        match resolve_cache_read(&key) {
+            Some(app) => app,
+            None => match appstore::lookup(&acc, &bundle, &platform) {
+                Ok(app) => {
+                    resolve_cache_write(&key, &app);
+                    app
+                }
+                Err(e) => return ctx.fail(e),
+            },
+        }
     };
     if app.price > 0.0 {
         return ctx.fail_msg("purchasing paid apps is not supported");
@@ -1656,6 +1807,7 @@ fn cmd_list_purchases(persona: Persona, args: &[String]) -> i32 {
                         a.version.as_str(),
                         a.price,
                         a.purchase_date.as_deref(),
+                        a.platforms.iter().map(|s| s.as_str()).collect::<Vec<&str>>(),
                     )
                 })
                 .collect();

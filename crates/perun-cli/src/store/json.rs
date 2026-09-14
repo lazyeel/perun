@@ -86,8 +86,31 @@ impl Json {
 }
 
 pub fn parse(input: &str) -> Result<Json, String> {
+    let bytes = input.as_bytes();
+    let mut start = 0;
+    // Skip leading whitespace (including MZStoreServices' \n\n\n prefix and
+    // UTF-8 BOM variants) — the parser's skip_ws only handles BOM, not the
+    // leading stray newlines some endpoints emit before the JSON opens.
+    while start < bytes.len()
+        && bytes[start].is_ascii_whitespace()
+    {
+        start += 1;
+    }
+    // Skip UTF-8 BOM (EF BB BF) — only at the true start.
+    let offset = if start + 2 < bytes.len()
+        && bytes[start] == 0xEF
+        && bytes[start + 1] == 0xBB
+        && bytes[start + 2] == 0xBF
+    {
+        3
+    } else {
+        0
+    };
+    let trimmed = std::str::from_utf8(&bytes[start + offset..])
+        .map_err(|_| "invalid utf8 in json".to_string())?;
+
     let mut p = Parser {
-        bytes: input.as_bytes(),
+        bytes: trimmed.as_bytes(),
         pos: 0,
     };
     p.skip_ws();

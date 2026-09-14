@@ -284,38 +284,50 @@ fn civil_from_days(z: i64) -> (i64, u64, u64) {
 
 /// A field helper for the `apps` array used by search/list-purchases:
 /// one app object serialized once, in the zerolog field order.
-pub fn app_field_json(id: i64, bundle: &str, name: &str, version: &str, price: f64) -> String {
+pub fn app_field_json(id: i64, bundle: &str, name: &str, version: &str, price: f64, platforms: &[&str]) -> String {
+    let plat = if platforms.is_empty() {
+        String::new()
+    } else {
+        format!(",\"platforms\":[{}]", platforms.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(","))
+    };
     format!(
-        "{{\"id\":{},\"bundleID\":{},\"name\":{},\"version\":{},\"price\":{}}}",
+        "{{\"id\":{},\"bundleID\":{},\"name\":{},\"version\":{},\"price\":{}{}}}",
         id,
         json_str(bundle),
         json_str(name),
         json_str(version),
-        fmt_float(price)
+        fmt_float(price),
+        plat
     )
 }
 
 /// Console mode marshals the same object with its own key order
 /// (zerolog console sorts the inner object keys): bundleID,id,name,price,version.
-pub fn app_field_console(id: i64, bundle: &str, name: &str, version: &str, price: f64) -> String {
+pub fn app_field_console(id: i64, bundle: &str, name: &str, version: &str, price: f64, platforms: &[&str]) -> String {
+    let plat = if platforms.is_empty() {
+        String::new()
+    } else {
+        format!(",\"platforms\":[{}]", platforms.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(","))
+    };
     format!(
-        "{{\"bundleID\":{},\"id\":{},\"name\":{},\"price\":{},\"version\":{}}}",
+        "{{\"bundleID\":{},\"id\":{},\"name\":{}{},\"price\":{},\"version\":{}}}",
         json_str(bundle),
         id,
         json_str(name),
+        plat,
         fmt_float(price),
         json_str(version)
     )
 }
 
 /// `apps` with an optional extra key per item (purchaseDate).
-pub type AppRow<'a> = (i64, &'a str, &'a str, &'a str, f64, Option<&'a str>);
+pub type AppRow<'a> = (i64, &'a str, &'a str, &'a str, f64, Option<&'a str>, Vec<&'a str>);
 
 pub fn apps_with_date_json(items: &[AppRow]) -> Vec<String> {
     items
         .iter()
-        .map(|(id, b, n, v, p, date)| {
-            let mut s = app_field_json(*id, b, n, v, *p);
+        .map(|(id, b, n, v, p, date, plats)| {
+            let mut s = app_field_json(*id, b, n, v, *p, plats);
             if let Some(d) = date {
                 s.truncate(s.len() - 1);
                 s.push_str(&format!(",\"purchaseDate\":{}}}", json_str(d)));
@@ -326,21 +338,27 @@ pub fn apps_with_date_json(items: &[AppRow]) -> Vec<String> {
 }
 
 pub fn apps_with_date_console(items: &[AppRow]) -> Vec<String> {
-    // Console mode sorts every key alphabetically: purchaseDate lands
-    // between price and version.
     items
         .iter()
-        .map(|(id, b, n, v, p, date)| match date {
-            Some(d) => format!(
-                "{{\"bundleID\":{},\"id\":{},\"name\":{},\"price\":{},\"purchaseDate\":{},\"version\":{}}}",
-                json_str(b),
-                id,
-                json_str(n),
-                fmt_float(*p),
-                json_str(d),
-                json_str(v)
-            ),
-            None => app_field_console(*id, b, n, v, *p),
+        .map(|(id, b, n, v, p, date, plats)| match date {
+            Some(d) => {
+                let plat = if plats.is_empty() {
+                    String::new()
+                } else {
+                    format!(",\"platforms\":[{}]", plats.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(","))
+                };
+                format!(
+                    "{{\"bundleID\":{},\"id\":{},\"name\":{},{},\"price\":{},\"purchaseDate\":{},\"version\":{}}}",
+                    json_str(b),
+                    id,
+                    json_str(n),
+                    plat,
+                    fmt_float(*p),
+                    json_str(d),
+                    json_str(v)
+                )
+            }
+            None => app_field_console(*id, b, n, v, *p, plats),
         })
         .collect()
 }
