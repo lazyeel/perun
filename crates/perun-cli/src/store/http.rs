@@ -315,6 +315,10 @@ pub fn send(mut req: Request) -> Result<Response, String> {
         if let Some(sink) = req.sink.as_mut() {
             sink.write_all(window)
                 .map_err(|e| format!("sink write: {e}"))?;
+            // Per-e6acb9c: flush once per chunk so a crash mid-download
+            // leaves the tail on disk and resumable. The BufWriter on the
+            // caller side already coalesces the tiny writes, so this is a
+            // single buffered flush() — acceptable for now.
             sink.flush().ok();
         } else {
             body.extend_from_slice(window);
