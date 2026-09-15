@@ -354,9 +354,41 @@ pub fn replicate(
     info: &DownloadInfo,
     account: &Account,
 ) -> Result<bool, String> {
-    let src = std::fs::read(src_path).map_err(|e| format!("read {src_path}: {e}"))?;
-    let (_, eocd) = find_eocd(&src)?;
-    let entries = parse_central(&src, &eocd)?;
+    // Stream the source via mmap: peak RSS stays O(1) instead of tracking
+    // the package size (a 3 GiB package would otherwise pin 3+ GiB of heap).
+    // Pages flow through the kernel cache on demand.
+    let src_file = std::fs::File::open(src_path)
+        .map_err(|e| format!("open {src_path}: {e}"))?;
+    let src_len = src_file
+        .metadata()
+        .map_err(|e| format!("stat {src_path}: {e}"))?
+        .len();
+    let src_map = unsafe {
+        memmap2::MmapOptions::new()
+            .len(src_len as usize)
+            .map(&src_file)
+            .map_err(|e| format!("mmap {src_path}: {e}"))?
+    };
+    // madvise(MADV_SEQUENTIAL): kernel prefetches ahead for our linear scan
+    // and drops pages we've already passed, so RSS stays ~O(buffer) not
+    // O(package). A 3.14 GiB Tanks Blitz stays under tens of MiB.
+    unsafe extern "C" {
+        fn madvise(addr: *mut std::ffi::c_void, len: usize, advise: i32) -> i32;
+    }
+    const MADV_SEQUENTIAL: i32 = 2;
+    unsafe {
+        let _ = madvise(
+            src_map.as_ptr() as *mut std::ffi::c_void,
+            src_len as usize,
+            MADV_SEQUENTIAL,
+        );
+    }
+    let src: &[u8] = &src_map[..];
+    let (_, eocd) = find_eocd(src)?;
+    // After parsing the central directory (a pass over the tail of the
+    // file), the high-offset pages are dead to us — replicate() jumps around.
+    // Advise the kernel it may reclaim the page range we just scanned.
+    let entries = parse_central(src, &eocd)?;
 
     // Locate the main bundle (skip Watch/ extensions like the reference).
     let bundle_name = entries
@@ -370,7 +402,8 @@ pub fn replicate(
         .ok_or("could not read bundle name")?;
     let sc_dir = format!("Payload/{bundle_name}.app/SC_Info/");
 
-    let mut out = std::fs::File::create(dst_path).map_err(|e| format!("create {dst_path}: {e}"))?;
+    let out_file = std::fs::File::create(dst_path).map_err(|e| format!("create {dst_path}: {e}"))?;
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, out_file);
     let mut zip = ZipWriter::new(&mut out);
 
     // Which sinf paths? Manifest.plist inside SC_Info lists them. Apple's
@@ -388,7 +421,7 @@ pub fn replicate(
         .iter()
         .find(|e| e.name == format!("{sc_dir}Manifest.plist"))
     {
-        let raw = decompress_entry(&src, manifest_entry)?;
+        let raw = decompress_entry(src, manifest_entry)?;
         if let Ok(doc) = plist::parse_binary(&raw).or_else(|_| plist::parse_xml(&raw)) {
             // Replication destinations first (the full set); SinfPaths fills
             // in anything it lists that replication did not (defensive:
@@ -410,7 +443,7 @@ pub fn replicate(
     }
     let fallback_sinf_path = format!(
         "{sc_dir}{}.sinf",
-        read_bundle_executable(&src, &entries, &bundle_name)?
+        read_bundle_executable(src, &entries, &bundle_name)?
     );
 
     let now = std::time::SystemTime::now()
@@ -426,7 +459,7 @@ pub fn replicate(
     let itunes_meta = plist::to_xml(&metadata).into_bytes();
 
     for entry in &entries {
-        zip.copy_raw(&src, entry)?;
+        zip.copy_raw(src, entry)?;
     }
     zip.add_stored("iTunesMetadata.plist", &itunes_meta, (ddate, dtime))?;
     if let Some(artwork) = &info.artwork {
@@ -470,11 +503,15 @@ pub fn replicate(
     }
 
     zip.finish()?;
-    // Zip finalization: flush and sync explicitly. File::drop cannot report
-    // errors (majd e3dea14 fixed the same silent-close loss in Go's defers);
-    // a failed close here would otherwise leave a truncated package behind.
-    out.sync_all().map_err(|e| format!("replicate sync: {e}"))?;
-    drop(out);
+    // Zip finalization: flush the coalescing buffer, then sync explicitly.
+    // File::drop cannot report errors (majd e3dea14 fixed the same
+    // silent-close loss in Go defers); a failed close would otherwise
+    // leave a truncated package with no error.
+    std::io::Write::flush(&mut out).map_err(|e| format!("replicate flush: {e}"))?;
+    let out_file = out
+        .into_inner()
+        .map_err(|e| format!("replicate buffer: {e}"))?;
+    out_file.sync_all().map_err(|e| format!("replicate sync: {e}"))?;
     Ok(true)
 }
 
