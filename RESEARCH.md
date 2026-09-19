@@ -1,6 +1,6 @@
 # RESEARCH.md — Perun: Native Binary-Projection Runtime for Apple Client Attestation (FairPlay SAP and ADI)
 
-**Project:** [lazyeel/perun](https://github.com/lazyeel/perun) · **Document class:** Interoperability research specification & reverse-engineering report · **Status:** Working end-to-end implementation (SAP protocol closed 2026-08-31; ADI dispatcher end-to-end to its provisioning gate 2026-09-03; live StoreKit client lane E2E 2026-09-07) · **License:** [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
+**Project:** [lazyeel/perun](https://github.com/lazyeel/perun) · **Document class:** Interoperability research specification & reverse-engineering report · **Status:** Working end-to-end implementation (SAP protocol closed 2026-08-31; ADI dispatcher end-to-end to its provisioning gate 2026-09-03; live StoreKit client lane E2E 2026-09-07; store-command parity and resumable downloads 2026-09-13/14; mmap-bounded IPA replication) · **License:** [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
 
 ---
 
@@ -259,8 +259,8 @@ Key invariants:
    slot values end up in key material.)
 2. **Guest heap.** Fixed 64 MiB arena `[0x7FF7_B000_0000, 0x7FF7_B400_0000)`,
    custom allocator reproducing C `malloc` semantics: 16-byte alignment
-   (`ALIGN = 16`), 8-byte size prefix per block, `free`/`malloc_size` walk the
-   prefix, user blocks **not** zeroed on allocation (fresh mmap pages are zero;
+   (`ALIGN = 16`), a 16-byte (aligned `size_t`) size prefix per block,
+   `free`/`malloc_size` walk the prefix, user blocks **not** zeroed on allocation (fresh mmap pages are zero;
    the reference never zeroes — an early shim that zeroed on alloc corrupted the
    parity, and a later one that zeroed via `calloc` diverged from the reference
    heap walk). Host `malloc` is unusable here: CoreFP calls `malloc_size` on
@@ -370,7 +370,8 @@ interposer proved sufficient in 2024 (§ 8):
    `memset`, `memcmp`, `strlen`, `strcmp`, `strncmp`.
 2. **Reference-semantics shims** (deterministic degenerate responses):
    `gettimeofday → {1717000000, 0}` (fixed timestamp for reproducible key
-   material), `arc4random → 0`, `sysctl* → *oldlenp=0, ret 0`, `getenv → NULL`,
+   material), `arc4random → 0`, `sysctl → −1` (`sysctlbyname → *oldlenp=0,
+   ret 0`), `getenv → NULL`,
    `statfs → 0` + zeroed 432-byte buffer, `lstat/fcntl → −1`, CF family
    (`CFStringCreateWithCString → ~0` only for `IOPlatformSerialNumber` /
    `IOPlatformUUID` / `board-id`, else NULL; `CFDictionaryGetValue → ~0`;
@@ -392,7 +393,7 @@ interposer proved sufficient in 2024 (§ 8):
 
 The reference emulator enters guests with all registers zero. The obfuscated
 dispatcher reads uninitialized registers; leftover host values change its
-flattened control flow. Perun's trampoline therefore zeroes RBX/RBP/R11–R15 and
+flattened control flow. Perun's trampoline therefore zeroes RBX/RBP/R10–R15 and
 loads RAX with the target (mirroring the reference's `callq *%rax` thunk) before
 `jmp` into the guest — then restores the host frame at the landing pad. Dispatch
 parity was verified decision-by-decision: 2 353/2 353 obfuscated-CFG dispatch
@@ -417,9 +418,10 @@ The PE32+ lane runs the same native-execution doctrine with Win64 semantics:
   terabytes apart under ASLR, and rel32 only reaches ±2 GB. An unresolved
   import lands on such a stub, which reports the missing symbol with its
   arguments instead of crashing (fail-closed design).
-- Base relocations are applied (delta is 0 when the preferred base is free);
-  PE32+ headers and all sections are mapped at the preferred base via
-  `mmap(MAP_FIXED)` with per-page protections.
+- Base relocations are applied when the load address slides (DIR64 and HIGHLOW
+  types; ordinal imports trap, forwarded exports are unsupported); headers and
+  sections map with `mmap(MAP_FIXED_NOREPLACE)` at the preferred base, falling
+  back to any address, with per-section `mprotect` after binding.
 - No Wine, no QEMU, no instruction emulation anywhere; overhead exists only
   at each Win32 boundary crossing.
 
@@ -450,6 +452,13 @@ The PE32+ lane runs the same native-execution doctrine with Win64 semantics:
  7  (usage) Base64(sig) → header `X-Apple-ActionSignature`
       on storefront login/purchase POSTs
 ```
+
+ The flow above is the bare `perun sap` path: fixed legacy endpoints compiled
+ into the binary. The production store lane (§ 5.9) runs the same guest
+ contract — same 24-byte hardware block, same `200` version, same 1-then-0
+ state assertions — through per-session URLs from the live URL bag instead:
+ the certificate arrives as a plist envelope (`sign-sap-setup-cert`), and the
+ setup round POSTs to the bag's `sign-sap-setup` URL.
 
 ### 5.2 What the protocol is and is not
 
@@ -679,7 +688,59 @@ poking memory.
 4. Grow the shim surface as real guests exercise more APIs (the trap reporter
    names each missing symbol with its arguments).
 5. A `perun scaffold` command to generate a ready-to-fill shim stub from a
-   trap report.
+   trap report. (Still unimplemented: the trap message already names this
+   command, but no such subcommand exists — the hint is stale.)
+
+### 5.9 The StoreKit client lane (production use of this runtime)
+
+The store lane turns the session above into a working App Store client
+(`perun store`, or the `ipatool` persona's strict grammar). Endpoint discovery
+is bag-driven: each session fetches `init.itunes.apple.com/bag.xml?guid=…`
+and reads `authenticateAccount`, `sign-sap-setup`, `sign-sap-setup-cert`, and
+`sign-sap-version` (the string `"200"`) from the `urlBag` sub-dict —
+hardcoded fallback defaults exist, but no request proceeds on a missing key.
+The signer runs the § 5.1 guest contract against the bag URLs and emits
+`X-Apple-ActionSignature` per signed body; login and the DAAP history call are
+the two signed call sites (§ 5.6).
+
+Authentication is MZFinance password auth with out-of-band 2FA: the code the
+user receives by push/SMS is appended to the password on the retry round and
+signed fresh per attempt. Pod redirects (3xx with `Location`) re-POST the
+original body without incrementing the attempt counter; shed load (204, 404,
+5xx, 429 with `Retry-After`) backs off and resends up to three attempts.
+Credentials persist in an AES-256-GCM vault bound to the pinned machine
+address (PBKDF2-HMAC-SHA256, 100 000 iterations); `auth revoke` wipes vault
+and cookie jar, while session reset clears cookies only.
+
+Search runs the public iTunes Search/Lookup APIs in the account's storefront
+country, with client-side scopes on top of the plain search: `--developer`
+(artist/seller name), `--id` (developer catalog by artist id), and
+`--description` (description text). Scopes probe at backend maximum and apply
+the requested limit after filtering. Purchase is free-license only
+(`price > 0` aborts); Arcade titles retry once under GAME pricing, and the
+known already-licensed shapes map to success.
+
+Downloads survived the 2026 download migration through a three-stage fallback
+chain — legacy `volumeStoreDownloadProduct`, then DownloadDispatch
+`redownload` on an empty song list, then `updateProduct` on an empty-500 —
+with the latest external version id resolved per platform when the caller does
+not pin one (the MDM lockup API for tvOS, the `apps.apple.com` product page
+for visionOS, memoized per process). Bodies stream into a `.tmp` file behind
+a strict `Range` gate (206 continuation checks, 416-means-complete); a 200
+after resume is a known defect (the full body appends instead of truncating).
+Purchase history is a three-stage DAAP flow (login/update/items, the latter
+two SAP-signed), newest-first with page/max-results pagination.
+
+The downloaded OTA stream is restreamed into a standard `.ipa` without ever
+being decompressed: local headers pass through byte-for-byte, deflated entries
+gain a 16-byte data descriptor, central-directory extras are cloned verbatim,
+and FairPlay `.sinf` blobs from `SC_Info/Manifest.plist` are injected per
+replication path, with `iTunesMetadata.plist` and `iTunesArtwork` added. Input
+is memory-mapped with sequential advise, so multi-gigabyte packages replicate
+at tens of megabytes of RSS; the custom pure-Rust inflate serves only the
+small metadata reads. macOS `.pkg` downloads and paid apps are explicit
+errors, not silent gaps. Command grammar for both personas is the README's
+subject; this section records the wire behavior it rests on.
 
 ## 6. Benchmarks
 
@@ -924,14 +985,15 @@ into the distributed binary (object form):
 | `bzip2-rs` | 0.1.2 | MIT OR Apache-2.0 | Paolo Barbolini (paolobarbolini/bzip2-rs) | pure-Rust bzip2 decoder in the first-run asset fetcher |
 | `crc32fast` | 1.5.1 | MIT OR Apache-2.0 | srijs (srijs/rust-crc32fast) | checksum primitive under bzip2-rs |
 | `cfg-if` | 1.0.4 | MIT OR Apache-2.0 | Alex Crichton (rust-lang/cfg-if) | conditional compilation under crc32fast |
-| `tinyvec` | 1.12.0 | Zlib OR Apache-2.0 OR MIT | Lokathor (Lokathor/tinyvec) | small-vector abstraction under bzip2-rs |
+| `tinyvec` | 1.13.2 | Zlib OR Apache-2.0 OR MIT | Lokathor (Lokathor/tinyvec) | small-vector abstraction under bzip2-rs |
+| `memmap2` | 0.9.11 | MIT OR Apache-2.0 | Dan Burkert, Yevhenii Reizner | memory-mapped IPA input in the streaming replicator |
 
 **Compile-time only — executed by rustc during the build, absent from the
 binary:**
 
 | Crate | Version | License | Author | Role |
 |---|---|---|---|---|
-| `proc-macro2`, `quote`, `syn` | — | MIT OR Apache-2.0 | David Tolnay | macro machinery behind linkme's `distributed_slice` |
+| `proc-macro2`, `quote`, `syn` | 1.0.107, 1.0.47, 3.0.5 | MIT OR Apache-2.0 | David Tolnay | macro machinery behind linkme's `distributed_slice` |
 | `unicode-ident` | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 | David Tolnay | identifier tables for the macro crates |
 
 All runtime licenses are MIT, Apache-2.0, or Zlib — permissive and
@@ -957,6 +1019,7 @@ with a NOTICE file (see the repository root).
 | 2026-09-03 | Benchmark hardening. Both sides re-benched against their public, unmodified artifacts: the oracle re-cloned from GitHub (commit 883ede5) and built with its own upstream Makefile (vendored Unicorn 2.1.1), perun as the shipped release binary. Per-round exchange rows retired — the stock oracle prints no phase timers and perun's release carries none for the split, so the public table now reports SAPExchange as the single combined Round 1 + Round 2 window and compares the oracle at the process level only (wall / CPU / peak RSS, N=3 per side, kernel rusage). Superseded instrumented figures (per-phase oracle timings, per-round exchange splits) removed; § 6.6 reproduces every number with one command per side. Third-party credits trimmed to what the law and the analysis actually require: NOTICE and § 8.1 now list only code compiled into the binary (runtime vs compile-time split, with unicode-ident's dual license kept distinct), and § 8 keeps the projects the work measured against or built on. Release profile hardened: no DWARF, stripped binaries, no build-host paths in distributed artifacts. |
 | 2026-09-07 | Storefront-path additions from the live StoreKit client lane (built on this runtime, E2E the same day: login+2FA → search → purchase → download). New § 5.6 maps which requests the action signature actually gates (login body and the DAAP history body — and nothing else on the storefront surface; purchase/download ride the session cookies+token). New § 5.7 records the 5005 account-state lesson: the code covers both invalid-2FA and unprovisioned-account, and ToS acceptance on any Apple web property flips the same flow to a working login. § 7 gains the 2026-09 Rust-rewrite family (ipatool-rs) and this work's StoreKit client status. |
 | 2026-09-07 | Unified specification: the Phase-1 document (STATUS.md) merged into this file and retired. The ADI/PE32+ lane is now first-class here — § 2.2 (CoreADI64.dll ground truth), § 4.7 (Win32 runtime invariants: FakeTEB/ARCH_SET_GS, 111 shims, absolute-jmp trap stubs), § 5.8 (the provisioning-gate analysis: status 0xffff5016, the RVA chain 0x19dda0/0x17eca0/0x5b20f with key 0x4f7e9322, the circular fpdi dependency, the two-trampoline experiment, ways forward), and § 6.7 (the 19-row verification log with reproduction commands). All facts, addresses, and measurements carried over verbatim; nothing dropped. |
+| 2026-09-19 | Store-lane specification and factual corrections. New § 5.9 specifies the production StoreKit client (bag-driven signer, MZFinance auth with 2FA and machine-bound vault, search scopes, free-license purchase, three-stage download fallback with per-platform version resolution, DAAP history, OTA restreaming with sinf injection); § 5.1 now distinguishes the bare `perun sap` legacy path from the bag-driven store path. Corrections against the implementation: guest-heap size prefix is 16 bytes (aligned `size_t`), not 8 (§ 4.1); `sysctl` returns −1 while only `sysctlbyname` zeroes `*oldlenp` (§ 4.5); the trampoline zeroes RBX/RBP/R10–R15 (§ 4.6); PE mapping is `MAP_FIXED_NOREPLACE` with fallback, relocations cover DIR64 and HIGHLOW (§ 4.7); the `scaffold` hint names a command that does not exist (§ 5.8). Dependency table: tinyvec 1.13.2, new memmap2 row, pinned proc-macro2/quote/syn versions (§ 8.1). |
 
 *Apple, macOS, OS X, StoreKit, FairPlay, iTunes and related marks are
 trademarks of Apple Inc. This independent research project is not affiliated

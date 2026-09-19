@@ -28,7 +28,8 @@ end-to-end up to its provisioning gate. The full analysis — binary ground trut
 **macOS side (`perun sap`)** — maps the 2013 commerce pair (CoreFP,
 CommerceCore, CommerceKit) from Apple's public OS X 10.9 update package,
 drives the FairPlay SAP protocol against `play.itunes.apple.com`, and
-produces the 501-byte action signature. One command, no arguments:
+produces the 501-byte action signature. With no arguments it uses
+the cached assets (fetching them on the first run):
 
 ```bash
 ./target/release/perun sap
@@ -52,8 +53,8 @@ binary map, memory invariants, protocol wire format, benchmarks — is
 **App Store client (`perun store` / bare aliases)** — a full Store lane on
 top of the same native SAP session: login via MZFinance with 2FA (the code
 arrives by push/SMS out of band and is appended to the password on the
-retry round), iTunes Search API lookup, free-app purchase, streaming IPA
-download with a progress bar, sinf replication, purchase history, and
+retry round), iTunes Search API lookup, free-app purchase, resumable streaming
+IPA download with a progress bar, sinf replication, purchase history, and
 version metadata. The command grammar matches the reference tool's:
 
 ```bash
@@ -96,8 +97,8 @@ command surface (`auth login|info|revoke`, `search <term>`, `purchase`,
 `download`, `list-purchases`, `list-versions`, `get-version-metadata`,
 `completion`, `help`), the global flags (`--format text|json`, `--verbose`,
 `--non-interactive`, `--keychain-passphrase`, `-h/--help`, `-v/--version`),
-all platform synonyms (`ios`, `ipados`, `apple-tv`, `tvos`, `vision`,
-`visionpro`, `xros`, `realitydevice`, `mac`, `osx`), the zerolog text and
+all platform spellings (`iphone`/`ios`, `ipad`/`ipados`, `appletv`/`apple-tv`/`tvos`,
+`vision`/`visionos`/`visionpro`/`xros`/`realitydevice`, `mac`/`macos`/`osx`), the zerolog text and
 JSON output shapes byte-for-byte, the progress bar, the exit codes (cobra's
 flat 1), and the silent relogin on password-token expiry. `--purchase`
 acquires a license mid-download when Apple demands one; tvOS and visionOS
@@ -150,7 +151,7 @@ entropy, time, registry) and macOS libSystem (CF/IOKit/DiskArbitration with
 deterministic degenerate answers, the custom guest heap, the ICXS container
 service).
 
-**Trap-and-scaffold extensibility** — imports without an implementation land
+**Trap-and-report extensibility** — imports without an implementation land
 on generated micro-stubs that trap on first call and report the missing
 symbol with its arguments. Adding an API is one declarative macro invocation
 in its own file; contributors never need to understand the loader.
@@ -239,6 +240,7 @@ Apache-2.0, Zlib; the full table with authors and SPDX expressions is in
 | `libc` | MIT OR Apache-2.0 | host libc ABI |
 | `linkme` | MIT OR Apache-2.0 | shim-table registration |
 | `bzip2-rs` | MIT OR Apache-2.0 | first-run asset fetcher |
+| `memmap2` | MIT OR Apache-2.0 | memory-mapped IPA input in the replicator |
 | `crc32fast`, `cfg-if`, `tinyvec` | MIT/Apache-2.0/Zlib | under bzip2-rs |
 
 The reference measurement oracle used in the benchmarks
