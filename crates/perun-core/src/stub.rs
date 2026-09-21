@@ -147,7 +147,7 @@ pub unsafe extern "win64" fn perun_trap_report(
         .to_string();
     eprintln!(
         "[perun] TRAP: {label}({arg0:#x}, {arg1:#x}, {arg2:#x}, {arg3:#x}) — \
-         no implementation. Run: cargo run -p perun-cli -- scaffold \"{label}\""
+         no implementation (unresolved import; shim missing)"
     );
     0
 }

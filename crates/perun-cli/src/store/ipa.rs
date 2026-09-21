@@ -19,6 +19,11 @@ use super::plist::{self, Plist};
 const EOCD_SIG: [u8; 4] = [0x50, 0x4B, 0x05, 0x06];
 const CEN_SIG: [u8; 4] = [0x50, 0x4B, 0x01, 0x02];
 const LOC_SIG: [u8; 4] = [0x50, 0x4B, 0x03, 0x04];
+const ZIP64_EOCD_SIG: [u8; 4] = [0x50, 0x4B, 0x06, 0x06];
+const ZIP64_LOC_SIG: [u8; 4] = [0x50, 0x4B, 0x06, 0x07];
+const ZIP64_EXTRA_ID: u16 = 0x0001;
+const ZIP64_SUB: u32 = 0xFFFF_FFFF;
+const ZIP64_SUB16: u16 = 0xFFFF;
 
 #[derive(Clone, Debug)]
 struct CentralEntry {
@@ -159,6 +164,74 @@ fn local_span(data: &[u8], entry: &CentralEntry) -> Result<(usize, u64), String>
 
 // ── writing ───────────────────────────────────────────────────────────────
 
+/// Strip ZIP64 extra blocks (id 0x0001) so the writer can regenerate
+/// structural values instead of re-emitting stale ones.
+fn strip_zip64_extra(extra: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(extra.len());
+    let mut i = 0;
+    while i + 4 <= extra.len() {
+        let id = u16::from_le_bytes([extra[i], extra[i + 1]]);
+        let size = u16::from_le_bytes([extra[i + 2], extra[i + 3]]) as usize;
+        let end = i + 4 + size;
+        if end > extra.len() {
+            // Truncated block: keep the tail verbatim rather than dropping.
+            out.extend_from_slice(&extra[i..]);
+            break;
+        }
+        if id != ZIP64_EXTRA_ID {
+            out.extend_from_slice(&extra[i..end]);
+        }
+        i = end;
+    }
+    if i < extra.len() {
+        out.extend_from_slice(&extra[i..]);
+    }
+    out
+}
+
+/// Build a ZIP64 extra block for the central directory. Fields appear in
+/// spec order, only for values that overflow 32 bits: uncompressed,
+/// compressed, local-header offset.
+fn zip64_central_extra(uncompressed: u64, compressed: u64, offset: u64) -> Vec<u8> {
+    let mut fields = Vec::with_capacity(24);
+    if uncompressed >= ZIP64_SUB as u64 {
+        fields.extend_from_slice(&uncompressed.to_le_bytes());
+    }
+    if compressed >= ZIP64_SUB as u64 {
+        fields.extend_from_slice(&compressed.to_le_bytes());
+    }
+    if offset >= ZIP64_SUB as u64 {
+        fields.extend_from_slice(&offset.to_le_bytes());
+    }
+    if fields.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(4 + fields.len());
+    out.extend_from_slice(&ZIP64_EXTRA_ID.to_le_bytes());
+    out.extend_from_slice(&(fields.len() as u16).to_le_bytes());
+    out.extend_from_slice(&fields);
+    out
+}
+
+/// Build a ZIP64 extra block for a local header (sizes only).
+fn zip64_local_extra(uncompressed: u64, compressed: u64) -> Vec<u8> {
+    let mut fields = Vec::with_capacity(16);
+    if uncompressed >= ZIP64_SUB as u64 {
+        fields.extend_from_slice(&uncompressed.to_le_bytes());
+    }
+    if compressed >= ZIP64_SUB as u64 {
+        fields.extend_from_slice(&compressed.to_le_bytes());
+    }
+    if fields.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(4 + fields.len());
+    out.extend_from_slice(&ZIP64_EXTRA_ID.to_le_bytes());
+    out.extend_from_slice(&(fields.len() as u16).to_le_bytes());
+    out.extend_from_slice(&fields);
+    out
+}
+
 struct ZipWriter<'w> {
     out: &'w mut dyn std::io::Write,
     offset: u64,
@@ -204,7 +277,16 @@ impl<'w> ZipWriter<'w> {
     /// anchor on). The compressed bytes are written verbatim.
     fn copy_raw(&mut self, src: &[u8], entry: &CentralEntry) -> Result<(), String> {
         let (data_start, compressed) = local_span(src, entry)?;
-        let mut header = src[entry.local_offset as usize..data_start].to_vec();
+        let src_header = src
+            .get(entry.local_offset as usize..data_start)
+            .ok_or("zip: entry header out of range")?;
+        if src_header.len() < 30 {
+            return Err("zip: local header too short".into());
+        }
+        let name_len =
+            u16::from_le_bytes([src_header[26], src_header[27]]) as usize;
+        let src_extra = src_header.get(30 + name_len..).unwrap_or(&[]);
+        let name_bytes = src_header.get(30..30 + name_len).unwrap_or(&[]);
         // Directories (name ends with '/') and stored entries: inline sizes,
         // no descriptor. Deflate: streaming framing — bit 3 set, sizes/CRC
         // zeroed, the descriptor written right after the compressed bytes.
@@ -215,12 +297,14 @@ impl<'w> ZipWriter<'w> {
         } else {
             entry.flags & !0x8
         };
-        header[8..10].copy_from_slice(&flags.to_le_bytes());
-        header[10..12].copy_from_slice(&entry.method.to_le_bytes());
+        let need64 = entry.compressed_size >= ZIP64_SUB as u64
+            || entry.uncompressed_size >= ZIP64_SUB as u64;
         // Local-header crc/sizes: zeroed for streaming (descriptor carries
-        // them), concrete for inline.
+        // them), concrete for inline (0xFFFFFFFF + ZIP64 extra when large).
         let (lh_crc, lh_csize, lh_usize) = if streaming {
             (0u32, 0u32, 0u32)
+        } else if need64 {
+            (entry.crc32, ZIP64_SUB, ZIP64_SUB)
         } else {
             (
                 entry.crc32,
@@ -228,9 +312,41 @@ impl<'w> ZipWriter<'w> {
                 entry.uncompressed_size as u32,
             )
         };
-        header[14..18].copy_from_slice(&lh_crc.to_le_bytes());
-        header[18..22].copy_from_slice(&lh_csize.to_le_bytes());
-        header[22..26].copy_from_slice(&lh_usize.to_le_bytes());
+        // Rebuild the local header so a ZIP64 extra can grow it: fixed
+        // 30-byte prefix + name + (stripped source extra + ZIP64 sizes).
+        let mut local_extra = strip_zip64_extra(src_extra);
+        if !streaming {
+            local_extra.extend_from_slice(&zip64_local_extra(
+                entry.uncompressed_size,
+                entry.compressed_size,
+            ));
+        }
+        if local_extra.len() > 0xFFFF {
+            return Err("zip: local extra too long".into());
+        }
+        if name_bytes.len() > 0xFFFF {
+            return Err("zip: entry name too long".into());
+        }
+        let mut header = Vec::with_capacity(30 + name_bytes.len() + local_extra.len());
+        header.extend_from_slice(&LOC_SIG);
+        // Version needed: 45 for ZIP64 entries, else copy source.
+        let version_needed: u16 = if need64 && !streaming {
+            45
+        } else {
+            u16::from_le_bytes([src_header[4], src_header[5]])
+        };
+        header.extend_from_slice(&version_needed.to_le_bytes());
+        header.extend_from_slice(&flags.to_le_bytes());
+        header.extend_from_slice(&entry.method.to_le_bytes());
+        // mtime/mdate: copy source verbatim.
+        header.extend_from_slice(&src_header[12..16]);
+        header.extend_from_slice(&lh_crc.to_le_bytes());
+        header.extend_from_slice(&lh_csize.to_le_bytes());
+        header.extend_from_slice(&lh_usize.to_le_bytes());
+        header.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+        header.extend_from_slice(&(local_extra.len() as u16).to_le_bytes());
+        header.extend_from_slice(name_bytes);
+        header.extend_from_slice(&local_extra);
 
         let local_offset = self.offset;
         self.raw(&header)?;
@@ -239,13 +355,28 @@ impl<'w> ZipWriter<'w> {
             .ok_or("zip: entry data out of range")?;
         self.raw(data)?;
         if streaming {
-            // Data descriptor: 0x08074b50 + crc + compressed + uncompressed.
-            let mut descriptor = [0u8; 16];
-            descriptor[..4].copy_from_slice(&0x0807_4b50u32.to_le_bytes());
-            descriptor[4..8].copy_from_slice(&entry.crc32.to_le_bytes());
-            descriptor[8..12].copy_from_slice(&(entry.compressed_size as u32).to_le_bytes());
-            descriptor[12..16].copy_from_slice(&(entry.uncompressed_size as u32).to_le_bytes());
-            self.raw(&descriptor)?;
+            // Data descriptor: 0x08074b50 + crc + sizes (64-bit when the
+            // entry overflows 32 bits, matching the ZIP64 central extra).
+            if need64 {
+                let mut descriptor = [0u8; 24];
+                descriptor[..4].copy_from_slice(&0x0807_4b50u32.to_le_bytes());
+                descriptor[4..8].copy_from_slice(&entry.crc32.to_le_bytes());
+                descriptor[8..16].copy_from_slice(&entry.compressed_size.to_le_bytes());
+                descriptor[16..24]
+                    .copy_from_slice(&entry.uncompressed_size.to_le_bytes());
+                self.raw(&descriptor)?;
+            } else {
+                let mut descriptor = [0u8; 16];
+                descriptor[..4].copy_from_slice(&0x0807_4b50u32.to_le_bytes());
+                descriptor[4..8].copy_from_slice(&entry.crc32.to_le_bytes());
+                descriptor[8..12].copy_from_slice(
+                    &(entry.compressed_size as u32).to_le_bytes(),
+                );
+                descriptor[12..16].copy_from_slice(
+                    &(entry.uncompressed_size as u32).to_le_bytes(),
+                );
+                self.raw(&descriptor)?;
+            }
         }
         self.entries.push(WrittenEntry {
             name: entry.name.clone(),
@@ -264,21 +395,36 @@ impl<'w> ZipWriter<'w> {
 
     /// Add a stored (method 0) entry.
     fn add_stored(&mut self, name: &str, data: &[u8], modified: (u16, u16)) -> Result<(), String> {
+        if name.len() > 0xFFFF {
+            return Err("zip: entry name too long".into());
+        }
         let crc = crc32_ieee(data);
+        let size = data.len() as u64;
+        let need64 = size >= ZIP64_SUB as u64;
         let local_offset = self.offset;
-        let mut header = Vec::with_capacity(30 + name.len());
+        let local_extra = zip64_local_extra(size, size);
+        if local_extra.len() > 0xFFFF {
+            return Err("zip: local extra too long".into());
+        }
+        let mut header = Vec::with_capacity(30 + name.len() + local_extra.len());
         header.extend_from_slice(&LOC_SIG);
-        header.extend_from_slice(&0u16.to_le_bytes()); // version
+        header.extend_from_slice(&(if need64 { 45u16 } else { 0u16 }).to_le_bytes()); // version
         header.extend_from_slice(&0u16.to_le_bytes()); // flags
         header.extend_from_slice(&0u16.to_le_bytes()); // method: stored
         header.extend_from_slice(&modified.1.to_le_bytes()); // time
         header.extend_from_slice(&modified.0.to_le_bytes()); // date
         header.extend_from_slice(&crc.to_le_bytes());
-        header.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        header.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        if need64 {
+            header.extend_from_slice(&ZIP64_SUB.to_le_bytes());
+            header.extend_from_slice(&ZIP64_SUB.to_le_bytes());
+        } else {
+            header.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            header.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        }
         header.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        header.extend_from_slice(&0u16.to_le_bytes()); // extra len
+        header.extend_from_slice(&(local_extra.len() as u16).to_le_bytes());
         header.extend_from_slice(name.as_bytes());
+        header.extend_from_slice(&local_extra);
         self.raw(&header)?;
         self.raw(data)?;
         self.entries.push(WrittenEntry {
@@ -286,8 +432,8 @@ impl<'w> ZipWriter<'w> {
             method: 0,
             flags: 0,
             crc32: crc,
-            compressed_size: data.len() as u64,
-            uncompressed_size: data.len() as u64,
+            compressed_size: size,
+            uncompressed_size: size,
             local_offset,
             external_attrs: 0o100644 << 16,
             modified,
@@ -298,45 +444,128 @@ impl<'w> ZipWriter<'w> {
 
     fn finish(mut self) -> Result<(), String> {
         let cd_start = self.offset;
+        // ZIP64 triggers: entry count, CD size/offset, or any entry's
+        // sizes/offset overflowing 32 bits. Previously these truncated via
+        // `as u16/as u32`; now they emit real ZIP64 structures.
+        let mut need64 = self.entries.len() >= ZIP64_SUB16 as usize;
+        for e in &self.entries {
+            if e.compressed_size >= ZIP64_SUB as u64
+                || e.uncompressed_size >= ZIP64_SUB as u64
+                || e.local_offset >= ZIP64_SUB as u64
+            {
+                need64 = true;
+                break;
+            }
+        }
         let mut records: Vec<Vec<u8>> = Vec::with_capacity(self.entries.len());
         for e in &self.entries {
-            let mut cen = Vec::with_capacity(46 + e.name.len() + e.central_extra.len());
+            if e.name.len() > 0xFFFF {
+                return Err("zip: entry name too long".into());
+            }
+            // Central extra: source bytes with stale ZIP64 stripped, plus a
+            // fresh ZIP64 block when this entry overflows 32 bits.
+            let mut extra = strip_zip64_extra(&e.central_extra);
+            extra.extend_from_slice(&zip64_central_extra(
+                e.uncompressed_size,
+                e.compressed_size,
+                e.local_offset,
+            ));
+            if extra.len() > 0xFFFF {
+                return Err("zip: central extra too long".into());
+            }
+            let entry64 = e.compressed_size >= ZIP64_SUB as u64
+                || e.uncompressed_size >= ZIP64_SUB as u64
+                || e.local_offset >= ZIP64_SUB as u64;
+            let version_needed: u16 = if entry64 { 45 } else { 0x0014 };
+            let mut cen = Vec::with_capacity(46 + e.name.len() + extra.len());
             cen.extend_from_slice(&CEN_SIG);
             cen.extend_from_slice(&0x0014u16.to_le_bytes()); // version made by
-            cen.extend_from_slice(&0x0014u16.to_le_bytes()); // version needed
+            cen.extend_from_slice(&version_needed.to_le_bytes());
             cen.extend_from_slice(&e.flags.to_le_bytes());
             cen.extend_from_slice(&e.method.to_le_bytes());
             cen.extend_from_slice(&e.modified.1.to_le_bytes());
             cen.extend_from_slice(&e.modified.0.to_le_bytes());
             cen.extend_from_slice(&e.crc32.to_le_bytes());
-            cen.extend_from_slice(&(e.compressed_size as u32).to_le_bytes());
-            cen.extend_from_slice(&(e.uncompressed_size as u32).to_le_bytes());
+            cen.extend_from_slice(
+                &(if e.compressed_size >= ZIP64_SUB as u64 {
+                    ZIP64_SUB
+                } else {
+                    e.compressed_size as u32
+                })
+                .to_le_bytes(),
+            );
+            cen.extend_from_slice(
+                &(if e.uncompressed_size >= ZIP64_SUB as u64 {
+                    ZIP64_SUB
+                } else {
+                    e.uncompressed_size as u32
+                })
+                .to_le_bytes(),
+            );
             cen.extend_from_slice(&(e.name.len() as u16).to_le_bytes());
-            // Central extra: carried over verbatim (ZIP64 and friends). The
-            // reference strips only the ZIP64 block so its own writer can
-            // regenerate structural values; we re-emit the source bytes.
-            cen.extend_from_slice(&(e.central_extra.len() as u16).to_le_bytes());
+            cen.extend_from_slice(&(extra.len() as u16).to_le_bytes());
             cen.extend_from_slice(&0u16.to_le_bytes()); // comment
             cen.extend_from_slice(&0u16.to_le_bytes()); // disk
             cen.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
             cen.extend_from_slice(&e.external_attrs.to_le_bytes());
-            cen.extend_from_slice(&(e.local_offset as u32).to_le_bytes());
+            cen.extend_from_slice(
+                &(if e.local_offset >= ZIP64_SUB as u64 {
+                    ZIP64_SUB
+                } else {
+                    e.local_offset as u32
+                })
+                .to_le_bytes(),
+            );
             cen.extend_from_slice(e.name.as_bytes());
-            cen.extend_from_slice(&e.central_extra);
+            cen.extend_from_slice(&extra);
             records.push(cen);
         }
         for record in &records {
             self.raw(record)?;
         }
         let cd_size = self.offset - cd_start;
+        if cd_size >= ZIP64_SUB as u64 || cd_start >= ZIP64_SUB as u64 {
+            need64 = true;
+        }
+        if need64 {
+            // ZIP64 end-of-central-directory record + locator, then the
+            // regular EOCD with placeholder values.
+            let zip64_eocd_offset = self.offset;
+            let count = self.entries.len() as u64;
+            let mut z64 = Vec::with_capacity(56);
+            z64.extend_from_slice(&ZIP64_EOCD_SIG);
+            z64.extend_from_slice(&44u64.to_le_bytes()); // size of remaining record
+            z64.extend_from_slice(&0x0014u16.to_le_bytes()); // version made by
+            z64.extend_from_slice(&45u16.to_le_bytes()); // version needed
+            z64.extend_from_slice(&0u32.to_le_bytes()); // disk
+            z64.extend_from_slice(&0u32.to_le_bytes()); // cd disk
+            z64.extend_from_slice(&count.to_le_bytes()); // entries this disk
+            z64.extend_from_slice(&count.to_le_bytes()); // entries total
+            z64.extend_from_slice(&cd_size.to_le_bytes());
+            z64.extend_from_slice(&cd_start.to_le_bytes());
+            self.raw(&z64)?;
+            let mut loc = Vec::with_capacity(20);
+            loc.extend_from_slice(&ZIP64_LOC_SIG);
+            loc.extend_from_slice(&0u32.to_le_bytes()); // cd disk
+            loc.extend_from_slice(&zip64_eocd_offset.to_le_bytes());
+            loc.extend_from_slice(&1u32.to_le_bytes()); // disks
+            self.raw(&loc)?;
+        }
         let mut eocd = Vec::with_capacity(22);
         eocd.extend_from_slice(&EOCD_SIG);
         eocd.extend_from_slice(&0u16.to_le_bytes()); // disk
         eocd.extend_from_slice(&0u16.to_le_bytes()); // cd disk
-        eocd.extend_from_slice(&(self.entries.len() as u16).to_le_bytes());
-        eocd.extend_from_slice(&(self.entries.len() as u16).to_le_bytes());
-        eocd.extend_from_slice(&(cd_size as u32).to_le_bytes());
-        eocd.extend_from_slice(&(cd_start as u32).to_le_bytes());
+        if need64 {
+            eocd.extend_from_slice(&ZIP64_SUB16.to_le_bytes());
+            eocd.extend_from_slice(&ZIP64_SUB16.to_le_bytes());
+            eocd.extend_from_slice(&ZIP64_SUB.to_le_bytes());
+            eocd.extend_from_slice(&ZIP64_SUB.to_le_bytes());
+        } else {
+            eocd.extend_from_slice(&(self.entries.len() as u16).to_le_bytes());
+            eocd.extend_from_slice(&(self.entries.len() as u16).to_le_bytes());
+            eocd.extend_from_slice(&(cd_size as u32).to_le_bytes());
+            eocd.extend_from_slice(&(cd_start as u32).to_le_bytes());
+        }
         eocd.extend_from_slice(&0u16.to_le_bytes()); // comment len
         self.raw(&eocd)?;
         Ok(())
@@ -376,6 +605,7 @@ pub fn replicate(
         fn madvise(addr: *mut std::ffi::c_void, len: usize, advise: i32) -> i32;
     }
     const MADV_SEQUENTIAL: i32 = 2;
+    const MADV_DONTNEED: i32 = 4;
     unsafe {
         let _ = madvise(
             src_map.as_ptr() as *mut std::ffi::c_void,
@@ -385,10 +615,23 @@ pub fn replicate(
     }
     let src: &[u8] = &src_map[..];
     let (_, eocd) = find_eocd(src)?;
-    // After parsing the central directory (a pass over the tail of the
-    // file), the high-offset pages are dead to us — replicate() jumps around.
-    // Advise the kernel it may reclaim the page range we just scanned.
     let entries = parse_central(src, &eocd)?;
+    // After parsing the central directory (a pass over the tail of the
+    // file), the high-offset pages are dead to us — replicate() jumps
+    // around. Tell the kernel it may reclaim the CD range we just scanned.
+    {
+        let cd_start = (eocd.cd_offset as usize).min(src.len());
+        let cd_len = (eocd.cd_size as usize).min(src.len().saturating_sub(cd_start));
+        if cd_len > 0 {
+            unsafe {
+                let _ = madvise(
+                    src_map.as_ptr().add(cd_start) as *mut std::ffi::c_void,
+                    cd_len,
+                    MADV_DONTNEED,
+                );
+            }
+        }
+    }
 
     // Locate the main bundle (skip Watch/ extensions like the reference).
     let bundle_name = entries
@@ -1077,9 +1320,10 @@ mod tests {
             0x9d, 0x94, 0xdf, 0x4f, 0x83, 0x30, 0x10, 0xc7, 0x9f, 0xdd, 0x5f, 0x51, 0x79, 0x1f,
             0xa7, 0x6f,
         ];
-        // header only check: block must parse without "bad code length"
-        // Full 429-byte stream is verified end-to-end via the live download test.
-        // Here we just guard the header decode: HLIT + HDIST + HCLEN + code lengths.
+        // Header-only check: the block must parse without "bad code length".
+        // This guards the header decode (HLIT + HDIST + HCLEN + code
+        // lengths); the full-stream inflate path is covered by the
+        // round-trip tests below.
         let mut br = BitReader::new(&deflated);
         let _btype = br.bit().unwrap() as usize | ((br.bit().unwrap() as usize) << 1);
         let hlit = five_bits(&mut br).unwrap() + 257;
@@ -1403,5 +1647,87 @@ mod tests {
         let deflated: Vec<u8> = vec![0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x57, 0xc8, 0x40, 0x90, 0x00];
         let out = inflate(&deflated, 17).unwrap();
         assert_eq!(String::from_utf8_lossy(&out), "hello hello hello");
+    }
+
+    #[test]
+    fn zip64_extra_helpers() {
+        // Small values: no block. Large values: placeholder-gated fields in
+        // spec order (uncompressed, compressed, offset).
+        assert!(zip64_central_extra(10, 20, 30).is_empty());
+        let big = ZIP64_SUB as u64;
+        let block = zip64_central_extra(big, 20, 30);
+        assert_eq!(&block[..4], &[0x01, 0x00, 0x08, 0x00]);
+        assert_eq!(&block[4..], &big.to_le_bytes());
+        let block = zip64_central_extra(10, big + 1, big + 2);
+        // compressed + offset, 16 bytes of fields.
+        assert_eq!(u16::from_le_bytes([block[2], block[3]]), 16);
+        // strip removes only id-0x0001 blocks, keeps the rest verbatim.
+        let mut extra = vec![0x55, 0x54, 0x02, 0x00, 0xAA, 0xBB];
+        extra.extend_from_slice(&block);
+        extra.extend_from_slice(&[0x58, 0x55, 0x01, 0x00, 0xCC]);
+        let stripped = strip_zip64_extra(&extra);
+        assert_eq!(
+            stripped,
+            vec![0x55, 0x54, 0x02, 0x00, 0xAA, 0xBB, 0x58, 0x55, 0x01, 0x00, 0xCC]
+        );
+    }
+
+    #[test]
+    fn zip64_finish_emits_structures_only_when_needed() {
+        // Small archive: plain EOCD, no ZIP64 sigs.
+        let small: Vec<u8> = {
+            let mut b = Vec::new();
+            let mut w = ZipWriter::new(&mut b);
+            w.add_stored("a.txt", b"hi", (0x5A21, 0x0C00)).unwrap();
+            w.finish().unwrap();
+            b
+        };
+        assert!(!small.windows(4).any(|w| w == ZIP64_EOCD_SIG));
+        assert!(!small.windows(4).any(|w| w == ZIP64_LOC_SIG));
+        // Synthetic large entry: sizes/offset overflow 32 bits without
+        // allocating gigabytes (entries are pushed directly).
+        let big: Vec<u8> = {
+            let mut b = Vec::new();
+            let mut w = ZipWriter::new(&mut b);
+            w.entries.push(WrittenEntry {
+                name: "big.bin".into(),
+                method: 0,
+                flags: 0,
+                crc32: 0,
+                compressed_size: ZIP64_SUB as u64 + 10,
+                uncompressed_size: ZIP64_SUB as u64 + 10,
+                local_offset: ZIP64_SUB as u64 + 5,
+                external_attrs: 0o100644 << 16,
+                modified: (0x5A21, 0x0C00),
+                central_extra: Vec::new(),
+            });
+            w.finish().unwrap();
+            b
+        };
+        assert!(big.windows(4).any(|w| w == ZIP64_EOCD_SIG));
+        assert!(big.windows(4).any(|w| w == ZIP64_LOC_SIG));
+        // Regular EOCD carries placeholders when ZIP64 is in play (the
+        // reader rejects ZIP64 inputs explicitly, so parse the tail by
+        // hand instead of find_eocd).
+        let at = big
+            .windows(4)
+            .rposition(|w| w == EOCD_SIG)
+            .expect("regular EOCD present");
+        let eocd = &big[at..at + 22];
+        assert_eq!(u16::from_le_bytes([eocd[8], eocd[9]]), 0xFFFF);
+        assert_eq!(u16::from_le_bytes([eocd[10], eocd[11]]), 0xFFFF);
+        assert_eq!(
+            u32::from_le_bytes([eocd[12], eocd[13], eocd[14], eocd[15]]),
+            0xFFFF_FFFF
+        );
+        assert_eq!(
+            u32::from_le_bytes([eocd[16], eocd[17], eocd[18], eocd[19]]),
+            0xFFFF_FFFF
+        );
+        // The single central record uses 0xFFFFFFFF placeholders and owns
+        // a ZIP64 extra block carrying the real 64-bit sizes.
+        assert!(big.windows(4).any(|w| w == CEN_SIG));
+        let huge = (ZIP64_SUB as u64 + 10).to_le_bytes();
+        assert!(big.windows(8).any(|w| w == huge));
     }
 }

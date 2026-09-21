@@ -166,6 +166,60 @@ pub fn guid_from_mac(mac: &[u8; 6]) -> String {
 
 // ── login ─────────────────────────────────────────────────────────────────
 
+/// Map an MZFinance authenticate reply to a failure, or `None` when the
+/// reply is a success candidate (the caller proceeds to token extraction).
+/// Pure function of the parsed fields, so the mapping is unit-testable
+/// without touching the network.
+fn classify_auth_failure(
+    failure_type: &str,
+    customer_message: &str,
+    auth_code: &str,
+    attempt: u32,
+) -> Option<StoreError> {
+    // -5000 on attempt 1 = Apple wants the 2FA-augmented password: surface
+    // it to the caller (the CLI prompts for the code and calls login again
+    // with it appended). Apple pushes the code to the trusted devices at
+    // this point.
+    if attempt == 1 && failure_type == FAILURE_INVALID_CREDENTIALS && auth_code.is_empty() {
+        return Some(StoreError::AuthCodeRequired);
+    }
+    // Invalid or expired 2FA code — the three shapes Apple reports it in
+    // (upstream's fix, mapped the same way):
+    //   1. failureType 5005 outright,
+    //   2. -5000 again AFTER a code was already appended,
+    //   3. BadLogin message once a code is in play.
+    if failure_type == FAILURE_INVALID_AUTH_CODE
+        || (failure_type == FAILURE_INVALID_CREDENTIALS && !auth_code.is_empty())
+        || (failure_type.is_empty() && !auth_code.is_empty() && customer_message == MSG_BAD_LOGIN)
+    {
+        return Some(StoreError::InvalidAuthCode);
+    }
+    if failure_type.is_empty() && auth_code.is_empty() && customer_message == MSG_BAD_LOGIN {
+        // Empty failureType with BadLogin and no code in play stays a hard
+        // failure (majd d1845ba semantics): a deliberately wrong password
+        // yields the exact same body, so auto-prompting would ask for a code
+        // that may never arrive. But it is NOT proof of wrong credentials —
+        // live fire 2026-09-20: the correct password drew this exact shape,
+        // a 2FA code arrived anyway, and password+code succeeded. Name the
+        // 2FA path in the message instead of implying bad credentials.
+        return Some(StoreError::Other(
+            "apple rejected the login (MZFinance.BadLogin, no failureType); if the password is correct, retry with a fresh 2FA code via --auth-code (get one from a trusted device) — otherwise try again later or from another network"
+                .into(),
+        ));
+    }
+    if failure_type.is_empty() && customer_message == MSG_ACCOUNT_DISABLED {
+        return Some(StoreError::AccountDisabled);
+    }
+    if !failure_type.is_empty() {
+        return Some(StoreError::Other(if customer_message.is_empty() {
+            format!("login failed: failureType {failure_type}")
+        } else {
+            customer_message.to_string()
+        }));
+    }
+    None
+}
+
 /// MZFinance authenticate. Returns the account with session tokens.
 /// The `auth_code` (from push, SMS fallback, or hardware key) is appended
 /// to the password on the retry round — Apple's only 2FA channel here.
@@ -327,45 +381,9 @@ pub fn login(
             .unwrap_or("")
             .to_string();
 
-        // -5000 on attempt 1 = Apple wants the 2FA-augmented password:
-        // surface it to the caller (the CLI prompts for the code and calls
-        // login again with it appended). Apple pushes the code to the
-        // trusted devices at this point.
-        if attempt == 1 && failure_type == FAILURE_INVALID_CREDENTIALS && auth_code.is_empty() {
-            return Err(StoreError::AuthCodeRequired);
-        }
-        // Invalid or expired 2FA code — the three shapes Apple reports it
-        // in (upstream's fix, mapped the same way):
-        //   1. failureType 5005 outright,
-        //   2. -5000 again AFTER a code was already appended,
-        //   3. BadLogin message once a code is in play.
-        if failure_type == FAILURE_INVALID_AUTH_CODE
-            || (failure_type == FAILURE_INVALID_CREDENTIALS && !auth_code.is_empty())
-            || (failure_type.is_empty()
-                && !auth_code.is_empty()
-                && customer_message == MSG_BAD_LOGIN)
+        if let Some(err) = classify_auth_failure(&failure_type, &customer_message, auth_code, attempt)
         {
-            return Err(StoreError::InvalidAuthCode);
-        }
-        if failure_type.is_empty() && auth_code.is_empty() && customer_message == MSG_BAD_LOGIN {
-            // Empty failureType with BadLogin is an outright rejection, not
-            // a 2FA challenge: Apple never sends a code for this shape (an
-            // A/B test with a deliberately wrong password yields the exact
-            // same body). Report it as a hard failure instead of prompting
-            // for a code that will never arrive (majd d1845ba semantics).
-            return Err(StoreError::Other(
-                "apple rejected the login (MZFinance.BadLogin, no failureType); try again later or from another network".into(),
-            ));
-        }
-        if failure_type.is_empty() && customer_message == MSG_ACCOUNT_DISABLED {
-            return Err(StoreError::AccountDisabled);
-        }
-        if !failure_type.is_empty() {
-            return Err(StoreError::Other(if customer_message.is_empty() {
-                format!("login failed: failureType {failure_type}")
-            } else {
-                customer_message
-            }));
+            return Err(err);
         }
 
         let password_token = doc
@@ -731,10 +749,10 @@ fn lookup_latest_ios_external_version_id_cached(app_id: i64, country: &str) -> R
     use std::sync::Mutex;
     static CACHE: OnceLock<Mutex<std::collections::HashMap<i64, String>>> = OnceLock::new();
     let lock = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-    if let Ok(guard) = lock.lock() {
-        if let Some(hit) = guard.get(&app_id) {
-            return Ok(hit.clone());
-        }
+    if let Ok(guard) = lock.lock()
+        && let Some(hit) = guard.get(&app_id)
+    {
+        return Ok(hit.clone());
     }
     let fresh = lookup_latest_ios_external_version_id(app_id, country)?;
     if let Ok(mut guard) = lock.lock() {
@@ -758,7 +776,7 @@ fn fallback_download_info(
     // MDM lookup per retry is wasted anti-fraud surface.
     let external_version_id = if external_version_id.is_empty() {
         let country = country_code_from_storefront(&account.store_front)?;
-        let resolved = lookup_latest_ios_external_version_id_cached(app_id, &country);
+        let resolved = lookup_latest_ios_external_version_id_cached(app_id, country);
         match resolved {
             Ok(id) => id,
             Err(e) => {
@@ -933,11 +951,12 @@ pub fn download(
     let destination = resolve_destination(app, &info.version, output)?;
     let tmp_path = format!("{}.tmp", destination);
 
-    // Stream to disk — resumable (abdb590 + e6acb9c).
-    // A partial `{dst}.tmp` from an interrupted run resumes via a Range
-    // request. The http layer validates the 206/416/200 answer BEFORE the
-    // first byte reaches the file, so a rejected range never corrupts the
-    // partial.
+    // Stream to disk — resumable. A partial `{dst}.tmp` from an interrupted
+    // run resumes via a Range request. The http layer validates the
+    // 206/416/200 answer BEFORE the first byte reaches the file, so a
+    // rejected range never corrupts the partial; a 200-after-resume (server
+    // ignored Range) truncates the file to 0 inside the http layer before
+    // the fresh body streams.
     let local_size = std::fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0);
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -947,37 +966,29 @@ pub fn download(
         .open(&tmp_path)
         .map_err(|e| StoreError::Other(format!("create {tmp_path}: {e}")))?;
     if local_size > 0 {
-        // abdb590: append the continuation at the end of the partial.
+        // Append the continuation at the end of the partial; a 200 answer
+        // rewinds + truncates before the first fresh byte.
         use std::io::Seek;
         file.seek(std::io::SeekFrom::End(0))
             .map_err(|e| StoreError::Other(format!("seek {tmp_path}: {e}")))?;
     }
-    let mut sink = std::io::BufWriter::new(&mut file);
     let mut req = Request::new("GET", &info.url);
     if local_size > 0 {
         req = req
             .header("Range", &format!("bytes={local_size}-"))
             .with_range_resume(local_size);
     }
-    let res = http::send(
-        req.with_sink(&mut sink).with_progress(progress),
-    )
-    .map_err(|e| {
+    let res = http::send(req.with_file_sink(&mut file).with_progress(progress)).map_err(|e| {
         // Keep the partial: an aborted resume must not lose the bytes
-        // already on disk (e6acb9c leaves validated 206 tails resumable).
+        // already on disk (validated 206 tails stay resumable).
         StoreError::Other(format!("download: {e}"))
     })?;
-    drop(sink);
-    if res.status == 416 {
-        // `bytes */N` matched the local size: the package is already whole.
-        drop(file);
-    } else {
-        // 200 (fresh full body, sink wrote from offset 0 because the file
-        // was truncated) or 206 (appended continuation). Both are final
-        // here; sync before the replicate pass reads it back.
-        use std::io::Write;
-        let _ = file.flush();
-        drop(file);
+    drop(file);
+    if res.status != 416 {
+        // 200 (fresh full body, truncated to 0 before streaming) or 206
+        // (appended continuation). Both are final here; the http layer
+        // flushed the file sink before returning, the replicate pass reads
+        // it back next.
     }
 
     // iTunes artwork (optional, alongside the package). A failure here is a
@@ -1674,3 +1685,58 @@ pub fn url_encode(s: &str) -> String {
 // silence unused warnings for items kept for CLI parity
 #[allow(unused)]
 fn _ui_stub() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn other_text(err: &StoreError) -> &str {
+        match err {
+            StoreError::Other(m) => m,
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_failure_mapping() {
+        // -5000 on attempt 1 without a code = 2FA challenge.
+        assert!(matches!(
+            classify_auth_failure(FAILURE_INVALID_CREDENTIALS, "", "", 1),
+            Some(StoreError::AuthCodeRequired)
+        ));
+        // Same shape on a later attempt is not the challenge path.
+        assert!(classify_auth_failure(FAILURE_INVALID_CREDENTIALS, "", "", 2).is_some());
+        // Bad 2FA code: 5005, -5000-with-code, BadLogin-with-code.
+        assert!(matches!(
+            classify_auth_failure(FAILURE_INVALID_AUTH_CODE, "", "467831", 2),
+            Some(StoreError::InvalidAuthCode)
+        ));
+        assert!(matches!(
+            classify_auth_failure(FAILURE_INVALID_CREDENTIALS, "", "467831", 2),
+            Some(StoreError::InvalidAuthCode)
+        ));
+        assert!(matches!(
+            classify_auth_failure("", MSG_BAD_LOGIN, "467831", 2),
+            Some(StoreError::InvalidAuthCode)
+        ));
+        // BadLogin with no code in play: hard failure that names the 2FA
+        // path instead of implying wrong credentials (live fire 2026-09-20:
+        // correct password drew this shape, a code arrived, password+code
+        // succeeded).
+        let err = classify_auth_failure("", MSG_BAD_LOGIN, "", 1).expect("mapped");
+        let text = other_text(&err);
+        assert!(text.contains("BadLogin"), "{text}");
+        assert!(text.contains("--auth-code"), "{text}");
+        // Disabled account and generic failureTypes keep their mapping.
+        assert!(matches!(
+            classify_auth_failure("", MSG_ACCOUNT_DISABLED, "", 1),
+            Some(StoreError::AccountDisabled)
+        ));
+        assert!(other_text(
+            &classify_auth_failure("2059", "", "", 1).expect("mapped")
+        )
+        .contains("2059"));
+        // Empty/empty = success candidate, proceed to token extraction.
+        assert!(classify_auth_failure("", "", "", 1).is_none());
+    }
+}

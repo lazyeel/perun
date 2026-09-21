@@ -284,7 +284,32 @@ fn cmd_run(args: &[String]) -> i32 {
         unsafe {
             std::env::set_var("PERUN_TRACE", "1");
             if !file.is_empty() {
-                std::env::set_var("PERUN_TRACE_FILE", file);
+                std::env::set_var("PERUN_TRACE_FILE", &file);
+            }
+        }
+        // PERUN_TRACE_FILE used to be accepted but never read: every shim
+        // checks only PERUN_TRACE and logs to stderr. Make --trace-file
+        // real by pointing stderr at the file, so all eprintln trace lines
+        // (shims, traps, loader) land there instead of the console.
+        if !file.is_empty() {
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&file)
+            {
+                Ok(f) => {
+                    use std::os::unix::io::AsRawFd;
+                    let fd = f.as_raw_fd();
+                    // dup2 is async-signal-safe wrt the later crash handler;
+                    // after this eprintln goes to the file.
+                    if unsafe { libc::dup2(fd, 2) } < 0 {
+                        eprintln!("[perun] warning: dup2 --trace-file {file}: failed");
+                    }
+                    // `f` closes here; fd 2 keeps the description open.
+                }
+                Err(e) => {
+                    eprintln!("[perun] warning: open --trace-file {file}: {e}");
+                }
             }
         }
         println!("[perun] tracing enabled");
@@ -706,6 +731,37 @@ fn cmd_info(path: &str) -> i32 {
                     s.virtual_size,
                     s.size_of_raw_data,
                 );
+            }
+            let imports = info.imports(&bytes);
+            if imports.is_empty() {
+                println!("Imports:         (none)");
+            } else {
+                let total: usize = imports.iter().map(|(_, s)| s.len()).sum();
+                println!(
+                    "Imports:         {} dll(s), {total} symbol(s)",
+                    imports.len()
+                );
+                for (dll, syms) in &imports {
+                    for sym in syms {
+                        match sym {
+                            perun_core::image::ImportSymbol::Name(n) => {
+                                println!("  {dll}!{n}");
+                            }
+                            perun_core::image::ImportSymbol::Ordinal(o) => {
+                                println!("  {dll}!#{o}");
+                            }
+                        }
+                    }
+                }
+            }
+            let exports = info.exports(&bytes);
+            if exports.is_empty() {
+                println!("Exports:         (none)");
+            } else {
+                println!("Exports:         {} name(s)", exports.len());
+                for name in &exports {
+                    println!("  {name}");
+                }
             }
             0
         }

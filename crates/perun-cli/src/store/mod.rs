@@ -82,8 +82,9 @@ pub fn state_dir() -> Result<PathBuf, String> {
 ///
 /// The first resolution is pinned to `<state>/machine`, so a change of
 /// NIC, NIC order, or container network namespace cannot silently re-key
-/// the encrypted account store or the Store identity Apple sees. The
-/// `--mac` CLI flag overrides per-run and never rewrites the pin.
+/// the encrypted account store or the Store identity Apple sees. There is
+/// no store-level `--mac` flag: only the bare `perun sap` command takes
+/// `--mac` as a per-run override (it never rewrites the pin).
 pub fn primary_mac() -> [u8; 6] {
     if let Some(mac) = pinned_mac() {
         return mac;

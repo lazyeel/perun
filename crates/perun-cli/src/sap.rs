@@ -603,9 +603,11 @@ impl SapRuntime {
 
 // ── the server protocol ──────────────────────────────────────────────────
 //
-// Endpoints mirror Apple's Store bag (majd/ipatool carries the same wiring):
-//   sign-sap-setup-cert: https://s.mzstatic.com/sap/setupCert.plist
-//   sign-sap-setup:      https://fpinit.itunes.apple.com/v1/signSapSetup/legacy
+// The bare `perun sap` path uses fixed endpoints compiled into the binary
+// (the production store lane instead drives per-session URLs from the live
+// URL bag — see store/bag.rs):
+//   sign-sap-setup-cert: https://s.mzstatic.com/sap/setup.crt
+//   sign-sap-setup:      https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/signSapSetup
 // The plist envelope holds the exchange buffers under fixed keys.
 
 const SETUP_CERT_URL: &str = "https://s.mzstatic.com/sap/setup.crt";

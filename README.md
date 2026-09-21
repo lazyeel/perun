@@ -31,7 +31,7 @@ The first run fetches the required images itself (~32 MB range-read from Apple's
 ./target/release/perun list-purchases
 ```
 
-The perun persona adds search scopes on top of the plain search, each with the optional `-l/--limit` (default 5):
+The perun persona adds search scopes on top of the plain search, each with the optional `-l/--limit` (default 5, valid 1–200):
 
 - `search Telegram --developer` — client filter on the developer's name (`artistName`/`sellerName`); the backend gets the full page and the requested limit is applied after the filter, so a filter can never shrink the page you asked for.
 - `search 686450210 --id` — the full catalog of one developer via the Lookup API by artist id.

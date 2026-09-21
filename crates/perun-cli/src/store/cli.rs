@@ -285,6 +285,16 @@ fn platform_metadata(platform: &str) -> Option<&'static str> {
     }
 }
 
+/// Parse `--limit` for search: integer 1..=200. Garbage and out-of-range
+/// are usage errors, never a silent default or a wrapping cast.
+pub fn parse_search_limit(raw: &str) -> Result<i64, String> {
+    match raw.parse::<i64>() {
+        Ok(v) if (1..=200).contains(&v) => Ok(v),
+        Ok(_) => Err("invalid --limit: expected an integer 1..=200".into()),
+        Err(_) => Err(format!("invalid --limit {raw:?}: expected an integer 1..=200")),
+    }
+}
+
 // ── entry ─────────────────────────────────────────────────────────────────
 
 pub fn run(args: &[String]) -> i32 {
@@ -1360,12 +1370,11 @@ fn cmd_search(persona: Persona, args: &[String]) -> i32 {
             .map(|s| s.to_string())
             .unwrap_or_else(|| ctx.inv.positional.first().cloned().unwrap_or_default()),
     };
-    let limit: i64 = ctx
-        .inv
-        .get(&["-l", "--limit"])
-        .unwrap_or("5")
-        .parse()
-        .unwrap_or(5);
+    let limit_raw = ctx.inv.get(&["-l", "--limit"]).unwrap_or("5");
+    let limit: i64 = match parse_search_limit(limit_raw) {
+        Ok(v) => v,
+        Err(e) => return ctx.usage_fail(&e),
+    };
     let platform = match parse_platform(ctx.inv.get(&["--platform"]).unwrap_or("")) {
         Ok(p) => p,
         Err(e) => return ctx.usage_fail(&e),
@@ -1426,7 +1435,7 @@ fn cmd_search(persona: Persona, args: &[String]) -> i32 {
                 }
             })
             .collect();
-        matched.into_iter().take(limit.max(1) as usize).collect()
+        matched.into_iter().take(limit as usize).collect()
     } else if platform == "visionos" {
         match appstore::search_visionos(&acc, &term, limit) {
             Ok(a) => a,
@@ -1760,18 +1769,24 @@ fn cmd_list_purchases(persona: Persona, args: &[String]) -> i32 {
         Ok(c) => c,
         Err(code) => return code,
     };
-    let limit: i64 = ctx
-        .inv
-        .get(&["-l", "--max-results"])
-        .unwrap_or("10")
-        .parse()
-        .unwrap_or(10);
-    let page: i64 = ctx
-        .inv
-        .get(&["-p", "--page"])
-        .unwrap_or("1")
-        .parse()
-        .unwrap_or(1);
+    let limit_raw = ctx.inv.get(&["-l", "--max-results"]).unwrap_or("10");
+    let limit: i64 = match limit_raw.parse() {
+        Ok(v) => v,
+        Err(_) => {
+            return ctx.usage_fail(&format!(
+                "invalid --max-results {limit_raw:?}: expected an integer 1..=100"
+            ));
+        }
+    };
+    let page_raw = ctx.inv.get(&["-p", "--page"]).unwrap_or("1");
+    let page: i64 = match page_raw.parse() {
+        Ok(v) => v,
+        Err(_) => {
+            return ctx.usage_fail(&format!(
+                "invalid --page {page_raw:?}: expected an integer >= 1"
+            ));
+        }
+    };
     if page < 1 {
         return ctx.usage_fail("page must be greater than 0");
     }
@@ -1928,5 +1943,24 @@ fn cmd_get_version_metadata(persona: Persona, args: &[String]) -> i32 {
             0
         }
         Err(e) => ctx.fail(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_limit_accepts_range_rejects_garbage() {
+        assert_eq!(parse_search_limit("5"), Ok(5));
+        assert_eq!(parse_search_limit("1"), Ok(1));
+        assert_eq!(parse_search_limit("200"), Ok(200));
+        // Garbage, zero, negatives, overflow: errors, never silent 5.
+        assert!(parse_search_limit("abc").is_err());
+        assert!(parse_search_limit("").is_err());
+        assert!(parse_search_limit("0").is_err());
+        assert!(parse_search_limit("-3").is_err());
+        assert!(parse_search_limit("201").is_err());
+        assert!(parse_search_limit("99999999999999999999").is_err());
     }
 }
