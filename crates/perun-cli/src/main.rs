@@ -9,6 +9,7 @@ use std::path::Path;
 
 mod fetcher;
 mod sap;
+mod scaffold;
 mod store;
 
 fn main() {
@@ -170,7 +171,7 @@ fn run() -> i32 {
     }
     if args.len() < 2 {
         eprintln!(
-            "usage: perun run <image.dll> [--verbose] [--trace] [--trace-file F] [--no-teb]\n       perun info <image.dll>\n       perun mach info <macho>\n       perun sap [--mac AA:BB:CC:DD:EE:FF] [--sign HEX|--file F]\n       perun store <auth|search|purchase|download|list-purchases|list-versions|get-version-metadata> ...\n       ipatool aliases: perun auth login|info|revoke · perun search -t ... · perun purchase -i ...\n                        perun download -i ... · perun list-purchases · perun list-versions ..."
+            "usage: perun run <image.dll> [--verbose] [--trace] [--trace-file F] [--no-teb]\n       perun info <image.dll>\n       perun mach info <macho>\n       perun scaffold \"TRAP-line\" [...]\n       perun sap [--mac AA:BB:CC:DD:EE:FF] [--sign HEX|--file F]\n       perun store <auth|search|purchase|download|list-purchases|list-versions|get-version-metadata> ...\n       ipatool aliases: perun auth login|info|revoke · perun search -t ... · perun purchase -i ...\n                        perun download -i ... · perun list-purchases · perun list-versions ..."
         );
         return 2;
     }
@@ -180,6 +181,7 @@ fn run() -> i32 {
         "run" => cmd_run(&args[2..]),
         "call" => cmd_call(&args[2..]),
         "mach" => cmd_mach(&args[2..]),
+        "scaffold" => scaffold::run(&args[2..]),
         "sap" => cmd_sap(&args[2..]),
         "store" => store::cli::run(&args[2..]),
         // ipatool-compatible top-level aliases: same grammar, no "store".

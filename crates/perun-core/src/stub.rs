@@ -147,7 +147,8 @@ pub unsafe extern "win64" fn perun_trap_report(
         .to_string();
     eprintln!(
         "[perun] TRAP: {label}({arg0:#x}, {arg1:#x}, {arg2:#x}, {arg3:#x}) — \
-         no implementation (unresolved import; shim missing)"
+         no implementation (unresolved import; shim missing); scaffold a stub \
+         with: perun scaffold '{label}({arg0:#x}, {arg1:#x}, {arg2:#x}, {arg3:#x})'"
     );
     0
 }
@@ -296,7 +297,8 @@ pub unsafe extern "C" fn perun_trap_report_sysv(
         .unwrap_or_else(|| "<unknown>".to_string());
     eprintln!(
         "[perun] TRAP(sysv): {label}({arg0:#x}, {arg1:#x}, {arg2:#x}, {arg3:#x}) — \
-         no implementation"
+         no implementation; scaffold a stub \
+         with: perun scaffold '{label}({arg0:#x}, {arg1:#x}, {arg2:#x}, {arg3:#x})'"
     );
     // RBP-chain backtrace (a few frames), mapping guest images by range.
     let mut rbp = unsafe { get_rbp() };

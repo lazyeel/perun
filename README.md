@@ -99,12 +99,14 @@ cargo build --release -p perun-cli
 ./target/release/perun info   /path/to/CoreADI64.dll
 ./target/release/perun run    /path/to/CoreADI64.dll --verbose
 ./target/release/perun call   /path/to/CoreADI64.dll vdfut768ig 0 scratch --verbose
+# Turn an unresolved-import trap report into a ready-to-fill shim stub:
+./target/release/perun scaffold 'KERNEL32!FooBar(0x1, 0x0, 0x0, 0x0)'
 
 # Mach-O inspection:
 ./target/release/perun mach info /path/to/MachO.bin
 ```
 
-The `call` command accepts `--verbose` (image summary), `--patch=RVA=HEX` (in-memory code patch), `--poke=RVA=VALUE`, `--peek=RVA` and `--peek-ptr=RVA` (read guest memory / dereference and dump after the call) — the same inspection tooling the RESEARCH.md verification log (§ 6.7) runs on.
+The `call` command accepts `--verbose` (image summary), `--patch=RVA=HEX` (in-memory code patch), `--poke=RVA=VALUE`, `--peek=RVA` and `--peek-ptr=RVA` (read guest memory / dereference and dump after the call) — the same inspection tooling the RESEARCH.md verification log (§ 6.7) runs on. An unresolved import prints a `TRAP` line naming the missing symbol; `perun scaffold` turns that line — or the hint's quoted `DLL!func(args)` payload pasted back verbatim — into a compiling `win32_api!` skeleton with the observed arguments and the owning source-file hint.
 
 Building SAP binaries requires `curl` on PATH (the fetcher and the protocol shells out to it) and network access to Apple endpoints. A stable Rust toolchain (tested with 1.98) is enough; there is no unsafe external dependency — the whole runtime is pure Rust plus libc.
 
