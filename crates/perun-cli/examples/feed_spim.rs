@@ -139,6 +139,79 @@ fn fill_packet(p: *mut u8, first: u64, args: [u64; 5]) {
     }
 }
 
+/// Shared DP pair builder for split-arg models: returns
+/// ((ctx_addr, ctx_watches, ctx_blob), (packet_addr, packet_watches, _)).
+#[allow(clippy::type_complexity)]
+fn dp_pair(
+    opv: u64,
+) -> (
+    (u64, Vec<(*const u8, usize)>, Vec<u8>),
+    (u64, Vec<(*const u8, usize)>, Vec<u8>),
+) {
+    unsafe fn region(n: usize) -> *mut u8 {
+        let p = libc::mmap(
+            std::ptr::null_mut(),
+            n,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        );
+        if p == libc::MAP_FAILED {
+            eprintln!("region mmap failed");
+            std::process::exit(1);
+        }
+        std::ptr::write_bytes(p as *mut u8, 0, n);
+        p as *mut u8
+    }
+    unsafe {
+        let rpacket = region(0x48);
+        let rctx = region(0x10);
+        let rmid = region(256);
+        let rmidn = region(8);
+        let rotp = region(256);
+        let rotpn = region(8);
+        fill_packet(
+            rpacket,
+            opv,
+            [
+                0xFFFFFFFFFFFFFFFF,
+                rmid as u64,
+                rmidn as u64,
+                rotp as u64,
+                rotpn as u64,
+            ],
+        );
+        std::ptr::write_unaligned(rctx as *mut u64, rpacket as u64);
+        std::ptr::write_unaligned((rctx as *mut u32).add(2), 0);
+        std::ptr::write_unaligned((rctx as *mut u32).add(3), 0);
+        let cw = vec![];
+        let pw = vec![
+            (rmid as *const u8, 256),
+            (rmidn as *const u8, 8),
+            (rotp as *const u8, 256),
+            (rotpn as *const u8, 8),
+        ];
+        let cb = std::slice::from_raw_parts(rctx, 0x10).to_vec();
+        let pb = std::slice::from_raw_parts(rpacket, 0x48).to_vec();
+        ((rctx as u64, cw, cb), (rpacket as u64, pw, pb))
+    }
+}
+
+/// Flat 6-qword vdfut block (vovan2200's raw dump reread): no pad inside —
+/// the pad lives in sub_1d0120's wrapper. [opcode, dsid/value, mid, mid_len,
+/// otp, otp_len]. Opcode 1 = OTP per the dump.
+fn layout_flat(opcode: u64, dsid: u64, mid: u64, mid_len: u64, otp: u64, otp_len: u64) -> Vec<u8> {
+    let mut s = vec![0u8; 0x30];
+    w64(&mut s, 0x00, opcode);
+    w64(&mut s, 0x08, dsid);
+    w64(&mut s, 0x10, mid);
+    w64(&mut s, 0x18, mid_len);
+    w64(&mut s, 0x20, otp);
+    w64(&mut s, 0x28, otp_len);
+    s
+}
+
 fn hex(b: &[u8]) -> String {
     b.iter()
         .map(|x| format!("{x:02x}"))
@@ -171,13 +244,19 @@ fn real_main() -> i32 {
     };
     let mut hits = 0;
     let mut ran = 0;
-    for model in ["A1", "A2", "B", "BC", "INV", "DP", "DB"] {
+    for model in [
+        "A1", "A2", "B", "BC", "INV", "DP", "DB", "FLAT", "DP2", "DP3", "DF",
+    ] {
         let ops: Vec<u64> = match model {
             // INV sweeps command 0..10 at +0x10 (flags=0), plus flags=1
             // probes encoded as 100+cmd.
             "INV" => (0u64..11).chain([100, 101, 104]).collect(),
-            // DP/DB sweep the packet first-word (function selector?).
-            "DP" | "DB" => vec![0, 1, 2, 3, 4, 5, 0x632b8d6e, 0x85fe63b0],
+            // DP/DB/DP2/DP3/DF sweep the packet first-word.
+            "DP" | "DB" | "DP2" | "DP3" | "DF" => {
+                vec![0, 1, 2, 3, 4, 5, 0x632b8d6e, 0x85fe63b0]
+            }
+            // FLAT sweeps the block opcode.
+            "FLAT" => vec![0, 1, 2, 3, 4, 5],
             _ => (0u64..8).collect(),
         };
         for op in ops {
@@ -278,6 +357,8 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
     let rslots = unsafe { region(16) };
     // Extra watched regions (DP out-buffers); checked for guest writes.
     let mut watches: Vec<(*const u8, usize)> = Vec::new();
+    // Split-arg override: some models pass different structs in rcx vs rdx.
+    let mut split: Option<(u64, u64)> = None;
     let blob = match model {
         "A1" => layout_a1(dsid, opv, rsp as u64, spim.len() as u64, rcp as u64),
         "A2" => layout_a2(dsid, opv, rsp as u64, spim.len() as u64, rcp as u64),
@@ -318,6 +399,53 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
             watches.push((rotpn as *const u8, 8));
             unsafe { std::slice::from_raw_parts(rctx, 0x10).to_vec() }
         }
+        "DP2" => {
+            // Split args: rcx=ctx, rdx=packet.
+            let (ctx_b, pkt_b) = dp_pair(opv);
+            split = Some((ctx_b.0, pkt_b.0));
+            watches.extend(ctx_b.1);
+            watches.extend(pkt_b.1);
+            ctx_b.2
+        }
+        "DP3" => {
+            // Split args: rcx=packet, rdx=ctx.
+            let (ctx_b, pkt_b) = dp_pair(opv);
+            split = Some((pkt_b.0, ctx_b.0));
+            watches.extend(ctx_b.1);
+            watches.extend(pkt_b.1);
+            pkt_b.2
+        }
+        "DF" => {
+            // MainContext wrapping the flat block: rcx=ctx, rdx=block.
+            let rmid = unsafe { region(256) };
+            let rmidn = unsafe { region(8) };
+            let rotp = unsafe { region(256) };
+            let rotpn = unsafe { region(8) };
+            let blk = layout_flat(
+                opv,
+                0xFFFFFFFFFFFFFFFF,
+                rmid as u64,
+                rmidn as u64,
+                rotp as u64,
+                rotpn as u64,
+            );
+            let rblk = unsafe { region(0x30) };
+            unsafe {
+                std::ptr::copy_nonoverlapping(blk.as_ptr(), rblk, 0x30);
+            }
+            let rctx = unsafe { region(0x10) };
+            unsafe {
+                std::ptr::write_unaligned(rctx as *mut u64, rblk as u64);
+                std::ptr::write_unaligned((rctx as *mut u32).add(2), 0);
+                std::ptr::write_unaligned((rctx as *mut u32).add(3), 0);
+            }
+            watches.push((rmid as *const u8, 256));
+            watches.push((rmidn as *const u8, 8));
+            watches.push((rotp as *const u8, 256));
+            watches.push((rotpn as *const u8, 8));
+            split = Some((rctx as u64, rblk as u64));
+            unsafe { std::slice::from_raw_parts(rctx, 0x10).to_vec() }
+        }
         "DB" => {
             // Envelope around the packet: outer sizes + packet with
             // OTP-shaped args. Tests whether header validation wants BOTH.
@@ -342,6 +470,26 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
             watches.push((rotp as *const u8, 256));
             watches.push((rotpn as *const u8, 8));
             layout_b(rpacket as u64, 0)
+        }
+        "FLAT" => {
+            // Flat 6-qword block straight into the call args.
+            let rmid = unsafe { region(256) };
+            let rmidn = unsafe { region(8) };
+            let rotp = unsafe { region(256) };
+            let rotpn = unsafe { region(8) };
+            let blk = layout_flat(
+                opv,
+                0xFFFFFFFFFFFFFFFF,
+                rmid as u64,
+                rmidn as u64,
+                rotp as u64,
+                rotpn as u64,
+            );
+            watches.push((rmid as *const u8, 256));
+            watches.push((rmidn as *const u8, 8));
+            watches.push((rotp as *const u8, 256));
+            watches.push((rotpn as *const u8, 8));
+            blk
         }
         "INV" => {
             let (cmd, flags) = if opv >= 100 {
@@ -372,7 +520,10 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
     unsafe {
         std::ptr::copy_nonoverlapping(blob.as_ptr(), rstruct, blob.len());
     }
-    let r = unsafe { op(rstruct as u64, rstruct as u64, 0, 0) };
+    let r = match split {
+        Some((a0, a1)) => unsafe { op(a0, a1, 0, 0) },
+        None => unsafe { op(rstruct as u64, rstruct as u64, 0, 0) },
+    };
     let scpim = unsafe { std::slice::from_raw_parts(rcp as *const u8, CPIM_CAP) };
     let sslots = unsafe { std::slice::from_raw_parts(rslots as *const u8, 16) };
     let wrote = scpim.iter().any(|&b| b != 0)
