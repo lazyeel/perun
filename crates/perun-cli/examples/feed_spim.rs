@@ -90,7 +90,7 @@ fn real_main() -> i32 {
     };
     let mut hits = 0;
     let mut ran = 0;
-    for model in ["A1", "A2", "B"] {
+    for model in ["A1", "A2", "B", "BC"] {
         for op in 0u64..8 {
             ran += 1;
             let out = std::process::Command::new(&exe)
@@ -155,6 +155,14 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
         }
     };
     let op: ExportFn = unsafe { std::mem::transmute(op_ptr) };
+    let init_ptr = match image.get_export_by_name("cvu8io98wun") {
+        Some(p) => p,
+        None => {
+            eprintln!("no init export");
+            return 1;
+        }
+    };
+    let init: ExportFn = unsafe { std::mem::transmute(init_ptr) };
 
     unsafe fn region(n: usize) -> *mut u8 {
         let p = libc::mmap(
@@ -181,6 +189,13 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
     let blob = match model {
         "A1" => layout_a1(dsid, opv, rsp as u64, spim.len() as u64, rcp as u64),
         "A2" => layout_a2(dsid, opv, rsp as u64, spim.len() as u64, rcp as u64),
+        "BC" => {
+            // cvu-init the inner region first (writes [+0]=0x2000000001,
+            // [+8]=0), then wrap the INITIALIZED bytes in the envelope.
+            let rc = unsafe { init(rinner as u64, rinner as u64, 0, 0) };
+            eprintln!("[feed] BC init rc={rc:#x}");
+            layout_b(rinner as u64, opv)
+        }
         _ => {
             let inner = layout_a1(dsid, opv, rsp as u64, spim.len() as u64, rcp as u64);
             unsafe {
