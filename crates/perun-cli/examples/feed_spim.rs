@@ -58,6 +58,53 @@ fn layout_b(inner: u64, op: u64) -> Vec<u8> {
     s
 }
 
+/// Blackwood-envelope hypothesis as honest repr(C): 32-bit sizes, command at
+/// +0x10, flags at +0x14. The u32-vs-u64 width is NOT independently provable
+/// offline (the session gate masks every discriminator), so the unit tests
+/// below pin the COMPILED offsets against this spec instead — if rustc
+/// disagrees, the tests fail and the spec, not the code, is wrong.
+#[repr(C)]
+struct AdiInvocation {
+    args: u64,
+    input_size: u32,
+    output_size: u32,
+    command: u32,
+    flags: u32,
+}
+
+/// Hypothetical startProvisioning inner block (same honesty rule).
+#[repr(C)]
+struct InnerStartProv {
+    dsid: u64,
+    spim_ptr: u64,
+    spim_len: u32,
+    _pad: u32,
+    session_out: u64,
+    cpim_out: u64,
+    cpim_len_out: u64,
+}
+
+fn layout_inv(inner: u64, cmd: u32, flags: u32) -> Vec<u8> {
+    let mut s = vec![0u8; 0x18];
+    w64(&mut s, 0x00, inner);
+    w32(&mut s, 0x08, 347);
+    w32(&mut s, 0x0C, CPIM_CAP as u32);
+    w32(&mut s, 0x10, cmd);
+    w32(&mut s, 0x14, flags);
+    s
+}
+
+fn layout_inner(dsid: u64, spim: u64, session_slot: u64, cpim: u64, len_slot: u64) -> Vec<u8> {
+    let mut s = vec![0u8; 0x30];
+    w64(&mut s, 0x00, dsid);
+    w64(&mut s, 0x08, spim);
+    w32(&mut s, 0x10, 347);
+    w64(&mut s, 0x18, session_slot);
+    w64(&mut s, 0x20, cpim);
+    w64(&mut s, 0x28, len_slot);
+    s
+}
+
 fn hex(b: &[u8]) -> String {
     b.iter()
         .map(|x| format!("{x:02x}"))
@@ -90,8 +137,14 @@ fn real_main() -> i32 {
     };
     let mut hits = 0;
     let mut ran = 0;
-    for model in ["A1", "A2", "B", "BC"] {
-        for op in 0u64..8 {
+    for model in ["A1", "A2", "B", "BC", "INV"] {
+        let ops: Vec<u64> = match model {
+            // INV sweeps command 0..10 at +0x10 (flags=0), plus flags=1
+            // probes encoded as 100+cmd.
+            "INV" => (0u64..11).chain([100, 101, 104]).collect(),
+            _ => (0u64..8).collect(),
+        };
+        for op in ops {
             ran += 1;
             let out = std::process::Command::new(&exe)
                 .args([&args[0], &args[1], &dsid, model, &op.to_string()])
@@ -186,6 +239,7 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
     let rcp = unsafe { region(CPIM_CAP) };
     let rstruct = unsafe { region(0x1000) };
     let rinner = unsafe { region(0x1000) };
+    let rslots = unsafe { region(16) };
     let blob = match model {
         "A1" => layout_a1(dsid, opv, rsp as u64, spim.len() as u64, rcp as u64),
         "A2" => layout_a2(dsid, opv, rsp as u64, spim.len() as u64, rcp as u64),
@@ -195,6 +249,24 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
             let rc = unsafe { init(rinner as u64, rinner as u64, 0, 0) };
             eprintln!("[feed] BC init rc={rc:#x}");
             layout_b(rinner as u64, opv)
+        }
+        "INV" => {
+            let (cmd, flags) = if opv >= 100 {
+                ((opv - 100) as u32, 1)
+            } else {
+                (opv as u32, 0)
+            };
+            let inner = layout_inner(
+                dsid,
+                rsp as u64,
+                rslots as u64,
+                rcp as u64,
+                (rslots as u64) + 8,
+            );
+            unsafe {
+                std::ptr::copy_nonoverlapping(inner.as_ptr(), rinner, inner.len());
+            }
+            layout_inv(rinner as u64, cmd, flags)
         }
         _ => {
             let inner = layout_a1(dsid, opv, rsp as u64, spim.len() as u64, rcp as u64);
@@ -209,7 +281,8 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
     }
     let r = unsafe { op(rstruct as u64, rstruct as u64, 0, 0) };
     let scpim = unsafe { std::slice::from_raw_parts(rcp as *const u8, CPIM_CAP) };
-    let wrote = scpim.iter().any(|&b| b != 0);
+    let sslots = unsafe { std::slice::from_raw_parts(rslots as *const u8, 16) };
+    let wrote = scpim.iter().any(|&b| b != 0) || sslots.iter().any(|&b| b != 0);
     if !KNOWN.contains(&r) || wrote {
         print!("HIT {model} op={opv} -> {r:#x} ({r}) cpim_wrote={wrote}");
         if wrote {
@@ -254,5 +327,35 @@ mod tests {
         assert_eq!(r64(&s, 0x08), 347);
         assert_eq!(r64(&s, 0x10), CPIM_CAP as u64);
         assert_eq!(r64(&s, 0x18), 4);
+    }
+
+    #[test]
+    fn repr_c_matches_spec() {
+        use std::mem::offset_of;
+        assert_eq!(offset_of!(AdiInvocation, args), 0x00);
+        assert_eq!(offset_of!(AdiInvocation, input_size), 0x08);
+        assert_eq!(offset_of!(AdiInvocation, output_size), 0x0C);
+        assert_eq!(offset_of!(AdiInvocation, command), 0x10);
+        assert_eq!(offset_of!(AdiInvocation, flags), 0x14);
+        assert_eq!(offset_of!(InnerStartProv, dsid), 0x00);
+        assert_eq!(offset_of!(InnerStartProv, spim_ptr), 0x08);
+        assert_eq!(offset_of!(InnerStartProv, spim_len), 0x10);
+        assert_eq!(offset_of!(InnerStartProv, session_out), 0x18);
+        assert_eq!(offset_of!(InnerStartProv, cpim_out), 0x20);
+        assert_eq!(offset_of!(InnerStartProv, cpim_len_out), 0x28);
+        // builders emit exactly what the structs declare
+        let inv = layout_inv(0x1111, 7, 1);
+        assert_eq!(r64(&inv, 0x00), 0x1111);
+        assert_eq!(u32::from_le_bytes(inv[0x08..0x0C].try_into().unwrap()), 347);
+        assert_eq!(u32::from_le_bytes(inv[0x10..0x14].try_into().unwrap()), 7);
+        assert_eq!(u32::from_le_bytes(inv[0x14..0x18].try_into().unwrap()), 1);
+        let inner = layout_inner(0xAABB, 0x1000, 0x2000, 0x3000, 0x4000);
+        assert_eq!(r64(&inner, 0x00), 0xAABB);
+        assert_eq!(r64(&inner, 0x08), 0x1000);
+        assert_eq!(
+            u32::from_le_bytes(inner[0x10..0x14].try_into().unwrap()),
+            347
+        );
+        assert_eq!(r64(&inner, 0x18), 0x2000);
     }
 }
