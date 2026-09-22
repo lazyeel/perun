@@ -102,11 +102,13 @@ fn real_main() -> i32 {
     let mut init_exp = "cvu8io98wun".to_string();
     let mut op_exp = "vdfut768ig".to_string();
     let mut skip_init = false;
+    let mut twice = false;
     let mut dll: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--skip-init" => skip_init = true,
+            "--twice" => twice = true,
             "--init" => init_exp = it.next().cloned().unwrap_or_default(),
             "--op" => op_exp = it.next().cloned().unwrap_or_default(),
             s if s.starts_with('-') => {
@@ -235,6 +237,18 @@ fn real_main() -> i32 {
 
     let head = unsafe { std::slice::from_raw_parts(scratch as *const u8, 32) };
     println!("[chain] scratch[0..32] = {}", hex(head));
+    if twice {
+        // Second op call in the warmed process: does accumulated .data/heap
+        // state change the answer?
+        let before = snap();
+        let r = unsafe { g(scratch, scratch, 0, 0) };
+        println!("[chain] {op_exp} 2nd call returned {r:#x} ({r})");
+        report_diff(
+            &format!("{op_exp} 2nd (rc={r:#x})"),
+            data_rva,
+            &diff_snaps(&before, &snap()),
+        );
+    }
     0
 }
 

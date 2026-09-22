@@ -84,6 +84,29 @@ struct InnerStartProv {
     cpim_len_out: u64,
 }
 
+/// vovan2200's DataPacket (Android lane, OTP-shaped): 32-byte header
+/// (first int32 + 7 pad) then five pointer-or-value arg slots.
+#[repr(C)]
+#[allow(dead_code)]
+struct DataPacket {
+    first: u32,
+    pad: [u32; 7],
+    arg1: u64,
+    arg2: u64,
+    arg3: u64,
+    arg4: u64,
+    arg5: u64,
+}
+
+/// MainContext wraps the packet plus result/crc words.
+#[repr(C)]
+#[allow(dead_code)]
+struct MainContext {
+    packet: u64,
+    res: i32,
+    crc: u32,
+}
+
 fn layout_inv(inner: u64, cmd: u32, flags: u32) -> Vec<u8> {
     let mut s = vec![0u8; 0x18];
     w64(&mut s, 0x00, inner);
@@ -103,6 +126,17 @@ fn layout_inner(dsid: u64, spim: u64, session_slot: u64, cpim: u64, len_slot: u6
     w64(&mut s, 0x20, cpim);
     w64(&mut s, 0x28, len_slot);
     s
+}
+
+/// Build a DataPacket region in place: first qword, five arg slots.
+fn fill_packet(p: *mut u8, first: u64, args: [u64; 5]) {
+    unsafe {
+        std::ptr::write_bytes(p, 0, 0x48);
+        std::ptr::write_unaligned(p as *mut u64, first);
+        for (i, a) in args.iter().enumerate() {
+            std::ptr::write_unaligned((p as *mut u64).add(4 + i), *a);
+        }
+    }
 }
 
 fn hex(b: &[u8]) -> String {
@@ -137,11 +171,13 @@ fn real_main() -> i32 {
     };
     let mut hits = 0;
     let mut ran = 0;
-    for model in ["A1", "A2", "B", "BC", "INV"] {
+    for model in ["A1", "A2", "B", "BC", "INV", "DP", "DB"] {
         let ops: Vec<u64> = match model {
             // INV sweeps command 0..10 at +0x10 (flags=0), plus flags=1
             // probes encoded as 100+cmd.
             "INV" => (0u64..11).chain([100, 101, 104]).collect(),
+            // DP/DB sweep the packet first-word (function selector?).
+            "DP" | "DB" => vec![0, 1, 2, 3, 4, 5, 0x632b8d6e, 0x85fe63b0],
             _ => (0u64..8).collect(),
         };
         for op in ops {
@@ -240,6 +276,8 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
     let rstruct = unsafe { region(0x1000) };
     let rinner = unsafe { region(0x1000) };
     let rslots = unsafe { region(16) };
+    // Extra watched regions (DP out-buffers); checked for guest writes.
+    let mut watches: Vec<(*const u8, usize)> = Vec::new();
     let blob = match model {
         "A1" => layout_a1(dsid, opv, rsp as u64, spim.len() as u64, rcp as u64),
         "A2" => layout_a2(dsid, opv, rsp as u64, spim.len() as u64, rcp as u64),
@@ -249,6 +287,61 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
             let rc = unsafe { init(rinner as u64, rinner as u64, 0, 0) };
             eprintln!("[feed] BC init rc={rc:#x}");
             layout_b(rinner as u64, opv)
+        }
+        "DP" => {
+            // vovan2200's packet: OTP-shaped args, first-word sweep.
+            let rpacket = unsafe { region(0x48) };
+            let rctx = unsafe { region(0x10) };
+            let rmid = unsafe { region(256) };
+            let rmidn = unsafe { region(8) };
+            let rotp = unsafe { region(256) };
+            let rotpn = unsafe { region(8) };
+            fill_packet(
+                rpacket,
+                opv,
+                [
+                    0xFFFFFFFFFFFFFFFF,
+                    rmid as u64,
+                    rmidn as u64,
+                    rotp as u64,
+                    rotpn as u64,
+                ],
+            );
+            unsafe {
+                std::ptr::write_unaligned(rctx as *mut u64, rpacket as u64);
+                std::ptr::write_unaligned((rctx as *mut u32).add(2), 0);
+                std::ptr::write_unaligned((rctx as *mut u32).add(3), 0);
+            }
+            watches.push((rmid as *const u8, 256));
+            watches.push((rmidn as *const u8, 8));
+            watches.push((rotp as *const u8, 256));
+            watches.push((rotpn as *const u8, 8));
+            unsafe { std::slice::from_raw_parts(rctx, 0x10).to_vec() }
+        }
+        "DB" => {
+            // Envelope around the packet: outer sizes + packet with
+            // OTP-shaped args. Tests whether header validation wants BOTH.
+            let rpacket = unsafe { region(0x48) };
+            let rmid = unsafe { region(256) };
+            let rmidn = unsafe { region(8) };
+            let rotp = unsafe { region(256) };
+            let rotpn = unsafe { region(8) };
+            fill_packet(
+                rpacket,
+                opv,
+                [
+                    0xFFFFFFFFFFFFFFFF,
+                    rmid as u64,
+                    rmidn as u64,
+                    rotp as u64,
+                    rotpn as u64,
+                ],
+            );
+            watches.push((rmid as *const u8, 256));
+            watches.push((rmidn as *const u8, 8));
+            watches.push((rotp as *const u8, 256));
+            watches.push((rotpn as *const u8, 8));
+            layout_b(rpacket as u64, 0)
         }
         "INV" => {
             let (cmd, flags) = if opv >= 100 {
@@ -282,7 +375,11 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
     let r = unsafe { op(rstruct as u64, rstruct as u64, 0, 0) };
     let scpim = unsafe { std::slice::from_raw_parts(rcp as *const u8, CPIM_CAP) };
     let sslots = unsafe { std::slice::from_raw_parts(rslots as *const u8, 16) };
-    let wrote = scpim.iter().any(|&b| b != 0) || sslots.iter().any(|&b| b != 0);
+    let wrote = scpim.iter().any(|&b| b != 0)
+        || sslots.iter().any(|&b| b != 0)
+        || watches
+            .iter()
+            .any(|(p, n)| unsafe { std::slice::from_raw_parts(*p, *n).iter().any(|&b| b != 0) });
     if !KNOWN.contains(&r) || wrote {
         print!("HIT {model} op={opv} -> {r:#x} ({r}) cpim_wrote={wrote}");
         if wrote {
@@ -357,5 +454,18 @@ mod tests {
             347
         );
         assert_eq!(r64(&inner, 0x18), 0x2000);
+    }
+
+    #[test]
+    fn packet_struct_matches_spec() {
+        use std::mem::offset_of;
+        assert_eq!(offset_of!(DataPacket, first), 0x00);
+        assert_eq!(offset_of!(DataPacket, arg1), 0x20);
+        assert_eq!(offset_of!(DataPacket, arg5), 0x40);
+        assert_eq!(offset_of!(MainContext, packet), 0x00);
+        assert_eq!(offset_of!(MainContext, res), 0x08);
+        assert_eq!(offset_of!(MainContext, crc), 0x0C);
+        assert_eq!(std::mem::size_of::<DataPacket>(), 0x48);
+        assert_eq!(std::mem::size_of::<MainContext>(), 0x10);
     }
 }
