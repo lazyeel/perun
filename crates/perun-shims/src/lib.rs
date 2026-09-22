@@ -24,6 +24,7 @@
 pub mod files;
 pub mod files_enum;
 pub mod mach;
+pub mod machine_id;
 pub mod memory;
 pub mod process;
 pub mod registry;
