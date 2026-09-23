@@ -184,6 +184,7 @@ fn run() -> i32 {
         "scaffold" => scaffold::run(&args[2..]),
         "sap" => cmd_sap(&args[2..]),
         "store" => store::cli::run(&args[2..]),
+        "seq" => cmd_seq(&args[2..]),
         // ipatool-compatible top-level aliases: same grammar, no "store".
         "auth" => store::cli::run(&args[1..]),
         "search" => store::cli::run(&args[1..]),
@@ -345,7 +346,7 @@ fn cmd_run(args: &[String]) -> i32 {
 fn cmd_call(args: &[String]) -> i32 {
     if args.len() < 2 {
         eprintln!(
-            "usage: perun call <image.dll> <export> [arg0 arg1 arg2 arg3] [--verbose] [--patch=RVA=HEX] [--poke=RVA=VAL] [--peek=RVA] [--peek-ptr=RVA]"
+            "usage: perun call <image.dll> <export> [arg0 arg1 arg2 arg3] [--verbose] [--load=NAME=FILE] [--patch=RVA=HEX] [--poke=RVA=VAL] [--poke-ptr=RVA=VAL] [--peek=RVA] [--peek-ptr=RVA]   (PERUN_SEQ=N repeats the call in-process)"
         );
         return 2;
     }
@@ -447,6 +448,13 @@ fn cmd_call(args: &[String]) -> i32 {
     }
     unsafe { std::ptr::write_bytes(ctx as *mut u8, 0, ctx_size) };
 
+    // --load=NAME=FILE: read a file into a fresh guest-visible buffer and
+    // register NAME as a token resolving to its address. This is how real
+    // server material (e.g. a GrandSlam `spim` blob) gets handed to the
+    // dispatcher's param struct, mirroring what the Android ADI engine feeds
+    // ADIProvisioningStart.
+    let mut loads: Vec<(String, u64, usize)> = Vec::new(); // (name, addr, len)
+
     // Parse up to 4 positional args. The token "scratch" resolves to the clean
     // scratch page address, so callers can hand the guest a zeroed parameter
     // block. Options of the form --poke RVA=VALUE write a qword into guest
@@ -462,6 +470,8 @@ fn cmd_call(args: &[String]) -> i32 {
     // --peek-ptr=RVA[,RVA...]: dereference guest RVA as host pointer, dump object
     let mut peek_ptrs: Vec<String> = Vec::new();
     let mut ai = 0usize;
+    // Positional args are collected first, resolved after all options.
+    let mut positional: Vec<String> = Vec::new();
     let resolve = |tok: &str| -> Option<u64> {
         match tok {
             "scratch" => Some(scratch as u64),
@@ -469,9 +479,43 @@ fn cmd_call(args: &[String]) -> i32 {
             _ => parse_num(tok),
         }
     };
+    // --poke specs are stored raw and resolved after the loop so values can
+    // reference loaded buffers by name regardless of CLI order.
+    // (kind, target, value_string)
+    let mut poke_specs: Vec<(u8, u64, String)> = Vec::new();
+    let mut poke_ptr_specs: Vec<(u64, String)> = Vec::new();
     // The positional stream (with --verbose already filtered out) drives both
     // the argument slots and the --patch/--poke/--peek option parsing below.
     for a in pos[2..].iter() {
+        if let Some(spec) = a.strip_prefix("--load=") {
+            let (name, path) = spec.split_once('=').unwrap_or((spec, ""));
+            let data = match std::fs::read(path) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("error: --load {path:?}: {e}");
+                    std::process::exit(2);
+                }
+            };
+            let len = data.len();
+            let buf = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    len.max(1),
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            if buf == libc::MAP_FAILED {
+                eprintln!("error: --load mmap failed");
+                std::process::exit(2);
+            }
+            unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), buf as *mut u8, len) };
+            println!("[perun] load {name:?} <- {path} ({len} bytes @ {buf:p})");
+            loads.push((name.to_string(), buf as u64, len));
+            continue;
+        }
         if let Some(spec) = a.strip_prefix("--patch=") {
             let (rva_s, hex_s) = spec.split_once('=').unwrap_or((spec, ""));
             let rva = parse_num(rva_s).unwrap_or_else(|| {
@@ -500,28 +544,24 @@ fn cmd_call(args: &[String]) -> i32 {
         }
         if let Some(spec) = a.strip_prefix("--poke=") {
             let (tgt_s, val_s) = spec.split_once('=').unwrap_or((spec, ""));
-            let val = resolve(val_s).unwrap_or_else(|| {
-                eprintln!("error: bad --poke value {val_s:?}");
-                std::process::exit(2);
-            });
             if let Some(off_s) = tgt_s.strip_prefix("ctx+") {
                 let off = parse_num(off_s).unwrap_or_else(|| {
                     eprintln!("error: bad ctx offset {off_s:?}");
                     std::process::exit(2);
                 });
-                pokes.push((1, off, val));
+                poke_specs.push((1, off, val_s.to_string()));
             } else if let Some(off_s) = tgt_s.strip_prefix("scratch+") {
                 let off = parse_num(off_s).unwrap_or_else(|| {
                     eprintln!("error: bad scratch offset {off_s:?}");
                     std::process::exit(2);
                 });
-                pokes.push((2, off, val));
+                poke_specs.push((2, off, val_s.to_string()));
             } else {
                 let rva = parse_num(tgt_s).unwrap_or_else(|| {
                     eprintln!("error: bad --poke rva {tgt_s:?}");
                     std::process::exit(2);
                 });
-                pokes.push((0, rva, val));
+                poke_specs.push((0, rva, val_s.to_string()));
             }
             continue;
         }
@@ -534,23 +574,65 @@ fn cmd_call(args: &[String]) -> i32 {
                 eprintln!("error: bad --poke-ptr rva {rva_s:?}");
                 std::process::exit(2);
             });
-            let val = resolve(val_s).unwrap_or_else(|| {
-                eprintln!("error: bad --poke-ptr value {val_s:?}");
-                std::process::exit(2);
-            });
-            let slot = (image.base() as u64).wrapping_add(rva) as *const u64;
-            let target = unsafe { std::ptr::read(slot) };
-            unsafe { std::ptr::write(target as *mut u64, val) };
-            println!("[perun] poke-ptr [RVA {rva:#x}] -> {target:#x} := {val:#x}");
+            poke_ptr_specs.push((rva, val_s.to_string()));
             continue;
         }
         if ai < 4 {
-            argv[ai] = resolve(a).unwrap_or_else(|| {
-                eprintln!("error: bad argument {a:?}");
-                std::process::exit(2);
-            });
-            ai += 1;
+            positional.push(a.clone());
         }
+    }
+
+    // Resolve positional args after all options so --load/--poke/--patch are
+    // registered first regardless of CLI order.
+    for a in positional.iter() {
+        if ai >= 4 {
+            break;
+        }
+        // Loaded buffers are addressable by name (e.g. "spim").
+        let loaded = loads
+            .iter()
+            .find(|(n, _, _)| n == a)
+            .map(|(_, addr, _)| *addr);
+        argv[ai] = loaded.or_else(|| resolve(a)).unwrap_or_else(|| {
+            eprintln!("error: bad argument {a:?}");
+            std::process::exit(2);
+        });
+        ai += 1;
+    }
+
+    // Resolve deferred poke values now that all --load buffers are registered.
+    // A value may be a loaded buffer name, scratch/ctx (optionally +OFF), or a
+    // number.
+    let resolve_val = |s: &str| -> Option<u64> {
+        if let Some((_, addr, _)) = loads.iter().find(|(n, _, _)| n == s) {
+            return Some(*addr);
+        }
+        if let Some(off_s) = s.strip_prefix("ctx+") {
+            let off = parse_num(off_s)?;
+            return Some((ctx as u64).wrapping_add(off));
+        }
+        if let Some(off_s) = s.strip_prefix("scratch+") {
+            let off = parse_num(off_s)?;
+            return Some((scratch as u64).wrapping_add(off));
+        }
+        resolve(s)
+    };
+    for (kind, tgt, val_s) in &poke_specs {
+        let val = resolve_val(val_s).unwrap_or_else(|| {
+            eprintln!("error: bad --poke value {val_s:?}");
+            std::process::exit(2);
+        });
+        pokes.push((*kind, *tgt, val));
+    }
+    for (rva, val_s) in &poke_ptr_specs {
+        let val = resolve_val(val_s).unwrap_or_else(|| {
+            eprintln!("error: bad --poke-ptr value {val_s:?}");
+            std::process::exit(2);
+        });
+        let slot = (image.base() as u64).wrapping_add(*rva) as *const u64;
+        let target = unsafe { std::ptr::read(slot) };
+        unsafe { std::ptr::write(target as *mut u64, val) };
+        println!("[perun] poke-ptr [RVA {rva:#x}] -> {target:#x} := {val:#x}");
     }
 
     // Apply pokes. kind 0 -> guest memory (image.base + rva); kind 1 -> ctx
@@ -598,12 +680,23 @@ fn cmd_call(args: &[String]) -> i32 {
 
     type ExportFn = unsafe extern "win64" fn(u64, u64, u64, u64) -> u64;
     let f: ExportFn = unsafe { std::mem::transmute(export_ptr) };
-    println!(
-        "[perun] calling {export_name}({:#x}, {:#x}, {:#x}, {:#x})...",
-        argv[0], argv[1], argv[2], argv[3]
-    );
-    let r = unsafe { f(argv[0], argv[1], argv[2], argv[3]) };
-    println!("[perun] {export_name} returned {r:#x} ({r})");
+
+    // PERUN_SEQ=N: repeat the call N times in the SAME process so gate state set
+    // by an earlier call carries into later ones (Android provisioning is a
+    // sequence of calls in one process; the Windows dispatcher folds them in).
+    let seq_n: usize = std::env::var("PERUN_SEQ")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+
+    for iter in 0..seq_n {
+        println!(
+            "[perun] call#{iter} {export_name}({:#x}, {:#x}, {:#x}, {:#x})...",
+            argv[0], argv[1], argv[2], argv[3]
+        );
+        let r = unsafe { f(argv[0], argv[1], argv[2], argv[3]) };
+        println!("[perun] call#{iter} {export_name} returned {r:#x} ({r})");
+    }
 
     // --peek=RVA[,RVA...]: read qwords from guest memory after the call so the
     // caller can watch globals (e.g. the provisioning gate) for writes.
@@ -646,10 +739,20 @@ fn cmd_call(args: &[String]) -> i32 {
         }
     }
 
-    // Dump the scratch page head in case the guest wrote output there.
-    let head = unsafe { std::slice::from_raw_parts(scratch as *const u8, 64) };
-    if head.iter().any(|&b| b != 0) {
-        println!("[perun] scratch[0..64] = {}", hexdump(head));
+    // Dump every non-zero qword in the scratch page with its offset, so the
+    // caller can see exactly which output fields the dispatcher wrote.
+    {
+        let page = unsafe { std::slice::from_raw_parts(scratch as *const u64, 0x1000 / 8) };
+        let mut any = false;
+        for (i, &q) in page.iter().enumerate() {
+            if q != 0 {
+                println!("[perun] scratch[{:#x}] = {q:#x}", i * 8);
+                any = true;
+            }
+        }
+        if !any {
+            println!("[perun] scratch: all zero (no output written)");
+        }
     }
 
     // Dump memory behind any argument that looks like a readable pointer, so
@@ -668,6 +771,297 @@ fn cmd_call(args: &[String]) -> i32 {
             }
         }
     }
+    0
+}
+
+/// Resolve a token to a guest-visible address: loaded buffer name, scratch/ctx
+/// (optionally +OFF), or a plain number.
+fn resolve_token(tok: &str, scratch: u64, ctx: u64, loads: &[(String, u64, usize)]) -> Option<u64> {
+    if let Some((_, addr, _)) = loads.iter().find(|(n, _, _)| n == tok) {
+        return Some(*addr);
+    }
+    if let Some(off_s) = tok.strip_prefix("ctx+") {
+        let off = parse_num(off_s)?;
+        return Some(ctx.wrapping_add(off));
+    }
+    if let Some(off_s) = tok.strip_prefix("scratch+") {
+        let off = parse_num(off_s)?;
+        return Some(scratch.wrapping_add(off));
+    }
+    match tok {
+        "scratch" => Some(scratch),
+        "ctx" => Some(ctx),
+        _ => parse_num(tok),
+    }
+}
+
+/// `perun seq <image.dll> <export> --script=FILE`
+///
+/// Load the image once, run DllMain once, then drive a SCRIPT of export calls
+/// in the SAME process so guest state carries across calls. This mirrors how a
+/// real host (iTunes on Windows, the ADI engine on Android) drives the ADI
+/// provisioning sequence: SetProvisioningPath -> SetAndroidID -> GetLoginCode
+/// -> ProvisioningStart -> ProvisioningEnd, all folded into dispatcher command
+/// codes on the Windows DLL.
+///
+/// Script lines (whitespace-separated, `#` starts a comment):
+///   load NAME FILE          read FILE into a named guest buffer
+///   poke TARGET VALUE       write a qword; TARGET = scratch+OFF | ctx+OFF | RVA
+///   call A0 A1 A2 A3        call the export; args are tokens (see resolve_token)
+///   zero scratch|ctx        clear the region
+///   dump                    print non-zero qwords of scratch and ctx
+fn cmd_seq(args: &[String]) -> i32 {
+    if args.len() < 3 {
+        eprintln!("usage: perun seq <image.dll> <export> --script=FILE");
+        return 2;
+    }
+    let path = &args[0];
+    let export_name = &args[1];
+    let mut script_path: Option<String> = None;
+    for a in args[2..].iter() {
+        if let Some(p) = a.strip_prefix("--script=") {
+            script_path = Some(p.to_string());
+        }
+    }
+    let script_path = match script_path {
+        Some(p) => p,
+        None => {
+            eprintln!("error: --script=FILE required");
+            return 2;
+        }
+    };
+
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: read {path}: {e}");
+            return 1;
+        }
+    };
+    let mut table = ShimTable::collect();
+    let image = match Image::load(&bytes, &mut table) {
+        Ok(img) => img,
+        Err(e) => {
+            eprintln!("error: {e:?}");
+            return 1;
+        }
+    };
+    unsafe { perun_core::teb::init_thread_teb(image.base() as u64) };
+    let dll_main = match unsafe { image.entry_dll_main() } {
+        Some(f) => f,
+        None => {
+            eprintln!("error: image has no entry point");
+            return 1;
+        }
+    };
+    let ret = unsafe { dll_main(image.base(), DLL_PROCESS_ATTACH, std::ptr::null_mut()) };
+    if ret == 0 {
+        eprintln!("error: DllMain returned FALSE");
+        return 3;
+    }
+    println!("[perun] DllMain TRUE; shim table {} APIs", table.len());
+    let export_ptr = match image.get_export_by_name(export_name) {
+        Some(p) => p,
+        None => {
+            eprintln!("error: export {export_name:?} not found");
+            return 1;
+        }
+    };
+    println!("[perun] export {export_name} @ {:#x}", export_ptr as usize);
+
+    let scratch = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            0x1000,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if scratch == libc::MAP_FAILED {
+        eprintln!("error: scratch mmap failed");
+        return 1;
+    }
+    unsafe { std::ptr::write_bytes(scratch as *mut u8, 0, 0x1000) };
+    let ctx_size = 0x10000usize;
+    let ctx = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            ctx_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if ctx == libc::MAP_FAILED {
+        eprintln!("error: ctx mmap failed");
+        return 1;
+    }
+    unsafe { std::ptr::write_bytes(ctx as *mut u8, 0, ctx_size) };
+
+    // Each `call` step re-resolves the export by name, so the default export
+    // resolved above is only the fallback for scripts that never name one.
+    let mut loads: Vec<(String, u64, usize)> = Vec::new();
+    let script = match std::fs::read_to_string(&script_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: read script {script_path}: {e}");
+            return 1;
+        }
+    };
+
+    let dump_region = |name: &str, base: u64, nq: usize| {
+        let page = unsafe { std::slice::from_raw_parts(base as *const u64, nq) };
+        let mut any = false;
+        for (i, &q) in page.iter().enumerate() {
+            if q != 0 {
+                println!("[perun] {name}[{:#x}] = {q:#x}", i * 8);
+                any = true;
+            }
+        }
+        if !any {
+            println!("[perun] {name}: all zero");
+        }
+    };
+
+    let mut step = 0usize;
+    for raw in script.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        step += 1;
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        match toks[0] {
+            "load" => {
+                if toks.len() < 3 {
+                    eprintln!("[seq] step {step}: load NAME FILE");
+                    return 2;
+                }
+                let data = match std::fs::read(toks[2]) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        eprintln!("[seq] step {step}: load {}: {e}", toks[2]);
+                        return 1;
+                    }
+                };
+                let len = data.len();
+                let buf = unsafe {
+                    libc::mmap(
+                        std::ptr::null_mut(),
+                        len.max(1),
+                        libc::PROT_READ | libc::PROT_WRITE,
+                        libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                        -1,
+                        0,
+                    )
+                };
+                if buf == libc::MAP_FAILED {
+                    eprintln!("[seq] step {step}: load mmap failed");
+                    return 1;
+                }
+                unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), buf as *mut u8, len) };
+                println!(
+                    "[seq] step {step}: load {:?} <- {} ({len} bytes @ {buf:p})",
+                    toks[1], toks[2]
+                );
+                loads.push((toks[1].to_string(), buf as u64, len));
+            }
+            "poke" => {
+                if toks.len() < 3 {
+                    eprintln!("[seq] step {step}: poke TARGET VALUE");
+                    return 2;
+                }
+                let tgt = toks[1];
+                let val = match resolve_token(toks[2], scratch as u64, ctx as u64, &loads) {
+                    Some(v) => v,
+                    None => {
+                        eprintln!("[seq] step {step}: bad poke value {:?}", toks[2]);
+                        return 2;
+                    }
+                };
+                let (dst, label) = if let Some(off_s) = tgt.strip_prefix("scratch+") {
+                    let off = parse_num(off_s).unwrap();
+                    (
+                        (scratch as u64).wrapping_add(off),
+                        format!("scratch[{off:#x}]"),
+                    )
+                } else if let Some(off_s) = tgt.strip_prefix("ctx+") {
+                    let off = parse_num(off_s).unwrap();
+                    ((ctx as u64).wrapping_add(off), format!("ctx[{off:#x}]"))
+                } else {
+                    let rva = parse_num(tgt).unwrap_or_else(|| {
+                        eprintln!("[seq] step {step}: bad poke target {tgt:?}");
+                        std::process::exit(2);
+                    });
+                    (
+                        (image.base() as u64).wrapping_add(rva),
+                        format!("RVA[{rva:#x}]"),
+                    )
+                };
+                unsafe { std::ptr::write(dst as *mut u64, val) };
+                println!("[seq] step {step}: poke {label} = {val:#x}");
+            }
+            "zero" => {
+                if toks.len() < 2 {
+                    eprintln!("[seq] step {step}: zero scratch|ctx");
+                    return 2;
+                }
+                match toks[1] {
+                    "scratch" => unsafe { std::ptr::write_bytes(scratch as *mut u8, 0, 0x1000) },
+                    "ctx" => unsafe { std::ptr::write_bytes(ctx as *mut u8, 0, ctx_size) },
+                    other => {
+                        eprintln!("[seq] step {step}: zero {other}?");
+                        return 2;
+                    }
+                }
+                println!("[seq] step {step}: zero {}", toks[1]);
+            }
+            "dump" => {
+                println!("[seq] step {step}: dump");
+                dump_region("scratch", scratch as u64, 0x1000 / 8);
+                dump_region("ctx", ctx as u64, 0x10000 / 8);
+            }
+            "call" => {
+                let export_name = toks.get(1).copied().unwrap_or("vdfut768ig");
+                let export_ptr = match image.get_export_by_name(export_name) {
+                    Some(p) => p,
+                    None => {
+                        eprintln!("[seq] step {step}: export {export_name:?} not found");
+                        return 1;
+                    }
+                };
+                type ExportFn = unsafe extern "win64" fn(u64, u64, u64, u64) -> u64;
+                let f: ExportFn = unsafe { std::mem::transmute(export_ptr) };
+                let mut argv = [0u64; 4];
+                for (i, slot) in argv.iter_mut().enumerate() {
+                    let tok = toks.get(i + 2).copied().unwrap_or("0");
+                    *slot = match resolve_token(tok, scratch as u64, ctx as u64, &loads) {
+                        Some(v) => v,
+                        None => {
+                            eprintln!("[seq] step {step}: bad call arg {tok:?}");
+                            return 2;
+                        }
+                    };
+                }
+                println!(
+                    "[seq] step {step}: call {export_name}({:#x}, {:#x}, {:#x}, {:#x})...",
+                    argv[0], argv[1], argv[2], argv[3]
+                );
+                let r = unsafe { f(argv[0], argv[1], argv[2], argv[3]) };
+                println!("[seq] step {step}: returned {r:#x} ({r})");
+                // Show what the guest wrote into the scratch param block.
+                dump_region("scratch", scratch as u64, 0x1000 / 8);
+            }
+            other => {
+                eprintln!("[seq] step {step}: unknown verb {other:?}");
+                return 2;
+            }
+        }
+    }
+    println!("[seq] done ({step} steps)");
     0
 }
 
