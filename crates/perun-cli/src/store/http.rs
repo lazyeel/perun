@@ -171,12 +171,12 @@ impl<'a> Request<'a> {
 /// appended. 200 = fresh full body (the file-sink path truncates to 0
 /// before streaming); 206 = continuation (start must equal the local
 /// size); 416 with matching `bytes */N` = the file is already complete.
-fn check_range_response(status: u16, headers: &HashMap<String, String>, local: u64) -> Result<(), String> {
-    let get = |name: &str| {
-        headers
-            .get(&name.to_ascii_lowercase())
-            .map(|s| s.as_str())
-    };
+fn check_range_response(
+    status: u16,
+    headers: &HashMap<String, String>,
+    local: u64,
+) -> Result<(), String> {
+    let get = |name: &str| headers.get(&name.to_ascii_lowercase()).map(|s| s.as_str());
     match status {
         200 => Ok(()),
         416 => {
@@ -197,10 +197,9 @@ fn check_range_response(status: u16, headers: &HashMap<String, String>, local: u
             let (bounds, total_text) = value.split_once('/').ok_or_else(|| {
                 format!("invalid download content range {header:?} for local size {local}")
             })?;
-            let (start_text, end_text) =
-                bounds.split_once('-').ok_or_else(|| {
-                    format!("invalid download content range {header:?} for local size {local}")
-                })?;
+            let (start_text, end_text) = bounds.split_once('-').ok_or_else(|| {
+                format!("invalid download content range {header:?} for local size {local}")
+            })?;
             let start = start_text.parse::<u64>().map_err(|_| {
                 format!("invalid download content range {header:?} for local size {local}")
             })?;
@@ -506,7 +505,10 @@ mod tests {
 
     #[test]
     fn range_gate_partial_206_validates_start() {
-        let h = range_hdrs(&[("content-range", "bytes 1000-28410/28411"), ("content-length", "27411")]);
+        let h = range_hdrs(&[
+            ("content-range", "bytes 1000-28410/28411"),
+            ("content-length", "27411"),
+        ]);
         assert!(check_range_response(206, &h, 1000).is_ok());
         assert!(check_range_response(206, &h, 999).is_err());
         assert!(check_range_response(206, &h, 0).is_err());

@@ -235,8 +235,10 @@ mod tests {
 
     #[test]
     fn parses_full_hint_verbatim() {
-        let c = parse_trap_line("perun scaffold 'KERNEL32.DLL!NoSuchApi12345(0x140000000, 0x1, 0x0, 0x0)'")
-            .expect("must parse");
+        let c = parse_trap_line(
+            "perun scaffold 'KERNEL32.DLL!NoSuchApi12345(0x140000000, 0x1, 0x0, 0x0)'",
+        )
+        .expect("must parse");
         assert_eq!(c.dll, "KERNEL32.DLL");
         assert_eq!(c.func, "NoSuchApi12345");
         assert_eq!(c.args, [0x140000000, 1, 0, 0]);

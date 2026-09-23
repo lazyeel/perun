@@ -91,9 +91,7 @@ pub fn parse(input: &str) -> Result<Json, String> {
     // Skip leading whitespace (including MZStoreServices' \n\n\n prefix and
     // UTF-8 BOM variants) — the parser's skip_ws only handles BOM, not the
     // leading stray newlines some endpoints emit before the JSON opens.
-    while start < bytes.len()
-        && bytes[start].is_ascii_whitespace()
-    {
+    while start < bytes.len() && bytes[start].is_ascii_whitespace() {
         start += 1;
     }
     // Skip UTF-8 BOM (EF BB BF) — only at the true start.

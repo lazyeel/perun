@@ -224,8 +224,7 @@ impl PeInfo {
             };
             // Ordinal entry must also be readable; otherwise the table is
             // truncated.
-            let ord_off =
-                rva_to_offset(&self.sections, _ords_rva.wrapping_add(i as u32 * 2));
+            let ord_off = rva_to_offset(&self.sections, _ords_rva.wrapping_add(i as u32 * 2));
             let Some(ord_off) = ord_off else { break };
             if read_u16_at(data, ord_off).is_none() {
                 break;
@@ -455,10 +454,7 @@ mod tests {
         );
         // Second descriptor has no lookup table: falls back to the IAT.
         assert_eq!(imports[1].0, "USER32.dll");
-        assert_eq!(
-            imports[1].1,
-            vec![ImportSymbol::Name("MessageBoxW".into())]
-        );
+        assert_eq!(imports[1].1, vec![ImportSymbol::Name("MessageBoxW".into())]);
         let exports = info.exports(&data);
         assert_eq!(exports, vec!["MyExport".to_string()]);
     }

@@ -284,11 +284,25 @@ fn civil_from_days(z: i64) -> (i64, u64, u64) {
 
 /// A field helper for the `apps` array used by search/list-purchases:
 /// one app object serialized once, in the zerolog field order.
-pub fn app_field_json(id: i64, bundle: &str, name: &str, version: &str, price: f64, platforms: &[&str]) -> String {
+pub fn app_field_json(
+    id: i64,
+    bundle: &str,
+    name: &str,
+    version: &str,
+    price: f64,
+    platforms: &[&str],
+) -> String {
     let plat = if platforms.is_empty() {
         String::new()
     } else {
-        format!(",\"platforms\":[{}]", platforms.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(","))
+        format!(
+            ",\"platforms\":[{}]",
+            platforms
+                .iter()
+                .map(|p| json_str(p))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
     };
     format!(
         "{{\"id\":{},\"bundleID\":{},\"name\":{},\"version\":{},\"price\":{}{}}}",
@@ -303,11 +317,25 @@ pub fn app_field_json(id: i64, bundle: &str, name: &str, version: &str, price: f
 
 /// Console mode marshals the same object with its own key order
 /// (zerolog console sorts the inner object keys): bundleID,id,name,price,version.
-pub fn app_field_console(id: i64, bundle: &str, name: &str, version: &str, price: f64, platforms: &[&str]) -> String {
+pub fn app_field_console(
+    id: i64,
+    bundle: &str,
+    name: &str,
+    version: &str,
+    price: f64,
+    platforms: &[&str],
+) -> String {
     let plat = if platforms.is_empty() {
         String::new()
     } else {
-        format!(",\"platforms\":[{}]", platforms.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(","))
+        format!(
+            ",\"platforms\":[{}]",
+            platforms
+                .iter()
+                .map(|p| json_str(p))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
     };
     format!(
         "{{\"bundleID\":{},\"id\":{},\"name\":{}{},\"price\":{},\"version\":{}}}",
@@ -321,7 +349,15 @@ pub fn app_field_console(id: i64, bundle: &str, name: &str, version: &str, price
 }
 
 /// `apps` with an optional extra key per item (purchaseDate).
-pub type AppRow<'a> = (i64, &'a str, &'a str, &'a str, f64, Option<&'a str>, Vec<&'a str>);
+pub type AppRow<'a> = (
+    i64,
+    &'a str,
+    &'a str,
+    &'a str,
+    f64,
+    Option<&'a str>,
+    Vec<&'a str>,
+);
 
 pub fn apps_with_date_json(items: &[AppRow]) -> Vec<String> {
     items

@@ -283,8 +283,7 @@ impl<'w> ZipWriter<'w> {
         if src_header.len() < 30 {
             return Err("zip: local header too short".into());
         }
-        let name_len =
-            u16::from_le_bytes([src_header[26], src_header[27]]) as usize;
+        let name_len = u16::from_le_bytes([src_header[26], src_header[27]]) as usize;
         let src_extra = src_header.get(30 + name_len..).unwrap_or(&[]);
         let name_bytes = src_header.get(30..30 + name_len).unwrap_or(&[]);
         // Directories (name ends with '/') and stored entries: inline sizes,
@@ -362,19 +361,14 @@ impl<'w> ZipWriter<'w> {
                 descriptor[..4].copy_from_slice(&0x0807_4b50u32.to_le_bytes());
                 descriptor[4..8].copy_from_slice(&entry.crc32.to_le_bytes());
                 descriptor[8..16].copy_from_slice(&entry.compressed_size.to_le_bytes());
-                descriptor[16..24]
-                    .copy_from_slice(&entry.uncompressed_size.to_le_bytes());
+                descriptor[16..24].copy_from_slice(&entry.uncompressed_size.to_le_bytes());
                 self.raw(&descriptor)?;
             } else {
                 let mut descriptor = [0u8; 16];
                 descriptor[..4].copy_from_slice(&0x0807_4b50u32.to_le_bytes());
                 descriptor[4..8].copy_from_slice(&entry.crc32.to_le_bytes());
-                descriptor[8..12].copy_from_slice(
-                    &(entry.compressed_size as u32).to_le_bytes(),
-                );
-                descriptor[12..16].copy_from_slice(
-                    &(entry.uncompressed_size as u32).to_le_bytes(),
-                );
+                descriptor[8..12].copy_from_slice(&(entry.compressed_size as u32).to_le_bytes());
+                descriptor[12..16].copy_from_slice(&(entry.uncompressed_size as u32).to_le_bytes());
                 self.raw(&descriptor)?;
             }
         }
@@ -586,8 +580,7 @@ pub fn replicate(
     // Stream the source via mmap: peak RSS stays O(1) instead of tracking
     // the package size (a 3 GiB package would otherwise pin 3+ GiB of heap).
     // Pages flow through the kernel cache on demand.
-    let src_file = std::fs::File::open(src_path)
-        .map_err(|e| format!("open {src_path}: {e}"))?;
+    let src_file = std::fs::File::open(src_path).map_err(|e| format!("open {src_path}: {e}"))?;
     let src_len = src_file
         .metadata()
         .map_err(|e| format!("stat {src_path}: {e}"))?
@@ -645,7 +638,8 @@ pub fn replicate(
         .ok_or("could not read bundle name")?;
     let sc_dir = format!("Payload/{bundle_name}.app/SC_Info/");
 
-    let out_file = std::fs::File::create(dst_path).map_err(|e| format!("create {dst_path}: {e}"))?;
+    let out_file =
+        std::fs::File::create(dst_path).map_err(|e| format!("create {dst_path}: {e}"))?;
     let mut out = std::io::BufWriter::with_capacity(1 << 20, out_file);
     let mut zip = ZipWriter::new(&mut out);
 
@@ -754,7 +748,9 @@ pub fn replicate(
     let out_file = out
         .into_inner()
         .map_err(|e| format!("replicate buffer: {e}"))?;
-    out_file.sync_all().map_err(|e| format!("replicate sync: {e}"))?;
+    out_file
+        .sync_all()
+        .map_err(|e| format!("replicate sync: {e}"))?;
     Ok(true)
 }
 
@@ -1668,7 +1664,9 @@ mod tests {
         let stripped = strip_zip64_extra(&extra);
         assert_eq!(
             stripped,
-            vec![0x55, 0x54, 0x02, 0x00, 0xAA, 0xBB, 0x58, 0x55, 0x01, 0x00, 0xCC]
+            vec![
+                0x55, 0x54, 0x02, 0x00, 0xAA, 0xBB, 0x58, 0x55, 0x01, 0x00, 0xCC
+            ]
         );
     }
 

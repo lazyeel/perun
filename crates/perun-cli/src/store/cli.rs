@@ -18,7 +18,6 @@
 //! geometry as `perun sap` (the obfuscated guest requires it), so every
 //! command that signs ships through `store::run_on_sap_thread`.
 
-
 use crate::store::account::{self, Account};
 use crate::store::appstore::StoreError;
 use crate::store::{appstore, bag, out, signer};
@@ -291,7 +290,9 @@ pub fn parse_search_limit(raw: &str) -> Result<i64, String> {
     match raw.parse::<i64>() {
         Ok(v) if (1..=200).contains(&v) => Ok(v),
         Ok(_) => Err("invalid --limit: expected an integer 1..=200".into()),
-        Err(_) => Err(format!("invalid --limit {raw:?}: expected an integer 1..=200")),
+        Err(_) => Err(format!(
+            "invalid --limit {raw:?}: expected an integer 1..=200"
+        )),
     }
 }
 
@@ -639,7 +640,15 @@ Flags:\n  -h, --help   help for completion\n\n{GLOBAL_FLAGS_BLOCK}\n"
 
 /// Everything a command handler needs: parsed invocation + output.
 /// One app row for the output layer: (id, bundle, name, version, price, purchase date).
-pub type AppRow<'a> = (i64, &'a str, &'a str, &'a str, f64, Option<&'a str>, Vec<&'a str>);
+pub type AppRow<'a> = (
+    i64,
+    &'a str,
+    &'a str,
+    &'a str,
+    f64,
+    Option<&'a str>,
+    Vec<&'a str>,
+);
 
 struct Ctx {
     inv: Invocation,
@@ -1457,7 +1466,10 @@ fn cmd_search(persona: Persona, args: &[String]) -> i32 {
                 a.version.as_str(),
                 a.price,
                 None,
-                a.platforms.iter().map(|s| s.as_str()).collect::<Vec<&str>>(),
+                a.platforms
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<&str>>(),
             )
         })
         .collect();
@@ -1495,13 +1507,15 @@ fn cmd_purchase(persona: Persona, args: &[String]) -> i32 {
         Ok(c) => c,
         Err(code) => return code,
     };
-    let bundle = ctx.inv.get(&["-b", "--bundle-identifier"]).unwrap_or("").to_string();
+    let bundle = ctx
+        .inv
+        .get(&["-b", "--bundle-identifier"])
+        .unwrap_or("")
+        .to_string();
     // 91d4294: purchase by app id, no bundle lookup required.
     let app_id = ctx.inv.get(&["-i", "--app-id"]).unwrap_or("").to_string();
     if bundle.is_empty() && app_id.is_empty() {
-        return ctx.usage_fail(
-            "either the app ID or the bundle identifier must be specified",
-        );
+        return ctx.usage_fail("either the app ID or the bundle identifier must be specified");
     }
     let app_id: i64 = if app_id.is_empty() {
         0
@@ -1822,7 +1836,10 @@ fn cmd_list_purchases(persona: Persona, args: &[String]) -> i32 {
                         a.version.as_str(),
                         a.price,
                         a.purchase_date.as_deref(),
-                        a.platforms.iter().map(|s| s.as_str()).collect::<Vec<&str>>(),
+                        a.platforms
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<&str>>(),
                     )
                 })
                 .collect();

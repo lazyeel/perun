@@ -316,8 +316,8 @@ pub fn login(
                 "[store] login send {} dropped by the edge (HTTP {}), resending",
                 resend, res.status
             );
-            let delay = std::time::Duration::from_secs(1 << resend)
-                .min(std::time::Duration::from_secs(8));
+            let delay =
+                std::time::Duration::from_secs(1 << resend).min(std::time::Duration::from_secs(8));
             std::thread::sleep(delay);
             res = http::send(
                 Request::new("POST", &url)
@@ -381,7 +381,8 @@ pub fn login(
             .unwrap_or("")
             .to_string();
 
-        if let Some(err) = classify_auth_failure(&failure_type, &customer_message, auth_code, attempt)
+        if let Some(err) =
+            classify_auth_failure(&failure_type, &customer_message, auth_code, attempt)
         {
             return Err(err);
         }
@@ -745,8 +746,8 @@ fn fetch_download_info(
 /// re-enters the fallback chain with the same app id; version ids change
 /// only when Apple ships an app update, so one resolve per process is fine.
 fn lookup_latest_ios_external_version_id_cached(app_id: i64, country: &str) -> Result<String> {
-    use std::sync::OnceLock;
     use std::sync::Mutex;
+    use std::sync::OnceLock;
     static CACHE: OnceLock<Mutex<std::collections::HashMap<i64, String>>> = OnceLock::new();
     let lock = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
     if let Ok(guard) = lock.lock()
@@ -1732,10 +1733,9 @@ mod tests {
             classify_auth_failure("", MSG_ACCOUNT_DISABLED, "", 1),
             Some(StoreError::AccountDisabled)
         ));
-        assert!(other_text(
-            &classify_auth_failure("2059", "", "", 1).expect("mapped")
-        )
-        .contains("2059"));
+        assert!(
+            other_text(&classify_auth_failure("2059", "", "", 1).expect("mapped")).contains("2059")
+        );
         // Empty/empty = success candidate, proceed to token extraction.
         assert!(classify_auth_failure("", "", "", 1).is_none());
     }
