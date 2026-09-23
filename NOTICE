@@ -6,8 +6,8 @@ This product compiles and links the following software developed by lazyeel:
   (Darwin) image loading, relocation, import binding (perun-core)
 - Guest API translation shims: Win32 to POSIX and macOS libSystem/Mach
   to Linux, including the FairPlay SAP session runtime (perun-shims)
-- Command-line runner, image inspector, and FairPlay SAP session driver
-  (perun-cli)
+- Command-line runner, image inspector, FairPlay SAP session driver, and
+  the App Store client (perun-cli)
 
 This product contains third-party open source software in object form,
 under its own license:
@@ -15,6 +15,12 @@ under its own license:
 - libc 0.2.189 (MIT OR Apache-2.0) — The Rust Project — https://github.com/rust-lang/libc
 - linkme, linkme-impl 0.3.37 (MIT OR Apache-2.0) — David Tolnay — https://github.com/dtolnay/linkme
 - bzip2-rs 0.1.2 (MIT OR Apache-2.0) — Paolo Barbolini — https://github.com/paolobarbolini/bzip2-rs
-- crc32fast 1.5.1 (MIT OR Apache-2.0) — srijs — https://github.com/srijs/rust-crc32fast
+- crc32fast 1.5.1 (MIT OR Apache-2.0) — Sam Rijs (srijs), Alex Crichton — https://github.com/srijs/rust-crc32fast
 - cfg-if 1.0.4 (MIT OR Apache-2.0) — Alex Crichton — https://github.com/rust-lang/cfg-if
-- tinyvec 1.12.0 (Zlib OR Apache-2.0 OR MIT) — Lokathor — https://github.com/Lokathor/tinyvec
+- tinyvec 1.13.2 (Zlib OR Apache-2.0 OR MIT) — Lokathor — https://github.com/Lokathor/tinyvec
+- memmap2 0.9.11 (MIT OR Apache-2.0) — Yevhenii Reizner, Dan Burkert and contributors — https://github.com/RazrFalcon/memmap2-rs
+  (fork of memmap-rs by Dan Burkert — https://github.com/danburkert/memmap-rs;
+  memory-mapped IPA input in the streaming replicator)
+
+Crates used only to build the macro machinery (proc-macro2, quote, syn, unicode-ident) do not reach the distributed object form and are therefore not listed above.
+linkme-impl is a proc macro, but the code it generates is compiled into the binaries, so it is listed.
