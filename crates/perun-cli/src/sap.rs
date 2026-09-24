@@ -4,7 +4,7 @@
 //! The Apple FairPlay SAP runtime: native, in-process, no emulation.
 //!
 //! Loads the four binaries Apple ships in the OS X 10.9 update package
-//! (CoreFP, CoreFP.icxs, CommerceKit, CommerceCore), relocates them, and
+//! (CoreFP, CoreFP.icxs, CommerceKit), relocates them, and
 //! drives the five SAP entry points directly on the CPU under the SysV
 //! AMD64 convention:
 //!
@@ -56,7 +56,6 @@ pub fn guest_landing_for_signal() -> u64 {
 // from anything the host maps. Same layout discipline as the reference
 // emulators, but executed natively.
 pub const COREFP_BASE: u64 = 0x7FF8_0400_0000;
-pub const COMMERCE_CORE_BASE: u64 = 0x7FF8_0800_0000;
 pub const COMMERCE_KIT_BASE: u64 = 0x7FF8_0C00_0000;
 // storeagent is deliberately not mapped; see the note in SapRuntime::new.
 // Its reference base was 0x7FF8_1000_0000.
@@ -80,7 +79,7 @@ pub const SAP_TEARDOWN: &str = "_IPaI1oem5iL";
 pub const SAP_DISPOSE: &str = "_jEHf8Xzsv8K";
 
 /// Directory holding the four Apple images used by the runtime (`CoreFP`,
-/// `CoreFP.icxs`, `CommerceKit`, `CommerceCore`). Images
+/// `CoreFP.icxs`, `CommerceKit`). Images
 /// are read transiently at load time and handed over to the loader (owned
 /// buffers, no persistent copies); only the ICXS blob stays resident because
 /// the guest reads it through the fake `open`/`read` shim path.
@@ -93,7 +92,7 @@ impl SapAssets {
         // Validate early so failures surface before any mapping happens.
         // storeagent is intentionally absent: it is not mapped (see the note
         // in SapRuntime::new) and the fetcher does not download it.
-        for name in ["CoreFP", "CoreFP.icxs", "CommerceKit", "CommerceCore"] {
+        for name in ["CoreFP", "CoreFP.icxs", "CommerceKit"] {
             let p = std::path::Path::new(dir).join(name);
             if !p.is_file() {
                 return Err(format!("{name}: not found in {dir}"));
@@ -107,7 +106,6 @@ impl SapAssets {
 
 pub struct SapRuntime {
     _corefp: MachImage,
-    _commerce_core: MachImage,
     commerce_kit: MachImage,
     init_addr: u64,
     exchange_addr: u64,
@@ -239,12 +237,6 @@ impl SapRuntime {
         )
         .map_err(|e| e.to_string())?;
 
-        let commerce_core = MachImage::load_file(
-            &image_path("CommerceCore"),
-            COMMERCE_CORE_BASE,
-            &mut resolver,
-        )
-        .map_err(|e| e.to_string())?;
         let commerce_kit =
             MachImage::load_file(&image_path("CommerceKit"), COMMERCE_KIT_BASE, &mut resolver)
                 .map_err(|e| e.to_string())?;
@@ -365,7 +357,6 @@ impl SapRuntime {
 
         Ok(SapRuntime {
             _corefp: corefp,
-            _commerce_core: commerce_core,
             commerce_kit,
             init_addr,
             exchange_addr,
@@ -395,6 +386,7 @@ impl SapRuntime {
     }
 
     fn init_inner(&mut self, mac: [u8; 6]) -> Result<u64, String> {
+        perun_shims::mach::set_guest_mac(&mac);
         let mut hw_block = [0u8; 24];
         hw_block[0..4].copy_from_slice(&6u32.to_le_bytes());
         hw_block[4..10].copy_from_slice(&mac);
@@ -731,6 +723,7 @@ impl SapRuntime {
     }
 
     fn setup_inner(&mut self, mac: [u8; 6]) -> Result<(), String> {
+        perun_shims::mach::set_guest_mac(&mac);
         // Legacy 10.9 protocol: the certificate is a raw DER blob served
         // straight from the CDN; no plist envelope at this step.
         let cert = http_get(SETUP_CERT_URL)?;

@@ -67,11 +67,6 @@ const PINNED: &[(&str, u64, &str)] = &[
         3_271_840,
         "b84ff12c21987856c0a17b78f1ad82b73195a6dec5f3b208a17d245555a2c8a2",
     ),
-    (
-        "CommerceCore",
-        207_744,
-        "c5401e57402230f3c876409d295319ddf1e61287bc882683c5d61277be7bc1f2",
-    ),
 ];
 
 /// Full cpio paths of the pinned files inside the update payload.
@@ -80,10 +75,6 @@ const CPIO_PATHS: &[(&str, &str)] = &[
     (
         "CommerceKit",
         "./System/Library/PrivateFrameworks/CommerceKit.framework/Versions/A/CommerceKit",
-    ),
-    (
-        "CommerceCore",
-        "./System/Library/PrivateFrameworks/CommerceKit.framework/Versions/A/Frameworks/CommerceCore.framework/Versions/A/CommerceCore",
     ),
     (
         "CoreFP",

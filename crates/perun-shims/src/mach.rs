@@ -356,7 +356,47 @@ pub fn mach_shim_table(corefp_exports: &HashMap<String, u64>) -> HashMap<String,
         m.insert(name.clone(), *addr as *const () as usize);
     }
 
+    // `_get_mac_address` out-parameter form. CommerceCore and CommerceKit both
+    // *define* it and neither *imports* it (verified by walking the
+    // bind/weak/lazy streams of all three images), so nothing reaches this
+    // shim on the SAP path today. It is registered anyway: it is the one
+    // function RESEARCH attributed to CommerceCore, and if a future guest
+    // path does call it, a shim is strictly better than a trap stub.
+    m.insert(
+        "_get_mac_address".to_string(),
+        pinned_shim(
+            shim_get_mac_address as *const () as usize,
+            "shim_get_mac_address",
+        ),
+    );
+
     m
+}
+
+// ── the guest MAC ─────────────────────────────────────────────────────────
+//
+// The 6-byte hardware identity the SAP session is seeded with. It is set from
+// the caller that already holds the MAC (`init`/`setup` take `[u8; 6]`), so the
+// shim reports exactly the identity the live session is using rather than
+// re-deriving one and risking a mismatch.
+
+static GUEST_MAC: std::sync::Mutex<[u8; 6]> = std::sync::Mutex::new([0; 6]);
+
+/// Publish the MAC that `_get_mac_address` will report.
+pub fn set_guest_mac(mac: &[u8; 6]) {
+    *GUEST_MAC.lock().unwrap_or_else(|e| e.into_inner()) = *mac;
+}
+
+/// `int _get_mac_address(uint8_t *out)` — writes 6 bytes, returns 0 on success.
+unsafe extern "C" fn shim_get_mac_address(out: *mut u8) -> i32 {
+    unsafe {
+        if out.is_null() {
+            return -1;
+        }
+        let mac = *GUEST_MAC.lock().unwrap_or_else(|e| e.into_inner());
+        std::ptr::copy_nonoverlapping(mac.as_ptr(), out, mac.len());
+        0
+    }
 }
 
 // ── shim implementations ─────────────────────────────────────────────────
