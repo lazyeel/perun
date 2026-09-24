@@ -71,21 +71,29 @@ pub fn state_dir() -> Result<PathBuf, String> {
 /// The machine MAC as `AA:BB:CC:DD:EE:FF` (Store identity + file binding).
 ///
 /// Resolution order:
-/// 1. a pinned MAC from `<state>/machine`, if the file exists;
-/// 2. the first physical, up interface in `/sys/class/net` (a `device/`
+/// 1. `PERUN_MAC` from the environment, when set and parseable;
+/// 2. a pinned MAC from `<state>/machine`, if the file exists;
+/// 3. the first physical, up interface in `/sys/class/net` (a `device/`
 ///    symlink in sysfs — virtual links like veth/bridge/tun do not have
 ///    one; loopback and down links are skipped);
-/// 3. a deterministic pseudo-MAC derived from a machine anchor
+/// 4. a deterministic pseudo-MAC derived from a machine anchor
 ///    (`/etc/machine-id`, else the hostname): six bytes of SHA-256 with
 ///    the local bit set, so the address is well-formed regardless of
 ///    what the host looks like.
 ///
+/// `PERUN_MAC` is a per-run override like `--mac`: it is read and returned
+/// without touching the pin, so exporting it cannot silently re-key the
+/// encrypted account store. A malformed value is reported and ignored
+/// rather than aborting the run.
 /// The first resolution is pinned to `<state>/machine`, so a change of
 /// NIC, NIC order, or container network namespace cannot silently re-key
 /// the encrypted account store or the Store identity Apple sees. There is
 /// no store-level `--mac` flag: only the bare `perun sap` command takes
 /// `--mac` as a per-run override (it never rewrites the pin).
 pub fn primary_mac() -> [u8; 6] {
+    if let Some(mac) = env_mac(std::env::var("PERUN_MAC").ok()) {
+        return mac;
+    }
     if let Some(mac) = pinned_mac() {
         return mac;
     }
@@ -123,6 +131,24 @@ pub fn parse_mac_text(text: &str) -> Result<[u8; 6], String> {
         mac[i] = u8::from_str_radix(part, 16).map_err(|_| "not a MAC address")?;
     }
     Ok(mac)
+}
+
+/// The `PERUN_MAC` override, parsed from an already-read value.
+///
+/// Split from [`primary_mac`] so the decision table is testable without
+/// mutating the process environment.
+fn env_mac(raw: Option<String>) -> Option<[u8; 6]> {
+    let text = raw?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    match parse_mac_text(&text) {
+        Ok(mac) => Some(mac),
+        Err(e) => {
+            eprintln!("[store] ignoring PERUN_MAC: {e} (expected AA:BB:CC:DD:EE:FF)");
+            None
+        }
+    }
 }
 
 /// The pinned MAC, if a pin file exists and parses.
@@ -364,5 +390,36 @@ mod tests {
             hardware_mac_in(&tree).unwrap(),
             [0x22, 0x22, 0x22, 0x22, 0x22, 0x22]
         );
+    }
+
+    #[test]
+    fn env_mac_decision_table() {
+        // Set -> honoured, whatever the pin says; this is the rung above it.
+        assert_eq!(
+            env_mac(Some("11:22:33:44:55:66".to_string())),
+            Some([0x11, 0x22, 0x33, 0x44, 0x55, 0x66])
+        );
+        // Hex case does not matter, the parser takes either.
+        assert_eq!(
+            env_mac(Some("AA:BB:CC:DD:EE:FF".to_string())),
+            Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
+        );
+        // Absent or blank -> fall through silently to the pin.
+        assert_eq!(env_mac(None), None);
+        assert_eq!(env_mac(Some(String::new())), None);
+        assert_eq!(env_mac(Some("   ".to_string())), None);
+        // Malformed -> reported, then fall through rather than abort the run.
+        for bad in [
+            "nonsense",
+            "11:22:33:44:55",
+            "11-22-33-44-55-66",
+            "zz:22:33:44:55:66",
+        ] {
+            assert_eq!(
+                env_mac(Some(bad.to_string())),
+                None,
+                "{bad} must be rejected"
+            );
+        }
     }
 }

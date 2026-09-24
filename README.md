@@ -147,7 +147,7 @@ perun sap --sign <hex>                # sign a custom payload  (or --file <path>
 perun mach info /path/to/MachO.bin    # header, segments, sections, symbols
 ```
 
-The machine address is auto-detected: the first physical, up interface (veth/bridge/tunnel links are skipped), or — on hosts without one, like containers — a deterministic pseudo-MAC derived from the machine anchor (machine ID, else hostname). The first resolution is pinned under `~/.local/state/perun/machine`, so the identity and the account store keyed by it survive NIC changes and container restarts. `--mac` forces a specific address for one run, for differential testing, and never touches the pin. There is no environment variable behind `--mac`.
+The machine address is auto-detected: the first physical, up interface (veth/bridge/tunnel links are skipped), or — on hosts without one, like containers — a deterministic pseudo-MAC derived from the machine anchor (machine ID, else hostname). The first resolution is pinned under `~/.local/state/perun/machine`, so the identity and the account store keyed by it survive NIC changes and container restarts. Two overrides sit above that pin: `--mac` forces a specific address for one run of the bare `perun sap`, and `PERUN_MAC` does the same for every lane. Neither ever rewrites the pin, so neither can silently re-key the account store.
 
 The first run fetches the required images itself (~32 MB range-read from Apple's public 1.28 GB update package, SHA-256-pinned, cached under `~/.cache/perun/sap/`); every later run is warm. All network I/O shells out to `curl`, which is the only external program required. The full specification — binary map, memory invariants, protocol wire format, benchmarks — is [RESEARCH.md](RESEARCH.md).
 
@@ -201,10 +201,11 @@ Everything is optional; the defaults are zero-config.
 | `PERUN_STORE_HTTP_DEBUG=1` | HTTP wire dump, also enabled by `--verbose` |
 | `PERUN_STORE_ZIP_DEBUG=1` | zip replicator debug output |
 | `PERUN_SEQ=N` | repeat one `call` in-process N times |
+| `PERUN_MAC` | override the machine address for this run, e.g. `AA:BB:CC:DD:EE:FF` — takes priority over the pin file and never rewrites it, so exporting it cannot re-key the account store |
 
 `--trace-file F` redirects stderr onto a file through `dup2`, so trace and trap lines land there instead of the console; there is no environment variable behind it.
 
-Credentials and the machine address are deliberately **not** read from the environment. There is no `PERUN_EMAIL`, `PERUN_PASSWORD`, `*_2FA_CODE` or `PERUN_MAC` variable in this tool: the email, password and 2FA code come from `auth login` flags or from a masked prompt, and the machine address comes from auto-detection with a `--mac` flag for an override. Keeping secrets out of the process environment means they never land in `/proc/*/environ` for another process to read.
+Credentials are deliberately **not** read from the environment. There is no `PERUN_EMAIL`, `PERUN_PASSWORD` or `*_2FA_CODE` variable in this tool: the email, password and 2FA code come from `auth login` flags or from a masked prompt, and the account then persists in the encrypted vault. Keeping secrets out of the process environment means they never land in `/proc/*/environ` for another process to read. The machine address is not a secret and does have an override: `--mac` on the bare `perun sap`, or `PERUN_MAC` for every lane (see the table above).
 
 ## Development
 
