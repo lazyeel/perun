@@ -103,11 +103,6 @@ impl SapAssets {
             dir: dir.to_string(),
         })
     }
-
-    fn read(&self, name: &str) -> Result<Vec<u8>, String> {
-        std::fs::read(std::path::Path::new(&self.dir).join(name))
-            .map_err(|e| format!("{name}: {e}"))
-    }
 }
 
 pub struct SapRuntime {
@@ -205,10 +200,13 @@ impl SapRuntime {
     /// the FairPlay hardware identity.
     pub fn new(assets: &SapAssets) -> Result<SapRuntime, String> {
         // Serve the ICXS blob through the fake file path before CoreFP loads.
-        perun_shims::mach::set_icxs(assets.read("CoreFP.icxs")?);
-
+        // Opened, not read: the shim preads from it on demand.
         let image_path =
             |name: &str| -> std::path::PathBuf { std::path::Path::new(&assets.dir).join(name) };
+
+        let icxs = std::fs::File::open(image_path("CoreFP.icxs"))
+            .map_err(|e| format!("CoreFP.icxs: {e}"))?;
+        perun_shims::mach::set_icxs(icxs)?;
 
         // Two-stage resolution: CoreFP's exports feed `_dlsym`, which
         // CommerceKit consults during its own init. The metadata parse reads

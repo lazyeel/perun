@@ -16,7 +16,10 @@
 //!    fake-but-stable registry entries. We return the same shape natively.
 //! 3. **The ICXS service** — CoreFP reads its key material through
 //!    `open()`/`read()` on `./../CoreFP.icxs`; the shim serves those two
-//!    calls from an in-memory copy and fails everything else.
+//!    calls straight from the file on disk and fails everything else. The
+//!    blob is never held in the process: `read` is a `pread` at the guest's
+//!    cursor, so the resident cost is the pages the guest actually asks
+//!    for, not the whole 5 MiB.
 //!
 //! Unimplemented imports land on SysV trap micro-stubs (see `stub.rs`),
 //! so the first guest call reports the missing symbol instead of crashing.
@@ -24,16 +27,14 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// The full ICXS blob served through the fake `open`/`read` path.
-pub struct Icxs {
-    pub data: Vec<u8>,
-}
-
 /// Descriptor CoreFP gets from `open("./../CoreFP.icxs")`.
 const ICXS_FD: i32 = 3;
 
 struct MachState {
-    icxs: Vec<u8>,
+    /// The ICXS file itself. Kept open for the process lifetime; `read`
+    /// pulls from it on demand so the blob never becomes resident memory.
+    icxs: Option<std::fs::File>,
+    icxs_len: u64,
     icxs_cursor: usize,
     /// IOKit iterator toggle: the guest loops until IOIteratorNext returns 0.
     iterator: u64,
@@ -44,19 +45,30 @@ static STATE: Mutex<Option<MachState>> = Mutex::new(None);
 fn with_state<T>(f: impl FnOnce(&mut MachState) -> T) -> T {
     let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let st = guard.get_or_insert_with(|| MachState {
-        icxs: Vec::new(),
+        icxs: None,
+        icxs_len: 0,
         icxs_cursor: 0,
         iterator: 0,
     });
     f(st)
 }
 
-/// Install the ICXS blob before loading CoreFP.
-pub fn set_icxs(data: Vec<u8>) {
+/// Install the ICXS source before loading CoreFP.
+///
+/// Takes an open file rather than the bytes: the guest reaches the blob
+/// through `open`/`read`, so keeping a copy here would make 5 MiB resident
+/// for the whole session to serve reads that touch a fraction of it.
+pub fn set_icxs(file: std::fs::File) -> Result<u64, String> {
+    let len = file
+        .metadata()
+        .map_err(|e| format!("CoreFP.icxs: {e}"))?
+        .len();
     with_state(|st| {
-        st.icxs = data;
+        st.icxs = Some(file);
+        st.icxs_len = len;
         st.icxs_cursor = 0;
     });
+    Ok(len)
 }
 
 // ── libc passthrough ───────────────────────────────────────────────────────
@@ -838,18 +850,28 @@ unsafe extern "C" fn shim_read(fd: i32, buf: *mut core::ffi::c_void, count: usiz
         if fd != ICXS_FD || buf.is_null() {
             return -1;
         }
+        use std::os::unix::fs::FileExt;
         with_state(|st| {
-            let remaining = st.icxs.len().saturating_sub(st.icxs_cursor);
-            let n = remaining.min(count);
-            if n > 0 {
-                std::ptr::copy_nonoverlapping(
-                    st.icxs.as_ptr().add(st.icxs_cursor),
-                    buf as *mut u8,
-                    n,
-                );
-                st.icxs_cursor += n;
+            let Some(file) = st.icxs.as_ref() else {
+                return -1;
+            };
+            let remaining = st.icxs_len.saturating_sub(st.icxs_cursor as u64);
+            let n = remaining.min(count as u64) as usize;
+            if n == 0 {
+                return 0;
             }
-            n as isize
+            // pread straight into the guest's buffer: the bytes pass through
+            // without ever being collected into a process-owned copy.
+            match file.read_at(
+                std::slice::from_raw_parts_mut(buf as *mut u8, n),
+                st.icxs_cursor as u64,
+            ) {
+                Ok(got) => {
+                    st.icxs_cursor += got;
+                    got as isize
+                }
+                Err(_) => -1,
+            }
         })
     }
 }
@@ -883,5 +905,76 @@ unsafe extern "C" fn shim_pthread_once(control: *mut core::ffi::c_void, init: us
             }
         }
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ICXS service must serve the file's bytes through the fake
+    /// `open`/`read` pair without ever holding the blob in memory: a
+    /// regression to an owned buffer would still pass a content check, so
+    /// this pins the on-demand path specifically.
+    #[test]
+    fn icxs_read_serves_the_file_on_demand() {
+        let dir = std::env::temp_dir().join(format!("perun-icxs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("CoreFP.icxs");
+        let payload: Vec<u8> = (0u32..64 * 1024).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &payload).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let len = set_icxs(file).unwrap();
+        assert_eq!(len, payload.len() as u64);
+
+        // open() rewinds; two reads must come from the file at the cursor.
+        let name = b"./../CoreFP.icxs\0";
+        let fd = unsafe { shim_open(name.as_ptr() as *const core::ffi::c_char, 0) };
+        assert_eq!(fd, ICXS_FD);
+
+        let mut a = vec![0u8; 4096];
+        let n = unsafe { shim_read(fd, a.as_mut_ptr() as *mut core::ffi::c_void, a.len()) };
+        assert_eq!(n, 4096);
+        assert_eq!(&a[..], &payload[..4096]);
+
+        let mut b = vec![0u8; 16];
+        let n = unsafe { shim_read(fd, b.as_mut_ptr() as *mut core::ffi::c_void, b.len()) };
+        assert_eq!(n, 16);
+        assert_eq!(&b[..], &payload[4096..4112]);
+
+        // A read is clamped to the caller's count, and the tail comes from
+        // the file rather than from a buffer that ran out.
+        let tail = payload.len() - 4112;
+        let chunk = 8192.min(tail);
+        let mut c = vec![0u8; chunk];
+        let n = unsafe { shim_read(fd, c.as_mut_ptr() as *mut core::ffi::c_void, c.len()) };
+        assert_eq!(n as usize, chunk);
+        assert_eq!(&c[..], &payload[4112..4112 + chunk]);
+
+        // Past the end: EOF, not stale bytes.
+        let mut d = vec![0u8; 64];
+        for _ in 0..((tail - chunk) / 64 + 1) {
+            let n = unsafe { shim_read(fd, d.as_mut_ptr() as *mut core::ffi::c_void, d.len()) };
+            assert!(n >= 0, "reads inside the file must not fail");
+        }
+        let n = unsafe { shim_read(fd, d.as_mut_ptr() as *mut core::ffi::c_void, d.len()) };
+        assert_eq!(n, 0, "a read at EOF returns 0");
+
+        // A second open rewinds the cursor.
+        let fd = unsafe { shim_open(name.as_ptr() as *const core::ffi::c_char, 0) };
+        let mut e = vec![0u8; 32];
+        let n = unsafe { shim_read(fd, e.as_mut_ptr() as *mut core::ffi::c_void, e.len()) };
+        assert_eq!(n, 32);
+        assert_eq!(&e[..], &payload[..32]);
+
+        // An unknown path is refused, as before.
+        let other = b"./../something-else\0";
+        assert_eq!(
+            unsafe { shim_open(other.as_ptr() as *const core::ffi::c_char, 0) },
+            -1
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

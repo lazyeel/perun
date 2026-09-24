@@ -247,6 +247,25 @@ impl MachImage {
                     continue;
                 }
                 let dst_off = (s.vmaddr - info.base) as usize;
+                if s.name_str() == "__TEXT" {
+                    // __TEXT is the bulk of the image (14 MiB of CoreFP's
+                    // 19 MiB span) and the guest executes only part of it.
+                    // Mapping it from the file leaves the untouched pages as
+                    // clean page-cache pages that cost the process nothing
+                    // until they are read, and turns every fixup write into a
+                    // copy-on-write of just that one page. The pread path
+                    // below would fault in and dirty the whole segment.
+                    if Self::map_text_file_backed(
+                        &file,
+                        base,
+                        span,
+                        dst_off,
+                        slice_off + s.fileoff,
+                        s.filesize,
+                    )? {
+                        continue;
+                    }
+                }
                 let n = (s.filesize as usize).min(span.saturating_sub(dst_off));
                 if n == 0 {
                     continue;
@@ -319,6 +338,54 @@ impl MachImage {
                 size: span,
             })
         }
+    }
+
+    /// Overlay `__TEXT` with a file-backed private mapping of the slice.
+    ///
+    /// Returns `false` when the layout rules out a file mapping — an
+    /// unaligned file offset or destination would have to start outside the
+    /// image — and the caller should fall back to `pread`.
+    ///
+    /// # Safety
+    /// `base..base+span` must be a mapping this loader owns.
+    unsafe fn map_text_file_backed(
+        file: &std::fs::File,
+        base: *mut u8,
+        span: usize,
+        dst_off: usize,
+        file_off: u64,
+        filesize: u64,
+    ) -> Result<bool, MachLoadError> {
+        use std::os::unix::io::AsRawFd;
+        const PAGE: usize = 0x1000;
+        if !file_off.is_multiple_of(PAGE as u64) || !dst_off.is_multiple_of(PAGE) || dst_off >= span
+        {
+            return Ok(false);
+        }
+        // Cover only the file-backed part; a BSS tail beyond `filesize` keeps
+        // the zero-filled anonymous mapping that already backs it.
+        let len = (filesize as usize)
+            .next_multiple_of(PAGE)
+            .min(span - dst_off);
+        if len == 0 {
+            return Ok(false);
+        }
+        // MAP_FIXED, not MAP_FIXED_NOREPLACE: the anonymous reservation for
+        // the whole span is already there and is ours to replace.
+        let m = unsafe {
+            libc::mmap(
+                base.add(dst_off) as *mut libc::c_void,
+                len,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                libc::MAP_PRIVATE | libc::MAP_FIXED,
+                file.as_raw_fd(),
+                file_off as libc::off_t,
+            )
+        };
+        if m == libc::MAP_FAILED {
+            return Err(MachLoadError::MapFailed { size: len });
+        }
+        Ok(true)
     }
 
     /// x86_64 slice offset of a fat container, 0 for thin files.
@@ -646,4 +713,67 @@ fn is_data_symbol(name: &str) -> bool {
         || name.starts_with("_kDA")
         || name.starts_with("_NS")
         || name == "___stack_chk_guard"
+}
+
+#[cfg(test)]
+mod file_backed_tests {
+    use super::MachImage;
+
+    /// `__TEXT` is mapped from the file when the layout allows it, and the
+    /// alignment guard must reject exactly the cases where a file mapping
+    /// would have to start outside the image. Falling back to `pread` there
+    /// is correct but dirties the whole segment, so the boundary is pinned.
+    #[test]
+    fn text_mapping_respects_the_alignment_boundary() {
+        const PAGE: usize = 0x1000;
+        let dir = std::env::temp_dir().join(format!("perun-fb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("img");
+        let body = vec![0xA5u8; PAGE * 3];
+        std::fs::write(&path, &body).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+
+        let span = PAGE * 4;
+        // An anonymous reservation standing in for the image span.
+        let base = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                span,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        } as *mut u8;
+        assert_ne!(base as isize, -1);
+
+        // Aligned: mapped from the file.
+        let ok = unsafe {
+            MachImage::map_text_file_backed(&file, base, span, 0, 0, PAGE as u64).unwrap()
+        };
+        assert!(ok, "an aligned layout must take the file-backed path");
+        // The bytes are visible through the mapping without any pread.
+        assert_eq!(unsafe { *base }, 0xA5);
+
+        // Unaligned file offset: refuse, caller falls back to pread.
+        let bad_off = unsafe {
+            MachImage::map_text_file_backed(&file, base, span, 0, 1, PAGE as u64).unwrap()
+        };
+        assert!(!bad_off, "an unaligned file offset cannot be mapped");
+
+        // Unaligned destination: same.
+        let bad_dst = unsafe {
+            MachImage::map_text_file_backed(&file, base, span, 1, 0, PAGE as u64).unwrap()
+        };
+        assert!(!bad_dst, "an unaligned destination cannot be mapped");
+
+        // Destination past the span: same.
+        let past = unsafe {
+            MachImage::map_text_file_backed(&file, base, span, span, 0, PAGE as u64).unwrap()
+        };
+        assert!(!past, "a destination outside the span cannot be mapped");
+
+        unsafe { libc::munmap(base as *mut libc::c_void, span) };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
