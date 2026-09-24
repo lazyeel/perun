@@ -91,10 +91,36 @@ impl Plist {
 
 // ── XML decoding ──────────────────────────────────────────────────────────
 
+/// A value shorter than this is never treated as a wrapped base64 token:
+/// a product name with a soft line break inside it must keep the break
+/// rather than be glued into one word. Apple's wrapped payloads are orders
+/// of magnitude longer.
+const WRAPPED_TOKEN_MIN: usize = 64;
+
 /// Parse an XML property list. Tolerant: Apple's store endpoints emit
 /// non-spec preamble (`<Document>`, `<Protocol>`) around the `<plist>`.
 pub fn parse_xml(input: &[u8]) -> Result<Plist, String> {
-    let text = std::str::from_utf8(input).map_err(|e| format!("plist utf8: {e}"))?;
+    let Ok(text) = std::str::from_utf8(input) else {
+        // A gateway page can arrive in a non-UTF-8 charset. Classifying it
+        // from the raw bytes is still worth doing: "not a property list"
+        // with an excerpt beats "invalid utf-8 at index N" when the real
+        // cause is a 502 page from the edge.
+        return Err(describe_non_plist(input));
+    };
+    // Comments first: a `<!-- ... -->` may contain `<dict>`, `<key>` or
+    // `</dict>`, any of which would otherwise break the balance in
+    // `take_element`, the key scan in `parse_entries`, or the `rfind` in
+    // `strip_suffix`. Stripping once up front fixes all three. The cost is
+    // that a literal `<!--` inside a `<string>` would also be removed; no
+    // Apple plist does that, and making the scanner comment-aware in every
+    // position would cost a state machine for no real input.
+    let stripped;
+    let text = if text.contains("<!--") {
+        stripped = strip_xml_comments(text);
+        stripped.as_str()
+    } else {
+        text
+    };
     // Trim anything outside the outermost dict/array. The store wraps plist
     // documents in XML envelopes; the payload we need is always a dict.
     // Self-closed roots (<dict/>, <array/>) are empty containers.
@@ -113,11 +139,98 @@ pub fn parse_xml(input: &[u8]) -> Result<Plist, String> {
             return parse_value(&text[start..start + tag.len()]);
         }
     }
-    Err("no <dict> or <array> in document".into())
+    // Nothing plist-shaped. Only now decide whether this is a gateway error
+    // page, so a legitimate document can never be misreported as HTML.
+    Err(describe_non_plist(input))
+}
+
+/// Remove `<!-- ... -->` sections, including multi-line ones. An unterminated
+/// comment swallows the rest of the document, which is the correct reading:
+/// the producer was mid-comment when the response ended.
+fn strip_xml_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("-->") {
+            Some(end) => rest = &rest[start + end + 3..],
+            // Unterminated: emit what is left and stop.
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// One-line, control-character-free excerpt of a response body, for error
+/// messages. Gateway pages are multi-line HTML, and a raw multi-line body
+/// inside a single log line is unreadable.
+pub fn response_snippet(body: &[u8], max: usize) -> String {
+    let text = String::from_utf8_lossy(body);
+    let mut out = String::with_capacity(max + 4);
+    let mut last_was_space = false;
+    for ch in text.chars() {
+        if out.chars().count() >= max {
+            out.push('…');
+            break;
+        }
+        // Control characters (including the NULs and form feeds a WAF page
+        // can carry) would corrupt the log line, so they collapse too.
+        let c = if ch.is_control() { ' ' } else { ch };
+        if c.is_whitespace() {
+            if !last_was_space {
+                out.push(' ');
+                last_was_space = true;
+            }
+        } else {
+            out.push(c);
+            last_was_space = false;
+        }
+    }
+    out.trim().to_string()
+}
+
+/// True when `body` looks like a gateway HTML error page rather than a
+/// property list. Apple’s CDN and Akamai answer 403/502/503 with HTML, and
+/// running that through a plist parser yields "no <dict> in document", which
+/// names neither the cause nor the status.
+pub fn looks_like_html(body: &[u8]) -> bool {
+    let head = String::from_utf8_lossy(&body[..body.len().min(2048)]).to_ascii_lowercase();
+    [
+        "<!doctype html",
+        "<html",
+        "<head",
+        "<body",
+        "<title",
+        "<h1",
+        "<meta ",
+        "cloudflare",
+        "akamai",
+        "access denied",
+    ]
+    .iter()
+    .any(|m| head.contains(m))
+}
+
+/// The error for a body that is not a property list at all. Names the real
+/// cause and carries an excerpt, because "no <dict> in document" on a 502
+/// HTML page is the single least useful message this code can produce.
+fn describe_non_plist(input: &[u8]) -> String {
+    let snippet = response_snippet(input, 180);
+    if looks_like_html(input) {
+        return format!("response is an HTML error page, not a property list: {snippet}");
+    }
+    if snippet.is_empty() {
+        return "response body is empty, expected a property list".to_string();
+    }
+    format!("response is not a property list: {snippet}")
 }
 
 fn parse_value(xml: &str) -> Result<Plist, String> {
     let xml = xml.trim_start();
+    if let Some(cdata) = cdata_value(xml) {
+        return Ok(cdata);
+    }
     // Self-closed containers: Xcode/Swift templates emit empty <dict/> and
     // <array/> values (e.g. UILaunchScreen, UISceneConfigurations in a
     // Swift-generated Info.plist). Empty container, nothing to descend into.
@@ -155,7 +268,7 @@ fn parse_value(xml: &str) -> Result<Plist, String> {
     }
     if let Some(rest) = xml.strip_prefix("<string>") {
         let body = strip_suffix(rest, "</string>")?;
-        return Ok(Plist::String(xml_unescape(body)));
+        return Ok(Plist::String(clean_string_value(xml_unescape(body))));
     }
     if let Some(rest) = xml.strip_prefix("<integer>") {
         let body = strip_suffix(rest, "</integer>")?;
@@ -187,6 +300,47 @@ fn parse_value(xml: &str) -> Result<Plist, String> {
         "unsupported plist element: {}",
         &xml[..xml.len().min(48)]
     ))
+}
+
+/// Unwrap a CDATA section as a string value.
+///
+/// CDATA content is literal: entities inside it are NOT expanded, which is
+/// the whole reason producers use it. So this deliberately skips
+/// `xml_unescape`.
+fn cdata_value(xml: &str) -> Option<Plist> {
+    let body = xml.strip_prefix("<![CDATA[")?.strip_suffix("]]>")?;
+    Some(Plist::String(body.to_string()))
+}
+
+/// Normalise a `<string>` body.
+///
+/// Apple soft-wraps long values (certificate bodies, tokens) across lines,
+/// and that wrapping must not survive into the value. There is no
+/// shape-based test that separates a wrapped base64 token from long prose:
+/// stripping the newlines out of a 117-character sentence of the words
+/// "word word … has  two  spaces" yields a string that is a legal base64
+/// length, and a naive length threshold would happily eat it.
+///
+/// So the test is the payload itself: unwrap only when the value contains a
+/// line break and the whitespace-stripped result is a syntactically valid
+/// base64 string. Prose that survives both checks is a documented
+/// limitation, not an oversight — see
+/// `wrapped_prose_that_looks_like_base64_is_a_known_collision`.
+fn clean_string_value(body: String) -> String {
+    if !body.contains(['\n', '\r']) {
+        return body;
+    }
+    let stripped: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    if stripped.len() < WRAPPED_TOKEN_MIN || !stripped.len().is_multiple_of(4) {
+        return body;
+    }
+    let is_base64 = stripped
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "+/=-_.".contains(c));
+    if !is_base64 {
+        return body;
+    }
+    stripped
 }
 
 fn strip_suffix<'a>(body: &'a str, suffix: &str) -> Result<&'a str, String> {
@@ -231,6 +385,11 @@ fn parse_entries(body: &str) -> Result<Vec<(String, Plist)>, String> {
 /// `xml`, returning its full text and how many bytes it spans. Nested
 /// same-name containers (dict-in-dict, array-in-array) are balanced.
 fn take_element(xml: &str) -> Result<(String, usize), String> {
+    // CDATA is terminated by `]]>`, not by a closing tag.
+    if xml.starts_with("<![CDATA[") {
+        let end = xml.find("]]>").ok_or("unterminated CDATA section")? + 3;
+        return Ok((xml[..end].to_string(), end));
+    }
     let open_end = xml.find('>').ok_or("unterminated element")?;
     let tag_body = &xml[..open_end];
     if tag_body.ends_with('/') {
@@ -845,6 +1004,229 @@ impl<'a> BinaryParser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A gateway answering with an HTML error page must produce a message
+    /// that names the cause, not "no <dict> in document".
+    #[test]
+    fn html_error_page_is_named_not_misparsed() {
+        for page in [
+            "<!DOCTYPE html>\n<html><head><title>502 Bad Gateway</title></head><body><h1>502</h1></body></html>",
+            "<html><body>Access denied. Reference #18.4f2a</body></html>",
+            "<HTML><BODY>Service Unavailable</BODY></HTML>",
+            "<!doctype html><html><body>Cloudflare Ray ID: 8f2a</body></html>",
+        ] {
+            let err = parse_xml(page.as_bytes()).unwrap_err();
+            assert!(
+                err.contains("HTML error page"),
+                "message does not name the cause: {err}"
+            );
+            assert!(looks_like_html(page.as_bytes()));
+            // The excerpt must be usable inside a single log line.
+            assert!(!err.contains('\n'), "snippet spans lines: {err}");
+        }
+    }
+
+    /// Non-XML, non-HTML bodies get their own message and still carry an
+    /// excerpt; an empty body says so instead of complaining about tags.
+    #[test]
+    fn non_plist_bodies_are_described() {
+        let err = parse_xml(b"rate limited, retry later").unwrap_err();
+        assert!(err.contains("not a property list"), "{err}");
+        assert!(err.contains("rate limited"), "no excerpt: {err}");
+
+        let err = parse_xml(b"").unwrap_err();
+        assert!(err.contains("empty"), "{err}");
+
+        // A binary plist handed to the XML parser: rejected, not panicked on.
+        let err = parse_xml(&[0u8, 1, 2, 0xFF, 0xFE]).unwrap_err();
+        assert!(err.contains("not a property list"), "{err}");
+    }
+
+    /// Control characters and NULs from a WAF page must not reach the log.
+    #[test]
+    fn snippets_are_sanitised_and_bounded() {
+        let body = b"line one\nline\ttwo\rmore\x00\x07 end";
+        let s = response_snippet(body, 180);
+        assert_eq!(s, "line one line two more end");
+        assert!(!s.chars().any(|c| c.is_control()));
+
+        let long = vec![b'x'; 5000];
+        let s = response_snippet(&long, 32);
+        assert!(s.chars().count() <= 33, "not bounded: {}", s.len());
+        assert!(s.ends_with('…'));
+    }
+
+    /// A comment may contain anything that looks like markup, including the
+    /// tags the scanner balances on. It must not shift the parse.
+    #[test]
+    fn comments_do_not_break_tag_balance() {
+        let xml = r#"<?xml version="1.0"?>
+        <plist version="1.0">
+        <!-- a comment with <dict> <key>fake</key> </dict> inside -->
+        <dict>
+            <!-- multi-line
+                 comment
+                 spanning lines with </dict> and <array> -->
+            <key>real</key>
+            <string>value</string>
+        </dict>
+        </plist>"#;
+        let doc = parse_xml(xml.as_bytes()).unwrap();
+        assert_eq!(doc.get("real").and_then(|v| v.as_str()), Some("value"));
+        assert!(doc.get("fake").is_none(), "a comment leaked a key");
+    }
+
+    /// An unterminated comment is a truncated response, not a panic.
+    #[test]
+    fn unterminated_comment_is_handled() {
+        let xml = "<plist><dict><key>a</key><string>b</string><!-- never closed";
+        // The comment swallows the rest, so the dict close is gone too and
+        // this must be a clean error rather than a panic or a hang.
+        let r = parse_xml(xml.as_bytes());
+        assert!(r.is_err() || r.unwrap().get("a").is_some());
+    }
+
+    /// CDATA content is a plain string, and its entities stay literal.
+    #[test]
+    fn cdata_becomes_a_literal_string() {
+        let xml = "<plist><dict><key>blob</key><![CDATA[<not> &amp; parsed]]></dict></plist>";
+        let doc = parse_xml(xml.as_bytes()).unwrap();
+        assert_eq!(
+            doc.get("blob").and_then(|v| v.as_str()),
+            Some("<not> &amp; parsed"),
+            "CDATA must stay literal"
+        );
+    }
+
+    /// CDATA inside a container must consume exactly one element, so the
+    /// siblings after it are still found.
+    #[test]
+    fn cdata_inside_containers_keeps_siblings() {
+        let xml = "<array><![CDATA[first]]><string>second</string><integer>3</integer></array>";
+        let doc = parse_xml(xml.as_bytes()).unwrap();
+        let items = doc.as_array().unwrap();
+        assert_eq!(items.len(), 3, "{items:?}");
+        assert_eq!(items[0].as_str(), Some("first"));
+        assert_eq!(items[1].as_str(), Some("second"));
+        assert_eq!(items[2].as_i64(), Some(3));
+    }
+
+    /// Unterminated CDATA is a clean error.
+    #[test]
+    fn unterminated_cdata_is_an_error() {
+        let xml = "<array><![CDATA[never closed</array>";
+        assert!(parse_xml(xml.as_bytes()).is_err());
+    }
+
+    /// Wrapped base64 loses its line breaks; prose keeps every byte.
+    #[test]
+    fn wrapped_tokens_are_unwrapped_and_prose_is_untouched() {
+        let payload = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5"; // 48 chars
+        let padded = format!("{payload}{payload}");
+        assert!(padded.len() >= WRAPPED_TOKEN_MIN);
+        let wrapped: String = padded
+            .as_bytes()
+            .chunks(24)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n            ");
+
+        let xml =
+            format!("<dict><key>k</key><string>\n            {wrapped}\n        </string></dict>");
+        let doc = parse_xml(xml.as_bytes()).unwrap();
+        assert_eq!(doc.get("k").and_then(|v| v.as_str()), Some(padded.as_str()));
+
+        // Short wrapped prose must keep its break: gluing it would turn
+        // "Telegram\nMessenger" into "TelegramMessenger".
+        let xml = "<dict><key>n</key><string>Telegram\nMessenger</string></dict>";
+        let doc = parse_xml(xml.as_bytes()).unwrap();
+        assert_eq!(
+            doc.get("n").and_then(|v| v.as_str()),
+            Some("Telegram\nMessenger")
+        );
+
+        // A long prose value whose stripped form is NOT valid base64 keeps
+        // every byte: the punctuation alone rules it out.
+        let prose = "This app is not available in your country, \
+                     please choose another storefront!";
+        let xml = format!("<dict><key>p</key><string>{prose}</string></dict>");
+        let doc = parse_xml(xml.as_bytes()).unwrap();
+        assert_eq!(doc.get("p").and_then(|v| v.as_str()), Some(prose));
+    }
+
+    /// Pins the one case the rule cannot win, so nobody "fixes" it by
+    /// loosening the check and starts eating ordinary strings.
+    ///
+    /// A soft-wrapped sentence made only of letters and spaces strips down
+    /// to a legal base64 length and alphabet, so it IS unwrapped. This is
+    /// accepted deliberately: the alternative — unwrapping nothing in
+    /// `<string>` — loses Apple's wrapped certificate and token payloads,
+    /// which is the case that actually occurs. A value that carries any
+    /// punctuation is left alone.
+    #[test]
+    fn wrapped_prose_that_looks_like_base64_is_a_known_collision() {
+        let prose = format!("{} has  two  spaces", "word ".repeat(20));
+        // Soft-wrap it exactly as Apple would, so the value really does
+        // contain line breaks.
+        let wrapped: String = prose
+            .as_bytes()
+            .chunks(24)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n            ");
+        let xml = format!("<dict><key>p</key><string>{wrapped}</string></dict>");
+        let doc = parse_xml(xml.as_bytes()).unwrap();
+        let got = doc.get("p").and_then(|v| v.as_str()).unwrap();
+        let expected: String = prose.chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(expected.len() % 4, 0, "fixture stopped being base64-shaped");
+        assert_eq!(
+            got, expected,
+            "collision behaviour changed; re-evaluate the rule before editing"
+        );
+    }
+
+    /// Pins the other half of the rule: a single-line value is never
+    /// rewritten, even when stripping its spaces would yield valid base64.
+    /// Apple only soft-wraps what it meant to wrap, so a break is the
+    /// signal; without it the transformation is guesswork.
+    #[test]
+    fn single_line_values_are_never_unwrapped() {
+        // Long enough to clear WRAPPED_TOKEN_MIN, so the newline check is
+        // the only thing protecting it — not the length threshold.
+        // The STRIPPED length is what the threshold sees, so it must clear
+        // WRAPPED_TOKEN_MIN on its own — otherwise this test is really
+        // exercising the length guard and proves nothing about newlines.
+        let token = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5YWJjZGVmZ2hpamtsbW5vcHFycw==";
+        let spaced: String = token
+            .as_bytes()
+            .chunks(4)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            token.len() >= WRAPPED_TOKEN_MIN,
+            "fixture too short to test the rule"
+        );
+        assert_eq!(token.len() % 4, 0, "fixture is not a base64 length");
+        let xml = format!("<dict><key>k</key><string>{spaced}</string></dict>");
+        let doc = parse_xml(xml.as_bytes()).unwrap();
+        assert_eq!(
+            doc.get("k").and_then(|v| v.as_str()),
+            Some(spaced.as_str()),
+            "single-line values must pass through untouched"
+        );
+    }
+
+    /// `<data>` already drops all whitespace; assert it across line breaks.
+    #[test]
+    fn base64_data_ignores_embedded_whitespace() {
+        let xml = "<dict><key>d</key><data>\n  aGVsbG8g\n  d29ybGQ=\n</data></dict>";
+        let doc = parse_xml(xml.as_bytes()).unwrap();
+        assert_eq!(
+            doc.get("d").and_then(|v| v.as_data()),
+            Some(&b"hello world"[..])
+        );
+    }
 
     #[test]
     fn xml_roundtrip_dict() {

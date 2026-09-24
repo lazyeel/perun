@@ -55,6 +55,14 @@ pub enum StoreError {
     AccountDisabled,
     AppNotFound,
     PaidApp,
+    /// A gateway answered with an HTML error page instead of a property
+    /// list. Carries the HTTP status and a one-line excerpt, because the
+    /// parse-level message ("no <dict> in document") names neither the
+    /// cause nor the server's own explanation.
+    ServerHtmlError {
+        status: u16,
+        snippet: String,
+    },
     Other(String),
 }
 
@@ -74,9 +82,29 @@ impl std::fmt::Display for StoreError {
             StoreError::AccountDisabled => write!(f, "account is disabled"),
             StoreError::AppNotFound => write!(f, "app not found"),
             StoreError::PaidApp => write!(f, "purchasing paid apps is not supported"),
+            StoreError::ServerHtmlError { status, snippet } => write!(
+                f,
+                "server returned an HTML error page (HTTP {status}): {snippet}"
+            ),
             StoreError::Other(msg) => write!(f, "{msg}"),
         }
     }
+}
+
+/// Build the error for a response body that would not parse as a property
+/// list, given the HTTP status that came with it.
+///
+/// A gateway HTML page gets its own variant, because "HTTP 502: <!DOCTYPE
+/// html>..." is the difference between a retryable edge error and a bug in
+/// the parser. Everything else keeps the parse-level message.
+pub fn parse_failure(what: &str, status: u16, body: &[u8], err: &str) -> StoreError {
+    if plist::looks_like_html(body) {
+        return StoreError::ServerHtmlError {
+            status,
+            snippet: plist::response_snippet(body, 160),
+        };
+    }
+    StoreError::Other(format!("{what} (HTTP {status}): {err}"))
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -413,10 +441,12 @@ pub fn login(
         let doc = match plist::parse_xml(&res.body) {
             Ok(doc) => doc,
             Err(e) => {
-                return Err(StoreError::Other(format!(
-                    "login response parse (HTTP {}): {}",
-                    res.status, e
-                )));
+                return Err(parse_failure(
+                    "login response parse",
+                    res.status,
+                    &res.body,
+                    &e,
+                ));
             }
         };
 
@@ -683,7 +713,7 @@ fn purchase_with_params(account: &Account, app: &App, guid: &str, pricing: &str)
     .map_err(|e| StoreError::Other(format!("purchase: {e}")))?;
 
     let doc = plist::parse_xml(&res.body)
-        .map_err(|e| StoreError::Other(format!("purchase parse (HTTP {}): {e}", res.status)))?;
+        .map_err(|e| parse_failure("purchase parse", res.status, &res.body, &e))?;
     let failure_type = doc
         .get("failureType")
         .and_then(|v| v.as_str())
@@ -896,9 +926,8 @@ fn fetch_download_info_from(
     )
     .map_err(|e| StoreError::Other(format!("download info: {e}")))?;
 
-    let doc = plist::parse_xml(&res.body).map_err(|e| {
-        StoreError::Other(format!("download info parse (HTTP {}): {e}", res.status))
-    })?;
+    let doc = plist::parse_xml(&res.body)
+        .map_err(|e| parse_failure("download info parse", res.status, &res.body, &e))?;
     let failure_type = doc
         .get("failureType")
         .and_then(|v| v.as_str())
