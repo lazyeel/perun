@@ -219,7 +219,7 @@ Credentials are deliberately **not** read from the environment. There is no `PER
 A stable Rust toolchain is enough. The workspace is edition 2024, which needs rustc 1.85 or newer; it is developed and verified against 1.98.1. There is no C or C++ dependency and no FFI beyond libc — the runtime is Rust plus a small set of permissive crates, listed with versions and SPDX expressions in [RESEARCH.md § 8.1](RESEARCH.md) and in [`NOTICE`](NOTICE). Building the SAP path additionally needs `curl` on `PATH` and network access to Apple endpoints.
 
 ```bash
-cargo test --workspace              # 202 tests across the workspace
+cargo test --workspace              # 226 tests across the workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check          # the tree is rustfmt-clean; this must exit 0
 ```
