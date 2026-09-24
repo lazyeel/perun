@@ -24,7 +24,7 @@
 //! Pure `std`, no dependencies. Like the SAP fetcher, the live side shells
 //! out to `curl`. Unit tests pin the decision table and the exact bodies.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::Command;
@@ -303,8 +303,8 @@ fn probe(base: &str) -> i32 {
     let dir: PathBuf = std::env::temp_dir().join(format!("fpdi-probe-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     println!(
-        "{:<16} {:<6} {:<16} {:<28} {:<14} {}",
-        "case", "method", "path", "content-type", "result", "body-head"
+        "{:<16} {:<6} {:<16} {:<28} {:<14} body-head",
+        "case", "method", "path", "content-type", "result"
     );
     for c in matrix() {
         let (meta, body) = run_curl(base, &c, &dir);
@@ -328,10 +328,8 @@ fn check() -> i32 {
     let l = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = l.local_addr().unwrap().port();
     std::thread::spawn(move || {
-        for c in l.incoming() {
-            if let Ok(s) = c {
-                serve_conn(s);
-            }
+        for s in l.incoming().flatten() {
+            serve_conn(s);
         }
     });
     let base = format!("http://127.0.0.1:{port}");

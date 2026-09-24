@@ -23,6 +23,7 @@ fn w64(mem: &mut [u8], off: usize, v: u64) {
 fn w32(mem: &mut [u8], off: usize, v: u32) {
     mem[off..off + 4].copy_from_slice(&v.to_le_bytes());
 }
+#[cfg(test)]
 fn r64(mem: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(mem[off..off + 8].try_into().unwrap())
 }
@@ -63,6 +64,7 @@ fn layout_b(inner: u64, op: u64) -> Vec<u8> {
 /// offline (the session gate masks every discriminator), so the unit tests
 /// below pin the COMPILED offsets against this spec instead — if rustc
 /// disagrees, the tests fail and the spec, not the code, is wrong.
+#[cfg(test)]
 #[repr(C)]
 struct AdiInvocation {
     args: u64,
@@ -73,6 +75,7 @@ struct AdiInvocation {
 }
 
 /// Hypothetical startProvisioning inner block (same honesty rule).
+#[cfg(test)]
 #[repr(C)]
 struct InnerStartProv {
     dsid: u64,
@@ -149,20 +152,22 @@ fn dp_pair(
     (u64, Vec<(*const u8, usize)>, Vec<u8>),
 ) {
     unsafe fn region(n: usize) -> *mut u8 {
-        let p = libc::mmap(
-            std::ptr::null_mut(),
-            n,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-            -1,
-            0,
-        );
-        if p == libc::MAP_FAILED {
-            eprintln!("region mmap failed");
-            std::process::exit(1);
+        unsafe {
+            let p = libc::mmap(
+                std::ptr::null_mut(),
+                n,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            );
+            if p == libc::MAP_FAILED {
+                eprintln!("region mmap failed");
+                std::process::exit(1);
+            }
+            std::ptr::write_bytes(p as *mut u8, 0, n);
+            p as *mut u8
         }
-        std::ptr::write_bytes(p as *mut u8, 0, n);
-        p as *mut u8
     }
     unsafe {
         let rpacket = region(0x48);
@@ -268,7 +273,7 @@ fn real_main() -> i32 {
                 Ok(o) if o.status.success() => {
                     let line = String::from_utf8_lossy(&o.stdout);
                     let line = line.trim();
-                    print!("{model} op={op} worker-rc=0 {line}\n");
+                    println!("{model} op={op} worker-rc=0 {line}");
                     if line.starts_with("HIT") {
                         hits += 1;
                     }
@@ -333,20 +338,22 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
     let init: ExportFn = unsafe { std::mem::transmute(init_ptr) };
 
     unsafe fn region(n: usize) -> *mut u8 {
-        let p = libc::mmap(
-            std::ptr::null_mut(),
-            n,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-            -1,
-            0,
-        );
-        if p == libc::MAP_FAILED {
-            eprintln!("mmap failed");
-            std::process::exit(1);
+        unsafe {
+            let p = libc::mmap(
+                std::ptr::null_mut(),
+                n,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            );
+            if p == libc::MAP_FAILED {
+                eprintln!("mmap failed");
+                std::process::exit(1);
+            }
+            std::ptr::write_bytes(p as *mut u8, 0, n);
+            p as *mut u8
         }
-        std::ptr::write_bytes(p as *mut u8, 0, n);
-        p as *mut u8
     }
 
     let rsp = unsafe { region(spim.len().max(8)) };

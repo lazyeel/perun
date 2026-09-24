@@ -29,14 +29,14 @@ pub fn collect_linux() -> MachineInputs {
         mac: first_mac(),
         vol4: vec![0; 4],
         product_id_ascii: std::fs::read("/etc/machine-id")
-            .map(|b| trim_nl(b))
+            .map(trim_nl)
             .unwrap_or_default(),
         cpu_ascii: cpu_model(),
         bios_ascii: std::fs::read("/sys/class/dmi/id/bios_version")
-            .map(|b| trim_nl(b))
+            .map(trim_nl)
             .unwrap_or_else(|_| {
                 std::fs::read("/proc/sys/kernel/osrelease")
-                    .map(|b| trim_nl(b))
+                    .map(trim_nl)
                     .unwrap_or_default()
             }),
         machine_wide: wide(&hostname()),
@@ -176,7 +176,7 @@ fn md5(msg: &[u8]) -> [u8; 16] {
         data.push(0);
     }
     data.extend_from_slice(&bit_len.to_le_bytes());
-    for chunk in data.chunks_exact(64) {
+    for chunk in data.as_chunks::<64>().0 {
         let mut m = [0u32; 16];
         for (i, w) in m.iter_mut().enumerate() {
             *w = u32::from_le_bytes([

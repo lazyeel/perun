@@ -58,7 +58,9 @@ extern "C" fn on_segv(_sig: libc::c_int, info: *mut libc::siginfo_t, _ctx: *mut 
 fn install_handler() {
     unsafe {
         let mut act: libc::sigaction = std::mem::zeroed();
-        act.sa_sigaction = on_segv as usize;
+        // fn-item -> integer is unspecified; go through a data pointer, the same
+        // cast the Mach-O shim table uses.
+        act.sa_sigaction = on_segv as *const () as usize;
         act.sa_flags = libc::SA_SIGINFO;
         libc::sigemptyset(&mut act.sa_mask);
         libc::sigaction(libc::SIGSEGV, &act, std::ptr::null_mut());
