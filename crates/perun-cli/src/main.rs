@@ -151,8 +151,86 @@ pub unsafe fn install_crash_probe() {
     }
 }
 
+/// Help text for the low-level lane, printed without running anything.
+///
+/// Intercepted in `run()` before the dispatch, never inside the commands: `sap`
+/// spawns a 256 MiB guest thread and may fetch Apple's assets, `run` maps a PE,
+/// `seq` executes a script, so a `--help` reaching them starts real work — the
+/// old behaviour turned `perun sap --help` into a live SAP session. `-h` and
+/// `--help` count anywhere in the tail, the way every other flag here does.
+fn low_level_help(sub: &str) -> Option<&'static str> {
+    Some(match sub {
+        "run" => concat!(
+            "usage: perun run <image.dll> [--verbose] [--trace] [--trace-file F] [--no-teb]\n\n",
+            "  Loads a PE32+ image, resolves its imports against the Win32 shim table,\n",
+            "  installs a per-thread TEB, and calls DllMain(DLL_PROCESS_ATTACH).\n\n",
+            "  --verbose        print the image summary before loading\n",
+            "  --trace          log the instrumented Win32 call sites (partial coverage)\n",
+            "  --trace-file F   redirect stderr onto F, where the trace lines land\n",
+            "  --no-teb         skip TEB initialization\n"
+        ),
+        "info" => concat!(
+            "usage: perun info <image.dll>\n\n",
+            "  Prints the PE32+ header and sections, then the import table (DLL, named and\n",
+            "  ordinal) and the export names. Accepts PE32+ only; a Mach-O file goes to\n",
+            "  `perun mach info`.\n"
+        ),
+        "mach" => concat!(
+            "usage: perun mach info <macho>\n\n",
+            "  Parses a 64-bit Mach-O image: header, segments, sections and the symbol\n",
+            "  table, without mapping it or running any guest code.\n"
+        ),
+        "sap" => concat!(
+            "usage: perun sap [<assets-dir>] [--mac AA:BB:CC:DD:EE:FF] [--sign HEX | --file F]\n\n",
+            "  Runs the FairPlay SAP session (init, two exchange rounds, sign) against the\n",
+            "  live endpoints. With no arguments the asset cache is used as-is, and a first\n",
+            "  run fetches the missing images itself from Apple's public update package.\n\n",
+            "  <assets-dir>     use this directory instead of the default cache\n",
+            "  --mac            force the machine address for this run, overriding the pin\n",
+            "  --sign HEX       sign this payload instead of the built-in smoke string\n",
+            "  --file F         sign the contents of F instead\n\n",
+            "  This command starts a real session and may perform network I/O.\n"
+        ),
+        "seq" => concat!(
+            "usage: perun seq <image.dll> <export> --script=FILE\n\n",
+            "  Loads one image and runs DllMain once, then drives a script of export calls\n",
+            "  in the same process so guest state carries between them. One verb per line,\n",
+            "  `#` starts a comment:\n\n",
+            "    load NAME FILE   read FILE into a named guest buffer\n",
+            "    poke T V         write a qword; T = scratch+OFF | ctx+OFF | RVA\n",
+            "    call [EXPORT] A0 A1 A2 A3\n",
+            "                     call the export (default vdfut768ig); args are tokens:\n",
+            "                     buffer names, scratch/ctx with optional +OFF, or numbers\n",
+            "    zero scratch|ctx clear that region\n",
+            "    dump            print the non-zero qwords of scratch and ctx\n\n",
+            "  Export names match the export table case-sensitively.\n"
+        ),
+        _ => return None,
+    })
+}
+
+/// True when the tail carries a help flag anywhere, the way the other parsers
+/// accept their flags in any position.
+fn help_flag_present(tail: &[String]) -> bool {
+    tail.iter().any(|a| a == "-h" || a == "--help")
+}
+
+/// Returns `Some(0)` when a help request was satisfied without running anything.
+fn low_level_help_requested(sub: &str, tail: &[String]) -> Option<i32> {
+    if !help_flag_present(tail) {
+        return None;
+    }
+    print!("{}", low_level_help(sub)?);
+    Some(0)
+}
+
 fn run() -> i32 {
-    let args: Vec<String> = std::env::args().collect();
+    run_with_args(&std::env::args().collect::<Vec<String>>())
+}
+
+/// The dispatcher, separated from `main` so the argv-driven help interception is
+/// testable without launching a process.
+fn run_with_args(args: &[String]) -> i32 {
     // argv[0] persona: a binary invoked as `ipatool` (basename) runs the
     // strict majd/ipatool grammar for EVERYTHING, including the bare
     // `--help`/`--version` root flags; `perun` keeps its native grammar.
@@ -174,6 +252,13 @@ fn run() -> i32 {
             "usage: perun run <image.dll> [--verbose] [--trace] [--trace-file F] [--no-teb]\n       perun info <image.dll>\n       perun mach info <macho>\n       perun scaffold \"TRAP-line\" [...]\n       perun sap [--mac AA:BB:CC:DD:EE:FF] [--sign HEX|--file F]\n       perun store <auth|search|purchase|download|list-purchases|list-versions|get-version-metadata> ...\n       ipatool aliases: perun auth login|info|revoke · perun search -t ... · perun purchase -i ...\n                        perun download -i ... · perun list-purchases · perun list-versions ..."
         );
         return 2;
+    }
+
+    // `-h`/`--help` for the low-level lane never reaches the commands: `sap`
+    // would spawn a guest thread and hit Apple's endpoints, `seq` would run its
+    // script, `run` would map the image. Answered here instead.
+    if let Some(code) = low_level_help_requested(&args[1], &args[2..]) {
+        return code;
     }
 
     match args[1].as_str() {
@@ -1428,4 +1513,80 @@ fn hex_decode(s: &str) -> Vec<u8> {
     (0..clean.len() / 2)
         .map(|i| u8::from_str_radix(&clean[i * 2..i * 2 + 2], 16).unwrap_or(0))
         .collect()
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::*;
+
+    const LOW_LEVEL: [&str; 5] = ["run", "info", "mach", "sap", "seq"];
+
+    #[test]
+    fn every_low_level_command_has_help() {
+        for sub in LOW_LEVEL {
+            assert!(low_level_help(sub).is_some(), "{sub} should have help");
+        }
+    }
+
+    #[test]
+    fn help_is_absent_for_commands_that_route_to_the_store_lane() {
+        // The store lane owns its own cobra help, byte-for-byte; the low-level
+        // intercept must not shadow it.
+        for sub in [
+            "store", "auth", "search", "purchase", "download", "call", "scaffold",
+        ] {
+            assert!(
+                low_level_help(sub).is_none(),
+                "{sub} must not be intercepted"
+            );
+        }
+    }
+
+    #[test]
+    fn help_text_carries_no_runtime_log_line() {
+        // The regression this pins: `perun sap --help` used to fall through to the
+        // command and run a live session, emitting [fetcher]/[sap] log lines and
+        // performing network I/O. A help string must not contain a log prefix.
+        for sub in LOW_LEVEL {
+            let text = low_level_help(sub).expect("help exists");
+            assert!(
+                !text.lines().any(|l| l.starts_with('[')),
+                "{sub} help must not contain a bracketed log line"
+            );
+            assert!(!text.is_empty(), "{sub} help must not be empty");
+        }
+    }
+
+    #[test]
+    fn help_flag_is_found_in_any_position() {
+        let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+        assert!(help_flag_present(&v(&["--help"])));
+        assert!(help_flag_present(&v(&["-h"])));
+        assert!(help_flag_present(&v(&[
+            "--mac", "AA:BB", "--help", "extra"
+        ])));
+        assert!(!help_flag_present(&v(&[])));
+        assert!(!help_flag_present(&v(&["--verbose", "--trace"])));
+    }
+
+    #[test]
+    fn dispatcher_answers_help_before_running_the_command() {
+        // The bug lived in the wiring, not the helper: `--help` reached the
+        // command and started real work. Drive the dispatcher directly and assert
+        // it returns 0 without touching the filesystem, a guest thread or network.
+        for sub in LOW_LEVEL {
+            for flag in ["-h", "--help"] {
+                let args: Vec<String> =
+                    ["perun", sub, flag].iter().map(|x| x.to_string()).collect();
+                assert_eq!(run_with_args(&args), 0, "perun {sub} {flag}");
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_subcommand_with_help_flag_is_not_answered() {
+        let args = vec!["--help".to_string()];
+        assert!(help_flag_present(&args));
+        assert!(low_level_help("bogus").is_none());
+    }
 }

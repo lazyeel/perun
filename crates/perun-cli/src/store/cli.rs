@@ -516,6 +516,30 @@ fn print_command_help(short: &str, usage: &str, flags: &str) {
 }
 
 fn help_search() {
+    // `begin` hands over a bare callback, and every other `help_*` in this file
+    // is persona-invariant, so only this one branches. Re-reading the persona is
+    // safe and costs nothing: `Persona::detect` is a basename compare on argv[0]
+    // in the same process that `run` already used to get here.
+    if Persona::detect() == Persona::Perun {
+        print!(
+            "Search for iOS, iPadOS, tvOS, visionOS, and macOS apps available on the App Store\n\n\
+Usage:\n  perun search <term> [flags]\n\n\
+Flags:\n  -h, --help              help for search\n  \
+-l, --limit int         maximum amount of search results to retrieve; visionOS supports up to 12 (default 5)\n      \
+--platform string   Platform to search: iphone (iOS), ipad (iPadOS), appletv (tvOS), visionos, or macos\n  \
+-t, --term string       the search term, instead of the positional argument\n\n\
+Client-side scopes — perun only, the ipatool persona has none, and the three are\n\
+mutually exclusive:\n      \
+--developer         keep only apps whose artistName/sellerName matches\n  -dev\n      \
+--description     keep only apps whose description text matches\n  -desc\n      \
+--id               the term is a numeric artist id: list that developer's whole\n                      catalog through the Lookup API\n\n\
+A scope probes the backend at its maximum and applies the limit after filtering,\n\
+so a filter never shrinks the page you asked for. With no scope, search stays\n\
+the plain Apple search across all fields.\n\n\
+{GLOBAL_FLAGS_BLOCK}\n"
+        );
+        return;
+    }
     print_command_help(
         "Search for iOS, iPadOS, tvOS, visionOS, and macOS apps available on the App Store",
         "search <term> [flags]",
