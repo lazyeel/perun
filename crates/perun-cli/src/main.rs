@@ -155,9 +155,10 @@ pub unsafe fn install_crash_probe() {
 ///
 /// Intercepted in `run()` before the dispatch, never inside the commands: `sap`
 /// spawns a 256 MiB guest thread and may fetch Apple's assets, `run` maps a PE,
-/// `seq` executes a script, so a `--help` reaching them starts real work — the
-/// old behaviour turned `perun sap --help` into a live SAP session. `-h` and
-/// `--help` count anywhere in the tail, the way every other flag here does.
+/// `seq` executes a script, `call` would export-call a guest and `scaffold` would
+/// try to parse the flag as a trap line, so a `--help` reaching them either starts
+/// real work or fails confusingly. `-h` and `--help` count anywhere in the tail,
+/// the way every other flag here does.
 fn low_level_help(sub: &str) -> Option<&'static str> {
     Some(match sub {
         "run" => concat!(
@@ -204,6 +205,32 @@ fn low_level_help(sub: &str) -> Option<&'static str> {
             "    zero scratch|ctx clear that region\n",
             "    dump            print the non-zero qwords of scratch and ctx\n\n",
             "  Export names match the export table case-sensitively.\n"
+        ),
+        "call" => concat!(
+            "usage: perun call <image.dll> <export> [arg0 arg1 arg2 arg3] [flags]\n\n",
+            "  Loads the image, runs DllMain once, then calls one export with up to four\n",
+            "  positional arguments in Win64 order (rcx, rdx, r8, r9). Values may be plain\n",
+            "  numbers or the tokens `scratch`, `ctx`, and either with a +OFF suffix.\n\n",
+            "  --load=NAME=FILE   read FILE into a named guest buffer, usable as a value\n",
+            "  --patch=RVA=HEX    patch bytes into the mapped image (mprotect'd, RX after)\n",
+            "  --poke=T=V         write a qword before the call; T = RVA | scratch+OFF | ctx+OFF\n",
+            "  --poke-ptr=RVA=V   write V through the pointer stored at guest RVA\n",
+            "  --peek=RVA[,RVA…]  read guest qwords after the call\n",
+            "  --peek-ptr=RVA     dereference a guest RVA as a host pointer and dump it\n",
+            "  --verbose          print the image summary before loading\n\n",
+            "  Option values resolve after the whole command line is parsed, so a buffer\n",
+            "  name works as a value wherever its --load sits.\n",
+            "  PERUN_SEQ=N repeats one call in-process (call#0, call#1, …).\n"
+        ),
+        "scaffold" => concat!(
+            "usage: perun scaffold \"TRAP-line\" [...]\n\n",
+            "  Turns an unresolved-import trap report into a compiling `win32_api!` stub\n",
+            "  with the observed arguments and the file whose family owns the API. Accepts\n",
+            "  the bare `DLL!func(args)` shape, the full `[perun] TRAP: …` line, and the\n",
+            "  hint payload pasted back verbatim. Several lines may be given at once.\n\n",
+            "  example: perun scaffold \"[perun] TRAP: KERNEL32!FooBar(0x1, 0x0, 0x0, 0x0)\"\n",
+            "           perun scaffold 'KERNEL32!FooBar(0x1, 0x0, 0x0, 0x0)'\n\n",
+            "  Exit 0 when every line parsed, 1 when one did not.\n"
         ),
         _ => return None,
     })
@@ -1519,7 +1546,7 @@ fn hex_decode(s: &str) -> Vec<u8> {
 mod help_tests {
     use super::*;
 
-    const LOW_LEVEL: [&str; 5] = ["run", "info", "mach", "sap", "seq"];
+    const LOW_LEVEL: [&str; 7] = ["run", "info", "mach", "sap", "seq", "call", "scaffold"];
 
     #[test]
     fn every_low_level_command_has_help() {
@@ -1533,7 +1560,13 @@ mod help_tests {
         // The store lane owns its own cobra help, byte-for-byte; the low-level
         // intercept must not shadow it.
         for sub in [
-            "store", "auth", "search", "purchase", "download", "call", "scaffold",
+            "store",
+            "auth",
+            "search",
+            "purchase",
+            "download",
+            "list-purchases",
+            "list-versions",
         ] {
             assert!(
                 low_level_help(sub).is_none(),
