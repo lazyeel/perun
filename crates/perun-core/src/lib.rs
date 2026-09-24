@@ -7,6 +7,8 @@ pub mod image;
 pub mod loader;
 pub mod macho;
 pub mod macho_loader;
+pub mod rdtsc_sites;
+pub mod sha256;
 pub mod stub;
 pub mod teb;
 

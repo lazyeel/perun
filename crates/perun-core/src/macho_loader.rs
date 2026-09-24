@@ -223,6 +223,35 @@ impl MachImage {
         Ok(img)
     }
 
+    /// SHA-256 of a file, streamed so the 29 MB CoreFP is never resident.
+    fn file_sha256(file: &std::fs::File) -> std::io::Result<String> {
+        use std::os::unix::fs::FileExt;
+        let mut h = crate::sha256::Sha256::new();
+        let mut buf = vec![0u8; 1 << 16];
+        let mut at = 0u64;
+        loop {
+            let n = file.read_at(&mut buf, at)?;
+            if n == 0 {
+                break;
+            }
+            h.update(&buf[..n]);
+            at += n as u64;
+        }
+        Ok(h.finish_hex())
+    }
+
+    /// Pinned rdtsc table for a file whose digest we recognise, else `None`.
+    fn pinned_rdtsc_table(file: &std::fs::File) -> Option<&'static [(u32, u8)]> {
+        use crate::rdtsc_sites as s;
+        let digest = Self::file_sha256(file).ok()?;
+        match digest.as_str() {
+            s::COREFP_RDTSC_SHA256 => Some(s::COREFP_RDTSC_PATCHES),
+            s::COMMERCEKIT_RDTSC_SHA256 => Some(s::COMMERCEKIT_RDTSC_PATCHES),
+            s::COMMERCECORE_RDTSC_SHA256 => Some(s::COMMERCECORE_RDTSC_PATCHES),
+            _ => None,
+        }
+    }
+
     /// Shared tail of the streaming path: stream segments into the mapping,
     /// then apply rebases/binds/rdtsc against mapped memory.
     ///
@@ -328,8 +357,10 @@ impl MachImage {
                 base.add(off).cast::<u64>().write_unaligned(value);
             }
 
-            // rdtsc neutralization against mapped __TEXT,__text.
-            Self::neutralize_rdtsc_mapped(&info, base, span);
+            // rdtsc neutralization against mapped __TEXT,__text. A pinned
+            // digest short-circuits the linear scan; anything else scans.
+            let pinned = Self::pinned_rdtsc_table(&file);
+            Self::neutralize_rdtsc_mapped(&info, base, span, pinned);
 
             Ok(MachImage {
                 slide,
@@ -419,15 +450,81 @@ impl MachImage {
         Err(MachLoadError::Parse(MachError::NoX86Slice))
     }
 
+    /// Replacement bytes for one idiom, by type id (0 = A, 1 = B, 2 = C).
+    #[inline]
+    fn rdtsc_replacement(kind: u8) -> &'static [u8] {
+        const REPL_A: [u8; 9] = [0x31, 0xC0, 0x31, 0xD2, 0x90, 0x90, 0x90, 0x90, 0x90];
+        const REPL_B: [u8; 12] = [
+            0x31, 0xC0, 0x31, 0xD2, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+        ];
+        const REPL_C: [u8; 10] = [0x31, 0xC0, 0x31, 0xD2, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90];
+        match kind {
+            0 => &REPL_A,
+            1 => &REPL_B,
+            _ => &REPL_C,
+        }
+    }
+
+    /// Idiom bytes for one type id, used by the equivalence test.
+    #[inline]
+    fn rdtsc_idiom(kind: u8) -> &'static [u8] {
+        const A: [u8; 9] = [0x0F, 0x31, 0x48, 0xC1, 0xE2, 0x20, 0x48, 0x09, 0xC2];
+        const B: [u8; 12] = [
+            0x0F, 0x31, 0x48, 0x89, 0xD1, 0x48, 0xC1, 0xE1, 0x20, 0x48, 0x09, 0xC1,
+        ];
+        const C: [u8; 10] = [0x0F, 0x31, 0x48, 0xC1, 0xE0, 0x04, 0x48, 0x83, 0xE0, 0x70];
+        match kind {
+            0 => &A,
+            1 => &B,
+            _ => &C,
+        }
+    }
+
+    /// Apply a pinned patch table. Returns false when any entry does not sit
+    /// on its expected idiom in the mapping, which means the table does not
+    /// belong to this image and the caller must fall back to the scan.
+    fn apply_rdtsc_table(table: &[(u32, u8)], base: *mut u8, text_off: usize, span: usize) -> bool {
+        unsafe {
+            let work = std::slice::from_raw_parts_mut(base, span);
+            for &(off, kind) in table {
+                let at = text_off + off as usize;
+                let repl = Self::rdtsc_replacement(kind);
+                let idiom = Self::rdtsc_idiom(kind);
+                if at + idiom.len() > work.len() || &work[at..at + idiom.len()] != idiom {
+                    return false;
+                }
+                work[at..at + repl.len()].copy_from_slice(repl);
+            }
+        }
+        true
+    }
+
     /// In-mapping variant of `neutralize_rdtsc`: same three idioms, same
     /// two-byte prefilter, same patch bytes — written into mapped memory.
-    fn neutralize_rdtsc_mapped(info: &MachInfo, base: *mut u8, span: usize) {
+    ///
+    /// The `pinned` table short-circuits the scan entirely. That matters
+    /// because the scan reads the whole `__TEXT,__text` *through the
+    /// mapping*, and every page it touches is faulted into the process: for
+    /// CoreFP that was 13.66 MiB, most of it code the guest never runs.
+    /// The sites cluster into 988 distinct 4 KiB pages, so patching them
+    /// directly dirties only those and leaves the rest clean on disk.
+    fn neutralize_rdtsc_mapped(
+        info: &MachInfo,
+        base: *mut u8,
+        span: usize,
+        pinned: Option<&[(u32, u8)]>,
+    ) {
         let Some((off, size)) = info.text_section else {
             return;
         };
         let start = off as usize;
         let end = start + size as usize;
         if end > span {
+            return;
+        }
+        if let Some(table) = pinned
+            && Self::apply_rdtsc_table(table, base, start, span)
+        {
             return;
         }
         const IDIOM_A: [u8; 9] = [0x0F, 0x31, 0x48, 0xC1, 0xE2, 0x20, 0x48, 0x09, 0xC2];
@@ -775,5 +872,178 @@ mod file_backed_tests {
 
         unsafe { libc::munmap(base as *mut libc::c_void, span) };
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod rdtsc_table_tests {
+    use crate::rdtsc_sites as sites;
+
+    /// Byte offset of the x86_64 slice in a (possibly fat) Mach-O.
+    fn fat_slice_of(blob: &[u8]) -> usize {
+        if blob.len() < 8 || blob[..4] != [0xca, 0xfe, 0xba, 0xbe] {
+            return 0;
+        }
+        let n = u32::from_be_bytes(blob[4..8].try_into().unwrap()) as usize;
+        for i in 0..n {
+            let rec = 8 + 20 * i;
+            let cputype = u32::from_be_bytes(blob[rec..rec + 4].try_into().unwrap());
+            if cputype == 0x0100_0007 {
+                return u32::from_be_bytes(blob[rec + 8..rec + 12].try_into().unwrap()) as usize;
+            }
+        }
+        0
+    }
+
+    /// The point of the pinned tables is that they reproduce the linear scan
+    /// byte for byte. This runs both over a real image's `__text` and
+    /// requires zero differing bytes — if a table drifts from the idiom it
+    /// claims to patch, the protocol silently runs un-neutralised rdtsc and
+    /// the SAP context goes non-deterministic.
+    fn assert_table_matches_scan(text: &[u8], table: &[(u32, u8)], label: &str) {
+        // Reference: the linear scan, verbatim from neutralize_rdtsc_mapped.
+        let mut scanned = text.to_vec();
+        {
+            const IA: [u8; 9] = [0x0F, 0x31, 0x48, 0xC1, 0xE2, 0x20, 0x48, 0x09, 0xC2];
+            const RA: [u8; 9] = [0x31, 0xC0, 0x31, 0xD2, 0x90, 0x90, 0x90, 0x90, 0x90];
+            const IB: [u8; 12] = [
+                0x0F, 0x31, 0x48, 0x89, 0xD1, 0x48, 0xC1, 0xE1, 0x20, 0x48, 0x09, 0xC1,
+            ];
+            const RB: [u8; 12] = [
+                0x31, 0xC0, 0x31, 0xD2, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+            ];
+            const IC: [u8; 10] = [0x0F, 0x31, 0x48, 0xC1, 0xE0, 0x04, 0x48, 0x83, 0xE0, 0x70];
+            const RC: [u8; 10] = [0x31, 0xC0, 0x31, 0xD2, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90];
+            let mut i = 0usize;
+            while i + 12 <= scanned.len() {
+                if scanned[i] != 0x0F || scanned[i + 1] != 0x31 {
+                    i += 1;
+                } else if scanned[i..i + 9] == IA {
+                    scanned[i..i + 9].copy_from_slice(&RA);
+                    i += 9;
+                } else if scanned[i..i + 12] == IB {
+                    scanned[i..i + 12].copy_from_slice(&RB);
+                    i += 12;
+                } else if scanned[i..i + 10] == IC {
+                    scanned[i..i + 10].copy_from_slice(&RC);
+                    i += 10;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        // Candidate: the pinned table, applied in the same order.
+        let mut tabled = text.to_vec();
+        for &(off, kind) in table {
+            let at = off as usize;
+            let (idiom, repl) = match kind {
+                0 => (
+                    &[0x0Fu8, 0x31, 0x48, 0xC1, 0xE2, 0x20, 0x48, 0x09, 0xC2][..],
+                    &[0x31u8, 0xC0, 0x31, 0xD2, 0x90, 0x90, 0x90, 0x90, 0x90][..],
+                ),
+                1 => (
+                    &[
+                        0x0Fu8, 0x31, 0x48, 0x89, 0xD1, 0x48, 0xC1, 0xE1, 0x20, 0x48, 0x09, 0xC1,
+                    ][..],
+                    &[
+                        0x31u8, 0xC0, 0x31, 0xD2, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+                    ][..],
+                ),
+                _ => (
+                    &[0x0Fu8, 0x31, 0x48, 0xC1, 0xE0, 0x04, 0x48, 0x83, 0xE0, 0x70][..],
+                    &[0x31u8, 0xC0, 0x31, 0xD2, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90][..],
+                ),
+            };
+            assert!(
+                at + idiom.len() <= tabled.len() && tabled[at..at + idiom.len()] == *idiom,
+                "{label}: table entry 0x{off:x} is not on its idiom"
+            );
+            tabled[at..at + repl.len()].copy_from_slice(repl);
+        }
+
+        let diff = scanned
+            .iter()
+            .zip(tabled.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(
+            diff, 0,
+            "{label}: {diff} byte(s) differ between scan and table"
+        );
+        assert_eq!(scanned.len(), tabled.len(), "{label}: length differs");
+    }
+
+    /// Structural check on the generated tables, independent of any file.
+    #[test]
+    fn tables_are_sorted_in_bounds_and_typed() {
+        for (label, text_len, table) in [
+            ("COREFP", 14_321_154usize, sites::COREFP_RDTSC_PATCHES),
+            ("COMMERCEKIT", 1_890_590, sites::COMMERCEKIT_RDTSC_PATCHES),
+            ("COMMERCECORE", 30_180, sites::COMMERCECORE_RDTSC_PATCHES),
+        ] {
+            let mut prev: Option<u32> = None;
+            for &(off, kind) in table {
+                assert!(kind <= 2, "{label}: bad type id {kind} at 0x{off:x}");
+                assert!(
+                    (off as usize) < text_len,
+                    "{label}: offset 0x{off:x} beyond __text"
+                );
+                if let Some(p) = prev {
+                    assert!(off > p, "{label}: offsets not strictly ascending");
+                }
+                prev = Some(off);
+            }
+        }
+        // The counts the generator reported, pinned so a regeneration that
+        // silently finds fewer sites is caught.
+        assert_eq!(sites::COREFP_RDTSC_PATCHES.len(), 6269);
+        assert_eq!(sites::COMMERCEKIT_RDTSC_PATCHES.len(), 251);
+        assert!(sites::COMMERCECORE_RDTSC_PATCHES.is_empty());
+    }
+
+    /// Site counts per idiom, as generated.
+    #[test]
+    fn idiom_type_counts_are_stable() {
+        let count = |t: &[(u32, u8)], k: u8| t.iter().filter(|(_, v)| *v == k).count();
+        assert_eq!(count(sites::COREFP_RDTSC_PATCHES, 0), 6256);
+        assert_eq!(count(sites::COREFP_RDTSC_PATCHES, 1), 13);
+        assert_eq!(count(sites::COREFP_RDTSC_PATCHES, 2), 0);
+        assert_eq!(count(sites::COMMERCEKIT_RDTSC_PATCHES, 0), 246);
+        assert_eq!(count(sites::COMMERCEKIT_RDTSC_PATCHES, 1), 4);
+        assert_eq!(count(sites::COMMERCEKIT_RDTSC_PATCHES, 2), 1);
+    }
+
+    /// Equivalence over the real images when they are present. The assets
+    /// are fetched on first use, so this is conditional — but when it runs
+    /// it is the real thing, over 13.66 MiB of CoreFP code.
+    #[test]
+    fn table_matches_scan_on_real_corefp() {
+        let dir = std::env::var("PERUN_SAP_DIR").unwrap_or_else(|_| {
+            format!(
+                "{}/.cache/perun/sap",
+                std::env::var("HOME").unwrap_or_default()
+            )
+        });
+        let path = std::path::Path::new(&dir).join("CoreFP");
+        let Ok(blob) = std::fs::read(&path) else {
+            eprintln!("skipping: {path:?} not present");
+            return;
+        };
+        let info = crate::macho::MachInfo::parse(&blob).expect("parse CoreFP");
+        let (off, size) = info.text_section.expect("__text");
+        // MachInfo reports slice-relative offsets; the buffer is the whole
+        // fat container, so the slice base has to be added back.
+        let slice = fat_slice_of(&blob);
+        let text = &blob[slice + off as usize..slice + (off + size) as usize];
+        assert_table_matches_scan(text, sites::COREFP_RDTSC_PATCHES, "CoreFP");
+
+        // And the pinned digest must be the file we just read, or the table
+        // would be selected for a different binary.
+        assert_eq!(
+            crate::sha256::sha256_hex(&blob),
+            sites::COREFP_RDTSC_SHA256,
+            "CoreFP digest drifted from the pin"
+        );
     }
 }
