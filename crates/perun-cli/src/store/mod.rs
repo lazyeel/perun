@@ -82,9 +82,10 @@ pub fn state_dir() -> Result<PathBuf, String> {
 ///    what the host looks like.
 ///
 /// `PERUN_MAC` is a per-run override like `--mac`: it is read and returned
-/// without touching the pin, so exporting it cannot silently re-key the
-/// encrypted account store. A malformed value is reported and ignored
-/// rather than aborting the run.
+/// early, before `pin_mac()`, so exporting it cannot silently re-key the
+/// vault. A malformed value is reported and ignored rather than aborting the
+/// run.
+///
 /// The first resolution is pinned to `<state>/machine`, so a change of
 /// NIC, NIC order, or container network namespace cannot silently re-key
 /// the encrypted account store or the Store identity Apple sees. There is
