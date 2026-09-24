@@ -342,24 +342,26 @@ The downloaded OTA stream is restreamed into a standard `.ipa` without ever bein
 
 ### 6.2 Per-phase latency (perun, from the tool's own reports)
 
-| Phase, as the release binary reports it | Mean (N=3) | Min–max |
+| Phase, as the release binary reports it | Mean (N=10) | Min–max |
 |---|---|---|
-| Image mapping (4 images, streaming loader) | 39.8 ms | 30.1–57.8 ms |
-| SAPInit | 0.613 ms | 0.598–0.623 ms |
-| SAPExchange (Round 1 + Round 2 combined) | 201.5 ms | 169.6–219.8 ms |
-| SAPSign | 1.09 ms | 1.00–1.20 ms |
+| Image mapping (4 images, streaming loader) | 31.6 ms | 27.0–44.6 ms |
+| SAPInit | 0.640 ms | 0.558–0.881 ms |
+| SAPExchange (Round 1 + Round 2 combined) | 215.1 ms | 180.6–252.7 ms |
+| SAPSign | 1.06 ms | 0.962–1.211 ms |
 
-The SAPExchange row is the complete two-round window exactly as the shipped binary reports it: round-1 guest computation, the HTTPS POST to `signSapSetup`, and round-2 guest computation, end to end. The rounds are not split. Splitting them would take in-source timers the public binary does not carry, and this table holds only numbers a reader can reproduce with the commands of § 6.6. The window's spread (170–220 ms over three runs) moves with the network round-trip to Apple's endpoint, not with guest work. The image-mapping row is context from the same command, not a protocol step.
+Re-measured 2026-09-24 at N=10 (the previous N=3 figures were 39.8 / 0.613 / 201.5 / 1.09 ms); every run returned the 501-byte signature and the reference context address `0x7ff7b0000250`. Perun is the only side here, so this table is a single-session measurement. The SAPExchange row is the complete two-round window exactly as the shipped binary reports it: round-1 guest computation, the HTTPS POST to `signSapSetup`, and round-2 guest computation, end to end. The rounds are not split. Splitting them would take in-source timers the public binary does not carry, and this table holds only numbers a reader can reproduce with the commands of § 6.6. The window's spread (181–253 ms over ten runs) moves with the network round-trip to Apple's endpoint, not with guest work. The image-mapping row is context from the same command, not a protocol step.
 
 ### 6.3 Whole-process resources (kernel `rusage`)
 
-| Metric | Oracle (N=3) | Perun (N=3) |
+| Metric | Oracle (N=3, 2026-09-02) | Perun (N=10, 2026-09-24) |
 |---|---|---|
-| Wall clock, whole process | 8.97–9.28 s (mean 9.09 s) | 0.213–0.291 s (mean **0.254 s**) |
-| Peak RSS (`ru_maxrss`) | 225.1–252.8 MiB (mean 234.4 MiB) | 26.6–26.9 MiB (mean **26.8 MiB**) |
-| CPU time, user + sys | 7.42–7.53 s (mean 7.46 s) | 0.084–0.115 s (mean 0.096 s) |
+| Wall clock, whole process | 8.97–9.28 s (mean 9.09 s) | 0.222–0.312 s (mean **0.259 s**) |
+| Peak RSS (`ru_maxrss`) | 225.1–252.8 MiB (mean 234.4 MiB) | 27.0–27.3 MiB (mean **27.1 MiB**) |
+| CPU time, user + sys | 7.42–7.53 s (mean 7.46 s) | 0.074–0.107 s (mean **0.083 s**) |
 
-On whole-process CPU, the metric least exposed to network jitter, perun leads by **78×**; on wall clock by **36×**; on peak RSS by **8.8×**. Both sides talked to the live endpoints during every run. The stock oracle's wall and CPU include a full asset fetch on every run — upstream `sapsigner` ships no cache, so each run re-streams the same ~32 MB tail slice of the public package that perun fetches once and keeps (§ 6.4). Perun's figures are its warm path: images and certificate from the on-disk cache, one live protocol POST. Its 26.8 MiB peak is the guest mappings (~21 MiB), the resident ICXS blob (~5 MiB), and the runtime itself (~1 MiB); the oracle's is the Unicorn engine plus five mapped guest images.
+**The two columns come from different sessions, so treat the ratios as an order of magnitude, not a measurement.** Perun was re-measured at N=10 on 2026-09-24 against the live endpoints; the oracle column is the 2026-09-02 session at N=3 and could not be re-run — its build vendors a pinned Unicorn 2.1.1 blob from `ghcr.io`, which now answers `401` to an anonymous pull, so the reference binary cannot be rebuilt in this environment without a registry token. Against those carried-over figures perun is ~35× faster on wall clock, ~89× on CPU and ~8.6× smaller on peak RSS. Every run in the fresh perun set exited 0 and produced the 501-byte signature.
+
+Both sides talked to the live endpoints during every run of their own session. The stock oracle's wall and CPU include a full asset fetch on every run — upstream `sapsigner` ships no cache, so each run re-streams the same ~32 MB tail slice of the public package that perun fetches once and keeps (§ 6.4). Perun's figures are its warm path: images and certificate from the on-disk cache, one live protocol POST. Its 27.1 MiB peak is the guest mappings (~21 MiB), the resident ICXS blob (~5 MiB), and the runtime itself (~1 MiB); the oracle's is the Unicorn engine plus five mapped guest images.
 
 ### 6.4 Cold start and the two asset models
 
@@ -369,7 +371,7 @@ Both tools read the same ~32 MB tail slice of the public 1.28 GB update package 
 
 | Tool | Engine | Whole-process cost (this host, N=3) | Deps |
 |---|---|---|---|
-| Perun (this work) | native Mach-O projection | 0.254 s wall / 0.096 s CPU / 26.8 MiB peak (warm) | pure Rust + libc |
+| Perun (this work) | native Mach-O projection | 0.259 s wall / 0.083 s CPU / 27.1 MiB peak (warm) | pure Rust + libc |
 | sapsigner (2024, stock, the measured oracle) | Unicorn TCG | 9.09 s wall / 7.46 s CPU / 234.4 MiB peak | Go + cgo + libunicorn 2.1.1 |
 | majd/ipatool ≥ 2.4.0 | Unicorn TCG (purego) | same engine family; not re-benched here | Go + prebuilt unicorn |
 | Signum `sapsigner.exe` (2026-08) | Unicorn TCG (sapsigner lineage) | same engine family; not re-benched here | closed GUI shell |
@@ -459,7 +461,7 @@ The August-2026 enforcement wave ("empty 403 / 204 on login") broke every third-
 | Emulated SAP (Unicorn TCG over the 10.9 images) | reference signer (2024, § 8); majd/ipatool v2.4.0 (2026-08-28) | QEMU-derived JIT | works, minutes-scale first login, external C dependency |
 | Native system CommerceKit | ipatool-sapfix (macOS-only, cgo `CKSigningSession`) | host OS | macOS-only, intermittent |
 | Rust rewrites of the reference tool | ipatool-rs (uncor3, Kosthi) | vendored emulator / native | early-stage (2026-09); drive the same wire |
-| **Native projection (this work)** | Perun | Linux `mmap` + SysV shims, pure Rust | same protocol, 0.25 s warm session incl. live network (see § 6.3); full StoreKit client lane on top (login+2FA → search → purchase → download, live E2E 2026-09-07) |
+| **Native projection (this work)** | Perun | Linux `mmap` + SysV shims, pure Rust | same protocol, 0.26 s warm session incl. live network (see § 6.3); full StoreKit client lane on top (login+2FA → search → purchase → download, live E2E 2026-09-07) |
 
 The commerce gate is a client-attestation gate, not a content-decryption mechanism, and the same 2013 engine satisfies it — the August community consensus that a hardware Secure Enclave was mandatory was falsified on 2026-08-28 when emulated software signatures were accepted by the live endpoints.
 

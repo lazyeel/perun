@@ -6,13 +6,15 @@ On top of that runtime sits a working App Store client — login with 2FA, searc
 
 ## Performance
 
-The FairPlay SAP session, measured against the stock Unicorn-based reference signer (`t0rr3sp3dr0/sapsigner`, unmodified, same live endpoints, same guest images, N=3 each):
+The FairPlay SAP session, measured against the stock Unicorn-based reference signer (`t0rr3sp3dr0/sapsigner`, unmodified, same live endpoints, same guest images):
 
-| Metric | Unicorn reference | Perun | Gain |
-|---|---|---|---|
-| Whole-process wall | 9.09 s | **0.25 s** | **36× faster** |
-| CPU (user + sys) | 7.46 s | **0.096 s** | **78× less** |
-| Peak RSS | 234 MiB | **26.8 MiB** | **8.8× smaller** |
+| Metric | Unicorn reference (N=3) | Perun (N=10) |
+|---|---|---|
+| Whole-process wall | 9.09 s | **0.26 s** |
+| CPU (user + sys) | 7.46 s | **0.083 s** |
+| Peak RSS | 234 MiB | **27.1 MiB** |
+
+The two columns were measured in different sessions — perun re-measured at N=10 on 2026-09-24, the oracle carried over from 2026-09-02 at N=3, because its build vendors a pinned Unicorn blob from `ghcr.io` that no longer pulls anonymously. Read the ratio as an order of magnitude, not a measurement.
 
 This is a **protocol-session** comparison: both sides run the same image corpus through the same steps — init, two exchange rounds, 501-byte signature — and the oracle reads its payload on stdin, so the comparison is at the process level. It is not a client-versus-client benchmark; no other App Store client was measured. Method, ranges and one reproduction command per side are in [RESEARCH.md § 6](RESEARCH.md).
 
@@ -94,7 +96,7 @@ Endpoints are bag-driven (fetched per session), the account is stored encrypted 
 
 **Transfers are resumable.** An interrupted download keeps its `.tmp` partial and the next run continues it with an HTTP `Range` request, after the 206/416/200 answer is validated — a server that ignored the range can never append onto a good prefix.
 
-**Packages are rebuilt with a real ZIP64 writer** (end-of-central-directory record plus locator, placeholders regenerated rather than truncated), so archives past 4 GB or 65 535 entries are written correctly instead of silently clipped. The streaming path uses the OTA framing Apple's kernel expects, with general-purpose flag bit 3 and the sizes and CRC in a trailing data descriptor. Replication is memory-flat regardless of package size: the input is memory-mapped and walked with `MADV_SEQUENTIAL`, so RSS tracks the buffer rather than the archive — a 3.14 GiB Tanks Blitz rebuilds in under tens of MiB. Reading a ZIP64 *central directory* is still refused: the writer emits it, the reader does not accept one.
+**Packages are rebuilt with a real ZIP64 writer** (end-of-central-directory record plus locator, placeholders regenerated rather than truncated), so archives past 4 GB or 65 535 entries are written correctly instead of silently clipped. The streaming path uses the OTA framing Apple's kernel expects, with general-purpose flag bit 3 and the sizes and CRC in a trailing data descriptor. Replication is memory-flat regardless of package size: the input is memory-mapped and walked with `MADV_SEQUENTIAL`, so RSS tracks the buffer rather than the archive. Exercised live on **31 real App Store packages** — every one downloaded and rebuilt with `rc=0` — among them Wargaming Tanks Blitz and PUBG Mobile; a 3.14 GiB Tanks Blitz rebuilds in under tens of MiB. Reading a ZIP64 *central directory* is still refused: the writer emits it, the reader does not accept one.
 
 **Download URLs resolve through a three-step recovery chain** — the legacy `volumeStoreDownloadProduct`, then `redownloadProduct` when the legacy call returns a silent empty `songList`, then `updateProduct` when that answers an empty HTTP 500. This mirrors the reference tool's recovery since Apple's 2026 migration, when the legacy call began returning empty song lists for newer apps.
 
