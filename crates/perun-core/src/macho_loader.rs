@@ -187,6 +187,31 @@ impl MachImage {
         resolver: &mut dyn MachImportResolver,
     ) -> Result<MachImage, MachLoadError> {
         let mut file = std::fs::File::open(path).map_err(|e| MachLoadError::Parse(e.into()))?;
+        // POSIX_FADV_RANDOM, because this file is then touched in a scattered
+        // way: a header, a LINKEDIT tail, and ~988 rdtsc sites spread over
+        // 13.66 MiB of __text.
+        //
+        // MEASURED, and worth recording: this does NOT change resident memory.
+        // CoreFP's __TEXT stays at rss=10 496 kB, dirty=3 968 kB, clean=6 528
+        // kB, byte-identical with and without the call. Readahead fills the
+        // page cache, and RSS counts page-table entries, not page cache — so
+        // the two are unrelated quantities. MADV_RANDOM was tried earlier and
+        // likewise changed nothing.
+        //
+        // The mechanism that does pull neighbours in is fault-around: a fault
+        // on a file-backed page maps its whole 64 KiB neighbourhood. It has no
+        // userspace switch — vm/fault_around_bytes was removed in Linux 6.x
+        // and the 64 KiB is compiled in.
+        //
+        // The one consumer that would prefer readahead is the sequential
+        // 29 MB SHA-256 pass, which runs after this. On a warm cache the cost
+        // is unmeasurable; on a cold one this hint is a real, small downside.
+        // Kept because it is the correct hint for the scattered access, and
+        // because the honest cost is bounded.
+        unsafe {
+            use std::os::unix::io::AsRawFd;
+            let _ = libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_RANDOM);
+        }
         let info = MachInfo::parse_reader(&mut file)?;
 
         // Mapping span (same computation as load_parsed).
