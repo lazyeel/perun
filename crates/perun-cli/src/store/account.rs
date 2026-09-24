@@ -3,13 +3,18 @@
 
 //! Account state + the on-disk session store.
 //!
-//! File format v3 (byte-compatible with the C++ ipatool fork): a binary
-//! blob `[0x03][u32 salt_len][salt][IV][GCM tag][ciphertext]`, where the
-//! key is PBKDF2-SHA256(machine_id + "nice_token_is_nice" + passphrase,
-//! salt, 100000, 32). The plaintext is the session JSON (email, tokens,
-//! storefront, pod, cookies-only auth). The password itself is stored
-//! only when the user passes `--remember-password` — otherwise the file
-//! holds session tokens alone and re-login asks for it again.
+//! File format: a binary blob `[0x04][u32 salt_len][salt][IV][GCM tag]
+//! [ciphertext]`, where the key is PBKDF2-SHA256(machine_id +
+//! "nice_token_is_nice" + passphrase, salt, 10000, 32). The plaintext is
+//! the session JSON (email, tokens, storefront, pod, cookies-only auth).
+//! The password itself is stored only when the user passes
+//! `--remember-password` — otherwise the file holds session tokens alone and
+//! re-login asks for it again.
+//!
+//! The round count is not a tunable: it is part of the key, so changing it
+//! makes every stored vault unreadable. There is no versioned migration —
+//! the tool is single-user, and an unreadable vault is fixed by `auth login`
+//! again.
 
 use std::path::PathBuf;
 
@@ -84,20 +89,17 @@ fn json_str(s: &str) -> String {
     out
 }
 
-// ── file format v3 ────────────────────────────────────────────────────────
-
-const FORMAT_V3: u8 = 0x03;
-const FORMAT_V4: u8 = 0x04;
+// -- file format ---------------------------------------------------------
+const FORMAT: u8 = 0x04;
 const SALT_LEN: usize = 16;
 const IV_LEN: usize = 12;
 const TAG_LEN: usize = 16;
 const KEY_LEN: usize = 32;
-/// v3 (0x03) was written with 100 000 rounds; v4 (0x04) drops to 10 000,
-/// which cuts the unlock from ~150 ms to ~14 ms. The round count is part of
-/// the format, not a tunable: `decrypt` dispatches on the version byte so a
-/// vault written before the change still opens.
-const PBKDF2_ROUNDS_V3: u32 = 100_000;
-const PBKDF2_ROUNDS_V4: u32 = 10_000;
+/// Key-stretching cost. 10 000 rounds keeps the unlock in the tens of
+/// milliseconds; the tool is single-user, so there is no lockout to defend
+/// against and a migration path for older files would only add code paths no
+/// one exercises. Lower it and every stored account becomes unreadable.
+const PBKDF2_ROUNDS: u32 = 10_000;
 
 pub fn account_file() -> Result<PathBuf, String> {
     Ok(state_dir()?.join("account"))
@@ -111,35 +113,24 @@ pub fn machine_id() -> String {
 }
 
 /// Derive the file key: PBKDF2-SHA256(machine + pepper + passphrase, salt).
-fn derive_key(machine: &str, passphrase: &str, salt: &[u8], rounds: u32) -> [u8; KEY_LEN] {
+fn derive_key(machine: &str, passphrase: &str, salt: &[u8]) -> [u8; KEY_LEN] {
     let material = format!("{machine}nice_token_is_nice{passphrase}");
     let mut key = [0u8; KEY_LEN];
-    pbkdf2_hmac_sha256(material.as_bytes(), salt, rounds, &mut key);
+    pbkdf2_hmac_sha256(material.as_bytes(), salt, PBKDF2_ROUNDS, &mut key);
     key
 }
 
-/// Rounds that go with a format version byte.
-fn rounds_for(format: u8) -> Result<u32, String> {
-    match format {
-        FORMAT_V3 => Ok(PBKDF2_ROUNDS_V3),
-        FORMAT_V4 => Ok(PBKDF2_ROUNDS_V4),
-        other => Err(format!(
-            "account file format 0x{other:02x} is unsupported — please run 'auth login' again"
-        )),
-    }
-}
-
-/// Encrypt the account JSON into the v3 blob.
+/// Encrypt the account JSON into the vault blob.
 pub fn encrypt(plaintext: &str, machine: &str, passphrase: &str) -> Result<Vec<u8>, String> {
     let mut salt = [0u8; SALT_LEN];
     let mut iv = [0u8; IV_LEN];
     fill_random(&mut salt);
     fill_random(&mut iv);
-    let key = derive_key(machine, passphrase, &salt, PBKDF2_ROUNDS_V4);
+    let key = derive_key(machine, passphrase, &salt);
     let (ciphertext, tag) = aes_gcm_encrypt(&key, &iv, plaintext.as_bytes())?;
 
     let mut out = Vec::with_capacity(1 + 4 + SALT_LEN + IV_LEN + TAG_LEN + ciphertext.len());
-    out.push(FORMAT_V4);
+    out.push(FORMAT);
     out.extend_from_slice(&(SALT_LEN as u32).to_be_bytes());
     out.extend_from_slice(&salt);
     out.extend_from_slice(&iv);
@@ -153,8 +144,9 @@ pub fn decrypt(blob: &[u8], machine: &str, passphrase: &str) -> Result<String, S
     if blob.first() == Some(&b'{') {
         return Err("account file is unencrypted — please run 'auth login' again".into());
     }
-    let format = *blob.first().unwrap();
-    let rounds = rounds_for(format)?;
+    if blob.first() != Some(&FORMAT) {
+        return Err("account file format is unsupported — please run 'auth login' again".into());
+    }
     let mut pos = 1;
     if blob.len() < pos + 4 + SALT_LEN + IV_LEN + TAG_LEN {
         return Err("account file is too short or corrupted".into());
@@ -171,7 +163,7 @@ pub fn decrypt(blob: &[u8], machine: &str, passphrase: &str) -> Result<String, S
     let tag: [u8; 16] = blob[pos..pos + TAG_LEN].try_into().map_err(|_| "bad tag")?;
     pos += TAG_LEN;
     let ciphertext = &blob[pos..];
-    let key = derive_key(machine, passphrase, salt, rounds);
+    let key = derive_key(machine, passphrase, salt);
     aes_gcm_decrypt(&key, &iv, ciphertext, &tag)
 }
 
@@ -725,6 +717,11 @@ impl Sha256 {
 }
 
 #[cfg(test)]
+fn hex(data: &[u8]) -> String {
+    data.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -746,44 +743,19 @@ mod tests {
         assert_eq!(back.pod, "25");
     }
 
-    /// A v3 vault (0x03, 100 000 rounds) must still open after the KDF drop.
-    /// The round count is part of the format, so `decrypt` dispatches on the
-    /// version byte rather than on a single global constant.
     #[test]
-    fn legacy_v3_vault_still_decrypts() {
+    fn vault_writes_the_current_format_and_rejects_others() {
         let machine = "020000000001";
-        let pass = "pw";
-        let mut salt = [0u8; SALT_LEN];
-        let mut iv = [0u8; IV_LEN];
-        for (i, b) in salt.iter_mut().enumerate() {
-            *b = i as u8;
-        }
-        for (i, b) in iv.iter_mut().enumerate() {
-            *b = (i * 3) as u8;
-        }
-        let key = derive_key(machine, pass, &salt, PBKDF2_ROUNDS_V3);
-        let (ct, tag) = aes_gcm_encrypt(&key, &iv, b"{\"email\":\"legacy@example.com\"}").unwrap();
-        let mut blob = vec![FORMAT_V3];
-        blob.extend_from_slice(&(SALT_LEN as u32).to_be_bytes());
-        blob.extend_from_slice(&salt);
-        blob.extend_from_slice(&iv);
-        blob.extend_from_slice(&tag);
-        blob.extend_from_slice(&ct);
-        let out = decrypt(&blob, machine, pass).expect("v3 vault must open");
-        assert!(out.contains("legacy@example.com"), "got {out}");
-
-        // The 10 000-round key must NOT open it.
-        let wrong = derive_key(machine, pass, &salt, PBKDF2_ROUNDS_V4);
-        assert!(aes_gcm_decrypt(&wrong, &iv, &ct, &tag).is_err());
-    }
-
-    #[test]
-    fn new_vaults_are_written_as_v4() {
-        let blob = encrypt("{}", "020000000001", "pw").unwrap();
-        assert_eq!(blob[0], FORMAT_V4, "new writes must use the fast format");
-        assert_eq!(rounds_for(FORMAT_V4).unwrap(), 10_000);
-        assert_eq!(rounds_for(FORMAT_V3).unwrap(), 100_000);
-        assert!(rounds_for(0x09).is_err());
+        let blob = encrypt("{\"email\":\"a@b.c\"}", machine, "pass").unwrap();
+        assert_eq!(blob[0], FORMAT);
+        assert_eq!(PBKDF2_ROUNDS, 10_000);
+        // A wrong passphrase must not open it, and neither must a wrong machine.
+        assert!(decrypt(&blob, machine, "wrong").is_err());
+        assert!(decrypt(&blob, "othermachine", "pass").is_err());
+        // An unknown format byte is rejected before any key derivation.
+        let mut bogus = blob.clone();
+        bogus[0] = 0x09;
+        assert!(decrypt(&bogus, machine, "pass").is_err());
     }
 
     #[test]
@@ -791,9 +763,8 @@ mod tests {
         let machine = "020000000001";
         let pt = "{\"email\":\"a@b.c\"}";
         let blob = encrypt(pt, machine, "pass").unwrap();
-        // v4 since the KDF drop (10 000 rounds); v3 blobs are still readable,
-        // see legacy_v3_vault_still_decrypts.
-        assert_eq!(blob[0], FORMAT_V4);
+        // Single format; lowering the KDF invalidates older vaults by design.
+        assert_eq!(blob[0], FORMAT);
         let back = decrypt(&blob, machine, "pass").unwrap();
         assert_eq!(back, pt);
         assert!(decrypt(&blob, machine, "wrong").is_err());
@@ -891,10 +862,6 @@ mod tests {
             let h = Sha256::digest(&data);
             assert_eq!(hex(&h), *expect, "length {len}");
         }
-    }
-
-    fn hex(data: &[u8]) -> String {
-        data.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     #[test]
@@ -998,4 +965,210 @@ mod tests {
         let pt = aes_gcm_decrypt(&key, &iv, &ct, &tag).unwrap();
         assert_eq!(pt, "");
     }
+}
+#[test]
+fn encrypt_decrypt_roundtrip() {
+    let machine = "020000000001";
+    let pt = "{\"email\":\"a@b.c\"}";
+    let blob = encrypt(pt, machine, "pass").unwrap();
+    // Single format; lowering the KDF invalidates older vaults by design.
+    assert_eq!(blob[0], FORMAT);
+    let back = decrypt(&blob, machine, "pass").unwrap();
+    assert_eq!(back, pt);
+    assert!(decrypt(&blob, machine, "wrong").is_err());
+    assert!(decrypt(&blob, "othermachine", "pass").is_err());
+}
+
+#[test]
+fn sha256_vectors() {
+    let h = Sha256::digest(b"");
+    let hex: String = h.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(
+        hex,
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    let h = Sha256::digest(b"abc");
+    let hex: String = h.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(
+        hex,
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}
+
+#[test]
+fn hmac_rfc4231() {
+    // RFC 4231 test case 2 (HMAC-SHA256).
+    let mut mac = HmacSha256::new(b"Jefe");
+    mac.update(b"what do ya know for sure?");
+    let out = mac.finalize();
+    let hex: String = out.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(
+        hex,
+        "3f56014b6e18a15b7bc1b6af490dcb12b953915427618b6635e5a88560364d29"
+    );
+}
+
+#[test]
+fn pbkdf2_rfc_vectors() {
+    let mut key = [0u8; 32];
+    pbkdf2_hmac_sha256(b"password", b"salt", 1, &mut key);
+    assert_eq!(
+        hex(&key),
+        "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"
+    );
+    pbkdf2_hmac_sha256(b"password", b"salt", 2, &mut key);
+    assert_eq!(
+        hex(&key),
+        "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43"
+    );
+    pbkdf2_hmac_sha256(b"password", b"salt", 4096, &mut key);
+    assert_eq!(
+        hex(&key),
+        "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a"
+    );
+}
+
+#[test]
+fn sha256_block_boundaries() {
+    // Block-edge lengths exercise the buffered path and the two-block
+    // finalization in finalize().
+    let cases: [(usize, u8, &str); 6] = [
+        (
+            200,
+            b'a',
+            "c2a908d98f5df987ade41b5fce213067efbcc21ef2240212a41e54b5e7c28ae5",
+        ),
+        (
+            63,
+            b'x',
+            "75220b47218278e656f2013bb8f0c455a25eaf01e86c64924e9d48d89776d6f2",
+        ),
+        (
+            64,
+            b'x',
+            "7ce100971f64e7001e8fe5a51973ecdfe1ced42befe7ee8d5fd6219506b5393c",
+        ),
+        (
+            65,
+            b'x',
+            "9537c5fdf120482f7d58d25e9ed583f52c02b4e304ea814db1633ad565aed7e9",
+        ),
+        (
+            119,
+            b'q',
+            "c8bc8a6e9626586bb888ad131d44ed2bd37fc608e902904ade3c566c4208e6ca",
+        ),
+        (
+            120,
+            b'q',
+            "77a2d49d72a11e41678c51f8f0cb67f5cb570f30370c3aeffe266a0d1ee43209",
+        ),
+    ];
+    let cases = &cases[..6];
+    for (len, byte, expect) in cases {
+        let data = vec![*byte; *len];
+        let h = Sha256::digest(&data);
+        assert_eq!(hex(&h), *expect, "length {len}");
+    }
+}
+
+#[test]
+fn gcm_nist_case4_with_data() {
+    // NIST GCM test case 4 (AES-256, 60-byte plaintext, empty AAD).
+    let key: [u8; 32] = [
+        0xfe, 0xff, 0xe9, 0x92, 0x86, 0x65, 0x73, 0x1c, 0x6d, 0x6a, 0x8f, 0x94, 0x67, 0x30, 0x83,
+        0x08, 0xfe, 0xff, 0xe9, 0x92, 0x86, 0x65, 0x73, 0x1c, 0x6d, 0x6a, 0x8f, 0x94, 0x67, 0x30,
+        0x83, 0x08,
+    ];
+    let iv: [u8; 12] = [
+        0xca, 0xfe, 0xba, 0xbe, 0xfa, 0xce, 0xdb, 0xad, 0xde, 0xca, 0xf8, 0x88,
+    ];
+    let pt: &[u8] = &[
+        0xd9, 0x31, 0x32, 0x25, 0xf8, 0x84, 0x06, 0xe5, 0xa5, 0x59, 0x09, 0xc5, 0xaf, 0xf5, 0x26,
+        0x9a, 0x86, 0xa7, 0xa9, 0x53, 0x15, 0x34, 0xf7, 0xda, 0x2e, 0x4c, 0x30, 0x3d, 0x8a, 0x31,
+        0x8a, 0x72, 0x1c, 0x3c, 0x0c, 0x95, 0x95, 0x68, 0x09, 0x53, 0x2f, 0xcf, 0x0e, 0x24, 0x49,
+        0xa6, 0xb5, 0x25, 0xb1, 0x6a, 0xed, 0xf5, 0xaa, 0x0d, 0xe6, 0x57, 0xba, 0x63, 0x7b, 0x39,
+    ];
+    let (ct, tag) = aes_gcm_encrypt(&key, &iv, pt).unwrap();
+    assert_eq!(
+        hex(&ct),
+        "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662"
+    );
+    assert_eq!(hex(&tag), "eb9f796c8d356fc31a8433884b696f4f");
+    // Decrypt returns a String (the store payload is JSON); for the
+    // binary NIST vector the tamper check below proves the full GCM
+    // path end to end instead.
+    let mut bad = tag;
+    bad[0] ^= 1;
+    assert!(aes_gcm_decrypt(&key, &iv, &ct, &bad).is_err());
+}
+
+#[test]
+fn gcm_partial_block() {
+    // 13-byte plaintext: exercises the incomplete-final-chunk XOR path.
+    let key: [u8; 32] = [
+        0xfe, 0xff, 0xe9, 0x92, 0x86, 0x65, 0x73, 0x1c, 0x6d, 0x6a, 0x8f, 0x94, 0x67, 0x30, 0x83,
+        0x08, 0xfe, 0xff, 0xe9, 0x92, 0x86, 0x65, 0x73, 0x1c, 0x6d, 0x6a, 0x8f, 0x94, 0x67, 0x30,
+        0x83, 0x08,
+    ];
+    let iv: [u8; 12] = [
+        0xca, 0xfe, 0xba, 0xbe, 0xfa, 0xce, 0xdb, 0xad, 0xde, 0xca, 0xf8, 0x88,
+    ];
+    let pt: &[u8] = &[
+        0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11, 0x73,
+    ];
+    let (ct, tag) = aes_gcm_encrypt(&key, &iv, pt).unwrap();
+    assert_eq!(hex(&ct), "e0dd4d374f92e474b81b4077f6");
+    assert_eq!(hex(&tag), "27d409a1ea5c0a1488fa97f289cf80d3");
+    // Round-trip through the String-returning decrypt only when the
+    // plaintext is valid UTF-8; this NIST vector is not, so the tag
+    // check above plus the tamper test in case 4 carry the proof.
+}
+
+#[test]
+fn aes_block_fips197() {
+    // FIPS-197 C.3: AES-256 single block.
+    let key: [u8; 32] = (0u8..32).collect::<Vec<_>>().try_into().unwrap();
+    let pt: [u8; 16] = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+        0xff,
+    ];
+    let rounds = aes_key_schedule(&key);
+    let ct = aes_encrypt_block(&rounds, &pt);
+    assert_eq!(hex(&ct), "8ea2b7ca516745bfeafc49904b496089");
+}
+
+#[test]
+fn account_roundtrip_unicode_and_json_edge() {
+    let acc = Account {
+        email: "üser@пример.рф".into(),
+        name: "Ω Test 😀".into(),
+        directory_services_id: "1234567890".into(),
+        password_token: "tok\"to\"quote".into(),
+        store_front: "143469-17,29".into(),
+        pod: "25".into(),
+        password: String::new(),
+    };
+    let json = acc.to_json();
+    let back = Account::from_json(&json).unwrap();
+    assert_eq!(back.email, acc.email);
+    assert_eq!(back.name, acc.name);
+    assert_eq!(back.password_token, acc.password_token);
+    assert_eq!(back.store_front, acc.store_front);
+    // from_json rejects garbage.
+    assert!(Account::from_json("not json").is_err());
+}
+
+#[test]
+fn gcm_nist_vector() {
+    // NIST GCM test case 3 (AES-256): zero key, zero IV, empty PT.
+    let key = [0u8; 32];
+    let iv = [0u8; 12];
+    let (ct, tag) = aes_gcm_encrypt(&key, &iv, b"").unwrap();
+    assert!(ct.is_empty());
+    let hex: String = tag.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(hex, "530f8afbc74536b9a963b4f1c4cb738b");
+    // Round-trip with AAD-free decrypt path.
+    let pt = aes_gcm_decrypt(&key, &iv, &ct, &tag).unwrap();
+    assert_eq!(pt, "");
 }
