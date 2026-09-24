@@ -22,6 +22,20 @@ const LOC_SIG: [u8; 4] = [0x50, 0x4B, 0x03, 0x04];
 const ZIP64_EOCD_SIG: [u8; 4] = [0x50, 0x4B, 0x06, 0x06];
 const ZIP64_LOC_SIG: [u8; 4] = [0x50, 0x4B, 0x06, 0x07];
 const ZIP64_EXTRA_ID: u16 = 0x0001;
+/// iOS 18 on A17 Pro and the M-series run with 16 KiB pages, so a Mach-O's
+/// payload has to start on a 16 KiB boundary inside the package. That lets
+/// the installer map the code straight out of the zip; an unaligned payload
+/// forces a copy through an aligned bounce buffer, and on those devices the
+/// copy is what breaks.
+///
+/// This is only the container half of the requirement. The Mach-O's own
+/// `__TEXT` has to have been linked with a 16 KiB segment alignment, which is
+/// a property of the binary and not something a repackager can change.
+const CODE_ALIGNMENT: u64 = 16 * 1024;
+/// Extra-field id used purely as alignment padding. 0x0000 is unassigned in
+/// APPNOTE, and a parser that does not recognise a field skips it by its
+/// declared size like any other.
+const PAD_EXTRA_ID: u16 = 0x0000;
 const ZIP64_SUB: u32 = 0xFFFF_FFFF;
 const ZIP64_SUB16: u16 = 0xFFFF;
 
@@ -232,6 +246,73 @@ fn zip64_local_extra(uncompressed: u64, compressed: u64) -> Vec<u8> {
     out
 }
 
+/// True when `name` is a Mach-O the installer has to be able to map directly:
+/// the bundle's own binary, or one nested in a framework or an app extension.
+///
+/// The test is by name, not by magic, and deliberately so: a deflated
+/// executable's bytes are still compressed at pack time, so sniffing a magic
+/// number would either be impossible for most entries or force a decompress
+/// pass that defeats the streaming design. Inside a bundle the executable
+/// always repeats the bundle's own name, which makes the shape unambiguous —
+/// `Frameworks/Networking.framework/Networking`, not `.../Resources/blob`.
+fn is_executable_macho(name: &str) -> bool {
+    if name.is_empty() || name.ends_with('/') {
+        return false;
+    }
+    // Only ever inside an app bundle.
+    if !name.starts_with("Payload/") {
+        return false;
+    }
+    let Some((parent, file)) = name.rsplit_once('/') else {
+        return false;
+    };
+    // The enclosing bundle directory, e.g. "Foo.app" / "Bar.framework".
+    let bundle_dir = parent.rsplit('/').next().unwrap_or(parent);
+    let Some((stem, ext)) = bundle_dir.rsplit_once('.') else {
+        return false;
+    };
+    if !matches!(ext, "app" | "framework" | "appex") {
+        return false;
+    }
+    // The binary inside a bundle always repeats the bundle's own name, which
+    // is what keeps `Frameworks/Networking.framework/Resources/blob` and
+    // `en.lproj/Localizable.strings` out. Watch apps and any deeper nesting
+    // need no special case: the shape is identical.
+    file == stem && !stem.is_empty()
+}
+
+/// Pad the local extra field so this entry's payload lands on a
+/// `CODE_ALIGNMENT` boundary.
+///
+/// The payload offset is `local_offset + 30 + name_len + extra_len`, so the
+/// local extra is the only lever. Nothing else has to move: the central
+/// directory records the *local header* offset, not the payload offset, and
+/// APPNOTE lets the two extra fields differ in length, so this needs no
+/// central-directory change to keep offsets consistent.
+///
+/// A field is a four-byte header plus data, so a pad of 1..3 cannot form a
+/// field of its own. Overshooting by one whole alignment unit keeps the
+/// result aligned and costs 16 KiB on roughly one entry in five thousand.
+fn align_payload_extra(extra: &mut Vec<u8>, local_offset: u64, name_len: usize) -> bool {
+    let base = local_offset + 30 + name_len as u64 + extra.len() as u64;
+    let residue = base % CODE_ALIGNMENT;
+    if residue == 0 {
+        return false;
+    }
+    let pad = (CODE_ALIGNMENT - residue) as usize;
+    let total = if pad < 4 {
+        pad + CODE_ALIGNMENT as usize
+    } else {
+        pad
+    };
+    debug_assert!(total >= 4);
+    debug_assert!(total <= usize::from(u16::MAX));
+    extra.extend_from_slice(&PAD_EXTRA_ID.to_le_bytes());
+    extra.extend_from_slice(&((total - 4) as u16).to_le_bytes());
+    extra.resize(extra.len() + (total - 4), 0);
+    true
+}
+
 struct ZipWriter<'w> {
     out: &'w mut dyn std::io::Write,
     offset: u64,
@@ -319,6 +400,13 @@ impl<'w> ZipWriter<'w> {
                 entry.uncompressed_size,
                 entry.compressed_size,
             ));
+        }
+        // 16 KiB payload alignment for executable Mach-O (iOS 18 / A17 Pro /
+        // M-series). `self.offset` is still this entry's local header offset
+        // here, and the padding only lengthens the local extra, so the
+        // central directory's local_offset stays valid untouched.
+        if is_executable_macho(&entry.name) {
+            align_payload_extra(&mut local_extra, self.offset, name_bytes.len());
         }
         if local_extra.len() > 0xFFFF {
             return Err("zip: local extra too long".into());
@@ -1716,5 +1804,182 @@ mod tests {
         assert!(big.windows(4).any(|w| w == CEN_SIG));
         let huge = (ZIP64_SUB as u64 + 10).to_le_bytes();
         assert!(big.windows(8).any(|w| w == huge));
+    }
+
+    /// The executable predicate is the whole contract: get it wrong in either
+    /// direction and the package is either unaligned or padded for nothing.
+    #[test]
+    fn executable_macho_predicate_covers_every_bundle_shape() {
+        for yes in [
+            "Payload/Telegram.app/Telegram",
+            "Payload/Foo.app/Frameworks/Networking.framework/Networking",
+            "Payload/Foo.app/PlugIns/Widget.appex/Widget",
+            "Payload/Foo.app/Watch/WatchApp.app/WatchApp",
+            "Payload/Foo.app/Frameworks/A/B.framework/B",
+        ] {
+            assert!(
+                is_executable_macho(yes),
+                "must be treated as executable: {yes}"
+            );
+        }
+        for no in [
+            "",
+            "Payload/",
+            "Payload/Foo.app/",
+            "Payload/Foo.app/Info.plist",
+            "Payload/Foo.app/Frameworks/Networking.framework/Resources/blob",
+            "Payload/Foo.app/PlugIns/Widget.appex/Assets.car",
+            "Payload/Foo.app/en.lproj/Localizable.strings",
+            "iTunesMetadata.plist",
+            "Payload/Foo.app/Other/Helper",
+            "Payload/Foo.app/Frameworks/Networking.framework/Headers/NNetworking.h",
+        ] {
+            assert!(
+                !is_executable_macho(no),
+                "must NOT be treated as executable: {no}"
+            );
+        }
+    }
+
+    /// Padding has to land exactly on the boundary, including the 1..3 byte
+    /// case that cannot form a field on its own.
+    #[test]
+    fn payload_extra_alignment_hits_the_boundary_exactly() {
+        for name_len in [1usize, 7, 20, 63, 300, 4095] {
+            for offset in [0u64, 1, 4095, 4096, 8191, 16383, 16384, 1_000_003] {
+                for seed in [0usize, 4, 9, 17, 64] {
+                    let mut extra = vec![0xAB; seed];
+                    // A plausible pre-existing field, so growth is exercised
+                    // on a non-empty extra too.
+                    if seed >= 9 {
+                        extra[0..2].copy_from_slice(&0x5455u16.to_le_bytes());
+                        extra[2..4].copy_from_slice(&((seed - 4) as u16).to_le_bytes());
+                    }
+                    let base_len = extra.len();
+                    let padded = align_payload_extra(&mut extra, offset, name_len);
+                    let data_offset = offset + 30 + name_len as u64 + extra.len() as u64;
+                    assert_eq!(
+                        data_offset % CODE_ALIGNMENT,
+                        0,
+                        "offset={offset} name={name_len} seed={seed} extra={}",
+                        extra.len()
+                    );
+                    if padded {
+                        assert!(extra.len() > base_len, "padding must grow the extra");
+                        // The tail is exactly one well-formed field.
+                        let d = &extra[base_len..];
+                        let id = u16::from_le_bytes([d[0], d[1]]);
+                        let sz = u16::from_le_bytes([d[2], d[3]]) as usize;
+                        assert_eq!(id, PAD_EXTRA_ID);
+                        assert_eq!(sz + 4, d.len(), "field length must match its header");
+                    } else {
+                        assert_eq!(data_offset, offset + 30 + name_len as u64 + base_len as u64);
+                    }
+                }
+            }
+        }
+    }
+
+    /// End-to-end: replicate a package carrying an app binary, a framework
+    /// binary and an appex binary, then walk the output's local headers and
+    /// assert every executable Mach-O payload sits on a 16 KiB boundary —
+    /// and that the archive is still a readable zip afterwards.
+    #[test]
+    fn ipa_replicate_aligns_executables_to_16k() {
+        const BIN: &[u8] = b"\xcf\xfa\xed\xfeEXECUTABLE";
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut zip = ZipWriter::new(&mut buf);
+            let (d, t) = (0x5A21, 0x0C00);
+            let mut ip = Plist::dict();
+            ip.set("CFBundleExecutable", Plist::string("TestApp"));
+            zip.add_stored(
+                "Payload/TestApp.app/Info.plist",
+                &plist::to_binary(&ip),
+                (d, t),
+            )
+            .unwrap();
+            zip.add_stored("Payload/TestApp.app/TestApp", BIN, (d, t))
+                .unwrap();
+            zip.add_stored(
+                "Payload/TestApp.app/Frameworks/Net.framework/Net",
+                BIN,
+                (d, t),
+            )
+            .unwrap();
+            zip.add_stored(
+                "Payload/TestApp.app/PlugIns/Widget.appex/Widget",
+                BIN,
+                (d, t),
+            )
+            .unwrap();
+            // Non-executable neighbours must be left alone.
+            zip.add_stored(
+                "Payload/TestApp.app/Frameworks/Net.framework/Resources/x",
+                b"data",
+                (d, t),
+            )
+            .unwrap();
+            zip.add_stored(
+                "Payload/TestApp.app/Watch/WatchApp.app/WatchApp",
+                BIN,
+                (d, t),
+            )
+            .unwrap();
+            zip.finish().unwrap();
+        }
+
+        let src_path =
+            std::env::temp_dir().join(format!("perun-align-src-{}.zip", std::process::id()));
+        let out_path =
+            std::env::temp_dir().join(format!("perun-align-out-{}.ipa", std::process::id()));
+        std::fs::write(&src_path, &buf).unwrap();
+
+        let info = DownloadInfo {
+            url: String::new(),
+            sinfs: Vec::new(),
+            metadata: Plist::dict(),
+            version: "1.0".into(),
+            artwork_url: String::new(),
+            artwork: None,
+        };
+        let account = crate::store::account::Account {
+            email: "tester@example.com".into(),
+            ..Default::default()
+        };
+        replicate(
+            src_path.to_str().unwrap(),
+            out_path.to_str().unwrap(),
+            &info,
+            &account,
+        )
+        .unwrap();
+
+        let out = std::fs::read(&out_path).unwrap();
+        let (_, eocd) = find_eocd(&out).unwrap();
+        let entries = parse_central(&out, &eocd).unwrap();
+
+        let mut checked = 0;
+        for e in &entries {
+            let (data_start, _) = local_span(&out, e).unwrap();
+            if is_executable_macho(&e.name) {
+                assert_eq!(
+                    data_start as u64 % CODE_ALIGNMENT,
+                    0,
+                    "unaligned executable payload: {} at {data_start}",
+                    e.name
+                );
+                // Content survived the padding.
+                assert_eq!(decompress_entry(&out, e).unwrap(), BIN, "{}", e.name);
+                checked += 1;
+            }
+        }
+        assert_eq!(
+            checked, 4,
+            "expected app, framework, appex and watch binaries"
+        );
+
+        let _ = std::fs::remove_file(&src_path);
+        let _ = std::fs::remove_file(&out_path);
     }
 }
