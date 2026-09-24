@@ -8,7 +8,7 @@ On top of that runtime sits a working App Store client — login with 2FA, searc
 
 The FairPlay SAP session, measured against the stock Unicorn-based reference signer (`t0rr3sp3dr0/sapsigner`, unmodified, same live endpoints, same guest images, N=3 each):
 
-| | Unicorn reference | Perun | |
+| Metric | Unicorn reference | Perun | Gain |
 |---|---|---|---|
 | Whole-process wall | 9.09 s | **0.25 s** | **36× faster** |
 | CPU (user + sys) | 7.46 s | **0.096 s** | **78× less** |
@@ -21,6 +21,7 @@ This is a **protocol-session** comparison: both sides run the same image corpus 
 ```bash
 cargo install --git https://github.com/lazyeel/perun
 # or build in place: cargo build --release -p perun-cli
+# (from a local build, substitute 'perun' with './target/release/perun')
 
 # 1. authenticate — password is typed with echo off, then the 2FA code if Apple asks:
 perun auth login -e you@example.com
@@ -28,9 +29,11 @@ perun auth login -e you@example.com
 # 2. find an app:
 perun search telegram -l 5
 
-# 3. take the license and download it (a bare word resolves by search first):
-perun purchase -b org.whispersystems.signal
-perun download -b org.whispersystems.signal -o .
+# 3. take the license and download in one step — the bare word resolves by
+#    search first, so a name, a bundle id or an app id all work here:
+perun download signal --purchase -o .
+#    the long form, when you want to be explicit about the bundle id:
+perun download -b org.whispersystems.signal --purchase -o .
 
 # machine-readable output for scripting:
 perun search telegram --format json
@@ -52,6 +55,7 @@ perun list-purchases --format json
 Login is MZFinance password auth with out-of-band 2FA: the code from push or SMS is appended to the password on the retry round. Search goes through the public iTunes Search and Lookup APIs. Purchase is free-license only. Download streams with a progress bar and replicates the package.
 
 ```bash
+# running from a local build? substitute 'perun' with './target/release/perun'
 perun auth login -e you@example.com          # interactive, masked password
 perun auth login -e you@example.com -p <password> --auth-code <code>   # unattended
 perun auth login -e you@example.com --remember-password
@@ -141,6 +145,7 @@ The commands below exist to drive and inspect guest binaries. They are the same 
 ### Mach-O / FairPlay SAP
 
 ```bash
+# running from a local build? substitute 'perun' with './target/release/perun'
 perun sap                            # zero-config; fetches the images on first run
 perun sap --mac AA:BB:CC:DD:EE:FF    # force the machine address for one run
 perun sap --sign <hex>                # sign a custom payload  (or --file <path>)
@@ -212,7 +217,7 @@ Credentials are deliberately **not** read from the environment. There is no `PER
 A stable Rust toolchain is enough. The workspace is edition 2024, which needs rustc 1.85 or newer; it is developed and verified against 1.98.1. There is no C or C++ dependency and no FFI beyond libc — the runtime is Rust plus a small set of permissive crates, listed with versions and SPDX expressions in [RESEARCH.md § 8.1](RESEARCH.md) and in [`NOTICE`](NOTICE). Building the SAP path additionally needs `curl` on `PATH` and network access to Apple endpoints.
 
 ```bash
-cargo test --workspace              # 200 tests across the workspace
+cargo test --workspace              # 202 tests across the workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check          # the tree is rustfmt-clean; this must exit 0
 ```
