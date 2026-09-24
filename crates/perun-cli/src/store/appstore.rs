@@ -220,6 +220,59 @@ fn classify_auth_failure(
     None
 }
 
+/// What the login retry loop must do with the response it just received.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoginRetry {
+    /// A real backend verdict (a plist reply or 403): stop resending.
+    Stop,
+    /// The edge shed the request: back off, then re-send the identical bytes.
+    Resend(std::time::Duration),
+    /// Rate limited: wait out `Retry-After` (or the exponential fallback), then re-send.
+    RateLimited(std::time::Duration),
+}
+
+/// Decide how the login loop reacts to one response.
+///
+/// Edge-drops (Kosthi/ipatool-rs#19): Apple's edge sometimes sheds requests
+/// before they reach MZFinance — a 3xx with no Location, or a 204/404/5xx with
+/// an empty or HTML body and no backend headers. Those are re-sent, up to three
+/// times, with 1 s / 2 s / 4 s of backoff capped at 8 s.
+///
+/// A 429 is re-sent too: it waits out `Retry-After` when that header parses, and
+/// the same exponential delay otherwise. The re-send is the point — sleeping on a
+/// 429 without issuing the request again would re-read the same response on every
+/// pass and stall until the give-up bound. 403 and any plist reply are real
+/// verdicts and stop the loop.
+fn login_retry_action(res: &http::Response, resend: u32) -> LoginRetry {
+    let exponential =
+        std::time::Duration::from_secs(1u64 << resend).min(std::time::Duration::from_secs(8));
+    if res.status == 429 {
+        let delay = res
+            .header("retry-after")
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(exponential);
+        return LoginRetry::RateLimited(delay);
+    }
+    if res.body.starts_with(b"<?xml")
+        || res.body.starts_with(b"<plist")
+        || res.body.starts_with(b"<Document")
+        || res.body.starts_with(b"<!DOCTYPE")
+    {
+        return LoginRetry::Stop;
+    }
+    let dropped = matches!(res.status, 204 | 404)
+        || res.status >= 500
+        || ((301..=399).contains(&res.status)
+            && res.status != 304
+            && res.header("location").is_none());
+    if dropped {
+        LoginRetry::Resend(exponential)
+    } else {
+        LoginRetry::Stop
+    }
+}
+
 /// MZFinance authenticate. Returns the account with session tokens.
 /// The `auth_code` (from push, SMS fallback, or hardware key) is appended
 /// to the password on the retry round — Apple's only 2FA channel here.
@@ -260,73 +313,43 @@ pub fn login(
         let url = redirect
             .clone()
             .unwrap_or_else(|| config.auth_endpoint.clone());
-        // Edge-drops (Kosthi/ipatool-rs#19): Apple's edge sometimes sheds
-        // requests before they reach MZFinance — a 3xx with no Location, a
-        // 204/404/5xx with an empty or HTML body and no backend headers.
-        // The identical signed bytes are resent up to 3 times, 250 ms
-        // apart; 403 (the real "no signature" verdict) and 429 (rate
-        // limit) are never resent.
-        let mut res = http::send(
-            Request::new("POST", &url)
-                .header(&name, &value)
-                .header("Content-Type", "application/x-www-form-urlencoded")
-                .form_body(body.clone())
-                .stop_on_redirect_marker(),
-        )
-        .map_err(|e| StoreError::Other(format!("login request: {e}")))?;
-        for resend in 0..=2 {
-            let has_store_verdict = res.status == 429
-                || res.body.starts_with(b"<?xml")
-                || res.body.starts_with(b"<plist")
-                || res.body.starts_with(b"<Document")
-                || res.body.starts_with(b"<!DOCTYPE");
-            let dropped = matches!(res.status, 204 | 404)
-                || res.status >= 500
-                || ((301..=399).contains(&res.status)
-                    && res.status != 304
-                    && res.header("location").is_none());
-
-            if has_store_verdict {
-                if res.status == 429 {
-                    let delay = res
-                        .header("retry-after")
-                        .and_then(|v| v.parse::<u64>().ok())
-                        .map(std::time::Duration::from_secs)
-                        .unwrap_or_else(|| std::time::Duration::from_secs(1 << resend));
-                    eprintln!(
-                        "[store] login rate limited (HTTP 429), retrying in {:?}",
-                        delay
-                    );
-                    std::thread::sleep(delay);
-                    if resend == 2 {
-                        return Err(StoreError::Other(
-                            "apple rate limited authentication; try again later (HTTP 429)".into(),
-                        ));
-                    }
-                    continue;
-                }
-                // 403/signature-rejected or a real plist reply: stop resending.
-                break;
-            }
-
-            if !dropped {
-                break;
-            }
-            eprintln!(
-                "[store] login send {} dropped by the edge (HTTP {}), resending",
-                resend, res.status
-            );
-            let delay =
-                std::time::Duration::from_secs(1 << resend).min(std::time::Duration::from_secs(8));
-            std::thread::sleep(delay);
-            res = http::send(
+        // One send, shared by every retry below: the signed bytes are identical
+        // across resends, so a retry differs only in when it fires.
+        let send_once = || -> std::result::Result<http::Response, StoreError> {
+            http::send(
                 Request::new("POST", &url)
                     .header(&name, &value)
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .form_body(body.clone())
                     .stop_on_redirect_marker(),
             )
-            .map_err(|e| StoreError::Other(format!("login request: {e}")))?;
+            .map_err(|e| StoreError::Other(format!("login request: {e}")))
+        };
+        let mut res = send_once()?;
+        for resend in 0..=2u32 {
+            match login_retry_action(&res, resend) {
+                LoginRetry::Stop => break,
+                LoginRetry::Resend(delay) => {
+                    eprintln!(
+                        "[store] login send {resend} dropped by the edge (HTTP {}), retrying in {delay:?}",
+                        res.status
+                    );
+                    std::thread::sleep(delay);
+                    res = send_once()?;
+                }
+                LoginRetry::RateLimited(delay) => {
+                    eprintln!("[store] login rate limited (HTTP 429), retrying in {delay:?}");
+                    if resend == 2 {
+                        return Err(StoreError::Other(
+                            "apple rate limited authentication; try again later (HTTP 429)".into(),
+                        ));
+                    }
+                    std::thread::sleep(delay);
+                    // Re-issue before looping: the next pass must judge a fresh
+                    // response, not the 429 that put us here.
+                    res = send_once()?;
+                }
+            }
         }
 
         // Pod redirect: re-POST the ORIGINAL body (attempt value included).
@@ -1738,5 +1761,109 @@ mod tests {
         );
         // Empty/empty = success candidate, proceed to token extraction.
         assert!(classify_auth_failure("", "", "", 1).is_none());
+    }
+
+    fn resp(status: u16, headers: &[(&str, &str)], body: &[u8]) -> http::Response {
+        // Keys are stored lowercased, the way the real parser ingests them
+        // (`http.rs`: `name.trim().to_ascii_lowercase()`), so a test cannot pass
+        // by handing `header()` a spelling the wire would never produce.
+        http::Response {
+            status,
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_ascii_lowercase(), v.to_string()))
+                .collect(),
+            body: body.to_vec(),
+        }
+    }
+
+    #[test]
+    fn retry_429_is_ratelimited_not_stop() {
+        // The regression this pins: a 429 used to sleep and `continue` without a
+        // re-send, so the loop re-read the same response and never re-issued the
+        // request. It must come back as RateLimited, which is the arm that re-sends.
+        let r = resp(429, &[], b"too many requests");
+        assert_eq!(
+            login_retry_action(&r, 0),
+            LoginRetry::RateLimited(std::time::Duration::from_secs(1))
+        );
+        // Every resend index re-sends; none degrades to Stop.
+        for resend in 0..=2u32 {
+            assert!(matches!(
+                login_retry_action(&r, resend),
+                LoginRetry::RateLimited(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn retry_429_honors_retry_after() {
+        let r = resp(429, &[("Retry-After", "7")], b"");
+        assert_eq!(
+            login_retry_action(&r, 0),
+            LoginRetry::RateLimited(std::time::Duration::from_secs(7))
+        );
+        // A junk header falls back to the exponential delay, not to zero sleep.
+        let junk = resp(429, &[("Retry-After", "soon")], b"");
+        assert_eq!(
+            login_retry_action(&junk, 1),
+            LoginRetry::RateLimited(std::time::Duration::from_secs(2))
+        );
+    }
+
+    #[test]
+    fn retry_backoff_is_exponential_capped_at_8s() {
+        for (resend, secs) in [(0u32, 1u64), (1, 2), (2, 4), (3, 8), (9, 8)] {
+            let shed = resp(503, &[], b"");
+            assert_eq!(
+                login_retry_action(&shed, resend),
+                LoginRetry::Resend(std::time::Duration::from_secs(secs)),
+                "resend {resend} should wait {secs}s"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_shapes_still_decide_as_before() {
+        // Edge-shed family re-sends.
+        for status in [204u16, 404, 500, 502, 301, 302, 307] {
+            let r = resp(status, &[], b"");
+            assert!(
+                matches!(login_retry_action(&r, 0), LoginRetry::Resend(_)),
+                "HTTP {status} should re-send"
+            );
+        }
+        // 3xx with a Location is a pod hop, not a shed — the caller re-POSTs it.
+        assert_eq!(
+            login_retry_action(&resp(302, &[("Location", "https://x/")], b""), 0),
+            LoginRetry::Stop
+        );
+        // 304 is never a redirect and never a shed.
+        assert_eq!(
+            login_retry_action(&resp(304, &[], b""), 0),
+            LoginRetry::Stop
+        );
+        // A real backend reply stops the loop regardless of status.
+        assert_eq!(
+            login_retry_action(&resp(500, &[], b"<?xml version=\"1.0\"?>"), 0),
+            LoginRetry::Stop
+        );
+        for marker in [&b"<?xml"[..], b"<plist", b"<Document", b"<!DOCTYPE"] {
+            assert_eq!(
+                login_retry_action(&resp(503, &[], marker), 0),
+                LoginRetry::Stop,
+                "body starting {marker:?} is a store verdict"
+            );
+        }
+        // 403 is the real "no signature" verdict.
+        assert_eq!(
+            login_retry_action(&resp(403, &[], b""), 0),
+            LoginRetry::Stop
+        );
+        // A plain 200 is not retried.
+        assert_eq!(
+            login_retry_action(&resp(200, &[], b"ok"), 0),
+            LoginRetry::Stop
+        );
     }
 }
