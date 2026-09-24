@@ -612,6 +612,10 @@ impl SapRuntime {
 
 const SETUP_CERT_URL: &str = "https://s.mzstatic.com/sap/setup.crt";
 const SETUP_URL: &str = "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/signSapSetup";
+/// The SAP lane identifies as a different Configurator build than the
+/// Store lane (2.15 vs 2.17) — keep them distinct.
+const SAP_USER_AGENT: &str = "Configurator/2.15 (Macintosh; OS X 14.2; 16C68)";
+
 const SETUP_KEY: &str = "sign-sap-setup-buffer";
 
 fn plist_extract(buffer: &[u8], key: &str) -> Option<Vec<u8>> {
@@ -648,25 +652,13 @@ fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn http_get(url: &str) -> Result<Vec<u8>, String> {
-    // Minimal HTTPS GET without pulling a TLS stack into the CLI: shell out
-    // to curl. The protocol step is not perf-critical.
-    let out = std::process::Command::new("curl")
-        .args([
-            "-sS",
-            "--fail",
-            "-H",
-            "User-Agent: Configurator/2.15 (Macintosh; OS X 14.2; 16C68)",
-            url,
-        ])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(format!(
-            "GET {url}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
+    // The SAP handshake must not carry the Store session cookies, so this goes
+    // through the cookie-less agent rather than store::http::send.
+    let res = crate::store::http::raw_request("GET", url, SAP_USER_AGENT, &[], None)?;
+    if res.status != 200 {
+        return Err(format!("GET {url}: HTTP {}", res.status));
     }
-    Ok(out.stdout)
+    Ok(res.body)
 }
 
 fn http_post_plist(url: &str, data: &[u8]) -> Result<Vec<u8>, String> {
@@ -674,29 +666,17 @@ fn http_post_plist(url: &str, data: &[u8]) -> Result<Vec<u8>, String> {
         "<?xml version=\"1.0\"?><plist><dict><key>{SETUP_KEY}</key><data>{}</data></dict></plist>",
         base64_encode(data),
     );
-    let out = std::process::Command::new("curl")
-        .args([
-            "-sS",
-            "--fail",
-            "-X",
-            "POST",
-            "-H",
-            "Content-Type: application/x-plist",
-            "-H",
-            "User-Agent: Configurator/2.15 (Macintosh; OS x 14.2; 16C68)",
-            "--data-binary",
-            &body,
-            url,
-        ])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(format!(
-            "POST {url}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
+    let res = crate::store::http::raw_request(
+        "POST",
+        url,
+        SAP_USER_AGENT,
+        &[("Content-Type", "application/x-plist")],
+        Some(body.as_bytes()),
+    )?;
+    if res.status != 200 {
+        return Err(format!("POST {url}: HTTP {}", res.status));
     }
-    Ok(out.stdout)
+    Ok(res.body)
 }
 
 fn base64_encode(data: &[u8]) -> String {

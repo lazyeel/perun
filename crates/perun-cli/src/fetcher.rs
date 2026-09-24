@@ -187,34 +187,33 @@ fn sha256_hex(data: &[u8]) -> String {
     h.iter().map(|x| format!("{x:08x}")).collect()
 }
 
-// ── curl plumbing (same model as the protocol module) ─────────────────────
+// ── HTTP (the cookie-less agent from the store module) ───────────────────
 
-fn curl_range(url: &str, start: u64, end_inclusive: u64) -> Result<Vec<u8>, String> {
-    let out = std::process::Command::new("curl")
-        .args([
-            "-sS",
-            "--fail",
-            "--max-time",
-            "60",
-            "-H",
-            "User-Agent: Configurator/2.15 (Macintosh; OS X 14.2; 16C68)",
-            "-r",
-            &format!("{start}-{end_inclusive}"),
-            url,
-        ])
-        .output()
-        .map_err(|e| format!("spawn curl: {e}"))?;
-    if !out.status.success() {
+/// The SAP lane identifies as a different Configurator build than the Store
+/// lane; the asset fetcher rides along with SAP, so it uses the same string.
+const ASSET_UA: &str = "Configurator/2.15 (Macintosh; OS X 14.2; 16C68)";
+
+fn range(url: &str, start: u64, end_inclusive: u64) -> Result<Vec<u8>, String> {
+    let res = crate::store::http::raw_request(
+        "GET",
+        url,
+        ASSET_UA,
+        &[("Range", &format!("bytes={start}-{end_inclusive}"))],
+        None,
+    )?;
+    // 206 is the honest answer to a Range; 200 means the server ignored it and
+    // sent the whole file, which would silently corrupt a ranged read.
+    if res.status != 206 && res.status != 200 {
         return Err(format!(
-            "curl range {start}-{end_inclusive} failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            "range {start}-{end_inclusive}: HTTP {}",
+            res.status
         ));
     }
-    Ok(out.stdout)
+    Ok(res.body)
 }
 
-/// Sequential `Read` over the network tail via `curl`, internally buffered in
-/// large windows: one curl process per 8 MiB, serving small `read()` calls
+/// Sequential `Read` over the network tail, internally buffered in
+/// large windows: one request per 8 MiB, serving small `read()` calls
 /// (the bzip2 decoder pulls ~1 KB at a time) from the in-memory window.
 struct RangeTailReader {
     url: String,
@@ -239,8 +238,8 @@ impl RangeTailReader {
             return Ok(());
         }
         const WINDOW: u64 = 8 << 20;
-        let data = curl_range(&self.url, self.pos, self.pos + WINDOW - 1)
-            .map_err(std::io::Error::other)?;
+        let data =
+            range(&self.url, self.pos, self.pos + WINDOW - 1).map_err(std::io::Error::other)?;
         self.window = data;
         self.fetched += self.window.len() as u64;
         Ok(())
@@ -297,13 +296,13 @@ fn inflate_zlib(data: &[u8]) -> Result<Vec<u8>, String> {
 
 /// Absolute byte range of the `Payload` heap object inside the package.
 fn payload_range(url: &str) -> Result<(u64, u64), String> {
-    let head = curl_range(url, 0, 8191)?;
+    let head = range(url, 0, 8191)?;
     if head.len() < 24 || &head[..4] != b"xar!" {
         return Err("update package is not a xar container".into());
     }
     let hlen = u16::from_be_bytes(head[4..6].try_into().unwrap()) as u64;
     let toc_cl = u64::from_be_bytes(head[8..16].try_into().unwrap());
-    let toc_raw = curl_range(url, hlen, hlen + toc_cl - 1)?;
+    let toc_raw = range(url, hlen, hlen + toc_cl - 1)?;
     let toc = inflate_zlib(&toc_raw)?;
     let text = String::from_utf8_lossy(&toc);
     let mut heap = hlen + toc_cl;
@@ -538,32 +537,18 @@ pub fn ensure_cert() -> Result<PathBuf, String> {
             return Ok(path);
         }
     }
-    let out = std::process::Command::new("curl")
-        .args([
-            "-sS",
-            "--fail",
-            "--max-time",
-            "30",
-            "-H",
-            "User-Agent: Configurator/2.15 (Macintosh; OS X 14.2; 16C68)",
-            SETUP_CERT_URL,
-        ])
-        .output()
-        .map_err(|e| format!("spawn curl: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "certificate fetch failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+    let res = crate::store::http::raw_request("GET", SETUP_CERT_URL, ASSET_UA, &[], None)?;
+    if res.status != 200 {
+        return Err(format!("certificate fetch failed: HTTP {}", res.status));
     }
-    if out.stdout.len() < SETUP_CERT_MIN_LEN {
+    if res.body.len() < SETUP_CERT_MIN_LEN {
         return Err(format!(
             "certificate suspiciously short: {}",
-            out.stdout.len()
+            res.body.len()
         ));
     }
     let tmp = dir.join(".setup.crt.part");
-    std::fs::write(&tmp, &out.stdout).map_err(|e| format!("write {tmp:?}: {e}"))?;
+    std::fs::write(&tmp, &res.body).map_err(|e| format!("write {tmp:?}: {e}"))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("rename cert: {e}"))?;
     Ok(path)
 }

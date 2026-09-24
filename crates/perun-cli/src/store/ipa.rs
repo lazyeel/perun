@@ -1248,31 +1248,19 @@ enum Range {
 }
 
 fn http_range(url: &str, range: Range) -> Result<Vec<u8>, String> {
+    // Same spellings curl's -r produced: a bare `start-end` span, or `-n` for
+    // the last n bytes. The artwork endpoint is public, so this stays off the
+    // Store agent's cookie jar exactly as the curl call was.
     let spec = match range {
         Range::Last(n) => format!("-{n}"),
         Range::Span(start, len) => format!("{start}-{}", start + len.saturating_sub(1)),
     };
-    let out = std::process::Command::new("curl")
-        .args([
-            "-sS",
-            "--fail",
-            "--max-time",
-            "60",
-            "-r",
-            &spec,
-            "-H",
-            &format!("User-Agent: {}", super::USER_AGENT),
-            url,
-        ])
-        .output()
-        .map_err(|e| format!("spawn curl: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "range request failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+    let res =
+        crate::store::http::raw_request("GET", url, super::USER_AGENT, &[("Range", &spec)], None)?;
+    if res.status != 206 && res.status != 200 {
+        return Err(format!("range request failed: HTTP {}", res.status));
     }
-    Ok(out.stdout)
+    Ok(res.body)
 }
 
 #[cfg(test)]

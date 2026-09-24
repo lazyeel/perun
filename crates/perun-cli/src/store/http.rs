@@ -1,22 +1,25 @@
 // Copyright 2026 lazyeel (https://github.com/lazyeel)
 // SPDX-License-Identifier: Apache-2.0
 
-//! HTTP for the Store lane, backed by the curl binary (same discipline as
-//! the SAP fetcher: no TLS stack in the binary, the system curl provides
-//! one). The cookie jar is a netscape-format file shared across requests
-//! and invocations — the Store's `mz_at0-*` session cookies live there.
+//! HTTP for the Store lane, over an in-process client (ureq + rustls).
 //!
-//! Streams: curl writes response headers to a temp file (`-D`) and the
-//! body to stdout, so the body stream stays clean even when `-L` follows
-//! several hops (each hop's header block would otherwise interleave with
-//! the body). The status is parsed from the header file afterwards; a
-//! body-streaming download can read the file mid-flight for the
-//! Content-Length progress hint.
+//! One [`ureq::Agent`] is built per process and reused, so connections are
+//! pooled and kept alive across requests — the SAP exchange, the login round
+//! and the DAAP history now reuse one TLS handshake per host instead of
+//! paying a fresh one (plus a `curl` fork) per call.
+//!
+//! The cookie jar is shared the same way: it is loaded once when the agent is
+//! built and written back after every response, because the Store's
+//! `mz_at0-*` session cookies must survive across invocations.
 
 use std::collections::HashMap;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::str::FromStr;
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+
+use ureq::Agent;
 
 use super::{USER_AGENT, state_dir};
 
@@ -250,134 +253,444 @@ fn truncate_file_for_fresh(
     Ok(false)
 }
 
-/// Execute a request through curl.
-pub fn send(mut req: Request) -> Result<Response, String> {
-    let jar = cookie_jar_path()?;
-    let hdr_path = state_dir()?.join(".headers.tmp");
-    let _ = std::fs::remove_file(&hdr_path);
+/// The one agent for the whole process, built on first use and reused.
+///
+/// Strictly one. Two agents meant two in-memory cookie jars, and whichever
+/// served the last request would overwrite the file and drop what the other
+/// learned — the session lost its `mz_at0-*` cookies after a single successful
+/// call. One jar, one store, one truth.
+///
+/// Redirects are off at the agent level (`max_redirects(0)`): the agent never
+/// jumps on its own. A call that wants a hop follows it itself, in
+/// [`send`], through this same agent, so a redirect can never become a second,
+/// cookie-less client. The login is the deliberate exception and keeps its own
+/// handling: its 302 to a pod carries the credentials, and re-posting the
+/// original body there is part of the protocol, not a blind follow.
+static AGENT: OnceLock<Agent> = OnceLock::new();
 
-    let mut cmd = Command::new("curl");
-    cmd.arg("-sS")
-        .arg("--connect-timeout")
-        .arg("20")
-        .arg("--max-time")
-        .arg("600")
-        .arg("-H")
-        .arg(format!("User-Agent: {USER_AGENT}"))
-        .arg("-b")
-        .arg(&jar)
-        .arg("-c")
-        .arg(&jar)
-        .arg("-D")
-        .arg(&hdr_path)
-        .arg("-o")
-        .arg("-"); // body to stdout
-    if !req.stop_on_redirect {
-        cmd.arg("-L").arg("--max-redirs").arg("8");
+fn agent() -> Result<&'static Agent, String> {
+    if let Some(a) = AGENT.get() {
+        return Ok(a);
     }
-    for (name, value) in &req.headers {
-        cmd.arg("-H").arg(format!("{name}: {value}"));
-    }
-    if req.body.is_some() {
-        cmd.arg("-X").arg(req.method).arg("--data-binary").arg("@-");
-    } else if req.method != "GET" {
-        // A POST without a payload still needs Content-Length: 0, or Apple's
-        // front (Tomcat) answers 411 Length Required.
-        cmd.arg("-X")
-            .arg(req.method)
-            .arg("-H")
-            .arg("Content-Length: 0");
-    }
-    cmd.arg(req.url);
-    if std::env::var("PERUN_STORE_HTTP_DEBUG").is_ok() {
-        eprintln!("[store:http] {cmd:?}");
-    }
+    // Build before publishing, so a failure is not cached for the process.
+    let a = build_agent(&cookie_jar_path()?)?;
+    Ok(AGENT.get_or_init(|| a))
+}
 
-    let mut child = cmd
-        .stdin(if req.body.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("spawn curl: {e}"))?;
+/// Apply the caller's headers. `header()` is on the unconstrained impl of the
+/// typestate parameter, so this works for both the with-body and no-body
+/// builders.
+fn with_headers<Any>(
+    mut b: ureq::RequestBuilder<Any>,
+    headers: &[(String, String)],
+) -> ureq::RequestBuilder<Any> {
+    for (name, value) in headers {
+        b = b.header(name, value);
+    }
+    b
+}
 
-    if let Some(body) = req.body.take() {
-        use std::io::Write;
-        let mut stdin = child.stdin.take().ok_or("curl stdin closed")?;
-        let mut off = 0usize;
-        while off < body.len() {
-            let n = stdin
-                .write(&body[off..])
-                .map_err(|e| format!("curl stdin: {e}"))?;
-            off += n;
+fn build_agent(jar: &PathBuf) -> Result<Agent, String> {
+    let builder = Agent::config_builder()
+        .user_agent(USER_AGENT)
+        .max_redirects(0)
+        .timeout_connect(Some(Duration::from_secs(15)))
+        .timeout_recv_body(Some(Duration::from_secs(60)))
+        .timeout_send_body(Some(Duration::from_secs(60)))
+        .http_status_as_error(false);
+    let agent: Agent = builder.build().into();
+    load_cookies(&agent, jar);
+    Ok(agent)
+}
+
+/// Read the shared jar into the agent, and keep the rows for the writer.
+fn load_cookies(agent: &Agent, jar: &PathBuf) {
+    let Ok(text) = std::fs::read_to_string(jar) else {
+        return;
+    };
+    if text.trim().is_empty() {
+        return;
+    }
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut guard = agent.cookie_jar_lock();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') && !line.starts_with("#HttpOnly_") {
+            continue;
         }
-        drop(stdin);
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() < 7 {
+            continue;
+        }
+        let (domain, include_sub, path, secure, expires, name, value) =
+            (f[0], f[1], f[2], f[3], f[4], f[5], f[6]);
+        if name.is_empty() {
+            continue;
+        }
+        // A row whose deadline has passed is dead: loading it would hand the
+        // agent a cookie Apple has already withdrawn.
+        if let Ok(sec) = expires.parse::<i64>()
+            && (sec < 0 || (sec > 0 && sec <= now_unix()))
+        {
+            continue;
+        }
+        let _ = include_sub;
+        // curl prefixes HttpOnly rows with `#HttpOnly_`. It is not part of the
+        // domain, and leaving it in makes the Domain attribute unparseable, so
+        // the row is dropped. The flag only restricts script access, which has
+        // no meaning for a client that just sends the cookie back.
+        let domain = domain.trim_start_matches("#HttpOnly_");
+        // The netscape domain carries a leading dot (".apple.com"), which is
+        // not a URI host; the cookie's Domain attribute keeps the dot.
+        let host = domain.trim_start_matches('.');
+        let Ok(uri) = format!("https://{host}").parse::<ureq::http::Uri>() else {
+            continue;
+        };
+        // The Domain attribute is what makes this a suffix cookie: without it
+        // the jar would treat every cookie as host-only for `apple.com` and
+        // send none of them to the `*.itunes.apple.com` hosts.
+        let mut set = format!("{name}={value}; Domain={domain}; Path={path}");
+        if secure == "TRUE" {
+            set.push_str("; Secure");
+        }
+        if let Ok(cookie) = ureq::Cookie::parse(set, &uri)
+            && guard.insert(cookie, &uri).is_err()
+        {
+            eprintln!("[store:http] cookie import failed for {name} on {host}");
+        }
+        rows.push(vec![
+            domain.to_string(),
+            include_sub.to_string(),
+            path.to_string(),
+            secure.to_string(),
+            expires.to_string(),
+            name.to_string(),
+            value.to_string(),
+        ]);
+    }
+    drop(guard);
+    *JAR_LINES.lock().unwrap_or_else(|e| e.into_inner()) = rows;
+}
+
+/// The on-disk jar, in curl's netscape format, held in memory for the process.
+///
+/// This is the persistence layer, and it is deliberately NOT enumerated from
+/// the in-memory jar: `ureq::Cookie` exposes only `name()` and `value()`, so
+/// the domain, path and expiry needed for the format cannot be read back out of
+/// it. Nor can we use ureq's own JSON saver — `cookie_store`'s JSON writer keeps
+/// only `is_persistent()` cookies, and Apple's `hsaccnt`, `wosid`, `woinst` and
+/// `mzf_in` carry no `Expires`, so every save dropped the four cookies
+/// MZFinance authenticates with and DAAP answered 401. The netscape format has
+/// an explicit expiry column, so a session cookie is written as `0` and comes
+/// back as a session cookie.
+static JAR_LINES: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn default_path(url: &str) -> String {
+    let path = url
+        .split_once("://")
+        .map_or("/", |(_, rest)| rest.find('/').map_or("/", |i| &rest[i..]));
+    let trimmed = path.split(['?', '#']).next().unwrap_or("/");
+    if !trimmed.starts_with('/') {
+        return "/".to_string();
+    }
+    match trimmed.rfind('/') {
+        Some(0) | None => "/".to_string(),
+        Some(i) => trimmed[..i].to_string(),
+    }
+}
+
+/// Fold one `Set-Cookie` header into a netscape row for `url`.
+///
+/// Returns `None` when the header deletes the cookie (`Max-Age` zero or
+/// negative), which must remove the stored row rather than resurrect it: an
+/// Apple session cookie dropped this way is what makes the next authenticated
+/// call fail.
+fn set_cookie_line(set: &str, url: &str) -> Option<Vec<String>> {
+    let mut parts = set.split(';');
+    let pair = parts.next()?.trim();
+    let (name, value) = pair.split_once('=')?;
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let (scheme, rest) = url.split_once("://")?;
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if host.is_empty() {
+        return None;
+    }
+    let host = format!("{scheme}://{host}")
+        .parse::<ureq::http::Uri>()
+        .ok()
+        .and_then(|u| u.host().map(|h| h.to_string()))?;
+    let mut domain = String::new();
+    let mut path = String::new();
+    let mut secure = false;
+    let mut expires = String::from("0");
+    for attr in parts {
+        let attr = attr.trim();
+        let (key, val) = attr.split_once('=').unwrap_or((attr, ""));
+        match key.trim().to_ascii_lowercase().as_str() {
+            "domain" => domain = format!(".{}", val.trim().trim_start_matches('.')),
+            "path" => path = val.trim().to_string(),
+            "secure" => secure = true,
+            "max-age" => {
+                if let Ok(secs) = val.trim().parse::<i64>() {
+                    if secs <= 0 {
+                        return None;
+                    }
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    expires = (now + secs).to_string();
+                }
+            }
+            "expires" => {
+                // Left as 0 (session): the absolute date is re-derived on the
+                // next response anyway, and a wrong one would expire early.
+                expires = String::from("0");
+            }
+            _ => {}
+        }
+    }
+    if path.is_empty() {
+        path = default_path(url);
+    }
+    if domain.is_empty() {
+        domain = host;
+    }
+    Some(vec![
+        domain,
+        "FALSE".to_string(),
+        path,
+        secure.to_string(),
+        expires,
+        name.to_string(),
+        value.trim().to_string(),
+    ])
+}
+
+/// Record the `Set-Cookie` headers of one response, replacing any row of the
+/// same name, domain and path.
+fn record_set_cookies(sets: &[String], url: &str) {
+    let mut rows = JAR_LINES.lock().unwrap_or_else(|e| e.into_inner());
+    for set in sets {
+        // The name identifies the row being set or deleted; the domain and path
+        // only say which of several same-named cookies it applies to.
+        let name = set.split(';').next().unwrap_or("").trim();
+        let Some((name, _)) = name.split_once('=') else {
+            continue;
+        };
+        let existing = |r: &Vec<String>| r[5] == name;
+        match set_cookie_line(set, url) {
+            Some(row) => match rows
+                .iter()
+                .position(|r| r[0] == row[0] && existing(r) && r[2] == row[2])
+            {
+                Some(i) => rows[i] = row,
+                None => rows.push(row),
+            },
+            None => rows.retain(|r| !existing(r)),
+        }
+    }
+}
+
+/// Write the jar back. Temp file plus rename, so a crash mid-write cannot
+/// truncate a live session.
+fn save_cookies(jar: &PathBuf) {
+    let rows = JAR_LINES.lock().unwrap_or_else(|e| e.into_inner());
+    if rows.is_empty() {
+        // Never replace a populated file with nothing: a failed load or a
+        // request that set no cookies must not destroy a live session.
+        return;
+    }
+    let mut out =
+        String::from("# Netscape HTTP Cookie File\n# Written by perun. Do not edit by hand.\n\n");
+    for r in rows.iter() {
+        out.push_str(&r.join("\t"));
+        out.push('\n');
+    }
+    let tmp = jar.with_extension("tmp");
+    if std::fs::write(&tmp, out).is_ok() && std::fs::rename(&tmp, jar).is_ok() {
+        return;
+    }
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// Issue one request, and follow hops ourselves when the caller wants them.
+///
+/// The agent is built with redirects off, so every hop goes through this same
+/// agent and the same cookie jar — the IPA URL answers with a 302 onto Apple's
+/// CDN, and the second hop must arrive as the same client, cookie scoping
+/// included. The caller's headers are carried over unchanged, `Range` among
+/// them: dropping it on the CDN hop would defeat resumable downloads, which
+/// exist precisely to survive that redirect.
+fn dispatch(
+    agent: &Agent,
+    req: &Request<'_>,
+    url: String,
+) -> Result<ureq::http::Response<ureq::Body>, String> {
+    const MAX_HOPS: usize = 8;
+    let mut url = url;
+    let mut hop = 0usize;
+    loop {
+        // `call()` exists only on the no-body builder, `send()` only on the
+        // with-body one, so the two shapes are dispatched separately; the
+        // header application is shared through with_headers().
+        let res = match (req.method, req.body.as_ref()) {
+            ("GET", _) | ("DELETE", _) => with_headers(agent.get(&url), &req.headers).call(),
+            ("POST", Some(body)) | ("PUT", Some(body)) => {
+                with_headers(agent.post(&url), &req.headers).send(body.clone())
+            }
+            // A POST with no payload still needs Content-Length: 0, or Apple's
+            // front (Tomcat) answers 411 Length Required.
+            ("POST", None) => with_headers(agent.post(&url), &req.headers).send(Vec::new()),
+            (other, _) => {
+                return Err(format!(
+                    "unsupported method {other:?}: the agent exposes GET/POST/PUT/DELETE only"
+                ));
+            }
+        };
+        let res = res.map_err(|e| format!("{url} {}", describe(&e)))?;
+
+        let status = res.status().as_u16();
+        let location = res
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        // The login stops on the first hop: its 302 carries the credentials and
+        // re-posting the original body to the pod is its own protocol step.
+        if req.stop_on_redirect || !(300..400).contains(&status) || status == 304 {
+            return Ok(res);
+        }
+        let Some(next) = location else {
+            return Ok(res);
+        };
+        let Ok(next) = url_join(&url, &next) else {
+            return Err(format!("{url}: unusable redirect target {next:?}"));
+        };
+        hop += 1;
+        if hop > MAX_HOPS {
+            return Err(format!("{url}: more than {MAX_HOPS} redirects"));
+        }
+        // Drain so the pooled connection can be reused for the next hop.
+        let _ = res.into_body().into_reader();
+        eprintln!("[store:http] {status} {url} -> {next}");
+        url = next;
+    }
+}
+
+/// Resolve a `Location` against the URL it came from (RFC 3986 §5.3, the
+/// subset that shows up here: absolute, rooted, and plain-relative).
+fn url_join(base: &str, location: &str) -> Result<String, String> {
+    if location.starts_with("http://") || location.starts_with("https://") {
+        return Ok(location.to_string());
+    }
+    let b = ureq::http::Uri::from_str(base).map_err(|e| e.to_string())?;
+    let host = b.authority().ok_or("no authority in base URL")?.to_string();
+    if let Some(rooted) = location.strip_prefix('/') {
+        return Ok(format!(
+            "{}://{host}/{rooted}",
+            b.scheme_str().unwrap_or("https")
+        ));
+    }
+    // Relative: replace the last path segment of the base.
+    let path = b.path();
+    let dir = match path.rfind('/') {
+        Some(i) => &path[..i + 1],
+        None => "/",
+    };
+    let resolved = if dir.ends_with('/') {
+        format!("{dir}{location}")
+    } else {
+        format!("{dir}/{location}")
+    };
+    Ok(format!(
+        "{}://{host}{resolved}",
+        b.scheme_str().unwrap_or("https")
+    ))
+}
+
+/// Execute a request through the shared agent.
+pub fn send(mut req: Request) -> Result<Response, String> {
+    let agent = agent()?;
+    let debug = std::env::var("PERUN_STORE_HTTP_DEBUG").is_ok();
+
+    let mut res = dispatch(agent, &req, req.url.to_string())?;
+
+    if debug {
+        eprintln!(
+            "[store:http] {} {} ({} header(s), {} body)",
+            req.method,
+            req.url,
+            req.headers.len(),
+            req.body.as_ref().map_or(0, |b| b.len())
+        );
     }
 
-    let mut out = child.stdout.take().ok_or("curl stdout closed")?;
-    let mut err = child.stderr.take().ok_or("curl stderr closed")?;
-    let mut body: Vec<u8> = Vec::new();
-    let mut chunk = [0u8; 64 * 1024];
-    let mut downloaded: u64 = 0;
-    let mut total_hint: Option<u64> = None;
-    let mut hint_read = false;
-    // File sink is buffered here (1 MiB) so the resume path keeps the
-    // caller's large-write behavior without the caller owning a BufWriter
-    // across the truncate point.
+    let status = res.status().as_u16();
+    let mut headers: HashMap<String, String> = HashMap::new();
+    let mut set_cookies: Vec<String> = Vec::new();
+    for (name, value) in res.headers() {
+        if let Ok(v) = value.to_str() {
+            let lower = name.as_str().to_ascii_lowercase();
+            if lower == "set-cookie" {
+                set_cookies.push(v.to_string());
+            }
+            headers.insert(lower, v.to_string());
+        }
+    }
+    record_set_cookies(&set_cookies, req.url);
+    save_cookies(&cookie_jar_path().unwrap_or_default());
+
+    // The resume gate runs before a single body byte can reach a sink.
     let mut file_buf: Option<std::io::BufWriter<&mut std::fs::File>> =
         req.file_sink.as_mut().map(|f| {
             let f: &mut std::fs::File = f;
             std::io::BufWriter::with_capacity(1 << 20, f)
         });
     let has_sink = req.sink.is_some() || file_buf.is_some();
+    if has_sink && let Some(start) = req.range_start {
+        check_range_response(status, &headers, start)?;
+        if let Some(buf) = file_buf.as_mut() {
+            truncate_file_for_fresh(buf.get_mut(), status, req.range_start)?;
+        }
+    }
+    let total_hint = headers
+        .get("content-length")
+        .and_then(|v| v.parse::<u64>().ok());
+
+    let mut body: Vec<u8> = Vec::new();
+    let mut downloaded: u64 = 0;
+    let mut chunk = [0u8; 64 * 1024];
+    // One reader for the whole body: re-creating it per chunk restarts the
+    // gzip decoder and truncates the response.
+    let mut reader = res.body_mut().as_reader();
     loop {
-        let n = out
+        let n = reader
             .read(&mut chunk)
-            .map_err(|e| format!("curl read: {e}"))?;
+            .map_err(|e| format!("read body: {e}"))?;
         if n == 0 {
             break;
         }
         let window = &chunk[..n];
         downloaded += window.len() as u64;
-        // curl writes the response headers to the file before the first
-        // body byte arrives — read the progress hint once, lazily.
-        if !hint_read && has_sink {
-            if let Ok(raw) = std::fs::read(&hdr_path) {
-                let (st, hdrs) = parse_header_file(&raw);
-                if let Some(start) = req.range_start {
-                    // Validate the range answer before the first byte
-                    // reaches the sink.
-                    check_range_response(st, &hdrs, start)?;
-                    // 200-after-resume: the server ignored Range and sends
-                    // the full body. Truncate the partial BEFORE streaming
-                    // so the fresh body starts at offset 0.
-                    if let Some(buf) = file_buf.as_mut() {
-                        truncate_file_for_fresh(buf.get_mut(), st, req.range_start)?;
-                    }
-                }
-                if let Some(len) = content_length_of_last_hop(&raw) {
-                    total_hint = Some(len);
-                }
-            }
-            hint_read = true;
-        }
         if let Some(buf) = file_buf.as_mut() {
-            use std::io::Write;
             buf.write_all(window)
                 .map_err(|e| format!("sink write: {e}"))?;
-            // Flush once per chunk so a crash mid-download leaves the tail
-            // on disk and resumable.
+            // Flush per chunk so a crash mid-download leaves a resumable tail.
             buf.flush().ok();
         } else if let Some(sink) = req.sink.as_mut() {
             sink.write_all(window)
                 .map_err(|e| format!("sink write: {e}"))?;
-            // Flush once per chunk so a crash mid-download leaves the tail
-            // on disk and resumable. The BufWriter on the caller side
-            // already coalesces the tiny writes, so this is a single
-            // buffered flush() — acceptable for now.
             sink.flush().ok();
         } else {
             body.extend_from_slice(window);
@@ -387,21 +700,10 @@ pub fn send(mut req: Request) -> Result<Response, String> {
         }
     }
     if let Some(buf) = file_buf.as_mut() {
-        use std::io::Write;
         buf.flush().map_err(|e| format!("sink flush: {e}"))?;
     }
 
-    let mut stderr = Vec::new();
-    err.read_to_end(&mut stderr).ok();
-    let exit = child.wait().map_err(|e| format!("curl wait: {e}"))?.code();
-    let raw_headers = std::fs::read(&hdr_path).unwrap_or_default();
-    let _ = std::fs::remove_file(&hdr_path);
-
-    let (status, headers) = parse_header_file(&raw_headers);
-    if status == 0 {
-        let msg = String::from_utf8_lossy(&stderr).trim().to_string();
-        return Err(format!("curl exit {exit:?}: {msg}"));
-    }
+    save_cookies(&cookie_jar_path()?);
 
     Ok(Response {
         status,
@@ -410,45 +712,87 @@ pub fn send(mut req: Request) -> Result<Response, String> {
     })
 }
 
-/// Parse the concatenated header blocks curl wrote (one per hop with -L).
-/// The status comes from the last hop; a header set by a later hop wins.
-fn parse_header_file(raw: &[u8]) -> (u16, HashMap<String, String>) {
-    let text = String::from_utf8_lossy(raw);
-    let mut status: u16 = 0;
-    let mut headers: HashMap<String, String> = HashMap::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("HTTP/") {
-            // rest looks like "1.1 200 OK" — pick the numeric status.
-            let code = rest.split_whitespace().nth(1).unwrap_or("");
-            status = code.parse().unwrap_or(status);
-            continue;
-        }
-        if let Some((name, value)) = line.split_once(':') {
-            let name = name.trim().to_ascii_lowercase();
-            let value = value.trim().to_string();
-            // Later hops override; X-Set-Apple-Store-Front must come from
-            // the final response, not an intermediate bounce.
-            headers.insert(name, value);
-        }
-    }
-    (status, headers)
+/// A second agent for the SAP lane.
+///
+/// The Store agent carries the shared cookie jar; the FairPlay handshake must
+/// not receive the `mz_at0-*` session cookies, so this one has none. It still
+/// pools connections, which is where the SAP win comes from.
+static SAP_AGENT: OnceLock<Agent> = OnceLock::new();
+
+fn sap_agent() -> &'static Agent {
+    SAP_AGENT.get_or_init(|| {
+        Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(15)))
+            .timeout_recv_body(Some(Duration::from_secs(60)))
+            .http_status_as_error(false)
+            .build()
+            .into()
+    })
 }
 
-fn content_length_of_last_hop(raw: &[u8]) -> Option<u64> {
-    let text = String::from_utf8_lossy(raw);
-    let mut len: Option<u64> = None;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with("HTTP/") {
-            len = None; // a new hop resets the length
-        } else if let Some((name, value)) = line.split_once(':')
-            && name.trim().eq_ignore_ascii_case("content-length")
-        {
-            len = value.trim().parse().ok();
+/// One request on the cookie-less SAP agent.
+///
+/// `user_agent` is a parameter because the SAP lane deliberately identifies as
+/// a different Configurator build than the Store lane does.
+pub fn raw_request(
+    method: &str,
+    url: &str,
+    user_agent: &str,
+    headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+) -> Result<Response, String> {
+    let agent = sap_agent();
+    let res = match (method, body) {
+        ("GET", _) => {
+            let mut b = agent.get(url).header("User-Agent", user_agent);
+            for (k, v) in headers {
+                b = b.header(*k, *v);
+            }
+            b.call()
+        }
+        (_, Some(data)) => {
+            let mut b = agent.post(url).header("User-Agent", user_agent);
+            for (k, v) in headers {
+                b = b.header(*k, *v);
+            }
+            b.send(data.to_vec())
+        }
+        _ => {
+            let mut b = agent.post(url).header("User-Agent", user_agent);
+            for (k, v) in headers {
+                b = b.header(*k, *v);
+            }
+            b.send(Vec::new())
         }
     }
-    len
+    .map_err(|e| format!("{method} {url}: {}", describe(&e)))?;
+
+    let status = res.status().as_u16();
+    let mut out: HashMap<String, String> = HashMap::new();
+    for (name, value) in res.headers() {
+        if let Ok(v) = value.to_str() {
+            out.insert(name.as_str().to_ascii_lowercase(), v.to_string());
+        }
+    }
+    let mut buf = Vec::new();
+    let mut res = res;
+    res.body_mut()
+        .as_reader()
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("read body: {e}"))?;
+    Ok(Response {
+        status,
+        headers: out,
+        body: buf,
+    })
+}
+
+/// A short, human-readable reason for a transport error.
+fn describe(e: &ureq::Error) -> String {
+    match e {
+        ureq::Error::StatusCode(code) => format!("HTTP {code}"),
+        other => other.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -542,37 +886,134 @@ mod tests {
         assert!(check_range_response(302, &range_hdrs(&[]), 0).is_err());
     }
 
+    /// The legacy curl jar is what an existing install has on disk. If this
+    /// import silently yields nothing, the next save wipes the session — the
+    /// failure is invisible until a signed request 401s.
     #[test]
-    fn header_file_edge_cases() {
-        // Single hop, no headers.
-        let raw = b"HTTP/1.1 204 No Content\r\n";
-        let (status, headers) = parse_header_file(raw);
-        assert_eq!(status, 204);
-        assert!(headers.is_empty());
-        // Three hops: last status wins, later header overrides.
-        let raw = b"HTTP/1.1 302\r\nLocation: /a\r\nHTTP/1.1 301\r\nLocation: /b\r\nHTTP/1.1 200\r\nX-Last: 3\r\n";
-        let (status, headers) = parse_header_file(raw);
-        assert_eq!(status, 200);
-        assert_eq!(headers.get("location").map(|s| s.as_str()), Some("/b"));
-        assert_eq!(headers.get("x-last").map(|s| s.as_str()), Some("3"));
-        // Non-numeric status keeps the previous value.
-        let raw = b"HTTP/1.1 xyz\r\n";
-        let (status, _) = parse_header_file(raw);
-        assert_eq!(status, 0);
-        // content_length_of_last_hop resets per hop.
-        let raw = b"HTTP/1.1 302\r\nContent-Length: 999\r\nHTTP/1.1 200\r\n";
-        assert_eq!(content_length_of_last_hop(raw), None);
-    }
-    #[test]
-    fn header_file_two_hops() {
-        let raw = b"HTTP/1.1 302 Found\r\nLocation: https://p25-buy/\r\nHTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Set-Apple-Store-Front: 143441-1,32\r\n";
-        let (status, headers) = parse_header_file(raw);
-        assert_eq!(status, 200);
-        assert_eq!(
-            headers.get("x-set-apple-store-front").map(|s| s.as_str()),
-            Some("143441-1,32")
+    fn legacy_netscape_jar_is_imported() {
+        let scratch = std::env::temp_dir().join(format!("perun-cj-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).unwrap();
+        let jar = scratch.join("cookies.txt");
+        std::fs::write(
+            &jar,
+            concat!(
+                "# Netscape HTTP Cookie File\n",
+                "\n",
+                ".apple.com\tTRUE\t/\tFALSE\t0\titspod\t48\n",
+                "#HttpOnly_.apple.com\tTRUE\t/\tTRUE\t0\tmz_at0\tSECRETVALUE\n",
+                "#HttpOnly_.apple.com\tTRUE\t/WebObjects\tTRUE\t0\twosid\tSID\n",
+            ),
+        )
+        .unwrap();
+
+        let agent: Agent = Agent::config_builder().build().into();
+        load_cookies(&agent, &jar);
+        let guard = agent.cookie_jar_lock();
+        let names: Vec<String> = guard.iter().map(|c| c.name().to_string()).collect();
+        assert!(
+            names.contains(&"itspod".to_string()),
+            "plain cookie: {names:?}"
         );
-        assert_eq!(content_length_of_last_hop(raw), Some(5));
+        assert!(
+            names.contains(&"mz_at0".to_string()),
+            "HttpOnly cookie: {names:?}"
+        );
+        assert!(
+            names.contains(&"wosid".to_string()),
+            "path-scoped cookie: {names:?}"
+        );
+        assert!(
+            guard.iter().any(|c| c.value() == "SECRETVALUE"),
+            "cookie value must survive the import"
+        );
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// The bug this file exists to prevent: `cookie_store`'s JSON saver keeps
+    /// only `is_persistent()` cookies, so Apple's session cookies — `hsaccnt`,
+    /// `wosid`, `woinst`, `mzf_in`, none of which carry an `Expires` — were
+    /// dropped on every save, and DAAP answered 401. The netscape format has an
+    /// explicit expiry column, so `0` (session) must survive the round trip.
+    #[test]
+    fn session_cookies_survive_the_jar_round_trip() {
+        let scratch = std::env::temp_dir().join(format!("perun-cj-rt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).unwrap();
+        let jar = scratch.join("cookies.txt");
+
+        {
+            let mut rows = JAR_LINES.lock().unwrap();
+            rows.clear();
+            rows.push(vec![
+                ".apple.com".into(),
+                "TRUE".into(),
+                "/WebObjects".into(),
+                "FALSE".into(),
+                "0".into(),
+                "hsaccnt".into(),
+                "session-value".into(),
+            ]);
+            rows.push(vec![
+                ".apple.com".into(),
+                "TRUE".into(),
+                "/".into(),
+                "TRUE".into(),
+                "0".into(),
+                "mz_at_ssl-1".into(),
+                "ssl-value".into(),
+            ]);
+        }
+        save_cookies(&jar);
+
+        let written = std::fs::read_to_string(&jar).unwrap();
+        assert!(
+            written.contains("hsaccnt\tsession-value"),
+            "session cookie missing from the jar file:\n{written}"
+        );
+
+        // Reload into a fresh agent: the row must come back as a real cookie.
+        {
+            let mut rows = JAR_LINES.lock().unwrap();
+            rows.clear();
+        }
+        let agent: Agent = Agent::config_builder().build().into();
+        load_cookies(&agent, &jar);
+        let names: Vec<String> = agent
+            .cookie_jar_lock()
+            .iter()
+            .map(|c| c.name().to_string())
+            .collect();
+        assert!(
+            names.contains(&"hsaccnt".to_string()),
+            "hsaccnt did not come back: {names:?}"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// An empty jar must never overwrite a populated file: that is how a failed
+    /// import used to destroy a live session with no error anywhere.
+    #[test]
+    fn empty_jar_does_not_overwrite_a_populated_file() {
+        let scratch = std::env::temp_dir().join(format!("perun-cj2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).unwrap();
+        let jar = scratch.join("cookies.txt");
+        let original =
+            b"# Netscape HTTP Cookie File\n.apple.com\tTRUE\t/\tFALSE\t0\thsaccnt\tkeep-me\n";
+        std::fs::write(&jar, original).unwrap();
+
+        let mut rows = JAR_LINES.lock().unwrap();
+        rows.clear();
+        drop(rows);
+        save_cookies(&jar);
+        assert_eq!(
+            std::fs::read(&jar).unwrap(),
+            original,
+            "the on-disk jar must survive an empty in-memory one"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     /// End-to-end through the real curl binary against a localhost server:
