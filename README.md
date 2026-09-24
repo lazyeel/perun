@@ -126,7 +126,7 @@ cargo install --git https://github.com/lazyeel/perun
 cargo install --git https://github.com/lazyeel/perun --locked
 ```
 
-The build needs a stable Rust toolchain (edition 2024) and nothing else — no C or C++ dependency. The SAP lane additionally shells out to `curl` at runtime and downloads its guest images on first use.
+The build needs a stable Rust toolchain (edition 2024) and nothing else — no C or C++ dependency. The SAP lane downloads its guest images on first use, over the same in-process client as the rest of the tool; no external program is required at runtime.
 
 There is no prebuilt release published yet: the GitHub Releases page for this repository is empty, so install from source or build with `cargo build --release`.
 
@@ -156,7 +156,7 @@ perun mach info /path/to/MachO.bin    # header, segments, sections, symbols
 
 The machine address is auto-detected: the first physical, up interface (veth/bridge/tunnel links are skipped), or — on hosts without one, like containers — a deterministic pseudo-MAC derived from the machine anchor (machine ID, else hostname). The first resolution is pinned under `~/.local/state/perun/machine`, so the identity and the account store keyed by it survive NIC changes and container restarts. Two overrides sit above that pin: `--mac` forces a specific address for one run of the bare `perun sap`, and `PERUN_MAC` does the same for every lane. Neither ever rewrites the pin, so neither can silently re-key the account store.
 
-The first run fetches the required images itself (~32 MB range-read from Apple's public 1.28 GB update package, SHA-256-pinned, cached under `~/.cache/perun/sap/`); every later run is warm. All network I/O shells out to `curl`, which is the only external program required. The full specification — binary map, memory invariants, protocol wire format, benchmarks — is [RESEARCH.md](RESEARCH.md).
+The first run fetches the required images itself (~32 MB range-read from Apple's public 1.28 GB update package, SHA-256-pinned, cached under `~/.cache/perun/sap/`); every later run is warm. All network I/O goes through one in-process client (`ureq` over rustls), so connections are pooled and no external program is required. The full specification — binary map, memory invariants, protocol wire format, benchmarks — is [RESEARCH.md](RESEARCH.md).
 
 ### Windows PE
 
@@ -216,10 +216,10 @@ Credentials are deliberately **not** read from the environment. There is no `PER
 
 ## Development
 
-A stable Rust toolchain is enough. The workspace is edition 2024, which needs rustc 1.85 or newer; it is developed and verified against 1.98.1. There is no C or C++ dependency and no FFI beyond libc — the runtime is Rust plus a small set of permissive crates, listed with versions and SPDX expressions in [RESEARCH.md § 8.1](RESEARCH.md) and in [`NOTICE`](NOTICE). Building the SAP path additionally needs `curl` on `PATH` and network access to Apple endpoints.
+A stable Rust toolchain is enough. The workspace is edition 2024, which needs rustc 1.85 or newer; it is developed and verified against 1.98.1. There is no C or C++ dependency and no FFI beyond libc — the runtime is Rust plus a small set of permissive crates, listed with versions and SPDX expressions in [RESEARCH.md § 8.1](RESEARCH.md) and in [`NOTICE`](NOTICE). The SAP path needs network access to Apple endpoints on first use, to fetch its guest images.
 
 ```bash
-cargo test --workspace              # 208 tests across the workspace
+cargo test --workspace              # 210 tests across the workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check          # the tree is rustfmt-clean; this must exit 0
 ```
