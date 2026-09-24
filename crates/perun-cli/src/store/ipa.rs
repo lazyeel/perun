@@ -592,8 +592,9 @@ pub fn replicate(
             .map_err(|e| format!("mmap {src_path}: {e}"))?
     };
     // madvise(MADV_SEQUENTIAL): kernel prefetches ahead for our linear scan
-    // and drops pages we've already passed, so RSS stays ~O(buffer) not
-    // O(package). A 3.14 GiB Tanks Blitz stays under tens of MiB.
+    // and drops pages we've already passed, so the resident set stays well
+    // below the package. Measured with wait4/ru_maxrss: a 3.14 GB
+    // (2.92 GiB) Tanks Blitz with 47 007 zip entries peaks at 1.0-1.1 GiB.
     unsafe extern "C" {
         fn madvise(addr: *mut std::ffi::c_void, len: usize, advise: i32) -> i32;
     }
