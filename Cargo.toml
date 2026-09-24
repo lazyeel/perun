@@ -18,14 +18,25 @@ perun-shims = { path = "crates/perun-shims" }
 
 [profile.release]
 debug = false
+# `panic = "abort"` is safe here: nothing in the workspace uses `catch_unwind`
+# or a panic hook, so no path relies on unwinding. A guest panic aborts instead
+# of killing a thread, and the panic message is still printed first.
+panic = "abort"
 strip = true
-lto = "thin"
+# Full LTO in one codegen unit: the shim table is a `distributed_slice` whose
+# entries live in every target, so cross-crate inlining is what lets the SAP
+# dispatch collapse. Costs build time, buys a smaller and tighter binary.
+opt-level = 3
+lto = "fat"
+codegen-units = 1
 # The release profile is stripped and carries no debug info. Panic Location
 # strings of registry crates still name the build host's cargo home; for
 # distributed binaries scrub them per invocation (works on any machine):
 #   RUSTFLAGS="--remap-path-prefix=$HOME=." cargo build --release
 # Local crash forensics instead wants symbols:
 #   CARGO_PROFILE_RELEASE_DEBUG=2 cargo build --release
+# Note: `cargo test` uses the test profile, so `panic = "abort"` does not reach
+# the test harness.
 
 # Native-parity stack geometry for the shims: the obfuscated guest folds
 # "uninitialized" stack slots of shim frames into its pointer arithmetic,
