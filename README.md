@@ -25,11 +25,11 @@ The machine address is auto-detected: the first physical, up interface (veth/bri
 
 The first run fetches the required images itself (~32 MB range-read from Apple's public 1.28 GB update package, SHA-256-pinned, cached under `~/.cache/perun/sap/`); every later run is warm. All network I/O shells out to `curl`, which is the only external program required. The full specification — binary map, memory invariants, protocol wire format, benchmarks — is [RESEARCH.md](RESEARCH.md).
 
-**App Store client (`perun store` / bare aliases)** — a full Store lane on top of the same native SAP session: login via MZFinance with 2FA (the code arrives by push/SMS out of band and is appended to the password on the retry round), iTunes Search API lookup, free-app purchase, resumable streaming IPA download with a progress bar, sinf replication, purchase history, and version metadata.
+**App Store client (`perun store` / bare aliases)** — a full Store lane on top of the same native SAP session: login via MZFinance with 2FA (the code arrives by push/SMS out of band and is appended to the password on the retry round), iTunes Search API lookup, free-app purchase, streaming IPA download with a progress bar, sinf replication, purchase history, and version metadata. Transfers are resumable: an interrupted download keeps its `.tmp` partial and the next run continues it with an HTTP `Range` request, after the 206/416/200 answer is validated so a server that ignored the range can never append onto a good prefix. Packages are rebuilt with a real ZIP64 writer (end-of-central-directory record plus locator, placeholders regenerated instead of truncated), so archives past 4 GB or 65 535 entries are written correctly rather than silently clipped; the streaming path uses the OTA framing Apple's kernel expects, with general-purpose flag bit 3 and the sizes and CRC in a trailing data descriptor instead of the local header. Reading a ZIP64 *central directory* is still refused — the writer emits it, the reader does not accept one.
 
 ```bash
 ./target/release/perun auth login -e you@example.com   # then a 2FA code
-./target/release/perun search -t telegram -l 5
+./target/release/perun search telegram -l 5
 ./target/release/perun purchase -b org.whispersystems.signal
 ./target/release/perun download -b org.whispersystems.signal -o .
 ./target/release/perun list-purchases
@@ -63,6 +63,8 @@ Invoked as `ipatool`, the tool runs the strict majd/ipatool v2 grammar instead �
 
 macOS packages are the one gap: `download --platform macos` fails with an explicit message rather than pretending, because native StoreAgent decryption is a separate piece of work.
 
+One deliberate difference from the reference: reached through the legacy `ipatool` name, a one-line nudge suggests switching to `perun`. It goes to **stderr**, only when stderr is a real terminal, and it stays silent when stderr is a pipe, under `--non-interactive`, and under `--format json` — so a captured transcript or a JSON pipeline is byte-identical to the reference.
+
 ## Performance
 
 Against the reference Unicorn-based signer (stock build of t0rr3sp3dr0/sapsigner, same live endpoints, same guest images, N=3 each):
@@ -89,6 +91,31 @@ Measurement method, ranges and reproduction commands: [RESEARCH.md § 6](RESEARC
 
 ```bash
 cargo build --release -p perun-cli
+
+# App Store (StoreKit):
+#   interactive login: email as a flag, password typed with echo off,
+#   then the 2FA code when Apple asks for it:
+./target/release/perun auth login -e you@example.com
+#   fully non-interactive (scripts, CI, keychain-less automation):
+./target/release/perun auth login -e you@example.com -p <password> --auth-code <code>
+./target/release/perun auth info
+./target/release/perun auth revoke
+
+#   plain search; the perun persona adds three client-side scopes:
+./target/release/perun search telegram -l 5
+./target/release/perun search Telegram --developer   # artistName/sellerName
+./target/release/perun search 686450210 --id         # the developer's whole catalog
+./target/release/perun search encrypted --description
+
+./target/release/perun purchase -b org.whispersystems.signal
+./target/release/perun purchase -i 686450210
+#   -o picks the output directory; a killed or network-dropped transfer leaves a
+#   .tmp partial that the next run resumes with an HTTP Range request:
+./target/release/perun download -b org.whispersystems.signal -o .
+./target/release/perun download -i 686450210 -o . --purchase
+./target/release/perun list-purchases
+./target/release/perun list-versions -b org.whispersystems.signal
+./target/release/perun get-version-metadata -b org.whispersystems.signal --external-version-id <id>
 
 # Mach-O / FairPlay SAP (zero-config; first run fetches the images):
 ./target/release/perun sap
@@ -156,13 +183,15 @@ Everything is optional; the defaults are zero-config.
 
 `--trace-file F` redirects stderr onto a file through `dup2`, so trace and trap lines land there instead of the console; there is no environment variable behind it.
 
+Credentials are deliberately **not** read from the environment. There is no `PERUN_EMAIL`, `PERUN_PASSWORD` or `*_2FA_CODE` variable in this tool: the email, password and 2FA code come from `auth login` flags, or from a masked prompt when they are omitted, and the account then persists in the encrypted vault. Keeping secrets out of the process environment means they never land in `/proc/*/environ` for another process to read.
+
 ## Development
 
-A stable Rust toolchain is enough (tested with 1.98). There is no C or C++ dependency and no FFI beyond libc — the runtime is Rust plus a small set of permissive crates, listed with versions and SPDX expressions in [RESEARCH.md § 8.1](RESEARCH.md) and in [`NOTICE`](NOTICE). Building the SAP path additionally needs `curl` on `PATH` and network access to Apple endpoints.
+A stable Rust toolchain is enough. The workspace is edition 2024, which needs rustc 1.85 or newer; it is developed and verified against 1.98.1. There is no C or C++ dependency and no FFI beyond libc — the runtime is Rust plus a small set of permissive crates, listed with versions and SPDX expressions in [RESEARCH.md § 8.1](RESEARCH.md) and in [`NOTICE`](NOTICE). Building the SAP path additionally needs `curl` on `PATH` and network access to Apple endpoints.
 
 ```bash
-cargo test --workspace              # 176 tests across the workspace
-cargo clippy --workspace --all-targets
+cargo test --workspace              # 188 tests across the workspace
+cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check          # the tree is rustfmt-clean; this must exit 0
 ```
 
