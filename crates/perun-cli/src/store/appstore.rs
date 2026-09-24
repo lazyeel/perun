@@ -221,7 +221,7 @@ fn classify_auth_failure(
 }
 
 /// What the login retry loop must do with the response it just received.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum LoginRetry {
     /// A real backend verdict (a plist reply or 403): stop resending.
     Stop,
@@ -229,7 +229,21 @@ enum LoginRetry {
     Resend(std::time::Duration),
     /// Rate limited: wait out `Retry-After` (or the exponential fallback), then re-send.
     RateLimited(std::time::Duration),
+    /// Stop now and fail with this message, without waiting or re-sending.
+    ///
+    /// `Stop` cannot carry it: on `Stop` the loop breaks and the response falls
+    /// through to plist parsing, which would report a generic parse error instead
+    /// of why the attempt was abandoned.
+    Abort(String),
 }
+
+/// Longest `Retry-After` we will sit through before giving up on a login.
+///
+/// A server asking for more than this is not obeyed by sleeping a truncated
+/// amount: honouring less than the server asked for invites Apple to escalate,
+/// so the attempt fails fast and the operator decides. 60 s is above the edge's
+/// own shed backoff and below anything worth blocking a scripted run for.
+const MAX_RETRY_AFTER_SECS: u64 = 60;
 
 /// Decide how the login loop reacts to one response.
 ///
@@ -238,18 +252,28 @@ enum LoginRetry {
 /// an empty or HTML body and no backend headers. Those are re-sent, up to three
 /// times, with 1 s / 2 s / 4 s of backoff capped at 8 s.
 ///
-/// A 429 is re-sent too: it waits out `Retry-After` when that header parses, and
-/// the same exponential delay otherwise. The re-send is the point — sleeping on a
-/// 429 without issuing the request again would re-read the same response on every
-/// pass and stall until the give-up bound. 403 and any plist reply are real
-/// verdicts and stop the loop.
+/// A 429 is re-sent too: it waits out `Retry-After` when that header parses as
+/// whole seconds, and the same exponential delay otherwise — an HTTP-date form
+/// does not parse, and no date parser is linked for one edge header. The
+/// re-send is the point: sleeping on a 429 without issuing the request again
+/// would re-read the same response on every pass and stall until the give-up
+/// bound. A `Retry-After` above [`MAX_RETRY_AFTER_SECS`] aborts rather than
+/// sleeping anyway. 403 and any plist reply are real verdicts and stop the loop.
 fn login_retry_action(res: &http::Response, resend: u32) -> LoginRetry {
     let exponential =
         std::time::Duration::from_secs(1u64 << resend).min(std::time::Duration::from_secs(8));
     if res.status == 429 {
-        let delay = res
+        let retry_after = res
             .header("retry-after")
-            .and_then(|v| v.parse::<u64>().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+        if let Some(secs) = retry_after
+            && secs > MAX_RETRY_AFTER_SECS
+        {
+            return LoginRetry::Abort(format!(
+                "Apple rate limit exceeded maximum wait threshold (got {secs}s, ceiling {MAX_RETRY_AFTER_SECS}s)"
+            ));
+        }
+        let delay = retry_after
             .map(std::time::Duration::from_secs)
             .unwrap_or(exponential);
         return LoginRetry::RateLimited(delay);
@@ -329,6 +353,9 @@ pub fn login(
         for resend in 0..=2u32 {
             match login_retry_action(&res, resend) {
                 LoginRetry::Stop => break,
+                LoginRetry::Abort(msg) => {
+                    return Err(StoreError::Other(msg));
+                }
                 LoginRetry::Resend(delay) => {
                     eprintln!(
                         "[store] login send {resend} dropped by the edge (HTTP {}), retrying in {delay:?}",
@@ -1809,6 +1836,39 @@ mod tests {
             login_retry_action(&junk, 1),
             LoginRetry::RateLimited(std::time::Duration::from_secs(2))
         );
+    }
+
+    #[test]
+    fn retry_after_above_ceiling_aborts_instead_of_sleeping() {
+        // Fail-fast, not truncation: a server asking for more than the ceiling
+        // must not be obeyed with a shorter sleep, so the attempt is abandoned.
+        for got in [61u64, 120, 86_400] {
+            let r = resp(429, &[("Retry-After", &got.to_string())], b"");
+            let want = format!(
+                "Apple rate limit exceeded maximum wait threshold (got {got}s, ceiling {MAX_RETRY_AFTER_SECS}s)"
+            );
+            assert_eq!(login_retry_action(&r, 0), LoginRetry::Abort(want.clone()));
+            // And it aborts at every resend index, never degrading to a wait.
+            for resend in 0..=2u32 {
+                assert!(matches!(
+                    login_retry_action(&r, resend),
+                    LoginRetry::Abort(_)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn retry_after_at_or_below_ceiling_is_honoured_whole() {
+        // The ceiling is inclusive: exactly 60 s is still obeyed, not refused.
+        for secs in [1u64, 7, MAX_RETRY_AFTER_SECS] {
+            let r = resp(429, &[("Retry-After", &secs.to_string())], b"");
+            assert_eq!(
+                login_retry_action(&r, 0),
+                LoginRetry::RateLimited(std::time::Duration::from_secs(secs)),
+                "{secs}s should be slept in full"
+            );
+        }
     }
 
     #[test]
