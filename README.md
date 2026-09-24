@@ -1,81 +1,128 @@
 # Perun
 
-A native binary projection runtime for Linux, in Rust. It maps foreign binaries straight into a Linux process and runs them on the bare CPU — no Wine, no QEMU, no instruction emulation. Two guests are supported today:
+A native FairPlay runtime and a self-contained App Store client for Linux, in Rust. Perun does not emulate anything: it maps Apple's Mach-O and Microsoft's PE binaries into the Linux address space and runs them on the bare CPU, translating the guest API surface at the boundary. No Wine, no QEMU, no Unicorn, no instruction interpreter.
 
-- **64-bit Windows PE images** (`.dll`), with the Win32 surface translated into POSIX: file I/O, virtual memory, synchronization, registry, TLS/FLS.
-- **64-bit Mach-O images** from macOS (framework binaries), with the libSystem/Mach surface translated into Linux equivalents — including a full FairPlay **SAP** session: the `X-Apple-ActionSignature` handshake, executed natively against the live servers.
+On top of that runtime sits a working App Store client — login with 2FA, search, purchase, download, purchase history — and a strict `ipatool`-compatible persona that reproduces the reference tool's grammar, output shapes and exit codes. It is a drop-in replacement for `ipatool` on the surface it implements; the one known gap is macOS `.pkg` packages, and it is listed below rather than hidden.
 
-Calls across the guest/host boundary are translated at the API level; guest code runs at native speed, and overhead exists only at each boundary crossing.
+## Performance
+
+The FairPlay SAP session, measured against the stock Unicorn-based reference signer (`t0rr3sp3dr0/sapsigner`, unmodified, same live endpoints, same guest images, N=3 each):
+
+| | Unicorn reference | Perun | |
+|---|---|---|---|
+| Whole-process wall | 9.09 s | **0.25 s** | **36× faster** |
+| CPU (user + sys) | 7.46 s | **0.096 s** | **78× less** |
+| Peak RSS | 234 MiB | **26.8 MiB** | **8.8× smaller** |
+
+This is a **protocol-session** comparison: both sides run the same image corpus through the same steps — init, two exchange rounds, 501-byte signature — and the oracle reads its payload on stdin, so the comparison is at the process level. It is not a client-versus-client benchmark; no other App Store client was measured. Method, ranges and one reproduction command per side are in [RESEARCH.md § 6](RESEARCH.md).
+
+## Quickstart
+
+```bash
+cargo install --git https://github.com/lazyeel/perun
+# or build in place: cargo build --release -p perun-cli
+
+# 1. authenticate — password is typed with echo off, then the 2FA code if Apple asks:
+perun auth login -e you@example.com
+
+# 2. find an app:
+perun search telegram -l 5
+
+# 3. take the license and download it (a bare word resolves by search first):
+perun purchase -b org.whispersystems.signal
+perun download -b org.whispersystems.signal -o .
+
+# machine-readable output for scripting:
+perun search telegram --format json
+perun list-purchases --format json
+```
+
+`--format json` is available on every store command, in both personas.
 
 ## What it does
 
-**Windows side (`perun run`, `perun call`, `perun seq`)** — loads a real Windows DLL, applies relocations, resolves imports against the shim table, installs a per-thread TEB, and runs `DllMain`. On Apple's `CoreADI64.dll` (iTunes for Windows, x86_64, static MSVC CRT) the image initializes with every import resolved — 111 Win32 APIs implemented — and the ADI dispatcher runs end-to-end up to its provisioning gate.
+**Three layers, one binary.** The binary projection runtime is the foundation; the SAP session and the Store client are built on it.
 
-The gate itself is characterized rather than bypassed, which is the actual result: the check is an in-memory provisioning-state flag consulted before command dispatch, the header validator behind the second failure exit is decoded down to its four byte-reads and OR-fold, and the outcome was shown to gate on missing provisioned state rather than on any forgeable input. Two-trampoline zeroing, a clean ZF flip, register canaries and live session content all leave the outcome unchanged; a valid header is not obtainable offline. The real caller is CoreFP's eight-call session cluster, not a single call, so `perun seq` exists to drive that shape — one image load, one `DllMain`, a script of calls in one process.
+- **64-bit Windows PE images** (`.dll`), with the Win32 surface translated into POSIX: file I/O, virtual memory, synchronization, registry, TLS/FLS.
+- **64-bit Mach-O images** from macOS, with the libSystem/Mach surface translated into Linux equivalents — including a full FairPlay **SAP** session, the `X-Apple-ActionSignature` handshake, executed natively against the live servers.
+- **An App Store client** on the same SAP session: `X-Apple-ActionSignature` is produced by the same native runtime that the benchmark above measures.
 
-The full analysis — binary ground truth, runtime invariants, the gate RVA chain, and a 20-row per-claim verification log — is [RESEARCH.md](RESEARCH.md) (§ 2.2, § 4.7, § 5.8, § 6.7).
+### App Store client
 
-**macOS side (`perun sap`)** — maps the 2013 commerce pair (CoreFP, CommerceCore, CommerceKit) from Apple's public OS X 10.9 update package, drives the FairPlay SAP protocol against `play.itunes.apple.com`, and produces the 501-byte action signature. With no arguments it uses the cached assets, fetching them on the first run:
-
-```bash
-./target/release/perun sap
-```
-
-The machine address is auto-detected: the first physical, up interface (veth/bridge/tunnel links are skipped), or — on hosts without one, like containers — a deterministic pseudo-MAC derived from the machine anchor (machine ID, else hostname). The first resolution is pinned under `~/.local/state/perun/machine`, so the identity and the account store keyed by it survive NIC changes and container restarts. `--mac` forces a specific address for one run, for differential testing, and never touches the pin.
-
-The first run fetches the required images itself (~32 MB range-read from Apple's public 1.28 GB update package, SHA-256-pinned, cached under `~/.cache/perun/sap/`); every later run is warm. All network I/O shells out to `curl`, which is the only external program required. The full specification — binary map, memory invariants, protocol wire format, benchmarks — is [RESEARCH.md](RESEARCH.md).
-
-**App Store client (`perun store` / bare aliases)** — a full Store lane on top of the same native SAP session: login via MZFinance with 2FA (the code arrives by push/SMS out of band and is appended to the password on the retry round), iTunes Search API lookup, free-app purchase, streaming IPA download with a progress bar, sinf replication, purchase history, and version metadata. Transfers are resumable: an interrupted download keeps its `.tmp` partial and the next run continues it with an HTTP `Range` request, after the 206/416/200 answer is validated so a server that ignored the range can never append onto a good prefix. Packages are rebuilt with a real ZIP64 writer (end-of-central-directory record plus locator, placeholders regenerated instead of truncated), so archives past 4 GB or 65 535 entries are written correctly rather than silently clipped; the streaming path uses the OTA framing Apple's kernel expects, with general-purpose flag bit 3 and the sizes and CRC in a trailing data descriptor instead of the local header. Replication is memory-flat regardless of package size: the input is memory-mapped and walked with `MADV_SEQUENTIAL`, so RSS tracks the buffer rather than the archive — a 3.14 GiB Tanks Blitz rebuilds in under tens of MiB. Reading a ZIP64 *central directory* is still refused — the writer emits it, the reader does not accept one. Download URLs come from a three-step recovery chain: the legacy `volumeStoreDownloadProduct`, then `redownloadProduct` when the legacy call returns a silent empty `songList`, then `updateProduct` when that answers an empty HTTP 500 — the same escalation the reference tool performs since Apple's 2026 migration.
+Login is MZFinance password auth with out-of-band 2FA: the code from push or SMS is appended to the password on the retry round. Search goes through the public iTunes Search and Lookup APIs. Purchase is free-license only. Download streams with a progress bar and replicates the package.
 
 ```bash
-./target/release/perun auth login -e you@example.com   # then a 2FA code
-./target/release/perun search telegram -l 5
-./target/release/perun purchase -b org.whispersystems.signal
-./target/release/perun download -b org.whispersystems.signal -o .
-./target/release/perun list-purchases
-./target/release/perun list-versions -b org.whispersystems.signal
-./target/release/perun get-version-metadata -b org.whispersystems.signal --external-version-id <id>
+perun auth login -e you@example.com          # interactive, masked password
+perun auth login -e you@example.com -p <password> --auth-code <code>   # unattended
+perun auth login -e you@example.com --remember-password
+#   --remember-password stores the password in the encrypted vault, which is what
+#   lets an unattended run relogin by itself when the token expires (failure 2034):
+perun auth info
+perun auth revoke
+
+perun search telegram -l 5
+perun search Telegram --developer   # artistName/sellerName  (alias: -dev)
+perun search 686450210 --id         # a developer's whole catalog
+perun search encrypted --description                            # (alias: -desc)
+
+perun purchase -b org.whispersystems.signal
+perun purchase -i 686450210
+perun download -b org.whispersystems.signal -o .
+perun download telegram             # positional: id, bundle id, or free text
+perun download 686450210 --purchase
+perun list-purchases
+perun list-versions -b org.whispersystems.signal
+perun get-version-metadata -b org.whispersystems.signal --external-version-id <id>
 ```
 
-The perun persona adds search scopes on top of the plain search, each with the optional `-l/--limit` (default 5, integer 1–200; visionOS searches cap at 12 because the backend does):
+The `perun` persona adds three search scopes on top of the plain search, each with the optional `-l/--limit` (default 5, integer 1–200; visionOS caps at 12 because the backend does):
 
-- `search Telegram --developer` — client filter on the developer's name (`artistName`/`sellerName`); the backend gets the full page and the requested limit is applied after the filter, so a filter can never shrink the page you asked for.
+- `search Telegram --developer` / `-dev` — client filter on the developer's name (`artistName`/`sellerName`); the backend gets the full page and the limit is applied after the filter, so a filter can never shrink the page you asked for.
 - `search 686450210 --id` — the full catalog of one developer via the Lookup API by artist id.
-- `search encrypted --description` — client filter on the description text.
+- `search encrypted --description` / `-desc` — client filter on the description text.
 - plain `search` stays the default Apple search across all fields.
 
-The scopes are mutually exclusive; the ipatool persona does not carry them.
+The scopes are mutually exclusive, and the `ipatool` persona does not carry them.
 
-**Every storefront value comes from the account.** `country` is read from the session's `storeFront`, and lookup, purchase and license all follow it; the egress IP does not gate anything, the account's storefront does. There is no region-override flag or variable, so an app absent from the account's storefront fails at lookup before a byte of payload flows — a US-only title is simply invisible to an account signed into another storefront. The 134 storefront IDs are table-driven in `store/storefronts.rs`.
+**Every storefront value comes from the account.** `country` is read from the session's `storeFront`, and lookup, purchase and license all follow it; the egress IP gates nothing, the account's storefront does. There is no region-override flag or variable, so an app absent from the account's storefront fails at lookup before a byte of payload flows. The 134 storefront IDs are table-driven in `store/storefronts.rs`.
 
-Endpoints are bag-driven (fetched per session, never hardcoded past the fallback), the account is stored encrypted (AES-256-GCM under PBKDF2-HMAC-SHA256, 100 000 rounds, keyed to the pinned machine address), and every signature-gated request is signed natively — the same runtime, one binary.
+Endpoints are bag-driven (fetched per session), the account is stored encrypted (AES-256-GCM under PBKDF2-HMAC-SHA256, 100 000 rounds, keyed to the pinned machine address), and every signature-gated request is signed natively.
+
+**Transfers are resumable.** An interrupted download keeps its `.tmp` partial and the next run continues it with an HTTP `Range` request, after the 206/416/200 answer is validated — a server that ignored the range can never append onto a good prefix.
+
+**Packages are rebuilt with a real ZIP64 writer** (end-of-central-directory record plus locator, placeholders regenerated rather than truncated), so archives past 4 GB or 65 535 entries are written correctly instead of silently clipped. The streaming path uses the OTA framing Apple's kernel expects, with general-purpose flag bit 3 and the sizes and CRC in a trailing data descriptor. Replication is memory-flat regardless of package size: the input is memory-mapped and walked with `MADV_SEQUENTIAL`, so RSS tracks the buffer rather than the archive — a 3.14 GiB Tanks Blitz rebuilds in under tens of MiB. Reading a ZIP64 *central directory* is still refused: the writer emits it, the reader does not accept one.
+
+**Download URLs resolve through a three-step recovery chain** — the legacy `volumeStoreDownloadProduct`, then `redownloadProduct` when the legacy call returns a silent empty `songList`, then `updateProduct` when that answers an empty HTTP 500. This mirrors the reference tool's recovery since Apple's 2026 migration, when the legacy call began returning empty song lists for newer apps.
 
 ### ipatool persona
 
-The same source builds under two names, and the persona is picked from argv[0] (busybox-style), so symlinks and copies both work:
+The same source builds under two names and the persona is picked from argv[0] (busybox-style), so symlinks and copies both work:
 
 ```bash
 cargo build --release        # produces BOTH target/release/perun and target/release/ipatool
 ipatool search telegram --limit 3 --format json
 ```
 
-Invoked as `ipatool`, the tool runs the strict majd/ipatool v2 grammar instead — command for command, flag for flag, output format for output format. In this mode it is a drop-in replacement: the exact cobra command surface (`auth login|info|revoke`, `search <term>`, `purchase`, `download`, `list-purchases`, `list-versions`, `get-version-metadata`, `completion`, `help`), the global flags (`--format text|json`, `--verbose`, `--non-interactive`, `--keychain-passphrase`, `-h/--help`, `-v/--version`), all platform spellings (`iphone`/`ios`, `ipad`/`ipados`, `appletv`/`apple-tv`/`tvos`, `vision`/`visionos`/`visionpro`/`xros`/`realitydevice`, `mac`/`macos`/`osx`), the zerolog text and JSON output shapes byte-for-byte, the progress bar, the exit codes (cobra's flat 1), and the silent relogin on password-token expiry. `--purchase` acquires a license mid-download when Apple demands one; tvOS and visionOS downloads resolve the latest external version id on their own (the MDM lockup API and the storefront product page respectively). The `perun` name keeps the native grammar and its stricter usage errors (exit 2).
+Invoked as `ipatool`, the tool runs the strict majd/ipatool v2 grammar — command for command, flag for flag, output format for output format: the exact cobra command surface (`auth login|info|revoke`, `search <term>`, `purchase`, `download`, `list-purchases`, `list-versions`, `get-version-metadata`, `completion`, `help`), the global flags (`--format text|json`, `--verbose`, `--non-interactive`, `--keychain-passphrase`, `-h/--help`, `-v/--version`), all platform spellings (`iphone`/`ios`, `ipad`/`ipados`, `appletv`/`apple-tv`/`tvos`, `vision`/`visionos`/`visionpro`/`xros`/`realitydevice`, `mac`/`macos`/`osx`), the zerolog text and JSON output shapes byte-for-byte, the progress bar, the exit codes (cobra's flat 1), and the silent relogin on password-token expiry. `--purchase` acquires a license mid-download when Apple demands one; tvOS and visionOS downloads resolve the latest external version id on their own.
+
+The `perun` name keeps the native grammar, with three search scopes, `--remember-password`, and stricter usage errors (exit 2).
 
 macOS packages are the one gap: `download --platform macos` fails with an explicit message rather than pretending, because native StoreAgent decryption is a separate piece of work.
 
-One deliberate difference from the reference: reached through the legacy `ipatool` name, a one-line nudge suggests switching to `perun`. It goes to **stderr**, only when stderr is a real terminal, and it stays silent when stderr is a pipe, under `--non-interactive`, and under `--format json` — so a captured transcript or a JSON pipeline is byte-identical to the reference.
+One deliberate difference from the reference: reached through the legacy `ipatool` name, a one-line nudge suggests switching to `perun`. It goes to **stderr**, only when stderr is a real terminal, and stays silent when stderr is a pipe, under `--non-interactive`, and under `--format json` — so a captured transcript or a JSON pipeline is byte-identical to the reference.
 
-## Performance
+## Installation
 
-Against the reference Unicorn-based signer (stock build of t0rr3sp3dr0/sapsigner, same live endpoints, same guest images, N=3 each):
+```bash
+# from source — installs BOTH `perun` and the `ipatool` persona:
+cargo install --git https://github.com/lazyeel/perun
+#   add --locked to resolve exactly the versions in Cargo.lock instead of floating:
+cargo install --git https://github.com/lazyeel/perun --locked
+```
 
-| | Unicorn reference | Perun |
-|---|---|---|
-| Whole-process wall | 9.09 s | **0.25 s** |
-| CPU (user + sys) | 7.46 s | **0.096 s** |
-| Peak RSS | 234 MiB | **26.8 MiB** |
+The build needs a stable Rust toolchain (edition 2024) and nothing else — no C or C++ dependency. The SAP lane additionally shells out to `curl` at runtime and downloads its guest images on first use.
 
-Measurement method, ranges and reproduction commands: [RESEARCH.md § 6](RESEARCH.md). The signatures are accepted by the live endpoints; parity with the reference engine was verified byte-for-byte (context address, exchange buffers, FNV state, dispatch decisions). The oracle's wall and CPU figures include a full asset fetch on every run, because upstream ships no cache; Perun's are the warm path.
+There is no prebuilt release published yet: the GitHub Releases page for this repository is empty, so install from source or build with `cargo build --release`.
 
 ## Design pillars
 
@@ -87,91 +134,46 @@ Measurement method, ranges and reproduction commands: [RESEARCH.md § 6](RESEARC
 
 **Trap-and-report extensibility** — imports without an implementation land on generated micro-stubs that trap on first call and report the missing symbol with its arguments. Adding an API is one declarative macro invocation in its own file; contributors never need to understand the loader. `perun scaffold` turns a trap line — or the hint's quoted `DLL!func(args)` payload pasted back verbatim — into a compiling `win32_api!` skeleton with the observed arguments and the owning source-file hint.
 
-## Installation
+## Researcher's toolkit
+
+The commands below exist to drive and inspect guest binaries. They are the same tooling the per-claim verification log in [RESEARCH.md § 6.7](RESEARCH.md) runs on, and they are not needed for ordinary App Store use.
+
+### Mach-O / FairPlay SAP
 
 ```bash
-# from source — installs BOTH `perun` and the `ipatool` persona:
-cargo install --git https://github.com/lazyeel/perun
-#   add --locked to resolve exactly the versions in Cargo.lock instead of floating:
-cargo install --git https://github.com/lazyeel/perun --locked
+perun sap                            # zero-config; fetches the images on first run
+perun sap --mac AA:BB:CC:DD:EE:FF    # force the machine address for one run
+perun sap --sign <hex>                # sign a custom payload  (or --file <path>)
+perun mach info /path/to/MachO.bin    # header, segments, sections, symbols
 ```
 
-The build needs a stable Rust toolchain (edition 2024) and nothing else — no C or C++ dependency. The SAP lane additionally shells out to `curl` at runtime, and downloads its guest images on first use.
+The machine address is auto-detected: the first physical, up interface (veth/bridge/tunnel links are skipped), or — on hosts without one, like containers — a deterministic pseudo-MAC derived from the machine anchor (machine ID, else hostname). The first resolution is pinned under `~/.local/state/perun/machine`, so the identity and the account store keyed by it survive NIC changes and container restarts. `--mac` forces a specific address for one run, for differential testing, and never touches the pin. There is no environment variable behind `--mac`.
 
-There is no prebuilt release published: the GitHub Releases page for this repository is empty, so install from source or build with `cargo build --release` (see [Development](#development)).
+The first run fetches the required images itself (~32 MB range-read from Apple's public 1.28 GB update package, SHA-256-pinned, cached under `~/.cache/perun/sap/`); every later run is warm. All network I/O shells out to `curl`, which is the only external program required. The full specification — binary map, memory invariants, protocol wire format, benchmarks — is [RESEARCH.md](RESEARCH.md).
 
-## Usage
+### Windows PE
 
 ```bash
-cargo build --release -p perun-cli
-
-# App Store (StoreKit):
-#   interactive login: email as a flag, password typed with echo off,
-#   then the 2FA code when Apple asks for it:
-./target/release/perun auth login -e you@example.com
-#   fully non-interactive (scripts, CI, keychain-less automation):
-./target/release/perun auth login -e you@example.com -p <password> --auth-code <code>
-#   --remember-password stores the password in the encrypted vault, which is what
-#   lets an unattended run relogin by itself when the token expires (failure 2034):
-./target/release/perun auth login -e you@example.com --remember-password
-./target/release/perun auth info
-./target/release/perun auth revoke
-
-#   plain search; the perun persona adds three client-side scopes:
-./target/release/perun search telegram -l 5
-./target/release/perun search Telegram --developer   # artistName/sellerName
-./target/release/perun search 686450210 --id         # the developer's whole catalog
-./target/release/perun search encrypted --description
-
-./target/release/perun purchase -b org.whispersystems.signal
-./target/release/perun purchase -i 686450210
-#   -o picks the output directory; a killed or network-dropped transfer leaves a
-#   .tmp partial that the next run resumes with an HTTP Range request:
-./target/release/perun download -b org.whispersystems.signal -o .
-./target/release/perun download -i 686450210 -o . --purchase
-#   a bare word is resolved by search first — id, bundle id, or free text:
-./target/release/perun download telegram
-./target/release/perun download 686450210 --purchase
-./target/release/perun list-purchases
-./target/release/perun list-versions -b org.whispersystems.signal
-./target/release/perun get-version-metadata -b org.whispersystems.signal --external-version-id <id>
-
-# Mach-O / FairPlay SAP (zero-config; first run fetches the images):
-./target/release/perun sap
-#   force a specific machine address for one run (differential testing;
-#   the auto-detected pin under ~/.local/state/perun/machine is kept):
-./target/release/perun sap --mac AA:BB:CC:DD:EE:FF
-#   sign a custom payload instead of the built-in smoke string
-#   (works with or without an assets directory):
-./target/release/perun sap --sign <hex>   # or --file <path>
-
-# Windows PE:
-./target/release/perun info   /path/to/CoreADI64.dll
-./target/release/perun run    /path/to/CoreADI64.dll --verbose
-./target/release/perun call   /path/to/CoreADI64.dll vdfut768ig 0 scratch --verbose
-#   feed a file as a named guest buffer, and use the name as a value:
-./target/release/perun call   /path/to/CoreADI64.dll vdfut768ig 0 scratch \
+perun info   /path/to/CoreADI64.dll
+perun run    /path/to/CoreADI64.dll --verbose
+perun call   /path/to/CoreADI64.dll vdfut768ig 0 scratch --verbose
+#   feed a file as a named guest buffer, then use the name as a value:
+perun call   /path/to/CoreADI64.dll vdfut768ig 0 scratch \
     --load=spim=/path/to/spim.bin --poke=scratch+0x0=spim --poke=scratch+0x8=0x15b
-#   repeat one call in-process so state set by an earlier call carries over:
-PERUN_SEQ=3 ./target/release/perun call /path/to/CoreADI64.dll vdfut768ig 0 scratch
-#   drive a whole session from a script (one image load, one DllMain):
-./target/release/perun seq    /path/to/CoreADI64.dll vdfut768ig --script=session.txt
-# Turn an unresolved-import trap report into a ready-to-fill shim stub:
-./target/release/perun scaffold 'KERNEL32!FooBar(0x1, 0x0, 0x0, 0x0)'
-
-# Mach-O inspection:
-./target/release/perun mach info /path/to/MachO.bin
+PERUN_SEQ=3 perun call /path/to/CoreADI64.dll vdfut768ig 0 scratch
+perun seq    /path/to/CoreADI64.dll vdfut768ig --script=session.txt
+perun scaffold 'KERNEL32!FooBar(0x1, 0x0, 0x0, 0x0)'
 ```
 
-The `call` command accepts `--verbose` (image summary), `--patch=RVA=HEX` (in-memory code patch), `--poke=TARGET=VALUE` and `--poke-ptr=RVA=VALUE`, `--peek=RVA` and `--peek-ptr=RVA` (read guest memory / dereference and dump after the call), and `--load=NAME=FILE` — the same inspection tooling the RESEARCH.md verification log (§ 6.7) runs on. `TARGET` in a poke is a guest RVA, `scratch+OFF` or `ctx+OFF`.
+On Apple's `CoreADI64.dll` (iTunes for Windows, x86_64, static MSVC CRT) the image initializes with every import resolved — 111 Win32 APIs implemented — and the ADI dispatcher runs end-to-end up to its provisioning gate.
 
-`perun run` takes `--verbose`, `--trace` (log the instrumented Win32 call sites — partial coverage, not every shim), `--trace-file F` (redirect stderr to a file, which is where the trace lines land) and `--no-teb` (skip TEB initialization when reproducing a load that hangs before it).
+`run` takes `--verbose`, `--trace` (log the instrumented Win32 call sites — partial coverage, not every shim), `--trace-file F` (redirect stderr to a file, where the trace lines land) and `--no-teb` (skip TEB initialization when reproducing a load that hangs before it).
 
-Option values resolve after the whole command line is parsed, so a buffer registered by `--load` is usable as a value no matter where its `--load` sits. The price is that a malformed poke value is rejected only after parsing completes.
+`call` accepts `--load=NAME=FILE`, `--patch=RVA=HEX`, `--poke=TARGET=VALUE`, `--poke-ptr=RVA=VALUE`, `--peek=RVA` and `--peek-ptr=RVA`. `TARGET` in a poke is a guest RVA, `scratch+OFF` or `ctx+OFF`; values may be numbers or the `scratch`/`ctx` tokens. Option values resolve after the whole command line is parsed, so a buffer registered by `--load` is usable as a value no matter where its `--load` sits — the price is that a malformed poke value is rejected only after parsing completes. Each invocation prints as `call#N <export>(...)` and the scratch page dumps per non-zero qword, so a sweep can tell which output fields the guest actually wrote.
 
-`perun seq` reads a script, one verb per line, `#` starting a comment: `load NAME FILE`, `poke TARGET VALUE`, `call [EXPORT] A0 A1 A2 A3` (arguments are tokens; the export defaults to `vdfut768ig`), `zero scratch|ctx`, and `dump` (every non-zero qword of both regions). Use it when each call in the session should differ — `PERUN_SEQ` covers the case where they are identical. Export names are matched case-sensitively against the export table, so `vdfut768ig` resolves and `VDFUT768IG` does not.
+`seq` loads one image and runs `DllMain` once, then drives a script of export calls in the same process so guest state carries between them. One verb per line, `#` starts a comment: `load NAME FILE`, `poke TARGET VALUE`, `call [EXPORT] A0 A1 A2 A3` (arguments are tokens; the export defaults to `vdfut768ig`), `zero scratch|ctx`, and `dump` (every non-zero qword of scratch and ctx). Use it when each call in the session should differ — `PERUN_SEQ=N` covers the case where they are identical. Export names match the export table case-sensitively.
 
-`call` prints each invocation as `call#N <export>(...)` and dumps the scratch page per non-zero qword, so a sweep can tell which output fields the guest actually wrote.
+**The provisioning gate is characterized, not bypassed** — and that is the actual result. The check is an in-memory provisioning-state flag consulted before command dispatch; the header validator behind the second failure exit is decoded down to its four byte-reads and OR-fold; and the outcome was shown to gate on missing provisioned state rather than on any forgeable input. Two-trampoline zeroing, a clean ZF flip, register canaries and live session content all leave the outcome unchanged, and a valid header is not obtainable offline. The real caller is CoreFP's eight-call session cluster rather than a single call, which is what `perun seq` exists to reproduce. The full analysis is [RESEARCH.md](RESEARCH.md) (§ 2.2, § 4.7, § 5.8, § 6.7).
 
 ### Research harnesses
 
@@ -202,14 +204,14 @@ Everything is optional; the defaults are zero-config.
 
 `--trace-file F` redirects stderr onto a file through `dup2`, so trace and trap lines land there instead of the console; there is no environment variable behind it.
 
-Credentials are deliberately **not** read from the environment. There is no `PERUN_EMAIL`, `PERUN_PASSWORD` or `*_2FA_CODE` variable in this tool: the email, password and 2FA code come from `auth login` flags, or from a masked prompt when they are omitted, and the account then persists in the encrypted vault. Keeping secrets out of the process environment means they never land in `/proc/*/environ` for another process to read.
+Credentials and the machine address are deliberately **not** read from the environment. There is no `PERUN_EMAIL`, `PERUN_PASSWORD`, `*_2FA_CODE` or `PERUN_MAC` variable in this tool: the email, password and 2FA code come from `auth login` flags or from a masked prompt, and the machine address comes from auto-detection with a `--mac` flag for an override. Keeping secrets out of the process environment means they never land in `/proc/*/environ` for another process to read.
 
 ## Development
 
 A stable Rust toolchain is enough. The workspace is edition 2024, which needs rustc 1.85 or newer; it is developed and verified against 1.98.1. There is no C or C++ dependency and no FFI beyond libc — the runtime is Rust plus a small set of permissive crates, listed with versions and SPDX expressions in [RESEARCH.md § 8.1](RESEARCH.md) and in [`NOTICE`](NOTICE). Building the SAP path additionally needs `curl` on `PATH` and network access to Apple endpoints.
 
 ```bash
-cargo test --workspace              # 188 tests across the workspace
+cargo test --workspace              # 200 tests across the workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check          # the tree is rustfmt-clean; this must exit 0
 ```
