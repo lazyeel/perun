@@ -2,6 +2,8 @@
 *.dll
 *.exe
 *.so
+*.ipa
+*.zip
 core
 core.*
 /tmp/

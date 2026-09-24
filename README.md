@@ -25,7 +25,7 @@ The machine address is auto-detected: the first physical, up interface (veth/bri
 
 The first run fetches the required images itself (~32 MB range-read from Apple's public 1.28 GB update package, SHA-256-pinned, cached under `~/.cache/perun/sap/`); every later run is warm. All network I/O shells out to `curl`, which is the only external program required. The full specification — binary map, memory invariants, protocol wire format, benchmarks — is [RESEARCH.md](RESEARCH.md).
 
-**App Store client (`perun store` / bare aliases)** — a full Store lane on top of the same native SAP session: login via MZFinance with 2FA (the code arrives by push/SMS out of band and is appended to the password on the retry round), iTunes Search API lookup, free-app purchase, streaming IPA download with a progress bar, sinf replication, purchase history, and version metadata. Transfers are resumable: an interrupted download keeps its `.tmp` partial and the next run continues it with an HTTP `Range` request, after the 206/416/200 answer is validated so a server that ignored the range can never append onto a good prefix. Packages are rebuilt with a real ZIP64 writer (end-of-central-directory record plus locator, placeholders regenerated instead of truncated), so archives past 4 GB or 65 535 entries are written correctly rather than silently clipped; the streaming path uses the OTA framing Apple's kernel expects, with general-purpose flag bit 3 and the sizes and CRC in a trailing data descriptor instead of the local header. Reading a ZIP64 *central directory* is still refused — the writer emits it, the reader does not accept one.
+**App Store client (`perun store` / bare aliases)** — a full Store lane on top of the same native SAP session: login via MZFinance with 2FA (the code arrives by push/SMS out of band and is appended to the password on the retry round), iTunes Search API lookup, free-app purchase, streaming IPA download with a progress bar, sinf replication, purchase history, and version metadata. Transfers are resumable: an interrupted download keeps its `.tmp` partial and the next run continues it with an HTTP `Range` request, after the 206/416/200 answer is validated so a server that ignored the range can never append onto a good prefix. Packages are rebuilt with a real ZIP64 writer (end-of-central-directory record plus locator, placeholders regenerated instead of truncated), so archives past 4 GB or 65 535 entries are written correctly rather than silently clipped; the streaming path uses the OTA framing Apple's kernel expects, with general-purpose flag bit 3 and the sizes and CRC in a trailing data descriptor instead of the local header. Replication is memory-flat regardless of package size: the input is memory-mapped and walked with `MADV_SEQUENTIAL`, so RSS tracks the buffer rather than the archive — a 3.14 GiB Tanks Blitz rebuilds in under tens of MiB. Reading a ZIP64 *central directory* is still refused — the writer emits it, the reader does not accept one. Download URLs come from a three-step recovery chain: the legacy `volumeStoreDownloadProduct`, then `redownloadProduct` when the legacy call returns a silent empty `songList`, then `updateProduct` when that answers an empty HTTP 500 — the same escalation the reference tool performs since Apple's 2026 migration.
 
 ```bash
 ./target/release/perun auth login -e you@example.com   # then a 2FA code
@@ -87,6 +87,19 @@ Measurement method, ranges and reproduction commands: [RESEARCH.md § 6](RESEARC
 
 **Trap-and-report extensibility** — imports without an implementation land on generated micro-stubs that trap on first call and report the missing symbol with its arguments. Adding an API is one declarative macro invocation in its own file; contributors never need to understand the loader. `perun scaffold` turns a trap line — or the hint's quoted `DLL!func(args)` payload pasted back verbatim — into a compiling `win32_api!` skeleton with the observed arguments and the owning source-file hint.
 
+## Installation
+
+```bash
+# from source — installs BOTH `perun` and the `ipatool` persona:
+cargo install --git https://github.com/lazyeel/perun
+#   add --locked to resolve exactly the versions in Cargo.lock instead of floating:
+cargo install --git https://github.com/lazyeel/perun --locked
+```
+
+The build needs a stable Rust toolchain (edition 2024) and nothing else — no C or C++ dependency. The SAP lane additionally shells out to `curl` at runtime, and downloads its guest images on first use.
+
+There is no prebuilt release published: the GitHub Releases page for this repository is empty, so install from source or build with `cargo build --release` (see [Development](#development)).
+
 ## Usage
 
 ```bash
@@ -98,6 +111,9 @@ cargo build --release -p perun-cli
 ./target/release/perun auth login -e you@example.com
 #   fully non-interactive (scripts, CI, keychain-less automation):
 ./target/release/perun auth login -e you@example.com -p <password> --auth-code <code>
+#   --remember-password stores the password in the encrypted vault, which is what
+#   lets an unattended run relogin by itself when the token expires (failure 2034):
+./target/release/perun auth login -e you@example.com --remember-password
 ./target/release/perun auth info
 ./target/release/perun auth revoke
 
@@ -113,6 +129,9 @@ cargo build --release -p perun-cli
 #   .tmp partial that the next run resumes with an HTTP Range request:
 ./target/release/perun download -b org.whispersystems.signal -o .
 ./target/release/perun download -i 686450210 -o . --purchase
+#   a bare word is resolved by search first — id, bundle id, or free text:
+./target/release/perun download telegram
+./target/release/perun download 686450210 --purchase
 ./target/release/perun list-purchases
 ./target/release/perun list-versions -b org.whispersystems.signal
 ./target/release/perun get-version-metadata -b org.whispersystems.signal --external-version-id <id>
