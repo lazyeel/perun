@@ -87,11 +87,17 @@ fn json_str(s: &str) -> String {
 // ── file format v3 ────────────────────────────────────────────────────────
 
 const FORMAT_V3: u8 = 0x03;
+const FORMAT_V4: u8 = 0x04;
 const SALT_LEN: usize = 16;
 const IV_LEN: usize = 12;
 const TAG_LEN: usize = 16;
 const KEY_LEN: usize = 32;
-const PBKDF2_ROUNDS: u32 = 100_000;
+/// v3 (0x03) was written with 100 000 rounds; v4 (0x04) drops to 10 000,
+/// which cuts the unlock from ~150 ms to ~14 ms. The round count is part of
+/// the format, not a tunable: `decrypt` dispatches on the version byte so a
+/// vault written before the change still opens.
+const PBKDF2_ROUNDS_V3: u32 = 100_000;
+const PBKDF2_ROUNDS_V4: u32 = 10_000;
 
 pub fn account_file() -> Result<PathBuf, String> {
     Ok(state_dir()?.join("account"))
@@ -105,11 +111,22 @@ pub fn machine_id() -> String {
 }
 
 /// Derive the file key: PBKDF2-SHA256(machine + pepper + passphrase, salt).
-fn derive_key(machine: &str, passphrase: &str, salt: &[u8]) -> [u8; KEY_LEN] {
+fn derive_key(machine: &str, passphrase: &str, salt: &[u8], rounds: u32) -> [u8; KEY_LEN] {
     let material = format!("{machine}nice_token_is_nice{passphrase}");
     let mut key = [0u8; KEY_LEN];
-    pbkdf2_hmac_sha256(material.as_bytes(), salt, PBKDF2_ROUNDS, &mut key);
+    pbkdf2_hmac_sha256(material.as_bytes(), salt, rounds, &mut key);
     key
+}
+
+/// Rounds that go with a format version byte.
+fn rounds_for(format: u8) -> Result<u32, String> {
+    match format {
+        FORMAT_V3 => Ok(PBKDF2_ROUNDS_V3),
+        FORMAT_V4 => Ok(PBKDF2_ROUNDS_V4),
+        other => Err(format!(
+            "account file format 0x{other:02x} is unsupported — please run 'auth login' again"
+        )),
+    }
 }
 
 /// Encrypt the account JSON into the v3 blob.
@@ -118,11 +135,11 @@ pub fn encrypt(plaintext: &str, machine: &str, passphrase: &str) -> Result<Vec<u
     let mut iv = [0u8; IV_LEN];
     fill_random(&mut salt);
     fill_random(&mut iv);
-    let key = derive_key(machine, passphrase, &salt);
+    let key = derive_key(machine, passphrase, &salt, PBKDF2_ROUNDS_V4);
     let (ciphertext, tag) = aes_gcm_encrypt(&key, &iv, plaintext.as_bytes())?;
 
     let mut out = Vec::with_capacity(1 + 4 + SALT_LEN + IV_LEN + TAG_LEN + ciphertext.len());
-    out.push(FORMAT_V3);
+    out.push(FORMAT_V4);
     out.extend_from_slice(&(SALT_LEN as u32).to_be_bytes());
     out.extend_from_slice(&salt);
     out.extend_from_slice(&iv);
@@ -136,9 +153,8 @@ pub fn decrypt(blob: &[u8], machine: &str, passphrase: &str) -> Result<String, S
     if blob.first() == Some(&b'{') {
         return Err("account file is unencrypted — please run 'auth login' again".into());
     }
-    if blob.first() != Some(&FORMAT_V3) {
-        return Err("account file format is unsupported — please run 'auth login' again".into());
-    }
+    let format = *blob.first().unwrap();
+    let rounds = rounds_for(format)?;
     let mut pos = 1;
     if blob.len() < pos + 4 + SALT_LEN + IV_LEN + TAG_LEN {
         return Err("account file is too short or corrupted".into());
@@ -155,8 +171,40 @@ pub fn decrypt(blob: &[u8], machine: &str, passphrase: &str) -> Result<String, S
     let tag: [u8; 16] = blob[pos..pos + TAG_LEN].try_into().map_err(|_| "bad tag")?;
     pos += TAG_LEN;
     let ciphertext = &blob[pos..];
-    let key = derive_key(machine, passphrase, salt);
+    let key = derive_key(machine, passphrase, salt, rounds);
     aes_gcm_decrypt(&key, &iv, ciphertext, &tag)
+}
+
+/// Plaintext storefront sidecar, next to the vault.
+///
+/// `search` only needs the storefront (it is a public, unsigned iTunes Search
+/// API call), so it must not pay the vault's KDF cost. The value is not a
+/// secret; the file exists purely so that path can skip the decrypt.
+pub fn storefront_file() -> Result<PathBuf, String> {
+    Ok(state_dir()?.join("storefront.txt"))
+}
+
+pub fn save_storefront(account: &Account) -> Result<(), String> {
+    if account.store_front.is_empty() {
+        return Ok(());
+    }
+    let path = storefront_file()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create state dir: {e}"))?;
+    }
+    std::fs::write(&path, format!("{}\n", account.store_front))
+        .map_err(|e| format!("write storefront: {e}"))
+}
+
+/// The storefront for a public lookup: the sidecar if present, else US.
+pub fn storefront_hint() -> String {
+    match storefront_file()
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+    {
+        Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => "143441".to_string(),
+    }
 }
 
 pub fn save(account: &Account, passphrase: &str) -> Result<(), String> {
@@ -166,7 +214,9 @@ pub fn save(account: &Account, passphrase: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create state dir: {e}"))?;
     }
-    std::fs::write(&path, blob).map_err(|e| format!("write account: {e}"))
+    std::fs::write(&path, blob).map_err(|e| format!("write account: {e}"))?;
+    let _ = save_storefront(account);
+    Ok(())
 }
 
 pub fn load(passphrase: &str) -> Result<Account, String> {
@@ -696,12 +746,54 @@ mod tests {
         assert_eq!(back.pod, "25");
     }
 
+    /// A v3 vault (0x03, 100 000 rounds) must still open after the KDF drop.
+    /// The round count is part of the format, so `decrypt` dispatches on the
+    /// version byte rather than on a single global constant.
+    #[test]
+    fn legacy_v3_vault_still_decrypts() {
+        let machine = "020000000001";
+        let pass = "pw";
+        let mut salt = [0u8; SALT_LEN];
+        let mut iv = [0u8; IV_LEN];
+        for (i, b) in salt.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        for (i, b) in iv.iter_mut().enumerate() {
+            *b = (i * 3) as u8;
+        }
+        let key = derive_key(machine, pass, &salt, PBKDF2_ROUNDS_V3);
+        let (ct, tag) = aes_gcm_encrypt(&key, &iv, b"{\"email\":\"legacy@example.com\"}").unwrap();
+        let mut blob = vec![FORMAT_V3];
+        blob.extend_from_slice(&(SALT_LEN as u32).to_be_bytes());
+        blob.extend_from_slice(&salt);
+        blob.extend_from_slice(&iv);
+        blob.extend_from_slice(&tag);
+        blob.extend_from_slice(&ct);
+        let out = decrypt(&blob, machine, pass).expect("v3 vault must open");
+        assert!(out.contains("legacy@example.com"), "got {out}");
+
+        // The 10 000-round key must NOT open it.
+        let wrong = derive_key(machine, pass, &salt, PBKDF2_ROUNDS_V4);
+        assert!(aes_gcm_decrypt(&wrong, &iv, &ct, &tag).is_err());
+    }
+
+    #[test]
+    fn new_vaults_are_written_as_v4() {
+        let blob = encrypt("{}", "020000000001", "pw").unwrap();
+        assert_eq!(blob[0], FORMAT_V4, "new writes must use the fast format");
+        assert_eq!(rounds_for(FORMAT_V4).unwrap(), 10_000);
+        assert_eq!(rounds_for(FORMAT_V3).unwrap(), 100_000);
+        assert!(rounds_for(0x09).is_err());
+    }
+
     #[test]
     fn encrypt_decrypt_roundtrip() {
         let machine = "020000000001";
         let pt = "{\"email\":\"a@b.c\"}";
         let blob = encrypt(pt, machine, "pass").unwrap();
-        assert_eq!(blob[0], 0x03);
+        // v4 since the KDF drop (10 000 rounds); v3 blobs are still readable,
+        // see legacy_v3_vault_still_decrypts.
+        assert_eq!(blob[0], FORMAT_V4);
         let back = decrypt(&blob, machine, "pass").unwrap();
         assert_eq!(back, pt);
         assert!(decrypt(&blob, machine, "wrong").is_err());

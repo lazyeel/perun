@@ -378,13 +378,20 @@ pub fn apps_with_date_console(items: &[AppRow]) -> Vec<String> {
         .iter()
         .map(|(id, b, n, v, p, date, plats)| match date {
             Some(d) => {
+                // Optional trailing field: build it with its own leading comma
+                // or omit it entirely. The old shape put a comma in the format
+                // string around an empty `plat`, which emitted a bare `,,` for
+                // apps that carry no platform data.
                 let plat = if plats.is_empty() {
                     String::new()
                 } else {
-                    format!(",\"platforms\":[{}]", plats.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(","))
+                    format!(
+                        ",\"platforms\":[{}]",
+                        plats.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(",")
+                    )
                 };
                 format!(
-                    "{{\"bundleID\":{},\"id\":{},\"name\":{},{},\"price\":{},\"purchaseDate\":{},\"version\":{}}}",
+                    "{{\"bundleID\":{},\"id\":{},\"name\":{}{},\"price\":{},\"purchaseDate\":{},\"version\":{}}}",
                     json_str(b),
                     id,
                     json_str(n),

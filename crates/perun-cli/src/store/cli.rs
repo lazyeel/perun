@@ -1130,9 +1130,8 @@ fn cmd_auth(persona: Persona, args: &[String]) -> i32 {
         }
     }
     let sub: &[String] = &args[idx..];
-    let mut rest: Vec<String> = sub[1..].to_vec();
-    rest.extend(pre);
-    let args_rest: &[String] = &rest;
+    // Guard BEFORE slicing: `sub[1..]` panics on an empty `sub`, which is what a
+    // bare `auth` produces. Reference behaviour is help + exit 0.
     if sub.is_empty() {
         if persona == Persona::Ipatool {
             help_auth();
@@ -1141,6 +1140,9 @@ fn cmd_auth(persona: Persona, args: &[String]) -> i32 {
         eprintln!("usage: perun store auth login|info|revoke");
         return 2;
     }
+    let mut rest: Vec<String> = sub[1..].to_vec();
+    rest.extend(pre);
+    let args_rest: &[String] = &rest;
     match sub[0].as_str() {
         "login" => cmd_auth_login(persona, args_rest),
         "info" => cmd_auth_info(persona, args_rest),
@@ -1413,9 +1415,12 @@ fn cmd_search(persona: Persona, args: &[String]) -> i32 {
         Err(e) => return ctx.usage_fail(&e),
     };
 
-    let acc = match require_account(&ctx) {
-        Ok(a) => a,
-        Err(c) => return c,
+    // Search is a public, unsigned iTunes Search API call that needs only the
+    // storefront, so it reads the plaintext sidecar and never opens the vault:
+    // no PBKDF2 on this path. Falls back to US when the sidecar is absent.
+    let acc = Account {
+        store_front: account::storefront_hint(),
+        ..Default::default()
     };
 
     // perun search scopes. The ipatool persona never has these flags; the
@@ -1480,9 +1485,21 @@ fn cmd_search(persona: Persona, args: &[String]) -> i32 {
             Err(e) => return ctx.fail(e),
         }
     };
+    // The `platforms` column is a perun-only extension. The reference ipatool
+    // never emits it, and the persona is meant to be byte-identical, so the
+    // ipatool side passes an empty list and the field is dropped entirely.
+    let show_platforms = ctx.persona == Persona::Perun;
     let items: Vec<AppRow> = apps
         .iter()
         .map(|a| {
+            let plats = if show_platforms {
+                a.platforms
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<&str>>()
+            } else {
+                Vec::new()
+            };
             (
                 a.id,
                 a.bundle_id.as_str(),
@@ -1490,10 +1507,7 @@ fn cmd_search(persona: Persona, args: &[String]) -> i32 {
                 a.version.as_str(),
                 a.price,
                 None,
-                a.platforms
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<&str>>(),
+                plats,
             )
         })
         .collect();

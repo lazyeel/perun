@@ -1549,6 +1549,20 @@ mod help_tests {
     const LOW_LEVEL: [&str; 7] = ["run", "info", "mach", "sap", "seq", "call", "scaffold"];
 
     #[test]
+    fn bare_auth_prints_help_instead_of_panicking() {
+        // Regression: `sub[1..]` used to be evaluated before the empty check, so a
+        // bare `auth` panicked with a slice-range error in both personas.
+        for persona_bin in ["ipatool", "perun"] {
+            let args = vec![persona_bin.to_string(), "auth".to_string()];
+            let code = run_with_args(&args);
+            assert!(
+                code == 0 || code == 2,
+                "{persona_bin} auth returned {code}, expected help (0) or usage (2)"
+            );
+        }
+    }
+
+    #[test]
     fn every_low_level_command_has_help() {
         for sub in LOW_LEVEL {
             assert!(low_level_help(sub).is_some(), "{sub} should have help");
