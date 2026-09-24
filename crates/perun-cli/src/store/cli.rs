@@ -100,7 +100,7 @@ impl Invocation {
 /// Parse the argv of one command (after the command word). `locals` are
 /// the command's own flags, both short and long forms. Boolean flags
 /// never consume the next token. Unknown flags are cobra errors.
-fn parse(argv: &[String], locals: &[(&str, bool)]) -> Invocation {
+fn parse(persona: Persona, argv: &[String], locals: &[(&str, bool)]) -> Invocation {
     let mut inv = Invocation::new();
     let mut i = 0;
     while i < argv.len() {
@@ -228,7 +228,12 @@ fn parse(argv: &[String], locals: &[(&str, bool)]) -> Invocation {
                         match argv.get(i) {
                             Some(v) => v.clone(),
                             None => {
-                                inv.usage_error = Some(format!("flag needs an argument: {name}"));
+                                let bare = name.trim_start_matches('-');
+                                inv.usage_error = Some(if persona == Persona::Ipatool {
+                                    format!("flag needs an argument: '{bare}' in -{bare}")
+                                } else {
+                                    format!("flag needs an argument: {name}")
+                                });
                                 return inv;
                             }
                         }
@@ -284,12 +289,19 @@ fn platform_metadata(platform: &str) -> Option<&'static str> {
     }
 }
 
-/// Parse `--limit` for search: integer 1..=200. Garbage and out-of-range
-/// are usage errors, never a silent default or a wrapping cast.
-pub fn parse_search_limit(raw: &str) -> Result<i64, String> {
+/// Parse `--limit` for search, per persona.
+///
+/// The ipatool persona is pflag: it accepts **any** integer, including 0 and
+/// negatives, and only a non-numeric value is a usage error — with pflag's own
+/// wording. The perun persona keeps the 1..=200 contract it documents.
+pub fn parse_search_limit_for(persona: Persona, raw: &str) -> Result<i64, String> {
     match raw.parse::<i64>() {
+        Ok(v) if persona == Persona::Ipatool => Ok(v),
         Ok(v) if (1..=200).contains(&v) => Ok(v),
         Ok(_) => Err("invalid --limit: expected an integer 1..=200".into()),
+        Err(_) if persona == Persona::Ipatool => Err(format!(
+            "invalid argument {raw:?} for \"-l, --limit\" flag: strconv.ParseInt: parsing {raw:?}: invalid syntax"
+        )),
         Err(_) => Err(format!(
             "invalid --limit {raw:?}: expected an integer 1..=200"
         )),
@@ -393,9 +405,7 @@ fn dispatch(args: &[String]) -> i32 {
         "get-version-metadata" => cmd_get_version_metadata(persona, rest),
         "completion" => {
             if persona == Persona::Ipatool {
-                // Cobra generates real shell scripts; a functional stub is
-                // worse than honesty, but the command must exist.
-                completion_stub(rest);
+                completion_emit(rest);
                 0
             } else {
                 unknown_command(persona, cmd)
@@ -631,13 +641,13 @@ fn help_auth_revoke() {
     );
 }
 
-fn completion_stub(args: &[String]) {
-    // The four shells cobra generates; we do not emit real completion
-    // scripts (the grammar is small enough to keep in muscle memory), but
-    // the command and its help exist so scripts probing for cobra
-    // subcommands see the same surface.
-    let shells = ["bash", "fish", "powershell", "zsh"];
-    let Some(shell) = args.first() else {
+/// `ipatool completion [shell]`: cobra's surface, reproduced.
+///
+/// The reference prints the generated script for the named shell. Bash is
+/// carried verbatim; the other three shells are listed by the help text but
+/// still have no generator here, and that gap is recorded in README.
+fn completion_emit(args: &[String]) {
+    let help = || {
         println!(
             "Generate the autocompletion script for ipatool for the specified shell.\nSee each sub-command's help for details on how to use the generated script.\n\n\
 Usage:\n  ipatool completion [command]\n\n\
@@ -646,17 +656,28 @@ Available Commands:\n\
 \x20 fish        Generate the autocompletion script for fish\n\
 \x20 powershell  Generate the autocompletion script for powershell\n\
 \x20 zsh         Generate the autocompletion script for zsh\n\n\
-Flags:\n  -h, --help   help for completion\n\n{GLOBAL_FLAGS_BLOCK}\n"
+Flags:\n  -h, --help   help for completion\n\n\
+{GLOBAL_FLAGS_BLOCK}\n\n\
+Use \"ipatool completion [command] --help\" for more information about a command.\n"
         );
-        return;
     };
-    if shells.contains(&shell.as_str()) {
-        println!(
-            "# ipatool completion for {shell}: hand-written commands are stable; see `ipatool --help`"
-        );
-    } else {
-        eprintln!("Error: unknown command \"{shell}\" for \"ipatool completion\"");
-        std::process::exit(1);
+    // cobra answers `--help` on the parent with the parent help, rc 0.
+    if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
+        help();
+        return;
+    }
+    let script = match args[0].as_str() {
+        "bash" => Some(crate::store::completion_bash::BASH),
+        "zsh" => Some(crate::store::completion_zsh::ZSH),
+        "fish" => Some(crate::store::completion_fish::FISH),
+        "powershell" => Some(crate::store::completion_powershell::POWERSHELL),
+        _ => None,
+    };
+    match script {
+        Some(text) => print!("{text}"),
+        // Cobra answers an unrecognised shell with the parent's help and rc 0,
+        // it does not treat the name as an unknown command.
+        None => help(),
     }
 }
 
@@ -705,7 +726,7 @@ fn begin(
     locals: &[(&str, bool)],
     help: fn(),
 ) -> Option<Result<Ctx, i32>> {
-    let inv = parse(args, locals);
+    let inv = parse(persona, args, locals);
     if let Some(err) = &inv.usage_error {
         // Cobra prints `Error: <msg>` + usage to stderr; majd then logs
         // the same message through the (text) logger with success=false.
@@ -1406,7 +1427,7 @@ fn cmd_search(persona: Persona, args: &[String]) -> i32 {
             .unwrap_or_else(|| ctx.inv.positional.first().cloned().unwrap_or_default()),
     };
     let limit_raw = ctx.inv.get(&["-l", "--limit"]).unwrap_or("5");
-    let limit: i64 = match parse_search_limit(limit_raw) {
+    let limit: i64 = match parse_search_limit_for(ctx.persona, limit_raw) {
         Ok(v) => v,
         Err(e) => return ctx.usage_fail(&e),
     };
@@ -2007,15 +2028,15 @@ mod tests {
 
     #[test]
     fn search_limit_accepts_range_rejects_garbage() {
-        assert_eq!(parse_search_limit("5"), Ok(5));
-        assert_eq!(parse_search_limit("1"), Ok(1));
-        assert_eq!(parse_search_limit("200"), Ok(200));
+        assert_eq!(parse_search_limit_for(Persona::Perun, "5"), Ok(5));
+        assert_eq!(parse_search_limit_for(Persona::Perun, "1"), Ok(1));
+        assert_eq!(parse_search_limit_for(Persona::Perun, "200"), Ok(200));
         // Garbage, zero, negatives, overflow: errors, never silent 5.
-        assert!(parse_search_limit("abc").is_err());
-        assert!(parse_search_limit("").is_err());
-        assert!(parse_search_limit("0").is_err());
-        assert!(parse_search_limit("-3").is_err());
-        assert!(parse_search_limit("201").is_err());
-        assert!(parse_search_limit("99999999999999999999").is_err());
+        assert!(parse_search_limit_for(Persona::Perun, "abc").is_err());
+        assert!(parse_search_limit_for(Persona::Perun, "").is_err());
+        assert!(parse_search_limit_for(Persona::Perun, "0").is_err());
+        assert!(parse_search_limit_for(Persona::Perun, "-3").is_err());
+        assert!(parse_search_limit_for(Persona::Perun, "201").is_err());
+        assert!(parse_search_limit_for(Persona::Perun, "99999999999999999999").is_err());
     }
 }

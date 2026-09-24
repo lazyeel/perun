@@ -4,7 +4,7 @@
 //! Output layer with byte-parity to majd/ipatool's zerolog rendering.
 //!
 //! Two exact formats, selected by `--format`:
-//! - `text`: the zerolog `ConsoleWriter` shape — `10:24AM LEVEL key=value …`
+//! - `text`: the zerolog `ConsoleWriter` shape — `6:03PM LEVEL key=value …`
 //!   (INF/DBG to stdout, ERR to stderr, keys sorted, strings quoted only
 //!   when they contain a space or `=`).
 //! - `json`: zerolog JSON — `{"level":"info",<fields>,"time":"RFC3339"}`.
@@ -245,8 +245,10 @@ fn humantime_json_now() -> String {
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
 }
 
-/// Console prefix `10:24AM` (the container runs UTC, matching the
-/// reference captures).
+/// Console prefix `6:03PM` (the container runs UTC, matching the
+/// reference captures). Cobra/zerolog print the 12-hour clock unpadded;
+/// Rust's `:02` would render `06:03PM` and break byte-parity between 00:00
+/// and 09:59, so the hour is formatted bare.
 pub fn console_time_now() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -258,7 +260,7 @@ pub fn console_time_now() -> String {
         0 => 12,
         h => h,
     };
-    format!("{h12:02}:{mi:02}{ampm}")
+    format!("{h12}:{mi:02}{ampm}")
 }
 
 fn civil_from_unix(t: u64) -> (i64, u64, u64, u64, u64, u64) {
