@@ -1437,10 +1437,11 @@ fn cmd_search(persona: Persona, args: &[String]) -> i32 {
     };
 
     // Search is a public, unsigned iTunes Search API call that needs only the
-    // storefront, so it reads the plaintext sidecar and never opens the vault:
-    // no PBKDF2 on this path. Falls back to US when the sidecar is absent.
+    // storefront, so it reads the plaintext sidecar and normally never opens the
+    // vault: no PBKDF2 on this path. A pre-sidecar install pays the KDF once to
+    // back-fill it, then takes the cheap path forever after.
     let acc = Account {
-        store_front: account::storefront_hint(),
+        store_front: account::storefront_hint(&ctx.inv.keychain_passphrase),
         ..Default::default()
     };
 

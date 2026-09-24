@@ -188,17 +188,40 @@ pub fn save_storefront(account: &Account) -> Result<(), String> {
         .map_err(|e| format!("write storefront: {e}"))
 }
 
-/// The storefront for a public lookup: the sidecar if present, else US.
-pub fn storefront_hint() -> String {
-    match storefront_file()
-        .ok()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-    {
-        Some(s) if !s.trim().is_empty() => s.trim().to_string(),
-        _ => "143441".to_string(),
-    }
+/// The sidecar's value, trimmed, or None when it is missing or blank.
+fn read_sidecar() -> Option<String> {
+    let path = storefront_file().ok()?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
+pub fn storefront_hint(passphrase: &str) -> String {
+    // 1. the sidecar: the steady state, and free.
+    if let Some(found) = read_sidecar() {
+        return found;
+    }
+    // 2. no sidecar but a vault on disk: a pre-sidecar install. Pay the KDF
+    //    exactly once, back-fill the sidecar, and answer from it.
+    if let Ok(acc) = load(passphrase)
+        && let Some(found) = save_storefront(&acc).ok().and_then(|()| read_sidecar())
+    {
+        return found;
+    }
+    // 3. neither: US is the only sensible answer for a client that never
+    //    signed in.
+    "143441".to_string()
+}
+
+/// The storefront for a public lookup, resolved in three steps.
+///
+/// 1. the plaintext sidecar, if it exists — the steady state, and free;
+/// 2. no sidecar but a vault on disk: open it **once**, take `store_front`,
+///    write the sidecar, and answer from the sidecar. This is the lazy
+///    migration — an install that predates the sidecar would otherwise search
+///    the US storefront silently, with no error to notice;
+/// 3. neither file: fall back to US, which is the only sensible answer for a
+///    client that has never signed in.
 pub fn save(account: &Account, passphrase: &str) -> Result<(), String> {
     let machine = machine_id();
     let blob = encrypt(&account.to_json(), &machine, passphrase)?;
@@ -724,6 +747,98 @@ fn hex(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storefront_hint_walks_all_three_steps() {
+        // Each case gets its own state dir, so the three steps are observed in
+        // isolation rather than inherited from a neighbour.
+        fn with_state(tag: &str) -> std::path::PathBuf {
+            let dir =
+                std::env::temp_dir().join(format!("perun-sf-hint-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        // Step 3: neither sidecar nor vault -> US, and nothing is written.
+        let bare = with_state("bare");
+        crate::store::state_dir_override_for_test(Some(bare.clone()));
+        assert_eq!(storefront_hint(""), "143441");
+        assert!(
+            !bare.join("storefront.txt").exists(),
+            "step 3 must not create a file"
+        );
+        assert!(
+            !bare.join("account").exists(),
+            "step 3 must not create a vault"
+        );
+
+        // Step 1: a sidecar alone answers, with no vault read.
+        std::fs::write(bare.join("storefront.txt"), "143469-2,34\n").unwrap();
+        assert_eq!(storefront_hint(""), "143469-2,34");
+
+        // Step 2: vault present, no sidecar -> the vault is opened once and the
+        // sidecar is back-filled, so the next call is free.
+        let legacy = with_state("legacy");
+        crate::store::state_dir_override_for_test(Some(legacy.clone()));
+        let acc = Account {
+            email: "a@b.c".into(),
+            store_front: "143441-7,48".into(),
+            ..Default::default()
+        };
+        // Build the legacy state by hand: an older binary wrote the vault and
+        // never a sidecar. Going through `save()` would create both, because
+        // `save()` now writes the sidecar too.
+        let machine = machine_id();
+        let blob = encrypt(&acc.to_json(), &machine, "").unwrap();
+        std::fs::write(legacy.join("account"), &blob).unwrap();
+        assert!(legacy.join("account").exists());
+        assert!(
+            !legacy.join("storefront.txt").exists(),
+            "precondition: no sidecar"
+        );
+        assert_eq!(
+            storefront_hint(""),
+            "143441-7,48",
+            "vault must supply the storefront"
+        );
+        assert_eq!(
+            std::fs::read_to_string(legacy.join("storefront.txt"))
+                .unwrap()
+                .trim(),
+            "143441-7,48",
+            "step 2 must back-fill the sidecar"
+        );
+        // Now on step 1: a garbage vault cannot corrupt the answer.
+        std::fs::write(legacy.join("account"), b"not a vault").unwrap();
+        assert_eq!(
+            storefront_hint(""),
+            "143441-7,48",
+            "sidecar wins over the vault"
+        );
+
+        // A blank sidecar is not an answer: fall through instead of searching
+        // for "". The vault has to be usable again first, because the case above
+        // deliberately corrupted it.
+        std::fs::write(legacy.join("account"), &blob).unwrap();
+        std::fs::write(legacy.join("storefront.txt"), "  \n").unwrap();
+        assert_eq!(
+            storefront_hint(""),
+            "143441-7,48",
+            "blank sidecar falls through to the vault"
+        );
+        assert_eq!(
+            std::fs::read_to_string(legacy.join("storefront.txt"))
+                .unwrap()
+                .trim(),
+            "143441-7,48",
+            "and the sidecar is re-written with the real value"
+        );
+
+        crate::store::state_dir_override_for_test(None);
+        let _ = std::fs::remove_dir_all(&bare);
+        let _ = std::fs::remove_dir_all(&legacy);
+    }
 
     #[test]
     fn account_json_roundtrip() {

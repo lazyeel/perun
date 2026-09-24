@@ -55,9 +55,27 @@ pub const HEADER_ACTION_SIGNATURE: &str = "X-Apple-ActionSignature";
 /// Bag endpoint.
 pub const BAG_URL: &str = "https://init.itunes.apple.com/bag.xml";
 
+#[cfg(test)]
+std::thread_local! {
+    /// Tests run one per thread, so a thread-local override is race-free where a
+    /// `PERUN_STORE_DIR` set_var would not be (and `set_var` is unsafe in 2024).
+    static STATE_DIR_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn state_dir_override_for_test(dir: Option<PathBuf>) {
+    STATE_DIR_OVERRIDE.with(|slot| *slot.borrow_mut() = dir);
+}
+
 /// Per-user state directory: `$PERUN_STORE_DIR`, else `~/.local/state/perun/`
-/// (XDG), holding the cookie jar and the encrypted account file.
+/// (XDG), holding the cookie jar, the encrypted account file and the plaintext
+/// storefront sidecar.
 pub fn state_dir() -> Result<PathBuf, String> {
+    #[cfg(test)]
+    if let Some(dir) = STATE_DIR_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        return Ok(dir);
+    }
     if let Ok(dir) = std::env::var("PERUN_STORE_DIR") {
         let dir = PathBuf::from(dir);
         std::fs::create_dir_all(&dir).map_err(|e| format!("create {dir:?}: {e}"))?;
