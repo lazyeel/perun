@@ -1,10 +1,27 @@
 // Copyright 2026 lazyeel (https://github.com/lazyeel)
 // SPDX-License-Identifier: Apache-2.0
 
+// A process shim hands the guest the PID and TID it was given, the
+// // thread index Windows counts in a `DWORD`, and the environment block
+// // offsets it composes. Those are the guest's own widths; narrowing one
+// // is a caller contract violation the shim reports, not one it hides.
+#![allow(unknown_lints)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
+
 //! Process, thread info, entropy, crypto and time shims.
 
-use crate::util::*;
-use crate::win32::*;
+use crate::util::{
+    PSEUDO_PROCESS, PSEUDO_THREAD, read_narrow, read_wide, set_last_error, unix_to_filetime,
+};
+use crate::win32::{
+    BOOL, BYTE, DWORD, ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, FALSE, FILETIME, HANDLE, LONG,
+    LPCSTR, LPCWSTR, STARTUPINFOW, SYSTEMTIME, TIME_ZONE_ID_UNKNOWN, TIME_ZONE_INFORMATION, TRUE,
+    UINT, WORD,
+};
 use crate::win32_api;
 
 // ── Process / thread identity ─────────────────────────────────────────────
@@ -48,7 +65,7 @@ win32_api! {
         {
             for line in s.lines() {
                 if let Some(rest) = line.strip_prefix("TracerPid:") {
-                    return rest.trim().parse::<u32>().map(|v| (v != 0) as BOOL).unwrap_or(0);
+                    return rest.trim().parse::<u32>().map_or(0, |v| BOOL::from(v != 0));
                 }
             }
         }
@@ -65,7 +82,7 @@ win32_api! {
         // which x86_64 baseline supports anyway.
         const PF_XSAVE_ENABLED: DWORD = 17;
         let _ = feature;
-        (PF_XSAVE_ENABLED == feature || true) as BOOL
+        BOOL::from(PF_XSAVE_ENABLED == feature || true)
     }
 }
 
@@ -76,7 +93,7 @@ win32_api! {
     unsafe extern "win64" fn GetSystemTimeAsFileTime(ft: *mut FILETIME) {
     unsafe {
         let mut ts: libc::timespec = std::mem::zeroed();
-        libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts);
+        libc::clock_gettime(libc::CLOCK_REALTIME, &raw mut ts);
         *ft = FILETIME::from_u64(unix_to_filetime(ts.tv_sec as i64, ts.tv_nsec as u32));
     }
     }
@@ -87,7 +104,7 @@ win32_api! {
     unsafe extern "win64" fn QueryPerformanceCounter(counter: *mut i64) -> BOOL {
     unsafe {
         let mut ts: libc::timespec = std::mem::zeroed();
-        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts);
         *counter = (ts.tv_sec as i64) * 1_000_000_000 + ts.tv_nsec as i64;
         TRUE
     }
@@ -114,7 +131,7 @@ win32_api! {
     unsafe {
         let t = libc::time(std::ptr::null_mut());
         let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&t, &mut tm);
+        libc::localtime_r(&raw const t, &raw mut tm);
         *st = systemtime_from_tm(&tm, 0);
     }
     }
@@ -126,7 +143,7 @@ win32_api! {
     unsafe {
         let t = libc::time(std::ptr::null_mut());
         let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&t, &mut tm);
+        libc::localtime_r(&raw const t, &raw mut tm);
         // Windows Bias is minutes west of UTC; tm_gmtoff is seconds east.
         (*tz).Bias = -((tm.tm_gmtoff / 60) as LONG);
         (*tz).StandardBias = 0;
@@ -189,7 +206,7 @@ win32_api! {
         let n = unsafe {
             libc::syscall(
                 libc::SYS_getrandom,
-                buf as *mut core::ffi::c_void,
+                buf.cast::<core::ffi::c_void>(),
                 len as usize,
                 0usize,
             )
@@ -271,7 +288,7 @@ win32_api! {
         let name = read_narrow(value_name);
         let name = String::from_utf8_lossy(&name);
         if std::env::var("PERUN_TRACE").is_ok() {
-            eprintln!("[perun] RegQueryValueExA({:?})", name);
+            eprintln!("[perun] RegQueryValueExA({name:?})");
         }
         match Registry::global().get(&name) {
             Some(v) => {
@@ -317,7 +334,7 @@ win32_api! {
         // Zeroed startup info with cb set; no console, no std handles.
         // CRT only needs a valid block here during DLL init.
         if !si.is_null() {
-            std::ptr::write_bytes(si as *mut u8, 0, std::mem::size_of::<STARTUPINFOW>());
+            std::ptr::write_bytes(si.cast::<u8>(), 0, std::mem::size_of::<STARTUPINFOW>());
             (*si).cb = std::mem::size_of::<STARTUPINFOW>() as DWORD;
         }
     }

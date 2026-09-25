@@ -1,6 +1,15 @@
 // Copyright 2026 lazyeel (https://github.com/lazyeel)
 // SPDX-License-Identifier: Apache-2.0
 
+// Error codes and handle arithmetic are the Win32 ABI as the guest sees it;
+// // the conversions at this boundary are the contract.
+#![allow(unknown_lints)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
+
 //! Win32 type surface shared by all shims.
 //!
 //! Sizes and layout match the Windows x64 ABI: `BOOL` is 4 bytes, handles
@@ -110,7 +119,7 @@ pub const TIME_ZONE_ID_UNKNOWN: DWORD = 0;
 pub const TIME_ZONE_ID_STANDARD: DWORD = 1;
 pub const TIME_ZONE_ID_DAYLIGHT: DWORD = 2;
 
-/// `WIN32_FIND_DATAA` (ANSI variant used by FindFirstFileExA).
+/// `WIN32_FIND_DATAA` (ANSI variant used by `FindFirstFileExA`).
 pub const MAX_PATH_A: usize = 260;
 pub const MAX_FILE_NAME_A: usize = 14;
 
@@ -135,7 +144,7 @@ impl Default for WIN32_FIND_DATAA {
     }
 }
 
-/// `FILE_ATTRIBUTE_DATA` for GetFileAttributesExW.
+/// `FILE_ATTRIBUTE_DATA` for `GetFileAttributesExW`.
 #[repr(C)]
 pub struct WIN32_FILE_ATTRIBUTE_DATA {
     pub dwFileAttributes: DWORD,
@@ -162,14 +171,16 @@ pub struct FILETIME {
 }
 
 impl FILETIME {
+    #[must_use]
     pub fn from_u64(v: u64) -> FILETIME {
         FILETIME {
             dwLowDateTime: v as u32,
             dwHighDateTime: (v >> 32) as u32,
         }
     }
+    #[must_use]
     pub fn as_u64(self) -> u64 {
-        (self.dwHighDateTime as u64) << 32 | self.dwLowDateTime as u64
+        u64::from(self.dwHighDateTime) << 32 | u64::from(self.dwLowDateTime)
     }
 }
 

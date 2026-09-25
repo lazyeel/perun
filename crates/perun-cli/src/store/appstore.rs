@@ -123,7 +123,7 @@ pub struct App {
     pub description: String,
     /// Supported device families, derived from the iTunes lookup
     /// `supportedDevices` prefixes (iPhone/iPod → "iphone", iPad → "ipad",
-    /// AppleTV → "appletv", RealityDevice → "visionos", Mac → "macos").
+    /// `AppleTV` → "appletv", `RealityDevice` → "visionos", Mac → "macos").
     pub platforms: Vec<String>,
 }
 
@@ -132,11 +132,17 @@ impl App {
         let get = |key: &str| item.get(key).and_then(|v| v.as_str()).unwrap_or("");
         let platforms = platforms_from_item(item);
         App {
-            id: item.get("trackId").and_then(|v| v.as_i64()).unwrap_or(0),
+            id: item
+                .get("trackId")
+                .and_then(super::json::Json::as_i64)
+                .unwrap_or(0),
             bundle_id: get("bundleId").to_string(),
             name: get("trackName").to_string(),
             version: get("version").to_string(),
-            price: item.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            price: item
+                .get("price")
+                .and_then(super::json::Json::as_f64)
+                .unwrap_or(0.0),
             purchase_date: None,
             developer: {
                 let a = get("artistName");
@@ -194,7 +200,7 @@ pub fn guid_from_mac(mac: &[u8; 6]) -> String {
 
 // ── login ─────────────────────────────────────────────────────────────────
 
-/// Map an MZFinance authenticate reply to a failure, or `None` when the
+/// Map an `MZFinance` authenticate reply to a failure, or `None` when the
 /// reply is a success candidate (the caller proceeds to token extraction).
 /// Pure function of the parsed fields, so the mapping is unit-testable
 /// without touching the network.
@@ -276,7 +282,7 @@ const MAX_RETRY_AFTER_SECS: u64 = 60;
 /// Decide how the login loop reacts to one response.
 ///
 /// Edge-drops (Kosthi/ipatool-rs#19): Apple's edge sometimes sheds requests
-/// before they reach MZFinance — a 3xx with no Location, or a 204/404/5xx with
+/// before they reach `MZFinance` — a 3xx with no Location, or a 204/404/5xx with
 /// an empty or HTML body and no backend headers. Those are re-sent, up to three
 /// times, with 1 s / 2 s / 4 s of backoff capped at 8 s.
 ///
@@ -301,9 +307,7 @@ fn login_retry_action(res: &http::Response, resend: u32) -> LoginRetry {
                 "Apple rate limit exceeded maximum wait threshold (got {secs}s, ceiling {MAX_RETRY_AFTER_SECS}s)"
             ));
         }
-        let delay = retry_after
-            .map(std::time::Duration::from_secs)
-            .unwrap_or(exponential);
+        let delay = retry_after.map_or(exponential, std::time::Duration::from_secs);
         return LoginRetry::RateLimited(delay);
     }
     if res.body.starts_with(b"<?xml")
@@ -325,7 +329,7 @@ fn login_retry_action(res: &http::Response, resend: u32) -> LoginRetry {
     }
 }
 
-/// MZFinance authenticate. Returns the account with session tokens.
+/// `MZFinance` authenticate. Returns the account with session tokens.
 /// The `auth_code` (from push, SMS fallback, or hardware key) is appended
 /// to the password on the retry round — Apple's only 2FA channel here.
 pub fn login(
@@ -726,7 +730,10 @@ fn purchase_with_params(account: &Account, app: &App, guid: &str, pricing: &str)
         .get("jingleDocType")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let status = doc.get("status").and_then(|v| v.as_i64()).unwrap_or(-1);
+    let status = doc
+        .get("status")
+        .and_then(super::plist::Plist::as_i64)
+        .unwrap_or(-1);
 
     if failure_type == FAILURE_TEMPORARILY_UNAVAILABLE {
         return Err(StoreError::TemporarilyUnavailable);
@@ -776,7 +783,7 @@ pub struct DownloadInfo {
     pub artwork: Option<Vec<u8>>,
 }
 
-/// FairPlay license record as Apple returns it; `id`/`dp_info` are part of
+/// `FairPlay` license record as Apple returns it; `id`/`dp_info` are part of
 /// the wire format even though the mobile path only consumes `data`.
 #[allow(dead_code)]
 #[derive(Clone, Debug, Default)]
@@ -842,7 +849,7 @@ fn lookup_latest_ios_external_version_id_cached(app_id: i64, country: &str) -> R
     Ok(fresh)
 }
 
-/// The DownloadDispatch recovery chain (see fetch_download_info).
+/// The `DownloadDispatch` recovery chain (see `fetch_download_info`).
 fn fallback_download_info(
     account: &Account,
     app_id: i64,
@@ -970,7 +977,10 @@ fn fetch_download_info_from(
     if let Some(list) = item.get("sinfs").and_then(|v| v.as_array()) {
         for entry in list {
             sinfs.push(Sinf {
-                id: entry.get("id").and_then(|v| v.as_i64()).unwrap_or(0),
+                id: entry
+                    .get("id")
+                    .and_then(super::plist::Plist::as_i64)
+                    .unwrap_or(0),
                 data: entry
                     .get("sinf")
                     .and_then(|v| v.as_data())
@@ -1029,7 +1039,7 @@ pub fn download(
     let info = fetch_download_info(account, app.id, guid, external_version_id)?;
 
     let destination = resolve_destination(app, &info.version, output)?;
-    let tmp_path = format!("{}.tmp", destination);
+    let tmp_path = format!("{destination}.tmp");
 
     // Stream to disk — resumable. A partial `{dst}.tmp` from an interrupted
     // run resumes via a Range request. The http layer validates the
@@ -1037,7 +1047,7 @@ pub fn download(
     // rejected range never corrupts the partial; a 200-after-resume (server
     // ignored Range) truncates the file to 0 inside the http layer before
     // the fresh body streams.
-    let local_size = std::fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0);
+    let local_size = std::fs::metadata(&tmp_path).map_or(0, |m| m.len());
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -1089,12 +1099,12 @@ pub fn download(
         let _ = std::fs::rename(&tmp_path, format!("{destination}.pre-replication"));
         StoreError::Other(format!("replicate: {e}"))
     })?;
-    if !patched {
+    if patched {
+        let _ = std::fs::remove_file(&tmp_path);
+    } else {
         // No bundle found (rare): move as-is.
         std::fs::rename(&tmp_path, &destination)
             .map_err(|e| StoreError::Other(format!("rename: {e}")))?;
-    } else {
-        let _ = std::fs::remove_file(&tmp_path);
     }
 
     Ok(DownloadOutput {
@@ -1194,29 +1204,31 @@ pub fn get_version_metadata(
     let date = ["releaseDate", "ReleaseDate"]
         .iter()
         .find_map(|key| doc.get(key).and_then(|v| v.as_str()))
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            // majd falls back to the zip entry's modified time, UTC.
-            let t = modified;
-            let days = t.div_euclid(86_400);
-            let secs = t.rem_euclid(86_400);
-            let z = days + 719_468;
-            let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-            let doe = z - era * 146_097;
-            let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-            let y = yoe + era * 400;
-            let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-            let mp = (5 * doy + 2) / 153;
-            let d = doy - (153 * mp + 2) / 5 + 1;
-            let m = if mp < 10 { mp + 3 } else { mp - 9 };
-            let y = if m <= 2 { y + 1 } else { y };
-            format!(
-                "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
-                secs / 3600,
-                (secs % 3600) / 60,
-                secs % 60
-            )
-        });
+        .map_or_else(
+            || {
+                // majd falls back to the zip entry's modified time, UTC.
+                let t = modified;
+                let days = t.div_euclid(86_400);
+                let secs = t.rem_euclid(86_400);
+                let z = days + 719_468;
+                let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+                let doe = z - era * 146_097;
+                let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+                let y = yoe + era * 400;
+                let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+                let mp = (5 * doy + 2) / 153;
+                let d = doy - (153 * mp + 2) / 5 + 1;
+                let m = if mp < 10 { mp + 3 } else { mp - 9 };
+                let y = if m <= 2 { y + 1 } else { y };
+                format!(
+                    "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+                    secs / 3600,
+                    (secs % 3600) / 60,
+                    secs % 60
+                )
+            },
+            std::string::ToString::to_string,
+        );
     Ok(VersionMetadata {
         display_version: version.to_string(),
         release_date: date,
@@ -1334,10 +1346,7 @@ pub fn lookup_artist_apps(account: &Account, artist_id: i64, platform: &str) -> 
     } else {
         lookup_entity(platform)
     };
-    let url = format!(
-        "{ITUNES_LOOKUP}?entity={entity}&id={artist_id}&limit=200&country={}",
-        country
-    );
+    let url = format!("{ITUNES_LOOKUP}?entity={entity}&id={artist_id}&limit=200&country={country}");
     let res = http::send(Request::new("GET", &url))
         .map_err(|e| StoreError::Other(format!("developer lookup: {e}")))?;
     if res.status != 200 {
@@ -1394,7 +1403,7 @@ pub fn search_visionos(account: &Account, term: &str, limit: i64) -> Result<Vec<
         .collect())
 }
 
-/// Walk the storefront search page's shelves for AppSearchResult lockups
+/// Walk the storefront search page's shelves for `AppSearchResult` lockups
 /// carrying a vision purchaseConfiguration (majd storefrontVisionApps).
 fn storefront_vision_apps(body: &[u8], limit: i64) -> Result<Vec<App>> {
     let text = String::from_utf8_lossy(body);
@@ -1431,7 +1440,10 @@ fn storefront_vision_apps(body: &[u8], limit: i64) -> Result<Vec<App>> {
                     let Some(lockup) = item.get("lockup") else {
                         continue;
                     };
-                    let id = lockup.get("adamId").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let id = lockup
+                        .get("adamId")
+                        .and_then(super::json::Json::as_i64)
+                        .unwrap_or(0);
                     if id == 0 || !seen.insert(id) {
                         continue;
                     }
@@ -1501,7 +1513,7 @@ pub fn lookup_ids(account: &Account, ids: &[String], platform: &str) -> Result<V
 // ── platform version lookup (MDM): latest external version id for tvOS /
 // visionOS downloads without an explicit `--external-version-id` ──────────
 
-/// MZStorePlatform lookup (the MDM flow): returns the first offer's
+/// `MZStorePlatform` lookup (the MDM flow): returns the first offer's
 /// external version id, falling back to `appExtVrsId` in its buy params.
 pub fn lookup_latest_external_version_id(
     app_id: i64,
@@ -1563,7 +1575,7 @@ pub fn lookup_latest_external_version_id(
     Ok(external)
 }
 
-/// iOS variant for the DownloadDispatch fallback. The MDM lockup WITH a
+/// iOS variant for the `DownloadDispatch` fallback. The MDM lockup WITH a
 /// platform parameter returns an empty result set on today's backend (the
 /// reference tool's `enterprisestore` probe hits the same wall); WITHOUT the
 /// platform parameter the same lockup serves the full record, offers
@@ -1754,7 +1766,7 @@ pub fn url_encode(s: &str) -> String {
     for b in s.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
+                out.push(b as char);
             }
             b' ' => out.push_str("%20"),
             _ => out.push_str(&format!("%{b:02X}")),

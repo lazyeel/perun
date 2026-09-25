@@ -2,15 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Thread Environment Block (TEB) and Process Environment Block (PEB) layout
-//! and GS_BASE setup.
+//! and `GS_BASE` setup.
 //!
 //! Windows x64 code expects `GS:[0x30]` to point at the current TEB,
-//! `GS:[0x60]` at the PEB, and `GS:[0x68]` at LastErrorValue. On Linux x86_64,
+//! `GS:[0x60]` at the PEB, and `GS:[0x68]` at `LastErrorValue`. On Linux `x86_64`,
 //! `FS` is owned by glibc/pthread TLS; `GS` is free for user space.
 
 const ARCH_SET_GS: libc::c_int = 0x1001;
 
-/// Minimal FakeTEB backing structure (page-aligned in heap).
+/// Minimal `FakeTEB` backing structure (page-aligned in heap).
 #[repr(C, align(4096))]
 pub struct FakeTeb {
     pub reserved_0: u64,          // +0x00
@@ -33,7 +33,7 @@ pub struct FakeTeb {
     pub peb: FakePeb,             // inline PEB storage
 }
 
-/// Minimal FakePEB backing structure.
+/// Minimal `FakePEB` backing structure.
 #[repr(C)]
 pub struct FakePeb {
     pub inherited_address_space: u8, // +0x00
@@ -52,15 +52,21 @@ thread_local! {
     static CURRENT_TEB: std::cell::RefCell<Option<Box<FakeTeb>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Initialize the per-thread FakeTEB and set `GS_BASE` via `arch_prctl`.
+/// Initialize the per-thread `FakeTEB` and set `GS_BASE` via `arch_prctl`.
 ///
 /// # Safety
-/// Invokes `syscall(SYS_arch_prctl, ARCH_SET_GS, ptr)`. Safe on x86_64 Linux.
+/// Invokes `syscall(SYS_arch_prctl, ARCH_SET_GS, ptr)`. Safe on `x86_64` Linux.
+///
+/// Deliberately `#[must_use]`: the returned block is what the shims reach
+/// through `GS:[0x30]`, and a caller that drops it on the floor has almost
+/// always made a mistake. The four setup sites that only want the side effect
+/// say so with an explicit `let _ =`.
+#[must_use]
 pub unsafe fn init_thread_teb(image_base: u64) -> *mut FakeTeb {
     unsafe {
         CURRENT_TEB.with(|slot| {
             let mut b = Box::new(std::mem::zeroed::<FakeTeb>());
-            let p = &mut *b as *mut FakeTeb as u64;
+            let p = &raw mut *b as u64;
 
             // Stack bounds must reflect the REAL Linux stack. MSVC's __chkstk
             // reads gs:[0x10] (StackLimit) and probes pages downward toward it;
@@ -78,7 +84,7 @@ pub unsafe fn init_thread_teb(image_base: u64) -> *mut FakeTeb {
             b.peb.being_debugged = 0;
             b.peb.process_heap = 1; // matches GetProcessHeap shim
 
-            let teb_ptr = &mut *b as *mut FakeTeb;
+            let teb_ptr = &raw mut *b;
             *slot.borrow_mut() = Some(b);
 
             let res = libc::syscall(libc::SYS_arch_prctl, ARCH_SET_GS, teb_ptr as u64);
@@ -99,11 +105,15 @@ pub unsafe fn init_thread_teb(image_base: u64) -> *mut FakeTeb {
 fn real_stack_bounds() -> (u64, u64) {
     unsafe {
         let mut attr: libc::pthread_attr_t = std::mem::zeroed();
-        if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) == 0 {
+        if libc::pthread_getattr_np(libc::pthread_self(), &raw mut attr) == 0 {
             let mut stack_addr: *mut libc::c_void = std::ptr::null_mut();
             let mut stack_size: usize = 0;
-            let ok = libc::pthread_attr_getstack(&attr, &mut stack_addr, &mut stack_size) == 0;
-            libc::pthread_attr_destroy(&mut attr);
+            let ok = libc::pthread_attr_getstack(
+                &raw const attr,
+                &raw mut stack_addr,
+                &raw mut stack_size,
+            ) == 0;
+            libc::pthread_attr_destroy(&raw mut attr);
             if ok && !stack_addr.is_null() && stack_size > 0 {
                 let bottom = stack_addr as u64;
                 let top = bottom + stack_size as u64;
@@ -113,18 +123,19 @@ fn real_stack_bounds() -> (u64, u64) {
     }
     // Fallback: bracket the current stack pointer. Probe a local to get rsp.
     let local: u64 = 0;
-    let rsp = &local as *const u64 as u64;
+    let rsp = &raw const local as u64;
     // Assume up to 8 MiB of stack below the current pointer.
     (rsp + 0x1000, rsp.saturating_sub(8 * 1024 * 1024))
 }
 
-/// Access the current thread's LastErrorValue pointer directly (for shims).
+/// Access the current thread's `LastErrorValue` pointer directly (for shims).
 ///
 /// # Safety
 /// Must be called after `init_thread_teb`.
+#[must_use]
 pub unsafe fn get_last_error_ptr() -> *mut u32 {
     CURRENT_TEB.with(|slot| match slot.borrow().as_ref() {
-        Some(b) => &b.last_error as *const u32 as *mut u32,
+        Some(b) => (&raw const b.last_error).cast_mut(),
         None => std::ptr::null_mut(),
     })
 }
@@ -133,10 +144,11 @@ pub unsafe fn get_last_error_ptr() -> *mut u32 {
 ///
 /// # Safety
 /// Must be called after `init_thread_teb`.
+#[must_use]
 pub unsafe fn get_tls_slot_ptr(index: usize) -> *mut u64 {
     unsafe {
         CURRENT_TEB.with(|slot| match slot.borrow().as_ref() {
-            Some(b) if index < b.tls_slots.len() => b.tls_slots.as_ptr().add(index) as *mut u64,
+            Some(b) if index < b.tls_slots.len() => b.tls_slots.as_ptr().add(index).cast_mut(),
             _ => std::ptr::null_mut(),
         })
     }

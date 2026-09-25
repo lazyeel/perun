@@ -1,6 +1,16 @@
 // Copyright 2026 lazyeel (https://github.com/lazyeel)
 // SPDX-License-Identifier: Apache-2.0
 
+// The Darwin shims return the guest's own mach_port_t / integer widths and
+// // carry the ICXS and IOKit structures the caller declared. Converting at
+// // the boundary is the translation.
+#![allow(unknown_lints)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
+
 //! macOS libSystem shim surface for Mach-O guests, mirroring the Win32
 //! translation matrix for PE guests.
 //!
@@ -8,26 +18,26 @@
 //! imports:
 //!
 //! 1. **libc passthrough** — `malloc`, `memcpy`, `pthread_*`, `getenv`…
-//!    forwarded straight to the host libc: same SysV ABI on both sides, so
+//!    forwarded straight to the host libc: same `SysV` ABI on both sides, so
 //!    a direct function pointer works.
-//! 2. **CoreFoundation / IOKit / DiskArbitration stubs** — the reference
+//! 2. **CoreFoundation / `IOKit` / `DiskArbitration` stubs** — the reference
 //!    interposer for these binaries (t0rr3sp3dr0/sapsigner) proved the guest
 //!    only needs degenerate answers here: null handles, empty strings,
 //!    fake-but-stable registry entries. We return the same shape natively.
-//! 3. **The ICXS service** — CoreFP reads its key material through
+//! 3. **The ICXS service** — `CoreFP` reads its key material through
 //!    `open()`/`read()` on `./../CoreFP.icxs`; the shim serves those two
 //!    calls straight from the file on disk and fails everything else. The
 //!    blob is never held in the process: `read` is a `pread` at the guest's
 //!    cursor, so the resident cost is the pages the guest actually asks
 //!    for, not the whole 5 MiB.
 //!
-//! Unimplemented imports land on SysV trap micro-stubs (see `stub.rs`),
+//! Unimplemented imports land on `SysV` trap micro-stubs (see `stub.rs`),
 //! so the first guest call reports the missing symbol instead of crashing.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// Descriptor CoreFP gets from `open("./../CoreFP.icxs")`.
+/// Descriptor `CoreFP` gets from `open("./../CoreFP.icxs")`.
 const ICXS_FD: i32 = 3;
 
 struct MachState {
@@ -36,14 +46,16 @@ struct MachState {
     icxs: Option<std::fs::File>,
     icxs_len: u64,
     icxs_cursor: usize,
-    /// IOKit iterator toggle: the guest loops until IOIteratorNext returns 0.
+    /// `IOKit` iterator toggle: the guest loops until `IOIteratorNext` returns 0.
     iterator: u64,
 }
 
 static STATE: Mutex<Option<MachState>> = Mutex::new(None);
 
 fn with_state<T>(f: impl FnOnce(&mut MachState) -> T) -> T {
-    let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let st = guard.get_or_insert_with(|| MachState {
         icxs: None,
         icxs_len: 0,
@@ -53,7 +65,7 @@ fn with_state<T>(f: impl FnOnce(&mut MachState) -> T) -> T {
     f(st)
 }
 
-/// Install the ICXS source before loading CoreFP.
+/// Install the ICXS source before loading `CoreFP`.
 ///
 /// Takes an open file rather than the bytes: the guest reaches the blob
 /// through `open`/`read`, so keeping a copy here would make 5 MiB resident
@@ -112,9 +124,10 @@ macro_rules! passthrough {
 }
 
 /// Build the full Mach-O import resolution table. `corefp_exports` maps the
-/// six obfuscated FairPlay names (leading underscore included) to their
-/// native addresses inside the loaded CoreFP image — this is how
-/// `_dlsym` answers CoreFP's runtime self-lookup.
+/// six obfuscated `FairPlay` names (leading underscore included) to their
+/// native addresses inside the loaded `CoreFP` image — this is how
+/// `_dlsym` answers `CoreFP`'s runtime self-lookup.
+#[must_use]
 pub fn mach_shim_table(corefp_exports: &HashMap<String, u64>) -> HashMap<String, usize> {
     let mut m: HashMap<String, usize> = HashMap::new();
 
@@ -219,7 +232,7 @@ pub fn mach_shim_table(corefp_exports: &HashMap<String, u64>) -> HashMap<String,
     );
     m.insert(
         "___stack_chk_guard".to_string(),
-        pinned_data_slot("stack_chk_guard", 0xA5713CD98642EF10),
+        pinned_data_slot("stack_chk_guard", 0xA5_71_3C_D9_86_42_EF_10),
     );
     // CoreFoundation / IOKit / DiskArbitration degenerate answers.
     for (name, f) in [
@@ -388,7 +401,7 @@ static GUEST_MAC: std::sync::Mutex<[u8; 6]> = std::sync::Mutex::new([0; 6]);
 /// The guest's state spray is sensitive to host statics that outlive a
 /// session. `IOIteratorNext` is `--counter % 2` (HANDOVER 3.7), so a
 /// counter left at odd parity makes the very first call return 0 instead of
-/// the documented `0xFFFFFFFF`; the guest then finds no IOKit interface and
+/// the documented `0xFFFFFFFF`; the guest then finds no `IOKit` interface and
 /// emits the MAC-less form, which is 485 bytes instead of 501. The guest heap
 /// has the same problem: a carried-over bump pointer hands the next session
 /// an arena that is not at its documented origin.
@@ -408,12 +421,16 @@ pub fn reset_shim_state() {
     // once per process at a fixed base, shared by every session in that
     // process. Rewinding its bump pointer hands a new session an arena the
     // previous one still has live pointers into, and the guest wedges.
-    *GUEST_MAC.lock().unwrap_or_else(|e| e.into_inner()) = [0; 6];
+    *GUEST_MAC
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = [0; 6];
 }
 
 /// Publish the MAC that `_get_mac_address` will report.
 pub fn set_guest_mac(mac: &[u8; 6]) {
-    *GUEST_MAC.lock().unwrap_or_else(|e| e.into_inner()) = *mac;
+    *GUEST_MAC
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = *mac;
 }
 
 /// `int _get_mac_address(uint8_t *out)` — writes 6 bytes, returns 0 on success.
@@ -422,7 +439,9 @@ unsafe extern "C" fn shim_get_mac_address(out: *mut u8) -> i32 {
         if out.is_null() {
             return -1;
         }
-        let mac = *GUEST_MAC.lock().unwrap_or_else(|e| e.into_inner());
+        let mac = *GUEST_MAC
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::ptr::copy_nonoverlapping(mac.as_ptr(), out, mac.len());
         0
     }
@@ -460,7 +479,7 @@ unsafe extern "C" fn shim_statfs(
 ) -> i32 {
     unsafe {
         if !buf.is_null() {
-            std::ptr::write_bytes(buf as *mut u8, 0, 432);
+            std::ptr::write_bytes(buf.cast::<u8>(), 0, 432);
         }
         0
     }
@@ -548,7 +567,7 @@ unsafe extern "C" fn shim_compare_and_swap32(old: i32, new: i32, ptr: *mut i32) 
 
 /// CFStringCreateWithCString(alloc, cStr, encoding): hand back a stable
 /// fake handle keyed by content; the guest asks for the same keys later
-/// via CFStringGetCString and object identity checks.
+/// via `CFStringGetCString` and object identity checks.
 unsafe extern "C" fn shim_cfstring_create(
     _alloc: *mut core::ffi::c_void,
     cstr: *const core::ffi::c_char,
@@ -563,7 +582,7 @@ unsafe extern "C" fn shim_cfstring_create(
         // else gets NULL so the guest takes its absence branches.
         const KEYS: [&[u8]; 3] = [b"IOPlatformSerialNumber", b"IOPlatformUUID", b"board-id"];
         let len = host_strlen(cstr);
-        let bytes = std::slice::from_raw_parts(cstr as *const u8, len);
+        let bytes = std::slice::from_raw_parts(cstr.cast::<u8>(), len);
         if KEYS.contains(&bytes) {
             return FAKE_HANDLE;
         }
@@ -609,7 +628,7 @@ unsafe extern "C" fn shim_io_registry_parent(_entry: u32, parent: *mut u32) -> i
     }
 }
 
-/// objc_msgSend: the only selector the guest sends during SAP signing is
+/// `objc_msgSend`: the only selector the guest sends during SAP signing is
 /// `objectForKey:`; answer with the fake handle so dictionary lookups
 /// succeed degenerately.
 unsafe extern "C" fn shim_objc_msgsend(
@@ -644,7 +663,7 @@ unsafe extern "C" fn shim_dlopen(path: *const core::ffi::c_char, _mode: i32) -> 
     }
 }
 
-/// dlsym(handle, name): answer CoreFP's own six obfuscated exports from the
+/// dlsym(handle, name): answer `CoreFP`'s own six obfuscated exports from the
 /// table built at load time.
 unsafe extern "C" fn shim_dlsym(_handle: usize, name: *const core::ffi::c_char) -> usize {
     unsafe {
@@ -664,7 +683,7 @@ thread_local! {
         std::cell::RefCell::new(HashMap::new());
 }
 
-/// Point `_dlsym` answers at the loaded CoreFP export table.
+/// Point `_dlsym` answers at the loaded `CoreFP` export table.
 pub fn set_dlsym_table(corefp_exports: &HashMap<String, u64>) {
     DLSYM_TABLE.with(|t| {
         let mut map = t.borrow_mut();
@@ -720,7 +739,9 @@ unsafe impl Send for ShimTableInner {}
 static SHIM_TABLE: Mutex<Option<ShimTableInner>> = Mutex::new(None);
 
 fn shim_slot_for(real_fn: usize, name: &str) -> u64 {
-    let mut guard = SHIM_TABLE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = SHIM_TABLE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let inner = guard.get_or_insert_with(|| unsafe {
         let p = libc::mmap(
             SHIM_TABLE_BASE as *mut libc::c_void,
@@ -757,6 +778,7 @@ fn shim_slot_for(real_fn: usize, name: &str) -> u64 {
 
 /// Wrap a shim in a fixed-address trampoline slot. Use for every guest
 /// import resolution so bound pointer VALUES are run-independent.
+#[must_use]
 pub fn pinned_shim(real_fn: usize, name: &str) -> usize {
     shim_slot_for(real_fn, name) as usize
 }
@@ -769,7 +791,9 @@ fn pinned_data_slot(name: &str, value: u64) -> usize {
     static SLOTS: OnceLock<std::sync::Mutex<std::collections::BTreeMap<String, u64>>> =
         OnceLock::new();
     let slots = SLOTS.get_or_init(Default::default);
-    let mut guard = slots.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = slots
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(&addr) = guard.get(name) {
         return addr as usize;
     }
@@ -785,7 +809,7 @@ fn pinned_data_slot(name: &str, value: u64) -> usize {
     addr as usize
 }
 
-/// The reference keeps malloc_good_size a separate (never-inlined) function —
+/// The reference keeps `malloc_good_size` a separate (never-inlined) function —
 /// its call frame is part of the observable shim residue.
 #[inline(never)]
 fn good_size(size: usize) -> usize {
@@ -798,11 +822,11 @@ unsafe extern "C" fn shim_malloc_good_size(size: usize) -> usize {
     good_size(size)
 }
 
-/// __bzero(s, n) — TWO arguments (SysV). Byte-parity port of the reference
+/// __bzero(s, n) — TWO arguments (`SysV`). Byte-parity port of the reference
 /// interposer (`for (it = s; it != s + n; ++it) *it = 0;`); a passthrough to
 /// host memset would misread the ABI (length as fill byte, count from rdx).
 unsafe extern "C" fn shim_bzero(s: *mut core::ffi::c_void, n: usize) {
-    let p = s as *mut u8;
+    let p = s.cast::<u8>();
     for i in 0..n {
         unsafe {
             p.add(i).write(0);
@@ -811,11 +835,11 @@ unsafe extern "C" fn shim_bzero(s: *mut core::ffi::c_void, n: usize) {
 }
 
 /// Byte-parity port of the reference C malloc:
-///   size_t aligned_size_t_size = malloc_good_size(sizeof(size_t));
-///   size_t aligned_size = malloc_good_size(size);
-///   if (heap_tail + .. > heap_head + heap_size) { abort(); }
-///   *(size_t*)heap_tail = size; ptr = heap_tail + prefix;
-///   heap_tail = ptr + aligned; return ptr;
+///   `size_t` `aligned_size_t_size` = `malloc_good_size(sizeof(size_t))`;
+///   `size_t` `aligned_size` = `malloc_good_size(size)`;
+///   if (`heap_tail` + .. > `heap_head` + `heap_size`) { `abort()`; }
+///   *(`size_t`*)`heap_tail` = size; ptr = `heap_tail` + prefix;
+///   `heap_tail` = ptr + aligned; return ptr;
 /// No logging, no TLS, no closure — every register-move of the compiled
 /// C shape is part of the guest-observable stack residue. The user-block
 /// zeroing the old shim did is DROPPED: the reference never zeroes, and
@@ -892,7 +916,7 @@ unsafe extern "C" fn shim_realloc(
         let old = block_size(ptr).unwrap_or(0);
         let dst = shim_malloc(new_size);
         if !dst.is_null() && old > 0 {
-            std::ptr::copy_nonoverlapping(ptr as *const u8, dst as *mut u8, old.min(new_size));
+            std::ptr::copy_nonoverlapping(ptr as *const u8, dst.cast::<u8>(), old.min(new_size));
         }
         dst
     }
@@ -932,7 +956,7 @@ unsafe extern "C" fn shim_read(fd: i32, buf: *mut core::ffi::c_void, count: usiz
             // pread straight into the guest's buffer: the bytes pass through
             // without ever being collected into a process-owned copy.
             match file.read_at(
-                std::slice::from_raw_parts_mut(buf as *mut u8, n),
+                std::slice::from_raw_parts_mut(buf.cast::<u8>(), n),
                 st.icxs_cursor as u64,
             ) {
                 Ok(got) => {
@@ -945,8 +969,8 @@ unsafe extern "C" fn shim_read(fd: i32, buf: *mut core::ffi::c_void, count: usiz
     }
 }
 
-/// pthread_once(control, init): run the guest's one-time initializer.
-/// The 2013 CommerceKit computes its control-flow-flattening moduli inside
+/// `pthread_once(control`, init): run the guest's one-time initializer.
+/// The 2013 `CommerceKit` computes its control-flow-flattening moduli inside
 /// these routines; skipping them leaves the dispatch divisors at zero and
 /// the first flattened function SIGFPEs. Mirrors the reference interposer:
 /// if the control word is nonzero, clear it and call the routine.
@@ -965,7 +989,7 @@ unsafe extern "C" fn shim_pthread_once(control: *mut core::ffi::c_void, init: us
         if control.is_null() {
             return 0;
         }
-        let ctl = control as *mut u64;
+        let ctl = control.cast::<u64>();
         if ctl.read_unaligned() != 0 {
             ctl.write_unaligned(0);
             if init != 0 {
@@ -999,16 +1023,16 @@ mod tests {
 
         // open() rewinds; two reads must come from the file at the cursor.
         let name = b"./../CoreFP.icxs\0";
-        let fd = unsafe { shim_open(name.as_ptr() as *const core::ffi::c_char, 0) };
+        let fd = unsafe { shim_open(name.as_ptr().cast::<core::ffi::c_char>(), 0) };
         assert_eq!(fd, ICXS_FD);
 
         let mut a = vec![0u8; 4096];
-        let n = unsafe { shim_read(fd, a.as_mut_ptr() as *mut core::ffi::c_void, a.len()) };
+        let n = unsafe { shim_read(fd, a.as_mut_ptr().cast::<core::ffi::c_void>(), a.len()) };
         assert_eq!(n, 4096);
         assert_eq!(&a[..], &payload[..4096]);
 
         let mut b = vec![0u8; 16];
-        let n = unsafe { shim_read(fd, b.as_mut_ptr() as *mut core::ffi::c_void, b.len()) };
+        let n = unsafe { shim_read(fd, b.as_mut_ptr().cast::<core::ffi::c_void>(), b.len()) };
         assert_eq!(n, 16);
         assert_eq!(&b[..], &payload[4096..4112]);
 
@@ -1017,30 +1041,30 @@ mod tests {
         let tail = payload.len() - 4112;
         let chunk = 8192.min(tail);
         let mut c = vec![0u8; chunk];
-        let n = unsafe { shim_read(fd, c.as_mut_ptr() as *mut core::ffi::c_void, c.len()) };
+        let n = unsafe { shim_read(fd, c.as_mut_ptr().cast::<core::ffi::c_void>(), c.len()) };
         assert_eq!(n as usize, chunk);
         assert_eq!(&c[..], &payload[4112..4112 + chunk]);
 
         // Past the end: EOF, not stale bytes.
         let mut d = vec![0u8; 64];
-        for _ in 0..((tail - chunk) / 64 + 1) {
-            let n = unsafe { shim_read(fd, d.as_mut_ptr() as *mut core::ffi::c_void, d.len()) };
+        for _ in 0..=((tail - chunk) / 64) {
+            let n = unsafe { shim_read(fd, d.as_mut_ptr().cast::<core::ffi::c_void>(), d.len()) };
             assert!(n >= 0, "reads inside the file must not fail");
         }
-        let n = unsafe { shim_read(fd, d.as_mut_ptr() as *mut core::ffi::c_void, d.len()) };
+        let n = unsafe { shim_read(fd, d.as_mut_ptr().cast::<core::ffi::c_void>(), d.len()) };
         assert_eq!(n, 0, "a read at EOF returns 0");
 
         // A second open rewinds the cursor.
-        let fd = unsafe { shim_open(name.as_ptr() as *const core::ffi::c_char, 0) };
+        let fd = unsafe { shim_open(name.as_ptr().cast::<core::ffi::c_char>(), 0) };
         let mut e = vec![0u8; 32];
-        let n = unsafe { shim_read(fd, e.as_mut_ptr() as *mut core::ffi::c_void, e.len()) };
+        let n = unsafe { shim_read(fd, e.as_mut_ptr().cast::<core::ffi::c_void>(), e.len()) };
         assert_eq!(n, 32);
         assert_eq!(&e[..], &payload[..32]);
 
         // An unknown path is refused, as before.
         let other = b"./../something-else\0";
         assert_eq!(
-            unsafe { shim_open(other.as_ptr() as *const core::ffi::c_char, 0) },
+            unsafe { shim_open(other.as_ptr().cast::<core::ffi::c_char>(), 0) },
             -1
         );
 

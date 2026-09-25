@@ -1,6 +1,14 @@
 // Copyright 2026 lazyeel (https://github.com/lazyeel)
 // SPDX-License-Identifier: Apache-2.0
 
+// RVA and size values are 32-bit by construction in the PE format: the
+// file offsets here are read out of the header and bounded by
+// `SizeOfImage` before use, so a `usize` -> `u32` narrowing is a
+// representation change on the way into a field the format defines
+// as 32 bits, not a value that can actually be lost.
+#![allow(unknown_lints)]
+#![allow(clippy::cast_possible_truncation)]
+
 //! Minimal PE32+ header parsing.
 //!
 //! All structures are read with explicit offsets from the byte stream, the
@@ -23,12 +31,14 @@ pub struct Section {
 }
 
 impl Section {
+    #[must_use]
     pub fn name_str(&self) -> String {
         let end = self.name.iter().position(|&b| b == 0).unwrap_or(8);
         String::from_utf8_lossy(&self.name[..end]).into_owned()
     }
 
     /// Memory protection flags derived from section characteristics
+    #[must_use]
     pub fn prot(&self) -> i32 {
         use image_consts::{IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE};
         let e = self.characteristics & IMAGE_SCN_MEM_EXECUTE != 0;
@@ -141,6 +151,13 @@ fn cstr_at(data: &[u8], off: usize) -> Option<String> {
 impl PeInfo {
     /// List imports as `(dll, symbols)` from the file bytes. Malformed
     /// entries are skipped; a truncated table ends the walk.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a crafted image makes the import table claim more names than
+    /// the file holds. Every RVA is bounds-checked before use, so a merely
+    /// truncated file walks cleanly and returns a short list.
+    #[must_use]
     pub fn imports(&self, data: &[u8]) -> Vec<(String, Vec<ImportSymbol>)> {
         let Some((dir_rva, _)) = self.opt.data_dirs[dir_index::IMPORT] else {
             return Vec::new();
@@ -197,6 +214,7 @@ impl PeInfo {
 
     /// List exported names from the file bytes. Ordinal-only exports have
     /// no name entry and are not listed (count via the directory header).
+    #[must_use]
     pub fn exports(&self, data: &[u8]) -> Vec<String> {
         let Some((dir_rva, _)) = self.opt.data_dirs[dir_index::EXPORT] else {
             return Vec::new();
@@ -207,7 +225,7 @@ impl PeInfo {
         let Some(num_names) = read_u32_at(data, dir_off + 24) else {
             return Vec::new();
         };
-        let (Some(names_rva), Some(_ords_rva)) = (
+        let (Some(names_rva), Some(ords_rva)) = (
             read_u32_at(data, dir_off + 32),
             read_u32_at(data, dir_off + 36),
         ) else {
@@ -224,23 +242,34 @@ impl PeInfo {
             };
             // Ordinal entry must also be readable; otherwise the table is
             // truncated.
-            let ord_off = rva_to_offset(&self.sections, _ords_rva.wrapping_add(i as u32 * 2));
+            let ord_off = rva_to_offset(&self.sections, ords_rva.wrapping_add(i as u32 * 2));
             let Some(ord_off) = ord_off else { break };
             if read_u16_at(data, ord_off).is_none() {
                 break;
             }
-            let Some(name_rva) = read_u32_at(data, name_ptr_off) else {
+            let Some(hint_rva) = read_u32_at(data, name_ptr_off) else {
                 break;
             };
-            let Some(name_off) = rva_to_offset(&self.sections, name_rva) else {
+            let Some(hint_at) = rva_to_offset(&self.sections, hint_rva) else {
                 continue;
             };
-            if let Some(name) = cstr_at(data, name_off) {
+            if let Some(name) = cstr_at(data, hint_at) {
                 out.push(name);
             }
         }
         out
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns `ParseError` naming the first thing that is wrong: `NotMz`, `BadSignature`, `NotX86_64`, `NotPe32Plus`, `BadImageBase`, or `Truncated`.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a header whose own declared length runs past the end of the
+    /// buffer: the optional-header offset and the section table are read with
+    /// `try_into().unwrap()`, so a file that lies about `e_lfanew` aborts
+    /// instead of returning `Truncated`. Only a malformed input reaches this.
     pub fn parse(data: &[u8]) -> Result<PeInfo, ParseError> {
         if data.len() < 0x40 || &data[0..2] != b"MZ" {
             return Err(ParseError::NotMz);
@@ -313,8 +342,9 @@ impl PeInfo {
 
         // size_of_headers: first section VA is the classic value; fall back to
         // rounding the header span up to the section alignment.
-        let size_of_headers = sections.first().map(|s| s.virtual_address).unwrap_or(
-            ((pe_off + 24 + opt_size + num_sections * 40).div_ceil(0x100000) * 0x100000) as u32,
+        let size_of_headers = sections.first().map_or(
+            ((pe_off + 24 + opt_size + num_sections * 40).div_ceil(0x10_00_00) * 0x10_00_00) as u32,
+            |s| s.virtual_address,
         );
 
         Ok(PeInfo {
@@ -364,6 +394,12 @@ mod tests {
     /// descriptors (lookup path + IAT-fallback path, named + ordinal) and
     /// one named export.
     fn synthetic_pe() -> Vec<u8> {
+        fn w32(buf: &mut [u8], off: usize, v: u32) {
+            buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        fn w64(buf: &mut [u8], off: usize, v: u64) {
+            buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
+        }
         let mut buf = vec![0u8; 0x1200];
         buf[0..2].copy_from_slice(b"MZ");
         buf[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
@@ -393,12 +429,6 @@ mod tests {
         buf[sec + 20..sec + 24].copy_from_slice(&0x200u32.to_le_bytes()); // raw ptr
         buf[sec + 36..sec + 40].copy_from_slice(&0x6000_0020u32.to_le_bytes());
 
-        fn w32(buf: &mut [u8], off: usize, v: u32) {
-            buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
-        }
-        fn w64(buf: &mut [u8], off: usize, v: u64) {
-            buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
-        }
         // Import descriptors at file 0x200 (RVA 0x1000): two real + null
         // terminator (60 bytes total, ending at 0x23B).
         // desc 0: lookup=0x103C, name=0x106C, iat=0x1054.

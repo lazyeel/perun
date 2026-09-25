@@ -57,11 +57,7 @@ fn diff_snaps(before: &[u8], after: &[u8]) -> Vec<Change> {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join("")
+    bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
 }
 
 fn report_diff(tag: &str, base_rva: u32, changes: &[Change]) {
@@ -140,12 +136,11 @@ fn real_main() -> i32 {
             return 1;
         }
     };
-    let data_sec = match info.sections.iter().find(|s| s.name_str() == ".data") {
-        Some(s) => s,
-        None => {
-            eprintln!("error: no .data section");
-            return 1;
-        }
+    let data_sec = if let Some(s) = info.sections.iter().find(|s| s.name_str() == ".data") {
+        s
+    } else {
+        eprintln!("error: no .data section");
+        return 1;
     };
     let data_rva = data_sec.virtual_address;
     let data_len = data_sec.virtual_size as usize;
@@ -159,13 +154,12 @@ fn real_main() -> i32 {
             return 1;
         }
     };
-    unsafe { perun_core::teb::init_thread_teb(image.base() as u64) };
-    let dll_main = match unsafe { image.entry_dll_main() } {
-        Some(f) => f,
-        None => {
-            eprintln!("error: image has no entry point");
-            return 1;
-        }
+    let _ = unsafe { perun_core::teb::init_thread_teb(image.base() as u64) };
+    let dll_main = if let Some(f) = unsafe { image.entry_dll_main() } {
+        f
+    } else {
+        eprintln!("error: image has no entry point");
+        return 1;
     };
     if unsafe { dll_main(image.base(), DLL_PROCESS_ATTACH, std::ptr::null_mut()) } == 0 {
         eprintln!("error: DllMain returned FALSE");
@@ -187,7 +181,7 @@ fn real_main() -> i32 {
         eprintln!("error: scratch mmap failed");
         return 1;
     }
-    unsafe { std::ptr::write_bytes(scratch as *mut u8, 0, 0x1000) };
+    unsafe { std::ptr::write_bytes(scratch.cast::<u8>(), 0, 0x1000) };
     let scratch = scratch as u64;
 
     let snap = || unsafe {
@@ -199,13 +193,14 @@ fn real_main() -> i32 {
             .map(|p| unsafe { std::mem::transmute(p) })
     };
 
-    if !skip_init {
-        let f = match resolve(&init_exp) {
-            Some(f) => f,
-            None => {
-                eprintln!("error: export {init_exp:?} not found");
-                return 1;
-            }
+    if skip_init {
+        println!("[chain] --skip-init: op export runs cold");
+    } else {
+        let f = if let Some(f) = resolve(&init_exp) {
+            f
+        } else {
+            eprintln!("error: export {init_exp:?} not found");
+            return 1;
         };
         let before = snap();
         let r = unsafe { f(scratch, scratch, 0, 0) };
@@ -215,16 +210,13 @@ fn real_main() -> i32 {
             data_rva,
             &diff_snaps(&before, &snap()),
         );
-    } else {
-        println!("[chain] --skip-init: op export runs cold");
     }
 
-    let g = match resolve(&op_exp) {
-        Some(g) => g,
-        None => {
-            eprintln!("error: export {op_exp:?} not found");
-            return 1;
-        }
+    let g = if let Some(g) = resolve(&op_exp) {
+        g
+    } else {
+        eprintln!("error: export {op_exp:?} not found");
+        return 1;
     };
     let before = snap();
     let r = unsafe { g(scratch, scratch, 0, 0) };

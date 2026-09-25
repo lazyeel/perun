@@ -1,6 +1,12 @@
 // Copyright 2026 lazyeel (https://github.com/lazyeel)
 // SPDX-License-Identifier: Apache-2.0
 
+// The pool hands out 20-byte stubs at fixed offsets inside one RWX
+// page, so both the page arithmetic and the offsets within it are
+// bounded by construction before they reach a pointer.
+#![allow(unknown_lints)]
+#![allow(clippy::cast_possible_truncation)]
+
 //! Trap micro-stub pool for unimplemented imports.
 //!
 //! Every unresolved IAT entry points at a 20-byte stub carved from an RWX
@@ -54,16 +60,20 @@ static POOL: Mutex<Option<PoolInner>> = Mutex::new(None);
 
 /// Global access handle used by the loader.
 pub struct StubPoolGuard {
-    _guard: std::sync::MutexGuard<'static, Option<PoolInner>>,
+    guard: std::sync::MutexGuard<'static, Option<PoolInner>>,
 }
 
 impl StubPoolGuard {
     /// Emit the next micro-stub and return its executable address.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the pool is exhausted, i.e. more than `MAX_STUBS` / `MAX_STUBS_SYSV` unresolved imports in one image. The bound is a compile-time constant, so a real binary cannot reach it.
     pub fn allocate(&mut self, label: String) -> *const u8 {
         // SAFETY: page allocation and stub emission below are bounded by
         // MAX_STUBS and the page size.
         unsafe {
-            let pool = self._guard.get_or_insert_with(|| PoolInner {
+            let pool = self.guard.get_or_insert_with(|| PoolInner {
                 page: std::ptr::null_mut(),
                 labels: Vec::new(),
             });
@@ -116,16 +126,19 @@ impl StubPoolGuard {
     }
 
     /// Look up a label by stub index.
+    #[must_use]
     pub fn label(&self, index: usize) -> Option<&str> {
-        self._guard
+        self.guard
             .as_ref()
-            .and_then(|p| p.labels.get(index).map(|s| s.as_str()))
+            .and_then(|p| p.labels.get(index).map(std::string::String::as_str))
     }
 }
 
 pub(crate) fn stub_pool() -> StubPoolGuard {
     StubPoolGuard {
-        _guard: POOL.lock().unwrap_or_else(|e| e.into_inner()),
+        guard: POOL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
     }
 }
 
@@ -203,16 +216,27 @@ static POOL_SYSV: Mutex<Option<SysVPoolInner>> = Mutex::new(None);
 
 /// Global access handle used by the Mach-O loader.
 pub struct SysVStubPoolGuard {
-    _guard: std::sync::MutexGuard<'static, Option<SysVPoolInner>>,
+    guard: std::sync::MutexGuard<'static, Option<SysVPoolInner>>,
 }
 
 impl SysVStubPoolGuard {
-    /// Emit the next SysV micro-stub and return its executable address.
+    /// Emit the next `SysV` micro-stub and return its executable address.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the pool is exhausted, i.e. more than `MAX_STUBS_SYSV`
+    /// unresolved imports in one image. The bound is a compile-time
+    /// constant, so a real binary cannot reach it.
     pub fn allocate(&mut self, label: String) -> *const u8 {
+        // STUB_SIZE (20) does not divide PAGE_SIZE, so a dense linear layout
+        // would let the 205th stub straddle a page boundary — and each pool
+        // page is its own mmap, so the write would run off the end. Pack a
+        // whole number of stubs per page instead.
+        const STUBS_PER_PAGE: usize = PAGE_SIZE / STUB_SIZE; // 204
         // SAFETY: bounded by MAX_STUBS_SYSV and the pool span, same as the
         // Win64 pool.
         unsafe {
-            let pool = self._guard.get_or_insert_with(|| SysVPoolInner {
+            let pool = self.guard.get_or_insert_with(|| SysVPoolInner {
                 pages: Vec::new(),
                 labels: Vec::new(),
             });
@@ -221,7 +245,6 @@ impl SysVStubPoolGuard {
             // layout would let the 205th stub straddle a page boundary —
             // and each pool page is its own mmap, so the write would run
             // off the end. Pack a whole number of stubs per page instead.
-            const STUBS_PER_PAGE: usize = PAGE_SIZE / STUB_SIZE; // 204
             let page_idx = index / STUBS_PER_PAGE;
             let in_page = (index % STUBS_PER_PAGE) * STUB_SIZE;
             while pool.pages.len() <= page_idx {
@@ -273,11 +296,13 @@ impl SysVStubPoolGuard {
 
 pub(crate) fn stub_pool_sysv() -> SysVStubPoolGuard {
     SysVStubPoolGuard {
-        _guard: POOL_SYSV.lock().unwrap_or_else(|e| e.into_inner()),
+        guard: POOL_SYSV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
     }
 }
 
-/// Reporter invoked by the SysV dispatcher with the guest's argument registers.
+/// Reporter invoked by the `SysV` dispatcher with the guest's argument registers.
 ///
 /// # Safety
 /// Called only from the asm dispatcher with valid register snapshots.
@@ -291,7 +316,7 @@ pub unsafe extern "C" fn perun_trap_report_sysv(
 ) -> i64 {
     let label = POOL_SYSV
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_ref()
         .and_then(|p| p.labels.get(index as usize).cloned())
         .unwrap_or_else(|| "<unknown>".to_string());

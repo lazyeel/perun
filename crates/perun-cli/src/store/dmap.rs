@@ -67,7 +67,7 @@ pub fn first_uint(data: &[u8], tag: &str) -> Option<u64> {
     let _ = walk_dmap(data, 0, &mut |t, payload| {
         if found.is_none() && t == tag {
             match payload.len() {
-                4 => found = Some(u32::from_be_bytes(payload.try_into().unwrap()) as u64),
+                4 => found = Some(u64::from(u32::from_be_bytes(payload.try_into().unwrap()))),
                 8 => found = Some(u64::from_be_bytes(payload.try_into().unwrap())),
                 _ => return Err("bad integer length".into()),
             }
@@ -113,7 +113,7 @@ pub fn parse_owned_apps(data: &[u8]) -> Vec<App> {
                 }
                 "aePd" => app.version = String::from_utf8_lossy(body).into_owned(),
                 "asdp" if body.len() == 4 => {
-                    let secs = u32::from_be_bytes(body.try_into().unwrap()) as i64;
+                    let secs = i64::from(u32::from_be_bytes(body.try_into().unwrap()));
                     app.purchase_date = Some(unix_to_iso8601(secs));
                 }
                 _ => {}
@@ -130,7 +130,7 @@ pub fn parse_owned_apps(data: &[u8]) -> Vec<App> {
 
 fn read_int(payload: &[u8]) -> Option<i64> {
     match payload.len() {
-        4 => Some(u32::from_be_bytes(payload.try_into().ok()?) as i64),
+        4 => Some(i64::from(u32::from_be_bytes(payload.try_into().ok()?))),
         8 => Some(i64::from_be_bytes(payload.try_into().ok()?)),
         _ => None,
     }
@@ -157,8 +157,7 @@ fn unix_to_iso8601(secs: i64) -> String {
 pub fn daap_headers(account: &Account, guid: &str) -> Vec<(String, String)> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0) as i64;
+        .map_or(0, |d| d.as_secs()) as i64;
     let rfc_date = unix_to_rfc1123(now);
     let client_time = unix_to_iso8601(now);
     vec![
@@ -219,8 +218,7 @@ pub fn items_body(session_id: u32, revision: u32, query: &str) -> Vec<u8> {
     let mut inner = Vec::new();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as u32)
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs() as u32);
     inner.extend_from_slice(&tag_u32("mstc", now));
     inner.extend_from_slice(&tag_u32("mlid", session_id));
     inner.extend_from_slice(&tag_u8("mikd", 2));

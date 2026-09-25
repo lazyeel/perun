@@ -87,8 +87,7 @@ fn path_matches(cookie_path: &str, request_path: &str) -> bool {
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 fn now_expiry(max_age: i64) -> i64 {
@@ -206,7 +205,7 @@ impl CookieJar {
         }
         self.cookies
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(Cookie {
                 name,
                 value: value.trim().to_string(),
@@ -220,7 +219,10 @@ impl CookieJar {
     }
 
     fn remove_matching(&self, name: &str, domain: &str, path: &str) {
-        let mut jar = self.cookies.lock().unwrap_or_else(|e| e.into_inner());
+        let mut jar = self
+            .cookies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         jar.retain(|c| {
             !(c.name.eq_ignore_ascii_case(name)
                 && c.domain.eq_ignore_ascii_case(domain)
@@ -236,7 +238,10 @@ impl CookieJar {
     pub fn get_cookie_header_for_url(&self, url: &str) -> Option<String> {
         let (scheme, host, path) = split_url(url)?;
         let now = now_unix();
-        let jar = self.cookies.lock().unwrap_or_else(|e| e.into_inner());
+        let jar = self
+            .cookies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut parts: Vec<String> = Vec::new();
         for c in jar.iter() {
             if c.expires > 0 && c.expires <= now {
@@ -303,7 +308,10 @@ impl CookieJar {
         }
         let n = loaded.len();
         if n > 0 {
-            *self.cookies.lock().unwrap_or_else(|e| e.into_inner()) = loaded;
+            *self
+                .cookies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = loaded;
         }
         Ok(n)
     }
@@ -314,7 +322,10 @@ impl CookieJar {
     /// An empty jar is never written: a failed load or a response that set no
     /// cookies must not be able to destroy a session that is working.
     pub fn save_netscape_file(&self, path: &Path) -> std::io::Result<()> {
-        let jar = self.cookies.lock().unwrap_or_else(|e| e.into_inner());
+        let jar = self
+            .cookies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if jar.is_empty() {
             return Ok(());
         }
@@ -352,20 +363,23 @@ impl CookieJar {
         let now = now_unix();
         self.cookies
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|c| c.expires == 0 || c.expires > now);
     }
 
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.cookies.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.cookies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     #[cfg(test)]
     pub fn names(&self) -> Vec<String> {
         self.cookies
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .map(|c| c.name.clone())
             .collect()
@@ -388,7 +402,7 @@ mod tests {
 
     /// The bug this module exists to prevent: Apple's session cookies carry no
     /// `Expires`, so a saver that keeps only persistent cookies drops the four
-    /// MZFinance authenticates with and the next signed call 401s. `0` is the
+    /// `MZFinance` authenticates with and the next signed call 401s. `0` is the
     /// netscape spelling of "session" and has to come back as a session cookie.
     #[test]
     fn session_cookies_survive_the_round_trip() {

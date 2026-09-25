@@ -62,8 +62,8 @@ fn install_handler() {
         // cast the Mach-O shim table uses.
         act.sa_sigaction = on_segv as *const () as usize;
         act.sa_flags = libc::SA_SIGINFO;
-        libc::sigemptyset(&mut act.sa_mask);
-        libc::sigaction(libc::SIGSEGV, &act, std::ptr::null_mut());
+        libc::sigemptyset(&raw mut act.sa_mask);
+        libc::sigaction(libc::SIGSEGV, &raw const act, std::ptr::null_mut());
     }
 }
 
@@ -81,8 +81,8 @@ fn region(n: usize) -> *mut u8 {
             eprintln!("mmap failed");
             std::process::exit(1);
         }
-        std::ptr::write_bytes(p as *mut u8, 0, n);
-        p as *mut u8
+        std::ptr::write_bytes(p.cast::<u8>(), 0, n);
+        p.cast::<u8>()
     }
 }
 
@@ -112,24 +112,22 @@ fn main() {
             std::process::exit(1);
         }
     };
-    unsafe { perun_core::teb::init_thread_teb(image.base() as u64) };
-    let dll_main = match unsafe { image.entry_dll_main() } {
-        Some(f) => f,
-        None => {
-            eprintln!("no entry");
-            std::process::exit(1);
-        }
+    let _ = unsafe { perun_core::teb::init_thread_teb(image.base() as u64) };
+    let dll_main = if let Some(f) = unsafe { image.entry_dll_main() } {
+        f
+    } else {
+        eprintln!("no entry");
+        std::process::exit(1);
     };
     if unsafe { dll_main(image.base(), DLL_PROCESS_ATTACH, std::ptr::null_mut()) } == 0 {
         eprintln!("DllMain FALSE");
         std::process::exit(3);
     }
-    let op_ptr = match image.get_export_by_name("vdfut768ig") {
-        Some(p) => p,
-        None => {
-            eprintln!("no export");
-            std::process::exit(1);
-        }
+    let op_ptr = if let Some(p) = image.get_export_by_name("vdfut768ig") {
+        p
+    } else {
+        eprintln!("no export");
+        std::process::exit(1);
     };
     let op: ExportFn = unsafe { std::mem::transmute(op_ptr) };
 

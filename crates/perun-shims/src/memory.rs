@@ -4,7 +4,11 @@
 //! Memory management shims: heap + virtual memory over POSIX.
 
 use crate::util::set_last_error;
-use crate::win32::*;
+use crate::win32::{
+    BOOL, DWORD, ERROR_INVALID_PARAMETER, FALSE, HANDLE, HEAP_ZERO_MEMORY, LPCVOID, LPVOID,
+    PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE,
+    PAGE_WRITECOPY, SIZE_T, TRUE,
+};
 use crate::win32_api;
 
 win32_api! {

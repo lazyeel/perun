@@ -97,29 +97,34 @@ pub struct ShimTable {
 
 impl ShimTable {
     /// Collect every `win32_api!` registration linked into the process.
+    #[must_use]
     pub fn collect() -> ShimTable {
         let mut map = HashMap::with_capacity(SHIM_ENTRIES.len());
-        for e in SHIM_ENTRIES.iter() {
+        for e in SHIM_ENTRIES {
             map.insert(e.name, e.func.0 as usize);
         }
         ShimTable { map }
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.map.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
 
     /// All registered names, sorted.
+    #[must_use]
     pub fn names(&self) -> Vec<&'static str> {
         let mut v: Vec<&'static str> = self.map.keys().copied().collect();
         v.sort_unstable();
         v
     }
 
+    #[must_use]
     pub fn get(&self, name: &str) -> Option<ExternPtr> {
         self.map.get(name).copied()
     }

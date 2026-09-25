@@ -5,7 +5,7 @@
 //!
 //! File format: a binary blob `[0x04][u32 salt_len][salt][IV][GCM tag]
 //! [ciphertext]`, where the key is PBKDF2-SHA256(machine_id +
-//! "nice_token_is_nice" + passphrase, salt, 10000, 32). The plaintext is
+//! "`nice_token_is_nice`" + passphrase, salt, 10000, 32). The plaintext is
 //! the session JSON (email, tokens, storefront, pod, cookies-only auth).
 //! The password itself is stored only when the user passes
 //! `--remember-password` — otherwise the file holds session tokens alone and
@@ -332,7 +332,7 @@ fn aes_gcm_decrypt(
     String::from_utf8(plaintext).map_err(|e| format!("account JSON utf8: {e}"))
 }
 
-/// GHASH over (AAD, ciphertext) then XOR with E_K(J0). GF(2^128) with the
+/// GHASH over (AAD, ciphertext) then XOR with `E_K(J0)`. GF(2^128) with the
 /// GCM reduction polynomial, bits reflected (the standard formulation).
 fn ghash_tag(
     rounds: &[[u8; 16]; 15],
@@ -425,7 +425,7 @@ fn aes_key_schedule(key: &[u8; 32]) -> [[u8; 16]; 15] {
     rounds
 }
 
-/// SubWord for the key schedule: apply the S-box to each of the four bytes.
+/// `SubWord` for the key schedule: apply the S-box to each of the four bytes.
 fn sub_word(w: u32) -> u32 {
     let b = w.to_be_bytes();
     u32::from_be_bytes([
@@ -656,14 +656,14 @@ impl Sha256 {
         self.buffered += 1;
         if self.buffered > 56 {
             // Zero-fill to the block edge, compress, start a fresh block.
-            for b in self.buffer[self.buffered..].iter_mut() {
+            for b in &mut self.buffer[self.buffered..] {
                 *b = 0;
             }
             let block = self.buffer;
             self.compress(&block);
             self.buffered = 0;
         }
-        for b in self.buffer[self.buffered..56].iter_mut() {
+        for b in &mut self.buffer[self.buffered..56] {
             *b = 0;
         }
         self.buffer[56..].copy_from_slice(&bits.to_be_bytes());

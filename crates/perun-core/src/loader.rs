@@ -1,6 +1,14 @@
 // Copyright 2026 lazyeel (https://github.com/lazyeel)
 // SPDX-License-Identifier: Apache-2.0
 
+// Offsets are `u32` because PE defines them that way, and the mapping
+// is bounded by the image size before any of them is used. The
+// `*mut u8 -> *const T` casts are the standard way to address a
+// mapped image, and every dereference behind them goes through
+// `read_unaligned`, which is what makes the alignment irrelevant.
+#![allow(unknown_lints)]
+#![allow(clippy::cast_possible_truncation, clippy::cast_ptr_alignment)]
+
 //! Native projection of a PE32+ image into process memory.
 //!
 //! Steps, mirroring what Windows' own loader does (and what the C prototype
@@ -83,6 +91,10 @@ impl std::error::Error for LoadError {}
 
 impl Image {
     /// Load a PE32+ image from its file bytes.
+    ///
+    /// # Errors
+    ///
+    /// `LoadError::Parse` for a header this crate cannot read, `UnsupportedMachine` for a non-`x86_64` image, `MapFailed` when the mapping cannot be created, and `RvaOutOfBounds` / `BadImportRva` / `BadExportRva` when a directory points outside the image.
     pub fn load(file: &[u8], resolver: &mut dyn ImportResolver) -> Result<Image, LoadError> {
         let info = PeInfo::parse(file)?;
         let size = info.opt.size_of_image;
@@ -115,7 +127,7 @@ impl Image {
         if base == libc::MAP_FAILED {
             return Err(LoadError::MapFailed { size });
         }
-        let base = base as *mut u8;
+        let base = base.cast::<u8>();
         let slide = (base as u64).wrapping_sub(info.opt.image_base);
 
         // SAFETY: `base` covers `size` bytes we just mapped; all copies below
@@ -190,18 +202,22 @@ impl Image {
         Ok(img)
     }
 
+    #[must_use]
     pub fn base(&self) -> *mut u8 {
         self.base
     }
 
+    #[must_use]
     pub fn size(&self) -> u32 {
         self.size
     }
 
+    #[must_use]
     pub fn slide(&self) -> u64 {
         self.slide
     }
 
+    #[must_use]
     pub fn info(&self) -> &PeInfo {
         &self.info
     }
@@ -211,6 +227,7 @@ impl Image {
     /// # Safety
     /// The caller must guarantee the runtime environment (TEB/GS, shims)
     /// is prepared before invoking guest code.
+    #[must_use]
     pub unsafe fn entry_dll_main(&self) -> Option<DllMainFn> {
         let rva = self.info.opt.address_of_entry_point;
         if rva == 0 {
@@ -220,6 +237,7 @@ impl Image {
     }
 
     /// Raw pointer to an export by name.
+    #[must_use]
     pub fn get_export_by_name(&self, name: &str) -> Option<*const u8> {
         if self.exports.num_names == 0 {
             return None;
@@ -243,7 +261,7 @@ impl Image {
                 {
                     return None; // forwarders not followed in phase 1
                 }
-                return Some(unsafe { self.base.add(func_rva as usize) } as *const u8);
+                return Some(unsafe { self.base.add(func_rva as usize) }.cast_const());
             }
         }
         None
@@ -252,7 +270,7 @@ impl Image {
     // ── internals ────────────────────────────────────────────────────────
 
     fn check_rva(&self, rva: u32, len: u32) -> Result<(), LoadError> {
-        if rva as u64 + len as u64 > self.size as u64 {
+        if u64::from(rva) + u64::from(len) > u64::from(self.size) {
             Err(LoadError::RvaOutOfBounds { rva })
         } else {
             Ok(())
@@ -311,7 +329,7 @@ impl Image {
                 for j in 0..count as usize {
                     let entry = entries.add(j).read_unaligned();
                     let ty = entry >> 12;
-                    let in_page = (entry & 0x0FFF) as u32;
+                    let in_page = u32::from(entry & 0x0FFF);
                     let target_rva = page_rva + in_page;
                     if target_rva + 8 > self.size {
                         continue;
@@ -319,13 +337,13 @@ impl Image {
                     match ty {
                         10 => {
                             // IMAGE_REL_BASED_DIR64
-                            let p = self.base.add(target_rva as usize) as *mut u64;
+                            let p = self.base.add(target_rva as usize).cast::<u64>();
                             let v = p.read_unaligned();
                             p.write_unaligned(v.wrapping_add(self.slide));
                         }
                         3 => {
                             // IMAGE_REL_BASED_HIGHLOW (rare in PE32+, kept for safety)
-                            let p = self.base.add(target_rva as usize) as *mut u32;
+                            let p = self.base.add(target_rva as usize).cast::<u32>();
                             let v = p.read_unaligned();
                             p.write_unaligned(v.wrapping_add(self.slide as u32));
                         }
@@ -361,8 +379,7 @@ impl Image {
             }
             let dll_name = self
                 .cstr_at(name_rva)
-                .map(String::from_utf8_lossy)
-                .unwrap_or_else(|| std::borrow::Cow::Borrowed("?"));
+                .map_or_else(|| std::borrow::Cow::Borrowed("?"), String::from_utf8_lossy);
             let dll_upper = dll_name.to_ascii_uppercase();
 
             let lookup_rva = d.0;
@@ -376,7 +393,7 @@ impl Image {
                 if entry == 0 {
                     break;
                 }
-                let resolved: Option<ExternPtr> = if entry & (1 << 63) != 0 {
+                let target: Option<ExternPtr> = if entry & (1 << 63) != 0 {
                     // Ordinal import: no name to dispatch on.
                     None
                 } else {
@@ -389,21 +406,23 @@ impl Image {
                 };
 
                 self.check_rva(iat_rva + idx * 8, 8)?;
-                let slot = unsafe { self.base.add((iat_rva + idx * 8) as usize) as *mut ExternPtr };
-                match resolved {
-                    Some(ptr) => unsafe { slot.write(ptr) },
-                    None => {
-                        // Unimplemented: point at a named trap micro-stub so
-                        // the first guest call reports instead of crashing.
-                        let dll_owned = dll_upper.clone();
-                        let fname_owned = self
-                            .cstr_at(((entry & 0x7FFF_FFFF) as u32).wrapping_add(2))
-                            .map(|b| String::from_utf8_lossy(b).into_owned())
-                            .unwrap_or_default();
-                        let stub =
-                            crate::stub_pool().allocate(format!("{dll_owned}!{fname_owned}"));
-                        unsafe { slot.write(stub as ExternPtr) };
-                    }
+                let slot = unsafe {
+                    self.base
+                        .add((iat_rva + idx * 8) as usize)
+                        .cast::<ExternPtr>()
+                };
+                if let Some(ptr) = target {
+                    unsafe { slot.write(ptr) }
+                } else {
+                    // Unimplemented: point at a named trap micro-stub so
+                    // the first guest call reports instead of crashing.
+                    let dll_owned = dll_upper.clone();
+                    let fname_owned = self
+                        .cstr_at(((entry & 0x7FFF_FFFF) as u32).wrapping_add(2))
+                        .map(|b| String::from_utf8_lossy(b).into_owned())
+                        .unwrap_or_default();
+                    let stub = crate::stub_pool().allocate(format!("{dll_owned}!{fname_owned}"));
+                    unsafe { slot.write(stub as ExternPtr) };
                 }
                 idx += 1;
                 if idx > 100_000 {

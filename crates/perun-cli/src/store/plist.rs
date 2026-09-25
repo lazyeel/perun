@@ -535,7 +535,7 @@ pub fn base64_encode(data: &[u8]) -> String {
             chunk.get(1).copied().unwrap_or(0),
             chunk.get(2).copied().unwrap_or(0),
         ];
-        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
         out.push(TABLE[(n >> 18 & 63) as usize] as char);
         out.push(TABLE[(n >> 12 & 63) as usize] as char);
         out.push(if chunk.len() > 1 {
@@ -595,22 +595,22 @@ pub fn to_binary(value: &Plist) -> Vec<u8> {
     fn width(n: usize) -> usize {
         if n < 15 {
             0
-        } else if n <= u8::MAX as usize {
+        } else if u8::try_from(n).is_ok() {
             1
-        } else if n <= u16::MAX as usize {
+        } else if u16::try_from(n).is_ok() {
             2
-        } else if n <= u32::MAX as usize {
+        } else if u32::try_from(n).is_ok() {
             4
         } else {
             8
         }
     }
     fn ref_width(bound: usize) -> usize {
-        if bound <= u8::MAX as usize {
+        if u8::try_from(bound).is_ok() {
             1
-        } else if bound <= u16::MAX as usize {
+        } else if u16::try_from(bound).is_ok() {
             2
-        } else if bound <= u32::MAX as usize {
+        } else if u32::try_from(bound).is_ok() {
             4
         } else {
             8
@@ -628,13 +628,13 @@ pub fn to_binary(value: &Plist) -> Vec<u8> {
             Plist::Boolean(true) => vec![0x09],
             Plist::Boolean(false) => vec![0x08],
             Plist::Integer(i) => {
-                if *i >= 0 && *i <= u8::MAX as i64 {
+                if u8::try_from(*i).is_ok() {
                     vec![0x10, *i as u8]
-                } else if *i >= i16::MIN as i64 && *i <= i16::MAX as i64 {
+                } else if i16::try_from(*i).is_ok() {
                     let mut v = vec![0x11];
                     v.extend_from_slice(&(*i as i16).to_be_bytes());
                     v
-                } else if *i >= i32::MIN as i64 && *i <= i32::MAX as i64 {
+                } else if i32::try_from(*i).is_ok() {
                     let mut v = vec![0x12];
                     v.extend_from_slice(&(*i as i32).to_be_bytes());
                     v
@@ -747,11 +747,11 @@ pub fn to_binary(value: &Plist) -> Vec<u8> {
     // Layout: header, objects, offset table, trailer. The table's entry
     // width covers the whole object span.
     let span: u64 = 8 + objects.iter().map(|o| o.len() as u64).sum::<u64>();
-    let ow: usize = if span <= u8::MAX as u64 {
+    let ow: usize = if u8::try_from(span).is_ok() {
         1
-    } else if span <= u16::MAX as u64 {
+    } else if u16::try_from(span).is_ok() {
         2
-    } else if span <= u32::MAX as u64 {
+    } else if u32::try_from(span).is_ok() {
         4
     } else {
         8
@@ -805,9 +805,9 @@ pub fn parse_binary(data: &[u8]) -> Result<Plist, String> {
         .map_err(|_| "bad table offset")? as usize;
     let read_uint = |bytes: &[u8]| -> u64 {
         match bytes.len() {
-            1 => bytes[0] as u64,
-            2 => u16::from_be_bytes(bytes.try_into().unwrap()) as u64,
-            4 => u32::from_be_bytes(bytes.try_into().unwrap()) as u64,
+            1 => u64::from(bytes[0]),
+            2 => u64::from(u16::from_be_bytes(bytes.try_into().unwrap())),
+            4 => u64::from(u32::from_be_bytes(bytes.try_into().unwrap())),
             8 => u64::from_be_bytes(bytes.try_into().unwrap()),
             _ => 0,
         }
@@ -839,7 +839,7 @@ struct BinaryParser<'a> {
     read_uint: ReadUint<'a>,
 }
 
-impl<'a> BinaryParser<'a> {
+impl BinaryParser<'_> {
     fn object(&self, index: usize) -> Result<Plist, String> {
         let entry_pos = self.table_start + index * self.offset_size;
         if entry_pos + self.offset_size > self.data.len() {
@@ -897,7 +897,7 @@ impl<'a> BinaryParser<'a> {
                     .get(body_start..body_start + 2usize.pow(size as u32))
                     .ok_or("truncated real")?;
                 let v = if bytes.len() == 4 {
-                    f32::from_be_bytes(bytes.try_into().unwrap()) as f64
+                    f64::from(f32::from_be_bytes(bytes.try_into().unwrap()))
                 } else {
                     f64::from_be_bytes(bytes.try_into().unwrap())
                 };
@@ -1048,7 +1048,7 @@ mod tests {
         let body = b"line one\nline\ttwo\rmore\x00\x07 end";
         let s = response_snippet(body, 180);
         assert_eq!(s, "line one line two more end");
-        assert!(!s.chars().any(|c| c.is_control()));
+        assert!(!s.chars().any(char::is_control));
 
         let long = vec![b'x'; 5000];
         let s = response_snippet(&long, 32);
@@ -1276,7 +1276,7 @@ mod bag_tests {
             back.get("CFBundleExecutable").and_then(|v| v.as_str()),
             Some("TestApp")
         );
-        assert_eq!(back.get("Version").and_then(|v| v.as_i64()), Some(42));
+        assert_eq!(back.get("Version").and_then(super::Plist::as_i64), Some(42));
         assert!(matches!(back.get("Flag"), Some(Plist::Boolean(true))));
         assert_eq!(
             back.get("Payload").and_then(|v| v.as_data()),

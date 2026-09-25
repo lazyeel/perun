@@ -1,10 +1,28 @@
 // Copyright 2026 lazyeel (https://github.com/lazyeel)
 // SPDX-License-Identifier: Apache-2.0
 
+// File offsets and lengths cross the boundary as the guest's `LARGE_INTEGER`
+// // and `DWORD` pair; a shim that narrowed one before comparing would be
+// // comparing a different number than the guest asked for.
+#![allow(unknown_lints)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
+
 //! File I/O and path shims over POSIX.
 
-use crate::util::*;
-use crate::win32::*;
+use crate::util::{
+    HostKind, handle_free, handle_get, handle_new, read_narrow, read_wide, set_last_error,
+    wide_from_str,
+};
+use crate::win32::{
+    BOOL, CREATE_ALWAYS, CREATE_NEW, DWORD, ERROR_INVALID_PARAMETER, FALSE,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, GENERIC_READ,
+    GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LPCSTR, LPCVOID, LPCWSTR, OPEN_ALWAYS,
+    OPEN_EXISTING, OVERLAPPED, SECURITY_ATTRIBUTES, TRUE, TRUNCATE_EXISTING,
+};
 use crate::win32_api;
 
 fn open_flags(access: DWORD, disposition: DWORD) -> (i32, i32) {
@@ -42,15 +60,14 @@ win32_api! {
 
         if std::env::var("PERUN_TRACE").is_ok() {
             eprintln!(
-                "[perun] CreateFileW({:?}, access={access:#x}, disp={disposition})",
-                path
+                "[perun] CreateFileW({path:?}, access={access:#x}, disp={disposition})"
             );
         }
 
         // Directory open (used by guests probing folder existence).
         if attrs & FILE_ATTRIBUTE_DIRECTORY != 0 && disposition == OPEN_EXISTING {
             let mode = libc::O_RDONLY | libc::O_DIRECTORY;
-            let fd = libc::open(path.as_bytes().as_ptr() as *const i8, mode);
+            let fd = libc::open(path.as_bytes().as_ptr().cast::<i8>(), mode);
             return if fd >= 0 {
                 handle_new(HostKind::File { fd, shared: false })
             } else {
@@ -96,7 +113,7 @@ win32_api! {
         let wide = narrow
             .iter()
             .take_while(|&&b| b != 0)
-            .map(|&b| b as u16)
+            .map(|&b| u16::from(b))
             .collect::<Vec<u16>>();
         let cname = std::ffi::CString::new(wide.iter().map(|&w| w as u8).take_while(|&b| b != 0).collect::<Vec<u8>>())
             .unwrap_or_default();
@@ -123,18 +140,15 @@ win32_api! {
         out_read: *mut DWORD,
         overlapped: *mut OVERLAPPED,
     ) -> BOOL { unsafe {
-        let (fd, _) = match file_of(h) {
-            Some(f) => f,
-            None => {
-                set_last_error(ERROR_INVALID_PARAMETER);
-                return FALSE;
-            }
+        let (fd, _) = if let Some(f) = file_of(h) { f } else {
+            set_last_error(ERROR_INVALID_PARAMETER);
+            return FALSE;
         };
         if !overlapped.is_null() && overlapped.read().Offset != 0 {
             // Positional read via the OVERLAPPED offset.
-            let off = ((overlapped.read().OffsetHigh as u64) << 32)
-                | overlapped.read().Offset as u64;
-            let n = libc::pread(fd, buf as *mut core::ffi::c_void, to_read as usize, off as i64);
+            let off = (u64::from(overlapped.read().OffsetHigh) << 32)
+                | u64::from(overlapped.read().Offset);
+            let n = libc::pread(fd, buf.cast::<core::ffi::c_void>(), to_read as usize, off as i64);
             if n < 0 {
                 set_last_error(ERROR_INVALID_PARAMETER);
                 return FALSE;
@@ -144,7 +158,7 @@ win32_api! {
             }
             return TRUE;
         }
-        let n = libc::read(fd, buf as *mut core::ffi::c_void, to_read as usize);
+        let n = libc::read(fd, buf.cast::<core::ffi::c_void>(), to_read as usize);
         if n < 0 {
             set_last_error(ERROR_INVALID_PARAMETER);
             return FALSE;
@@ -165,12 +179,9 @@ win32_api! {
         out_written: *mut DWORD,
         _overlapped: *mut OVERLAPPED,
     ) -> BOOL { unsafe {
-        let (fd, _) = match file_of(h) {
-            Some(f) => f,
-            None => {
-                set_last_error(ERROR_INVALID_PARAMETER);
-                return FALSE;
-            }
+        let (fd, _) = if let Some(f) = file_of(h) { f } else {
+            set_last_error(ERROR_INVALID_PARAMETER);
+            return FALSE;
         };
         let n = libc::write(fd, buf, to_write as usize);
         if n < 0 {
@@ -187,10 +198,7 @@ win32_api! {
 win32_api! {
     /// BOOL CloseHandle(HANDLE);
     unsafe extern "win64" fn CloseHandle(h: HANDLE) -> BOOL { unsafe {
-        match handle_free(h) {
-            true => TRUE,
-            false => FALSE,
-        }
+        if handle_free(h) { TRUE } else { FALSE }
     }}
 }
 
@@ -293,7 +301,7 @@ fn attributes_for_path(path: &[u8]) -> DWORD {
         Err(_) => return INVALID_FILE_ATTRIBUTES,
     };
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::stat(c.as_ptr(), &mut st) } != 0 {
+    if unsafe { libc::stat(c.as_ptr(), &raw mut st) } != 0 {
         return INVALID_FILE_ATTRIBUTES;
     }
     let mut attrs = FILE_ATTRIBUTE_NORMAL;
@@ -314,7 +322,7 @@ win32_api! {
         let path = String::from_utf16_lossy(&read_wide(name));
         let attrs = attributes_for_path(path.as_bytes());
         if std::env::var("PERUN_TRACE").is_ok() {
-            eprintln!("[perun] GetFileAttributesW({:?}) -> {attrs:#x}", path);
+            eprintln!("[perun] GetFileAttributesW({path:?}) -> {attrs:#x}");
         }
         attrs
     }}
@@ -343,7 +351,7 @@ win32_api! {
             None => return 0xFFFF_FFFF, // INVALID_FILE_SIZE
         };
         let mut st: libc::stat = std::mem::zeroed();
-        if libc::fstat(fd, &mut st) != 0 {
+        if libc::fstat(fd, &raw mut st) != 0 {
             return 0xFFFF_FFFF;
         }
         let size = st.st_size as u64;

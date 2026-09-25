@@ -1,11 +1,23 @@
 // Copyright 2026 lazyeel (https://github.com/lazyeel)
 // SPDX-License-Identifier: Apache-2.0
 
+// The SEH and TLS shims move the guest's exception records and slot indices
+// // through; their layout is Windows', and the conversions are the ABI.
+#![allow(unknown_lints)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
+
 //! SEH surface, TLS and misc: minimal detect-and-report implementations by
 //! design (an unwinder is explicitly out of scope for this runtime).
 
-use crate::util::*;
-use crate::win32::*;
+use crate::util::set_last_error;
+use crate::win32::{
+    BOOL, DWORD, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, FALSE, HANDLE, LONG, LPSTR,
+    LPVOID, TLS_OUT_OF_INDEXES, TRUE, UINT,
+};
 use crate::win32_api;
 
 // ── SEH surface (detect/report only) ─────────────────────────────────────
@@ -58,7 +70,7 @@ win32_api! {
     unsafe extern "win64" fn RtlCaptureContext(ctx: *mut core::ffi::c_void) { unsafe {
         // Zero the CONTEXT blob (1232 bytes on x64): callers only need it to
         // be valid-shaped before they poke specific fields.
-        std::ptr::write_bytes(ctx as *mut u8, 0, 1232);
+        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 1232);
     }}
 }
 
@@ -118,17 +130,17 @@ win32_api! {
     /// void InitializeSListHead(PSLIST_HEADER);
     unsafe extern "win64" fn InitializeSListHead(head: *mut core::ffi::c_void) { unsafe {
         // SLIST_HEADER is 16 bytes on x64.
-        std::ptr::write_bytes(head as *mut u8, 0, 16);
+        std::ptr::write_bytes(head.cast::<u8>(), 0, 16);
     }}
 }
 
 win32_api! {
     /// PSLIST_ENTRY InterlockedFlushSList(PSLIST_HEADER);
     unsafe extern "win64" fn InterlockedFlushSList(head: *mut core::ffi::c_void) -> *mut core::ffi::c_void { unsafe {
-        let first = head as *mut std::sync::atomic::AtomicUsize;
+        let first = head.cast::<std::sync::atomic::AtomicUsize>();
         let old = (*first).swap(0, std::sync::atomic::Ordering::AcqRel);
         // Second quad holds depth/sequence; reset both halves honestly.
-        *(head as *mut usize).add(1) = 0;
+        *head.cast::<usize>().add(1) = 0;
         old as *mut core::ffi::c_void
     }}
 }

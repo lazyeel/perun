@@ -18,6 +18,7 @@ pub use stub::StubPoolGuard;
 
 /// Access the process-wide trap micro-stub pool (used by the loader for
 /// unresolved imports).
+#[must_use]
 pub fn stub_pool() -> StubPoolGuard {
     stub::stub_pool()
 }
@@ -25,6 +26,7 @@ pub fn stub_pool() -> StubPoolGuard {
 /// Trap micro-stub pool for SysV-ABI guests (Mach-O images). Separate pool:
 /// the stub's dispatcher returns through a different calling convention and
 /// keeps guest argument registers intact differently from the Win64 one.
+#[must_use]
 pub fn stub_pool_sysv() -> stub::SysVStubPoolGuard {
     stub::stub_pool_sysv()
 }

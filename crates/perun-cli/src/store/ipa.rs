@@ -91,8 +91,8 @@ fn find_eocd_at(data: &[u8], base: u64) -> Result<(u64, Eocd), String> {
         return Err("zip: multi-disk archives are not supported".into());
     }
     let entry_count = u16::from_le_bytes([eocd[10], eocd[11]]);
-    let cd_size = u32::from_le_bytes([eocd[12], eocd[13], eocd[14], eocd[15]]) as u64;
-    let cd_offset = u32::from_le_bytes([eocd[16], eocd[17], eocd[18], eocd[19]]) as u64;
+    let cd_size = u64::from(u32::from_le_bytes([eocd[12], eocd[13], eocd[14], eocd[15]]));
+    let cd_offset = u64::from(u32::from_le_bytes([eocd[16], eocd[17], eocd[18], eocd[19]]));
     // Zip64 marker: real values live in a zip64 EOCD. IPAs this size don't
     // occur; reject rather than mis-read.
     if cd_offset == 0xFFFF_FFFF || cd_size == 0xFFFF_FFFF || entry_count == 0xFFFF {
@@ -117,12 +117,12 @@ fn find_eocd(data: &[u8]) -> Result<(usize, Eocd), String> {
 /// own end-of-central-directory record.
 ///
 /// The central directory it names must start inside the archive and end at or
-/// before the record itself. A ZIP64 archive carries 0xFFFF_FFFF placeholders
+/// before the record itself. A ZIP64 archive carries `0xFFFF_FFFF` placeholders
 /// here and its real numbers live in the zip64 record, so it is left to the
 /// caller's explicit zip64 rejection rather than judged here.
 fn candidate_is_plausible(eocd: &[u8], at: u64) -> bool {
-    let cd_size = u32::from_le_bytes([eocd[12], eocd[13], eocd[14], eocd[15]]) as u64;
-    let cd_offset = u32::from_le_bytes([eocd[16], eocd[17], eocd[18], eocd[19]]) as u64;
+    let cd_size = u64::from(u32::from_le_bytes([eocd[12], eocd[13], eocd[14], eocd[15]]));
+    let cd_offset = u64::from(u32::from_le_bytes([eocd[16], eocd[17], eocd[18], eocd[19]]));
     if cd_size == 0xFFFF_FFFF || cd_offset == 0xFFFF_FFFF {
         return true;
     }
@@ -163,12 +163,12 @@ fn parse_central_at(data: &[u8], start: usize, eocd: &Eocd) -> Result<Vec<Centra
         // land its two halves in each other's field.
         let modified = (u16_at(14), u16_at(12));
         let crc32 = u32_at(16);
-        let compressed_size = u32_at(20) as u64;
-        let uncompressed_size = u32_at(24) as u64;
+        let compressed_size = u64::from(u32_at(20));
+        let uncompressed_size = u64::from(u32_at(24));
         let name_len = u16_at(28) as usize;
         let extra_len = u16_at(30) as usize;
         let comment_len = u16_at(32) as usize;
-        let local_offset = u32_at(42) as u64;
+        let local_offset = u64::from(u32_at(42));
         let external_attrs = u32_at(38);
         let flags = u16_at(8);
         let name_start = pos + 46;
@@ -181,7 +181,7 @@ fn parse_central_at(data: &[u8], start: usize, eocd: &Eocd) -> Result<Vec<Centra
         let extra_end = extra_start + extra_len;
         let central_extra = data
             .get(extra_start..extra_end)
-            .map(|b| b.to_vec())
+            .map(<[u8]>::to_vec)
             .unwrap_or_default();
         entries.push(CentralEntry {
             name,
@@ -200,7 +200,7 @@ fn parse_central_at(data: &[u8], start: usize, eocd: &Eocd) -> Result<Vec<Centra
     Ok(entries)
 }
 
-/// Local header span for an entry: (local_header_len, compressed_size).
+/// Local header span for an entry: (`local_header_len`, `compressed_size`).
 #[cfg(test)]
 fn local_span(data: &[u8], entry: &CentralEntry) -> Result<(usize, u64), String> {
     let off = entry.local_offset as usize;
@@ -303,8 +303,8 @@ fn local_span_file(pkg: &Pkg, entry: &CentralEntry) -> Result<(u64, u64), String
     if h[..4] != LOC_SIG {
         return Err(format!("zip: bad local signature for {}", entry.name));
     }
-    let name_len = u16::from_le_bytes([h[26], h[27]]) as u64;
-    let extra_len = u16::from_le_bytes([h[28], h[29]]) as u64;
+    let name_len = u64::from(u16::from_le_bytes([h[26], h[27]]));
+    let extra_len = u64::from(u16::from_le_bytes([h[28], h[29]]));
     Ok((off + 30 + name_len + extra_len, entry.compressed_size))
 }
 
@@ -361,13 +361,13 @@ fn strip_zip64_extra(extra: &[u8]) -> Vec<u8> {
 /// compressed, local-header offset.
 fn zip64_central_extra(uncompressed: u64, compressed: u64, offset: u64) -> Vec<u8> {
     let mut fields = Vec::with_capacity(24);
-    if uncompressed >= ZIP64_SUB as u64 {
+    if uncompressed >= u64::from(ZIP64_SUB) {
         fields.extend_from_slice(&uncompressed.to_le_bytes());
     }
-    if compressed >= ZIP64_SUB as u64 {
+    if compressed >= u64::from(ZIP64_SUB) {
         fields.extend_from_slice(&compressed.to_le_bytes());
     }
-    if offset >= ZIP64_SUB as u64 {
+    if offset >= u64::from(ZIP64_SUB) {
         fields.extend_from_slice(&offset.to_le_bytes());
     }
     if fields.is_empty() {
@@ -383,10 +383,10 @@ fn zip64_central_extra(uncompressed: u64, compressed: u64, offset: u64) -> Vec<u
 /// Build a ZIP64 extra block for a local header (sizes only).
 fn zip64_local_extra(uncompressed: u64, compressed: u64) -> Vec<u8> {
     let mut fields = Vec::with_capacity(16);
-    if uncompressed >= ZIP64_SUB as u64 {
+    if uncompressed >= u64::from(ZIP64_SUB) {
         fields.extend_from_slice(&uncompressed.to_le_bytes());
     }
-    if compressed >= ZIP64_SUB as u64 {
+    if compressed >= u64::from(ZIP64_SUB) {
         fields.extend_from_slice(&compressed.to_le_bytes());
     }
     if fields.is_empty() {
@@ -459,7 +459,7 @@ fn align_payload_extra(extra: &mut Vec<u8>, local_offset: u64, name_len: usize) 
         pad
     };
     debug_assert!(total >= 4);
-    debug_assert!(total <= usize::from(u16::MAX));
+    debug_assert!(u16::try_from(total).is_ok());
     extra.extend_from_slice(&PAD_EXTRA_ID.to_le_bytes());
     extra.extend_from_slice(&((total - 4) as u16).to_le_bytes());
     extra.resize(extra.len() + (total - 4), 0);
@@ -533,8 +533,8 @@ impl<'w> ZipWriter<'w> {
         } else {
             entry.flags & !0x8
         };
-        let need64 = entry.compressed_size >= ZIP64_SUB as u64
-            || entry.uncompressed_size >= ZIP64_SUB as u64;
+        let need64 = entry.compressed_size >= u64::from(ZIP64_SUB)
+            || entry.uncompressed_size >= u64::from(ZIP64_SUB);
         // Local-header crc/sizes: zeroed for streaming (descriptor carries
         // them), concrete for inline (0xFFFFFFFF + ZIP64 extra when large).
         let (lh_crc, lh_csize, lh_usize) = if streaming {
@@ -682,7 +682,7 @@ impl<'w> ZipWriter<'w> {
         }
         let crc = crc32_ieee(data);
         let size = data.len() as u64;
-        let need64 = size >= ZIP64_SUB as u64;
+        let need64 = size >= u64::from(ZIP64_SUB);
         let local_offset = self.offset;
         let local_extra = zip64_local_extra(size, size);
         if local_extra.len() > 0xFFFF {
@@ -731,9 +731,9 @@ impl<'w> ZipWriter<'w> {
         // `as u16/as u32`; now they emit real ZIP64 structures.
         let mut need64 = self.entries.len() >= ZIP64_SUB16 as usize;
         for e in &self.entries {
-            if e.compressed_size >= ZIP64_SUB as u64
-                || e.uncompressed_size >= ZIP64_SUB as u64
-                || e.local_offset >= ZIP64_SUB as u64
+            if e.compressed_size >= u64::from(ZIP64_SUB)
+                || e.uncompressed_size >= u64::from(ZIP64_SUB)
+                || e.local_offset >= u64::from(ZIP64_SUB)
             {
                 need64 = true;
                 break;
@@ -755,9 +755,9 @@ impl<'w> ZipWriter<'w> {
             if extra.len() > 0xFFFF {
                 return Err("zip: central extra too long".into());
             }
-            let entry64 = e.compressed_size >= ZIP64_SUB as u64
-                || e.uncompressed_size >= ZIP64_SUB as u64
-                || e.local_offset >= ZIP64_SUB as u64;
+            let entry64 = e.compressed_size >= u64::from(ZIP64_SUB)
+                || e.uncompressed_size >= u64::from(ZIP64_SUB)
+                || e.local_offset >= u64::from(ZIP64_SUB);
             let version_needed: u16 = if entry64 { 45 } else { 0x0014 };
             let mut cen = Vec::with_capacity(46 + e.name.len() + extra.len());
             cen.extend_from_slice(&CEN_SIG);
@@ -769,7 +769,7 @@ impl<'w> ZipWriter<'w> {
             cen.extend_from_slice(&e.modified.0.to_le_bytes());
             cen.extend_from_slice(&e.crc32.to_le_bytes());
             cen.extend_from_slice(
-                &(if e.compressed_size >= ZIP64_SUB as u64 {
+                &(if e.compressed_size >= u64::from(ZIP64_SUB) {
                     ZIP64_SUB
                 } else {
                     e.compressed_size as u32
@@ -777,7 +777,7 @@ impl<'w> ZipWriter<'w> {
                 .to_le_bytes(),
             );
             cen.extend_from_slice(
-                &(if e.uncompressed_size >= ZIP64_SUB as u64 {
+                &(if e.uncompressed_size >= u64::from(ZIP64_SUB) {
                     ZIP64_SUB
                 } else {
                     e.uncompressed_size as u32
@@ -791,7 +791,7 @@ impl<'w> ZipWriter<'w> {
             cen.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
             cen.extend_from_slice(&e.external_attrs.to_le_bytes());
             cen.extend_from_slice(
-                &(if e.local_offset >= ZIP64_SUB as u64 {
+                &(if e.local_offset >= u64::from(ZIP64_SUB) {
                     ZIP64_SUB
                 } else {
                     e.local_offset as u32
@@ -806,7 +806,7 @@ impl<'w> ZipWriter<'w> {
             self.raw(record)?;
         }
         let cd_size = self.offset - cd_start;
-        if cd_size >= ZIP64_SUB as u64 || cd_start >= ZIP64_SUB as u64 {
+        if cd_size >= u64::from(ZIP64_SUB) || cd_start >= u64::from(ZIP64_SUB) {
             need64 = true;
         }
         if need64 {
@@ -973,8 +973,7 @@ fn replicate_to(
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
     let (ddate, dtime) = dos_datetime(now);
 
     // iTunesMetadata.plist: the download metadata + account identity.
@@ -1042,7 +1041,7 @@ fn replicate_to(
     Ok(true)
 }
 
-/// CFBundleExecutable from the bundle's Info.plist (binary or XML).
+/// `CFBundleExecutable` from the bundle's Info.plist (binary or XML).
 fn read_bundle_executable_pkg(
     pkg: &mut Pkg,
     entries: &[CentralEntry],
@@ -1211,7 +1210,7 @@ impl<'a> BitReader<'a> {
     fn bits(&mut self, n: u32) -> Result<u32, String> {
         let mut v = 0u32;
         for i in 0..n {
-            v |= (self.bit()? as u32) << i;
+            v |= u32::from(self.bit()?) << i;
         }
         Ok(v)
     }
@@ -1227,7 +1226,7 @@ impl<'a> BitReader<'a> {
         let mut v = 0u64;
         for i in 0..n {
             let b = *self.data.get(self.pos).ok_or("inflate: out of input")?;
-            v |= (b as u64) << (8 * i);
+            v |= u64::from(b) << (8 * i);
             self.pos += 1;
         }
         Ok(v)
@@ -1315,8 +1314,8 @@ fn decode(br: &mut BitReader, h: &Huffman) -> Result<u16, String> {
     let mut first = 0i32;
     let mut index = 0i32;
     for len in 1..16 {
-        code |= br.bit()? as i32;
-        let count = h.counts[len] as i32;
+        code |= i32::from(br.bit()?);
+        let count = i32::from(h.counts[len]);
         if code - count < first {
             return Ok(h.symbols[(index + (code - first)) as usize]);
         }
@@ -1433,7 +1432,7 @@ fn crc32_ieee(data: &[u8]) -> u32 {
         });
         let mut crc = 0xFFFF_FFFFu32;
         for &b in data {
-            crc = TABLE[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
+            crc = TABLE[((crc ^ u32::from(b)) & 0xFF) as usize] ^ (crc >> 8);
         }
         !crc
     }
@@ -1490,11 +1489,15 @@ fn extra_mtime_unix(extra: &[u8]) -> Option<i64> {
         let body = extra.get(off + 4..off + 4 + size)?;
         match id {
             0x5455 if !body.is_empty() && body[0] & 1 != 0 && body.len() >= 5 => {
-                return Some(i32::from_le_bytes([body[1], body[2], body[3], body[4]]) as i64);
+                return Some(i64::from(i32::from_le_bytes([
+                    body[1], body[2], body[3], body[4],
+                ])));
             }
             0x5855 if body.len() >= 8 => {
                 // [atime u32][mtime u32] (+ optional uid/gid u16s)
-                return Some(i32::from_le_bytes([body[4], body[5], body[6], body[7]]) as i64);
+                return Some(i64::from(i32::from_le_bytes([
+                    body[4], body[5], body[6], body[7],
+                ])));
             }
             _ => {}
         }
@@ -1505,12 +1508,12 @@ fn extra_mtime_unix(extra: &[u8]) -> Option<i64> {
 
 /// DOS date/time → Unix seconds (the zip convention).
 pub fn dos_to_unix((date, time): (u16, u16)) -> i64 {
-    let year = 1980 + ((date >> 9) & 0x7f) as i64;
-    let month = ((date >> 5) & 0x0f) as i64;
-    let day = (date & 0x1f) as i64;
-    let hour = ((time >> 11) & 0x1f) as i64;
-    let minute = ((time >> 5) & 0x3f) as i64;
-    let second = ((time & 0x1f) * 2) as i64;
+    let year = 1980 + i64::from((date >> 9) & 0x7f);
+    let month = i64::from((date >> 5) & 0x0f);
+    let day = i64::from(date & 0x1f);
+    let hour = i64::from((time >> 11) & 0x1f);
+    let minute = i64::from((time >> 5) & 0x3f);
+    let second = i64::from((time & 0x1f) * 2);
     // days since epoch (Howard Hinnant, civil_from_days inverted)
     let y = if month <= 2 { year - 1 } else { year };
     let era = if y >= 0 { y } else { y - 399 } / 400;
@@ -1956,7 +1959,7 @@ mod tests {
         assert_eq!(stripped.len(), two.len());
 
         // And the ZIP64 block before the truncation is still removed.
-        let mut with_z64 = zip64_central_extra(ZIP64_SUB as u64, 20, 30);
+        let mut with_z64 = zip64_central_extra(u64::from(ZIP64_SUB), 20, 30);
         with_z64.extend_from_slice(&extra);
         let stripped = strip_zip64_extra(&with_z64);
         assert_eq!(stripped, extra, "zip64 block dropped, tail kept once");
@@ -2007,7 +2010,7 @@ mod tests {
         // Small values: no block. Large values: placeholder-gated fields in
         // spec order (uncompressed, compressed, offset).
         assert!(zip64_central_extra(10, 20, 30).is_empty());
-        let big = ZIP64_SUB as u64;
+        let big = u64::from(ZIP64_SUB);
         let block = zip64_central_extra(big, 20, 30);
         assert_eq!(&block[..4], &[0x01, 0x00, 0x08, 0x00]);
         assert_eq!(&block[4..], &big.to_le_bytes());
@@ -2049,9 +2052,9 @@ mod tests {
                 method: 0,
                 flags: 0,
                 crc32: 0,
-                compressed_size: ZIP64_SUB as u64 + 10,
-                uncompressed_size: ZIP64_SUB as u64 + 10,
-                local_offset: ZIP64_SUB as u64 + 5,
+                compressed_size: u64::from(ZIP64_SUB) + 10,
+                uncompressed_size: u64::from(ZIP64_SUB) + 10,
+                local_offset: u64::from(ZIP64_SUB) + 5,
                 external_attrs: 0o100644 << 16,
                 modified: (0x5A21, 0x0C00),
                 central_extra: Vec::new(),
@@ -2082,7 +2085,7 @@ mod tests {
         // The single central record uses 0xFFFFFFFF placeholders and owns
         // a ZIP64 extra block carrying the real 64-bit sizes.
         assert!(big.windows(4).any(|w| w == CEN_SIG));
-        let huge = (ZIP64_SUB as u64 + 10).to_le_bytes();
+        let huge = (u64::from(ZIP64_SUB) + 10).to_le_bytes();
         assert!(big.windows(8).any(|w| w == huge));
     }
 

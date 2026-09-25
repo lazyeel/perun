@@ -5,8 +5,11 @@
 
 use std::sync::Condvar;
 
-use crate::util::*;
-use crate::win32::*;
+use crate::util::{EventFlags, EventState, HostKind, handle_get, handle_new, read_wide};
+use crate::win32::{
+    BOOL, DWORD, FALSE, HANDLE, INFINITE, LPCSTR, LPCWSTR, SECURITY_ATTRIBUTES, TRUE,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use crate::win32_api;
 
 win32_api! {
@@ -19,7 +22,7 @@ win32_api! {
         // Guest allocates the CRITICAL_SECTION blob; we require it to be at
         // least pointer-sized and store a boxed recursive mutex inside.
         let inner = Box::new(recursive_mutex_init());
-        std::ptr::write(cs as *mut Box<MutexHandle>, inner);
+        std::ptr::write(cs.cast::<Box<MutexHandle>>(), inner);
         TRUE
     }}
 }
@@ -31,10 +34,10 @@ fn recursive_mutex_init() -> libc::pthread_mutex_t {
     let mut m: libc::pthread_mutex_t = unsafe { std::mem::zeroed() };
     let mut attr: libc::pthread_mutexattr_t = unsafe { std::mem::zeroed() };
     unsafe {
-        libc::pthread_mutexattr_init(&mut attr);
-        libc::pthread_mutexattr_settype(&mut attr, libc::PTHREAD_MUTEX_RECURSIVE);
-        libc::pthread_mutex_init(&mut m, &attr);
-        libc::pthread_mutexattr_destroy(&mut attr);
+        libc::pthread_mutexattr_init(&raw mut attr);
+        libc::pthread_mutexattr_settype(&raw mut attr, libc::PTHREAD_MUTEX_RECURSIVE);
+        libc::pthread_mutex_init(&raw mut m, &raw const attr);
+        libc::pthread_mutexattr_destroy(&raw mut attr);
     }
     m
 }
@@ -42,9 +45,9 @@ fn recursive_mutex_init() -> libc::pthread_mutex_t {
 /// Interpret the guest-provided critical section blob.
 ///
 /// # Safety
-/// `cs` must be a blob previously passed to InitializeCriticalSection*.
+/// `cs` must be a blob previously passed to `InitializeCriticalSection`*.
 unsafe fn cs_lock(cs: *mut core::ffi::c_void) -> &'static mut libc::pthread_mutex_t {
-    unsafe { ((cs as *mut Box<MutexHandle>).as_mut().expect("cs blob")) as _ }
+    unsafe { (cs.cast::<Box<MutexHandle>>().as_mut().expect("cs blob")) as _ }
 }
 
 win32_api! {
@@ -74,8 +77,8 @@ win32_api! {
 win32_api! {
     /// void DeleteCriticalSection(PCRITICAL_SECTION);
     unsafe extern "win64" fn DeleteCriticalSection(cs: *mut CRITICAL_SECTION) { unsafe {
-        let mut boxed = Box::from_raw(cs as *mut Box<MutexHandle>);
-        libc::pthread_mutex_destroy(&mut **boxed);
+        let mut boxed = Box::from_raw(cs.cast::<Box<MutexHandle>>());
+        libc::pthread_mutex_destroy(&raw mut **boxed);
         drop(boxed);
     }}
 }
@@ -148,7 +151,7 @@ fn wait_on_event(e: &EventState, timeout_ms: DWORD) -> DWORD {
     let deadline = if timeout_ms == INFINITE {
         None
     } else {
-        Some(std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64))
+        Some(std::time::Instant::now() + std::time::Duration::from_millis(u64::from(timeout_ms)))
     };
     let mut f = e.state.lock().unwrap();
     while !f.signaled {
@@ -187,7 +190,7 @@ win32_api! {
                         locked = cond.wait(locked).unwrap();
                     } else {
                         let dl =
-                            std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
+                            std::time::Instant::now() + std::time::Duration::from_millis(u64::from(timeout_ms));
                         let (l2, res) = cond.wait_timeout(locked, dl - std::time::Instant::now()).unwrap();
                         locked = l2;
                         if res.timed_out() && *locked {
@@ -242,7 +245,7 @@ win32_api! {
     ) -> HANDLE { unsafe {
         let name_s = String::from_utf16_lossy(&read_wide(name));
         if std::env::var("PERUN_TRACE").is_ok() {
-            eprintln!("[perun] CreateMutexW({:?})", name_s);
+            eprintln!("[perun] CreateMutexW({name_s:?})");
         }
         let _ = name_s;
         CreateMutexA(sa, initial_owner, std::ptr::null())

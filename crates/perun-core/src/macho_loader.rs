@@ -1,7 +1,19 @@
 // Copyright 2026 lazyeel (https://github.com/lazyeel)
 // SPDX-License-Identifier: Apache-2.0
 
-//! Native projection of a Mach-O x86_64 image into Linux process memory,
+// Segment offsets and addresses are 64-bit here and the loader works
+// in wrapping arithmetic deliberately: a malformed image must fail
+// its bounds checks, not panic on an overflow, and `wrapping_add`
+// on a bind addend is the documented behaviour rather than an
+// accident. Every result is range-checked before it is mapped.
+#![allow(unknown_lints)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
+
+//! Native projection of a Mach-O `x86_64` image into Linux process memory,
 //! the mirror of `loader.rs` for Apple binaries.
 //!
 //! Same shape as the PE path: parse → map → copy segments → rebase → bind →
@@ -10,7 +22,7 @@
 //! (segment, offset, value) lists, so relocation is direct patching.
 //!
 //! After `MachImage::load`, guest code runs natively on the CPU under the
-//! SysV AMD64 calling convention — no emulation.
+//! `SysV` AMD64 calling convention — no emulation.
 
 use crate::macho::{MachError, MachInfo};
 
@@ -60,6 +72,10 @@ impl MachImage {
     /// Load a Mach-O (thin or fat) at `load_base`, binding imports through
     /// `resolver`. Unresolved imports land on trap micro-stubs exactly like
     /// the PE path, so the first guest call reports instead of crashing.
+    ///
+    /// # Errors
+    ///
+    /// `MachLoadError::Parse` for anything the parser rejects, and `MapFailed` or `SegmentOutOfBounds` for a segment that does not fit the mapping.
     pub fn load(
         input: &[u8],
         load_base: u64,
@@ -69,6 +85,9 @@ impl MachImage {
         Self::load_parsed(info, load_base, resolver)
     }
 
+    /// # Errors
+    ///
+    /// The same as `load`; the owned buffer is handed to the parser so a thin image is not copied.
     /// Load from an owned buffer: thin images parse in place with no copy of
     /// the file content beyond the final mapping.
     pub fn load_owned(
@@ -80,6 +99,9 @@ impl MachImage {
         Self::load_parsed(info, load_base, resolver)
     }
 
+    /// # Errors
+    ///
+    /// Only the mapping half can fail here, since the image is already parsed: `MapFailed` or `SegmentOutOfBounds`.
     /// Load an already-parsed image. Callers that need metadata from the
     /// image before mapping it (export addresses) can parse once and hand
     /// the same `MachInfo` here, avoiding a second read of the file.
@@ -129,7 +151,7 @@ impl MachImage {
         if base == libc::MAP_FAILED {
             return Err(MachLoadError::MapFailed { size: span });
         }
-        let base = base as *mut u8;
+        let base = base.cast::<u8>();
 
         // Zero-fill-tail fixups: patch directly in mapped memory.
         let deferred: Vec<([u8; 16], u64, u64)> =
@@ -181,6 +203,10 @@ impl MachImage {
     /// image outside its mapping: metadata comes from `parse_reader`
     /// (header + targeted tail reads), segment contents are pread directly
     /// into the mapping, and fixups/rdtsc run against the mapped bytes.
+    ///
+    /// # Errors
+    ///
+    /// Whatever reading the file raises, plus the same mapping errors as `load_parsed`.
     pub fn load_file(
         path: &std::path::Path,
         load_base: u64,
@@ -189,6 +215,9 @@ impl MachImage {
         Self::load_file_with_pin(path, load_base, resolver, None)
     }
 
+    /// # Errors
+    ///
+    /// The same as `load_file`; the pin changes which rdtsc table is used, not which failures are possible.
     /// `known_sha256` is a caller-supplied digest for this exact file, letting
     /// the pinned rdtsc table be taken without re-hashing the whole image. See
     /// [`MachImage::pinned_rdtsc_table`] for what a wrong claim does.
@@ -255,14 +284,14 @@ impl MachImage {
         if base == libc::MAP_FAILED {
             return Err(MachLoadError::MapFailed { size: span });
         }
-        let base = base as *mut u8;
+        let base = base.cast::<u8>();
         let img = unsafe {
             Self::map_and_fixup(file, info, base, span, load_base, resolver, known_sha256)?
         };
         Ok(img)
     }
 
-    /// SHA-256 of a file, streamed so the 29 MB CoreFP is never resident.
+    /// SHA-256 of a file, streamed so the 29 MB `CoreFP` is never resident.
     fn file_sha256(file: &std::fs::File) -> std::io::Result<String> {
         use std::os::unix::fs::FileExt;
         let mut h = crate::sha256::Sha256::new();
@@ -296,12 +325,11 @@ impl MachImage {
     ) -> Option<&'static [(u32, u8)]> {
         use crate::rdtsc_sites as s;
         let owned;
-        let digest = match known {
-            Some(d) => d,
-            None => {
-                owned = Self::file_sha256(file).ok()?;
-                owned.as_str()
-            }
+        let digest = if let Some(d) = known {
+            d
+        } else {
+            owned = Self::file_sha256(file).ok()?;
+            owned.as_str()
         };
         match digest {
             s::COREFP_RDTSC_SHA256 => Some(s::COREFP_RDTSC_PATCHES),
@@ -385,6 +413,15 @@ impl MachImage {
                             .trim_end_matches('\0')
                             .to_string(),
                     }))?;
+                // `read_unaligned` is what makes the cast sound: `base` is a
+                // page-aligned mapping and `off` is a slide, so the 8-byte
+                // slot is not guaranteed to be aligned.
+                // `read_unaligned`/`write_unaligned` are what make this sound:
+                // `base` is a page-aligned mapping and `off` is the slide, so
+                // the 8-byte slot need not be 8-aligned. The PE path says the
+                // same thing and is allowed at module scope; this site is
+                // scoped so the rest of the file keeps the lint.
+                #[allow(clippy::cast_ptr_alignment)]
                 let slot = base.add(off).cast::<u64>();
                 let old = slot.read_unaligned();
                 slot.write_unaligned(old.wrapping_add(slide));
@@ -465,7 +502,7 @@ impl MachImage {
         // the whole span is already there and is ours to replace.
         let m = unsafe {
             libc::mmap(
-                base.add(dst_off) as *mut libc::c_void,
+                base.add(dst_off).cast::<libc::c_void>(),
                 len,
                 libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
                 libc::MAP_PRIVATE | libc::MAP_FIXED,
@@ -479,7 +516,7 @@ impl MachImage {
         Ok(true)
     }
 
-    /// x86_64 slice offset of a fat container, 0 for thin files.
+    /// `x86_64` slice offset of a fat container, 0 for thin files.
     fn fat_slice_offset(file: &mut std::fs::File) -> Result<u64, MachLoadError> {
         use std::io::{Read, Seek, SeekFrom};
         // Rewind first: the file position is arbitrary at this point.
@@ -502,7 +539,7 @@ impl MachImage {
             file.read_exact(&mut rec)
                 .map_err(|e| MachLoadError::Parse(e.into()))?;
             let cputype = u32::from_be_bytes(rec[0..4].try_into().unwrap());
-            let offset = u32::from_be_bytes(rec[8..12].try_into().unwrap()) as u64;
+            let offset = u64::from(u32::from_be_bytes(rec[8..12].try_into().unwrap()));
             if cputype == crate::macho::CPU_TYPE_X86_64 {
                 return Ok(offset);
             }
@@ -565,7 +602,7 @@ impl MachImage {
     /// The `pinned` table short-circuits the scan entirely. That matters
     /// because the scan reads the whole `__TEXT,__text` *through the
     /// mapping*, and every page it touches is faulted into the process: for
-    /// CoreFP that was 13.66 MiB, most of it code the guest never runs.
+    /// `CoreFP` that was 13.66 MiB, most of it code the guest never runs.
     /// The sites cluster into 988 distinct 4 KiB pages, so patching them
     /// directly dirties only those and leaves the rest clean on disk.
     fn neutralize_rdtsc_mapped(
@@ -574,6 +611,16 @@ impl MachImage {
         span: usize,
         pinned: Option<&[(u32, u8)]>,
     ) {
+        const IDIOM_A: [u8; 9] = [0x0F, 0x31, 0x48, 0xC1, 0xE2, 0x20, 0x48, 0x09, 0xC2];
+        const REPL_A: [u8; 9] = [0x31, 0xC0, 0x31, 0xD2, 0x90, 0x90, 0x90, 0x90, 0x90];
+        const IDIOM_B: [u8; 12] = [
+            0x0F, 0x31, 0x48, 0x89, 0xD1, 0x48, 0xC1, 0xE1, 0x20, 0x48, 0x09, 0xC1,
+        ];
+        const REPL_B: [u8; 12] = [
+            0x31, 0xC0, 0x31, 0xD2, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+        ];
+        const IDIOM_C: [u8; 10] = [0x0F, 0x31, 0x48, 0xC1, 0xE0, 0x04, 0x48, 0x83, 0xE0, 0x70];
+        const REPL_C: [u8; 10] = [0x31, 0xC0, 0x31, 0xD2, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90];
         let Some((off, size)) = info.text_section else {
             return;
         };
@@ -587,16 +634,6 @@ impl MachImage {
         {
             return;
         }
-        const IDIOM_A: [u8; 9] = [0x0F, 0x31, 0x48, 0xC1, 0xE2, 0x20, 0x48, 0x09, 0xC2];
-        const REPL_A: [u8; 9] = [0x31, 0xC0, 0x31, 0xD2, 0x90, 0x90, 0x90, 0x90, 0x90];
-        const IDIOM_B: [u8; 12] = [
-            0x0F, 0x31, 0x48, 0x89, 0xD1, 0x48, 0xC1, 0xE1, 0x20, 0x48, 0x09, 0xC1,
-        ];
-        const REPL_B: [u8; 12] = [
-            0x31, 0xC0, 0x31, 0xD2, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
-        ];
-        const IDIOM_C: [u8; 10] = [0x0F, 0x31, 0x48, 0xC1, 0xE0, 0x04, 0x48, 0x83, 0xE0, 0x70];
-        const REPL_C: [u8; 10] = [0x31, 0xC0, 0x31, 0xD2, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90];
 
         unsafe {
             let work = std::slice::from_raw_parts_mut(base, span);
@@ -666,7 +703,7 @@ impl MachImage {
         // add nothing: the guest only reads them as inert pointers.
         let zero_page = zero_data_page();
         for b in &info.binds {
-            let resolved = resolver
+            let target = resolver
                 .resolve(&b.name)
                 .map(|p| (p as u64).wrapping_add(b.addend as u64))
                 .or_else(|| {
@@ -682,7 +719,7 @@ impl MachImage {
                         Some(stub as u64)
                     }
                 });
-            let value = resolved.unwrap_or(0);
+            let value = target.unwrap_or(0);
             match info.segment_file_offset(&b.segment, b.seg_off, work.len())? {
                 Some(off) => {
                     if off + 8 > work.len() {
@@ -700,24 +737,29 @@ impl MachImage {
     /// Exported symbol address by name (leading underscore included), in the
     /// loaded layout. Symbols from the classic symtab; the 10.9 images do
     /// not use the export trie for the entry points we need.
+    #[must_use]
     pub fn symbol(&self, name: &str) -> Option<u64> {
         let sym = self.info.symbols.iter().find(|s| s.name == name)?;
         Some((self.base as u64).wrapping_add(sym.addr.wrapping_sub(self.info.base)))
     }
 
+    #[must_use]
     pub fn base(&self) -> *mut u8 {
         self.base
     }
 
+    #[must_use]
     pub fn slide(&self) -> u64 {
         self.slide
     }
 
+    #[must_use]
     pub fn info(&self) -> &MachInfo {
         &self.info
     }
 
     /// Size of the mapped span in bytes.
+    #[must_use]
     pub fn size(&self) -> usize {
         self.size
     }
@@ -737,6 +779,7 @@ impl MachImage {
     ///
     /// # Safety
     /// `addr..addr+len` must be mapped.
+    #[must_use]
     pub unsafe fn read(&self, addr: u64, len: usize) -> Vec<u8> {
         unsafe {
             let mut out = vec![0u8; len];
@@ -835,7 +878,7 @@ static ZERO_DATA_PAGE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 const ZERO_DATA_PAGE_ADDR: usize = 0x1000_0000;
 
 /// A read-only all-zero page used for data imports that the SAP path never
-/// dereferences meaningfully (ObjC runtime refs, constant strings). Reading
+/// dereferences meaningfully (`ObjC` runtime refs, constant strings). Reading
 /// from it returns zeros; writing is not attempted by these paths.
 fn zero_data_page() -> usize {
     *ZERO_DATA_PAGE.get_or_init(|| unsafe {
@@ -901,7 +944,8 @@ mod file_backed_tests {
                 -1,
                 0,
             )
-        } as *mut u8;
+        }
+        .cast::<u8>();
         assert_ne!(base as isize, -1);
 
         // Aligned: mapped from the file.
@@ -930,7 +974,7 @@ mod file_backed_tests {
         };
         assert!(!past, "a destination outside the span cannot be mapped");
 
-        unsafe { libc::munmap(base as *mut libc::c_void, span) };
+        unsafe { libc::munmap(base.cast::<libc::c_void>(), span) };
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -940,7 +984,7 @@ mod rdtsc_table_tests {
     use super::MachImage;
     use crate::rdtsc_sites as sites;
 
-    /// Byte offset of the x86_64 slice in a (possibly fat) Mach-O.
+    /// Byte offset of the `x86_64` slice in a (possibly fat) Mach-O.
     fn fat_slice_of(blob: &[u8]) -> usize {
         if blob.len() < 8 || blob[..4] != [0xca, 0xfe, 0xba, 0xbe] {
             return 0;
@@ -1099,9 +1143,9 @@ mod rdtsc_table_tests {
         assert!(sites::COMMERCECORE_RDTSC_PATCHES.is_empty());
     }
 
-    /// The same equivalence for CommerceKit, which is where the shipped rows
-    /// actually live. Without this the CoreFP half runs vacuously over an
-    /// empty table and a mistyped CommerceKit offset would not be caught.
+    /// The same equivalence for `CommerceKit`, which is where the shipped rows
+    /// actually live. Without this the `CoreFP` half runs vacuously over an
+    /// empty table and a mistyped `CommerceKit` offset would not be caught.
     #[test]
     fn commercekit_table_rows_are_genuine_scan_sites() {
         let dir = std::env::var("PERUN_SAP_DIR").unwrap_or_else(|_| {
@@ -1140,7 +1184,7 @@ mod rdtsc_table_tests {
 
     /// Equivalence over the real images when they are present. The assets
     /// are fetched on first use, so this is conditional — but when it runs
-    /// it is the real thing, over 13.66 MiB of CoreFP code.
+    /// it is the real thing, over 13.66 MiB of `CoreFP` code.
     #[test]
     fn table_matches_scan_on_real_corefp() {
         let dir = std::env::var("PERUN_SAP_DIR").unwrap_or_else(|_| {

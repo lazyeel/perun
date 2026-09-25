@@ -35,7 +35,7 @@ impl Response {
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .get(&name.to_ascii_lowercase())
-            .map(|s| s.as_str())
+            .map(std::string::String::as_str)
     }
 }
 
@@ -179,7 +179,11 @@ fn check_range_response(
     headers: &HashMap<String, String>,
     local: u64,
 ) -> Result<(), String> {
-    let get = |name: &str| headers.get(&name.to_ascii_lowercase()).map(|s| s.as_str());
+    let get = |name: &str| {
+        headers
+            .get(&name.to_ascii_lowercase())
+            .map(std::string::String::as_str)
+    };
     match status {
         200 => Ok(()),
         416 => {
@@ -341,8 +345,8 @@ fn dispatch(
         // with-body one, so the two shapes are dispatched separately; the
         // header application is shared through with_headers().
         let res = match (req.method, req.body.as_ref()) {
-            ("GET", _) | ("DELETE", _) => with_headers(agent.get(&url), &headers).call(),
-            ("POST", Some(body)) | ("PUT", Some(body)) => {
+            ("GET" | "DELETE", _) => with_headers(agent.get(&url), &headers).call(),
+            ("POST" | "PUT", Some(body)) => {
                 with_headers(agent.post(&url), &headers).send(body.clone())
             }
             // A POST with no payload still needs Content-Length: 0, or Apple's
@@ -401,7 +405,7 @@ fn url_join(base: &str, location: &str) -> Result<String, String> {
     // Relative: replace the last path segment of the base.
     let path = b.path();
     let dir = match path.rfind('/') {
-        Some(i) => &path[..i + 1],
+        Some(i) => &path[..=i],
         None => "/",
     };
     let resolved = if dir.ends_with('/') {
@@ -428,7 +432,7 @@ pub fn send(mut req: Request) -> Result<Response, String> {
             req.method,
             req.url,
             req.headers.len(),
-            req.body.as_ref().map_or(0, |b| b.len())
+            req.body.as_ref().map_or(0, std::vec::Vec::len)
         );
     }
 
@@ -448,8 +452,9 @@ pub fn send(mut req: Request) -> Result<Response, String> {
     let host = req
         .url
         .split_once("://")
-        .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(""))
-        .unwrap_or("")
+        .map_or("", |(_, rest)| {
+            rest.split(['/', '?', '#']).next().unwrap_or("")
+        })
         .to_string();
     for set in &set_cookies {
         jar.add_from_set_cookie(set, &host);
@@ -524,7 +529,7 @@ pub fn send(mut req: Request) -> Result<Response, String> {
 
 /// A second agent for the SAP lane.
 ///
-/// The Store agent carries the shared cookie jar; the FairPlay handshake must
+/// The Store agent carries the shared cookie jar; the `FairPlay` handshake must
 /// not receive the `mz_at0-*` session cookies, so this one has none. It still
 /// pools connections, which is where the SAP win comes from.
 static SAP_AGENT: OnceLock<Agent> = OnceLock::new();

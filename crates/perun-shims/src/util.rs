@@ -1,6 +1,16 @@
 // Copyright 2026 lazyeel (https://github.com/lazyeel)
 // SPDX-License-Identifier: Apache-2.0
 
+// The UTF-16 helpers return the guest's own counts; a negative or wide
+// // value here is a caller contract violation the shim reports upstream
+// // rather than one it can mask.
+#![allow(unknown_lints)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
+
 //! Shared shim infrastructure: typed handle system and UTF-16 helpers.
 //!
 //! Win32 handles are polymorphic — the same `CloseHandle` can receive a
@@ -12,7 +22,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 
-use crate::win32::*;
+use crate::win32::{HANDLE, LPCSTR, LPCWSTR, LPWSTR};
 
 // ── Host objects ─────────────────────────────────────────────────────────
 
@@ -28,7 +38,7 @@ pub(crate) struct EventFlags {
 }
 
 pub(crate) enum HostKind {
-    /// Std-stream handles are shared and must not be closed on CloseHandle.
+    /// Std-stream handles are shared and must not be closed on `CloseHandle`.
     File {
         fd: i32,
         shared: bool,
@@ -70,8 +80,7 @@ pub(crate) fn live_contains(ptr: usize) -> bool {
         .lock()
         .unwrap()
         .as_ref()
-        .map(|s| s.contains(&ptr))
-        .unwrap_or(false)
+        .is_some_and(|s| s.contains(&ptr))
 }
 
 /// Allocate a host object and return it as an opaque Win32 handle.
@@ -84,7 +93,7 @@ pub(crate) fn handle_new(kind: HostKind) -> HANDLE {
     )
     .expect("layout");
     // SAFETY: layout is non-zero (size_of::<HostObject>() >= 8).
-    let ptr = unsafe { std::alloc::alloc(layout) as *mut HostObject };
+    let ptr = unsafe { std::alloc::alloc(layout).cast::<HostObject>() };
     assert!(!ptr.is_null(), "host object allocation failed");
     // SAFETY: raw region freshly allocated above.
     unsafe {
@@ -111,7 +120,7 @@ pub(crate) unsafe fn handle_get(h: HANDLE) -> Option<&'static HostObject> {
     }
 }
 
-/// Free a host object (CloseHandle path).
+/// Free a host object (`CloseHandle` path).
 pub(crate) unsafe fn handle_free(h: HANDLE) -> bool {
     unsafe {
         let p = h as usize;
@@ -220,18 +229,19 @@ pub(crate) unsafe fn read_narrow(p: LPCSTR) -> Vec<u8> {
 /// Unix seconds+nanos → FILETIME (100ns ticks since 1601-01-01).
 pub(crate) fn unix_to_filetime(secs: i64, nanos: u32) -> u64 {
     const EPOCH_DIFF: i64 = 11_644_473_600;
-    ((secs + EPOCH_DIFF) as u64) * 10_000_000 + (nanos as u64) / 100
+    ((secs + EPOCH_DIFF) as u64) * 10_000_000 + u64::from(nanos) / 100
 }
 
-/// Read LastErrorValue from the active TEB.
+/// Read `LastErrorValue` from the active TEB.
+#[must_use]
 pub fn get_last_error() -> u32 {
     unsafe {
         let p = perun_core::teb::get_last_error_ptr();
-        if !p.is_null() { *p } else { 0 }
+        if p.is_null() { 0 } else { *p }
     }
 }
 
-/// Write LastErrorValue to the active TEB.
+/// Write `LastErrorValue` to the active TEB.
 pub fn set_last_error(code: u32) {
     unsafe {
         let p = perun_core::teb::get_last_error_ptr();
@@ -257,7 +267,10 @@ mod tests {
         let mut buf = [0u16; 8];
         let n = write_wide(buf.as_mut_ptr(), 8, &wide_from_str("abc"));
         assert_eq!(n, 3);
-        assert_eq!(&buf[..4], &[b'a' as u16, b'b' as u16, b'c' as u16, 0]);
+        assert_eq!(
+            &buf[..4],
+            &[u16::from(b'a'), u16::from(b'b'), u16::from(b'c'), 0]
+        );
     }
 
     #[test]

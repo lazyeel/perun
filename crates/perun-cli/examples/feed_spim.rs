@@ -1,10 +1,10 @@
 // Copyright 2026 lazyeel (https://github.com/lazyeel)
 // SPDX-License-Identifier: Apache-2.0
 
-//! feed_spim: feed a live GSA spim (+dsId) into CoreADI64.dll via honest
+//! `feed_spim`: feed a live GSA spim (+dsId) into CoreADI64.dll via honest
 //! in-process pointers. Model A (flat) vs Model B (envelope), opcodes 0..7.
-//! Signal: any return outside {5016, 5026} or any cpim_out write.
-//! Usage: feed_spim <dll> <spim.raw> [dsId=-2]
+//! Signal: any return outside {5016, 5026} or any `cpim_out` write.
+//! Usage: `feed_spim` <dll> <spim.raw> [dsId=-2]
 //!
 //! Each case runs in its own child process: a wild guest can smash the host
 //! stack past the crash probe, so one address space per case.
@@ -87,7 +87,7 @@ struct InnerStartProv {
     cpim_len_out: u64,
 }
 
-/// vovan2200's DataPacket (Android lane, OTP-shaped): 32-byte header
+/// vovan2200's `DataPacket` (Android lane, OTP-shaped): 32-byte header
 /// (first int32 + 7 pad) then five pointer-or-value arg slots.
 #[repr(C)]
 #[allow(dead_code)]
@@ -101,7 +101,7 @@ struct DataPacket {
     arg5: u64,
 }
 
-/// MainContext wraps the packet plus result/crc words.
+/// `MainContext` wraps the packet plus result/crc words.
 #[repr(C)]
 #[allow(dead_code)]
 struct MainContext {
@@ -131,19 +131,19 @@ fn layout_inner(dsid: u64, spim: u64, session_slot: u64, cpim: u64, len_slot: u6
     s
 }
 
-/// Build a DataPacket region in place: first qword, five arg slots.
+/// Build a `DataPacket` region in place: first qword, five arg slots.
 fn fill_packet(p: *mut u8, first: u64, args: [u64; 5]) {
     unsafe {
         std::ptr::write_bytes(p, 0, 0x48);
-        std::ptr::write_unaligned(p as *mut u64, first);
+        std::ptr::write_unaligned(p.cast::<u64>(), first);
         for (i, a) in args.iter().enumerate() {
-            std::ptr::write_unaligned((p as *mut u64).add(4 + i), *a);
+            std::ptr::write_unaligned(p.cast::<u64>().add(4 + i), *a);
         }
     }
 }
 
 /// Shared DP pair builder for split-arg models: returns
-/// ((ctx_addr, ctx_watches, ctx_blob), (packet_addr, packet_watches, _)).
+/// ((`ctx_addr`, `ctx_watches`, `ctx_blob`), (`packet_addr`, `packet_watches`, _)).
 #[allow(clippy::type_complexity)]
 fn dp_pair(
     opv: u64,
@@ -165,8 +165,8 @@ fn dp_pair(
                 eprintln!("region mmap failed");
                 std::process::exit(1);
             }
-            std::ptr::write_bytes(p as *mut u8, 0, n);
-            p as *mut u8
+            std::ptr::write_bytes(p.cast::<u8>(), 0, n);
+            p.cast::<u8>()
         }
     }
     unsafe {
@@ -187,15 +187,15 @@ fn dp_pair(
                 rotpn as u64,
             ],
         );
-        std::ptr::write_unaligned(rctx as *mut u64, rpacket as u64);
-        std::ptr::write_unaligned((rctx as *mut u32).add(2), 0);
-        std::ptr::write_unaligned((rctx as *mut u32).add(3), 0);
+        std::ptr::write_unaligned(rctx.cast::<u64>(), rpacket as u64);
+        std::ptr::write_unaligned(rctx.cast::<u32>().add(2), 0);
+        std::ptr::write_unaligned(rctx.cast::<u32>().add(3), 0);
         let cw = vec![];
         let pw = vec![
-            (rmid as *const u8, 256),
-            (rmidn as *const u8, 8),
-            (rotp as *const u8, 256),
-            (rotpn as *const u8, 8),
+            (rmid.cast_const(), 256),
+            (rmidn.cast_const(), 8),
+            (rotp.cast_const(), 256),
+            (rotpn.cast_const(), 8),
         ];
         let cb = std::slice::from_raw_parts(rctx, 0x10).to_vec();
         let pb = std::slice::from_raw_parts(rpacket, 0x48).to_vec();
@@ -204,8 +204,8 @@ fn dp_pair(
 }
 
 /// Flat 6-qword vdfut block (vovan2200's raw dump reread): no pad inside —
-/// the pad lives in sub_1d0120's wrapper. [opcode, dsid/value, mid, mid_len,
-/// otp, otp_len]. Opcode 1 = OTP per the dump.
+/// the pad lives in `sub_1d0120`'s wrapper. [opcode, dsid/value, mid, `mid_len`,
+/// otp, `otp_len`]. Opcode 1 = OTP per the dump.
 fn layout_flat(opcode: u64, dsid: u64, mid: u64, mid_len: u64, otp: u64, otp_len: u64) -> Vec<u8> {
     let mut s = vec![0u8; 0x30];
     w64(&mut s, 0x00, opcode);
@@ -308,32 +308,29 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
             return 1;
         }
     };
-    unsafe { perun_core::teb::init_thread_teb(image.base() as u64) };
-    let dll_main = match unsafe { image.entry_dll_main() } {
-        Some(f) => f,
-        None => {
-            eprintln!("no entry");
-            return 1;
-        }
+    let _ = unsafe { perun_core::teb::init_thread_teb(image.base() as u64) };
+    let dll_main = if let Some(f) = unsafe { image.entry_dll_main() } {
+        f
+    } else {
+        eprintln!("no entry");
+        return 1;
     };
     if unsafe { dll_main(image.base(), DLL_PROCESS_ATTACH, std::ptr::null_mut()) } == 0 {
         eprintln!("DllMain FALSE");
         return 3;
     }
-    let op_ptr = match image.get_export_by_name("vdfut768ig") {
-        Some(p) => p,
-        None => {
-            eprintln!("no export");
-            return 1;
-        }
+    let op_ptr = if let Some(p) = image.get_export_by_name("vdfut768ig") {
+        p
+    } else {
+        eprintln!("no export");
+        return 1;
     };
     let op: ExportFn = unsafe { std::mem::transmute(op_ptr) };
-    let init_ptr = match image.get_export_by_name("cvu8io98wun") {
-        Some(p) => p,
-        None => {
-            eprintln!("no init export");
-            return 1;
-        }
+    let init_ptr = if let Some(p) = image.get_export_by_name("cvu8io98wun") {
+        p
+    } else {
+        eprintln!("no init export");
+        return 1;
     };
     let init: ExportFn = unsafe { std::mem::transmute(init_ptr) };
 
@@ -351,8 +348,8 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
                 eprintln!("mmap failed");
                 std::process::exit(1);
             }
-            std::ptr::write_bytes(p as *mut u8, 0, n);
-            p as *mut u8
+            std::ptr::write_bytes(p.cast::<u8>(), 0, n);
+            p.cast::<u8>()
         }
     }
 
@@ -396,14 +393,14 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
                 ],
             );
             unsafe {
-                std::ptr::write_unaligned(rctx as *mut u64, rpacket as u64);
-                std::ptr::write_unaligned((rctx as *mut u32).add(2), 0);
-                std::ptr::write_unaligned((rctx as *mut u32).add(3), 0);
+                std::ptr::write_unaligned(rctx.cast::<u64>(), rpacket as u64);
+                std::ptr::write_unaligned(rctx.cast::<u32>().add(2), 0);
+                std::ptr::write_unaligned(rctx.cast::<u32>().add(3), 0);
             }
-            watches.push((rmid as *const u8, 256));
-            watches.push((rmidn as *const u8, 8));
-            watches.push((rotp as *const u8, 256));
-            watches.push((rotpn as *const u8, 8));
+            watches.push((rmid.cast_const(), 256));
+            watches.push((rmidn.cast_const(), 8));
+            watches.push((rotp.cast_const(), 256));
+            watches.push((rotpn.cast_const(), 8));
             unsafe { std::slice::from_raw_parts(rctx, 0x10).to_vec() }
         }
         "DP2" => {
@@ -442,14 +439,14 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
             }
             let rctx = unsafe { region(0x10) };
             unsafe {
-                std::ptr::write_unaligned(rctx as *mut u64, rblk as u64);
-                std::ptr::write_unaligned((rctx as *mut u32).add(2), 0);
-                std::ptr::write_unaligned((rctx as *mut u32).add(3), 0);
+                std::ptr::write_unaligned(rctx.cast::<u64>(), rblk as u64);
+                std::ptr::write_unaligned(rctx.cast::<u32>().add(2), 0);
+                std::ptr::write_unaligned(rctx.cast::<u32>().add(3), 0);
             }
-            watches.push((rmid as *const u8, 256));
-            watches.push((rmidn as *const u8, 8));
-            watches.push((rotp as *const u8, 256));
-            watches.push((rotpn as *const u8, 8));
+            watches.push((rmid.cast_const(), 256));
+            watches.push((rmidn.cast_const(), 8));
+            watches.push((rotp.cast_const(), 256));
+            watches.push((rotpn.cast_const(), 8));
             split = Some((rctx as u64, rblk as u64));
             unsafe { std::slice::from_raw_parts(rctx, 0x10).to_vec() }
         }
@@ -472,10 +469,10 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
                     rotpn as u64,
                 ],
             );
-            watches.push((rmid as *const u8, 256));
-            watches.push((rmidn as *const u8, 8));
-            watches.push((rotp as *const u8, 256));
-            watches.push((rotpn as *const u8, 8));
+            watches.push((rmid.cast_const(), 256));
+            watches.push((rmidn.cast_const(), 8));
+            watches.push((rotp.cast_const(), 256));
+            watches.push((rotpn.cast_const(), 8));
             layout_b(rpacket as u64, 0)
         }
         "FLAT" => {
@@ -492,10 +489,10 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
                 rotp as u64,
                 rotpn as u64,
             );
-            watches.push((rmid as *const u8, 256));
-            watches.push((rmidn as *const u8, 8));
-            watches.push((rotp as *const u8, 256));
-            watches.push((rotpn as *const u8, 8));
+            watches.push((rmid.cast_const(), 256));
+            watches.push((rmidn.cast_const(), 8));
+            watches.push((rotp.cast_const(), 256));
+            watches.push((rotpn.cast_const(), 8));
             blk
         }
         "INV" => {
@@ -531,8 +528,8 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
         Some((a0, a1)) => unsafe { op(a0, a1, 0, 0) },
         None => unsafe { op(rstruct as u64, rstruct as u64, 0, 0) },
     };
-    let scpim = unsafe { std::slice::from_raw_parts(rcp as *const u8, CPIM_CAP) };
-    let sslots = unsafe { std::slice::from_raw_parts(rslots as *const u8, 16) };
+    let scpim = unsafe { std::slice::from_raw_parts(rcp.cast_const(), CPIM_CAP) };
+    let sslots = unsafe { std::slice::from_raw_parts(rslots.cast_const(), 16) };
     let wrote = scpim.iter().any(|&b| b != 0)
         || sslots.iter().any(|&b| b != 0)
         || watches

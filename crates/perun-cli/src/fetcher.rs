@@ -291,7 +291,7 @@ fn payload_range(url: &str) -> Result<(u64, u64), String> {
     if head.len() < 24 || &head[..4] != b"xar!" {
         return Err("update package is not a xar container".into());
     }
-    let hlen = u16::from_be_bytes(head[4..6].try_into().unwrap()) as u64;
+    let hlen = u64::from(u16::from_be_bytes(head[4..6].try_into().unwrap()));
     let toc_cl = u64::from_be_bytes(head[8..16].try_into().unwrap());
     let toc_raw = range(url, hlen, hlen + toc_cl - 1)?;
     let toc = inflate_zlib(&toc_raw)?;
@@ -489,7 +489,7 @@ pub fn ensure_cache(verbose: bool) -> Result<PathBuf, String> {
         skip(&mut stream, file_size)?;
         walked += file_size;
         if walked > PROGRESS_EVERY && walked % PROGRESS_EVERY < (8 << 20) {
-            eprintln!("[fetcher] walking archive: {walked} decompressed bytes…",);
+            eprintln!("[fetcher] walking archive: {walked} decompressed bytes…");
         }
     }
 

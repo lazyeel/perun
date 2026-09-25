@@ -5,7 +5,7 @@
 //! libSystem surface for the SAP phase.
 //!
 //! Style lints are relaxed crate-wide: the Win32 half mirrors the native
-//! ABI (CRITICAL_SECTION, wYear, FARPROC…), and the Mach half carries
+//! ABI (`CRITICAL_SECTION`, wYear, FARPROC…), and the Mach half carries
 //! Apple's C names verbatim — renaming them to Rust style would break
 //! the 1:1 mapping to the reference interposer. Phase-1 shims are kept
 //! even where the SAP path no longer exercises them.

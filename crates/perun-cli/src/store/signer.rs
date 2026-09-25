@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The bag-driven SAP action signer: drives the native `SapRuntime`
-//! (CommerceKit guest mapped into this process) through the setup rounds
+//! (`CommerceKit` guest mapped into this process) through the setup rounds
 //! using the endpoints from the live bag, then signs request bodies into
 //! `X-Apple-ActionSignature`.
 
@@ -23,7 +23,7 @@ pub struct Signer {
 
 impl Signer {
     /// Full setup: assets → init → cert exchange → setup exchange.
-    /// `mac` seeds the FairPlay hardware identity (6 bytes).
+    /// `mac` seeds the `FairPlay` hardware identity (6 bytes).
     pub fn new(config: &SAPConfig, mac: [u8; 6]) -> Result<Signer, String> {
         let assets = super::ensure_sap_assets()?;
         let mut runtime = SapRuntime::new(&assets).map_err(|e| format!("SAP runtime: {e}"))?;
@@ -47,7 +47,7 @@ impl Signer {
         }
 
         let (req1, st1) = runtime
-            .exchange(config.version as u64, mac, &cert)
+            .exchange(u64::from(config.version), mac, &cert)
             .map_err(|e| format!("exchange(cert): {e}"))?;
         if st1 != 1 {
             return Err(format!("exchange(cert) state {st1} != 1"));
@@ -55,7 +55,7 @@ impl Signer {
 
         let reply = post_setup_buffer(&config.setup_url, &req1)?;
         let (_req2, st2) = runtime
-            .exchange(config.version as u64, mac, &reply)
+            .exchange(u64::from(config.version), mac, &reply)
             .map_err(|e| format!("exchange(setup): {e}"))?;
         if st2 != 0 {
             return Err(format!("exchange(setup) state {st2} != 0"));
@@ -105,7 +105,7 @@ fn post_setup_buffer(url: &str, buffer: &[u8]) -> Result<Vec<u8>, String> {
     let doc = plist::parse_xml(&res.body).map_err(|e| format!("signSapSetup parse: {e}"))?;
     doc.get("sign-sap-setup-buffer")
         .and_then(|v| v.as_data())
-        .map(|d| d.to_vec())
+        .map(<[u8]>::to_vec)
         .ok_or_else(|| "signSapSetup: missing reply buffer".to_string())
 }
 

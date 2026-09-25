@@ -116,18 +116,15 @@ fn parse(persona: Persona, argv: &[String], locals: &[(&str, bool)]) -> Invocati
             };
             let matched = match name {
                 "format" => {
-                    let value = match inline {
-                        Some(v) => v,
-                        None => {
-                            i += 1;
-                            match argv.get(i) {
-                                Some(v) => v.clone(),
-                                None => {
-                                    inv.usage_error =
-                                        Some("flag needs an argument: --format".into());
-                                    return inv;
-                                }
-                            }
+                    let value = if let Some(v) = inline {
+                        v
+                    } else {
+                        i += 1;
+                        if let Some(v) = argv.get(i) {
+                            v.clone()
+                        } else {
+                            inv.usage_error = Some("flag needs an argument: --format".into());
+                            return inv;
                         }
                     };
                     match value.as_str() {
@@ -151,19 +148,16 @@ fn parse(persona: Persona, argv: &[String], locals: &[(&str, bool)]) -> Invocati
                     true
                 }
                 "keychain-passphrase" => {
-                    let value = match inline {
-                        Some(v) => v,
-                        None => {
-                            i += 1;
-                            match argv.get(i) {
-                                Some(v) => v.clone(),
-                                None => {
-                                    inv.usage_error = Some(
-                                        "flag needs an argument: --keychain-passphrase".into(),
-                                    );
-                                    return inv;
-                                }
-                            }
+                    let value = if let Some(v) = inline {
+                        v
+                    } else {
+                        i += 1;
+                        if let Some(v) = argv.get(i) {
+                            v.clone()
+                        } else {
+                            inv.usage_error =
+                                Some("flag needs an argument: --keychain-passphrase".into());
+                            return inv;
                         }
                     };
                     inv.keychain_passphrase = value;
@@ -183,18 +177,16 @@ fn parse(persona: Persona, argv: &[String], locals: &[(&str, bool)]) -> Invocati
                         locals.iter().find(|(n, _)| *n == long_form.as_str())
                     {
                         let value = if *takes_value {
-                            match inline {
-                                Some(v) => v,
-                                None => {
-                                    i += 1;
-                                    match argv.get(i) {
-                                        Some(v) => v.clone(),
-                                        None => {
-                                            inv.usage_error =
-                                                Some(format!("flag needs an argument: --{name}"));
-                                            return inv;
-                                        }
-                                    }
+                            if let Some(v) = inline {
+                                v
+                            } else {
+                                i += 1;
+                                if let Some(v) = argv.get(i) {
+                                    v.clone()
+                                } else {
+                                    inv.usage_error =
+                                        Some(format!("flag needs an argument: --{name}"));
+                                    return inv;
                                 }
                             }
                         } else {
@@ -225,17 +217,16 @@ fn parse(persona: Persona, argv: &[String], locals: &[(&str, bool)]) -> Invocati
                         a[2..].to_string()
                     } else {
                         i += 1;
-                        match argv.get(i) {
-                            Some(v) => v.clone(),
-                            None => {
-                                let bare = name.trim_start_matches('-');
-                                inv.usage_error = Some(if persona == Persona::Ipatool {
-                                    format!("flag needs an argument: '{bare}' in -{bare}")
-                                } else {
-                                    format!("flag needs an argument: {name}")
-                                });
-                                return inv;
-                            }
+                        if let Some(v) = argv.get(i) {
+                            v.clone()
+                        } else {
+                            let bare = name.trim_start_matches('-');
+                            inv.usage_error = Some(if persona == Persona::Ipatool {
+                                format!("flag needs an argument: '{bare}' in -{bare}")
+                            } else {
+                                format!("flag needs an argument: {name}")
+                            });
+                            return inv;
                         }
                     };
                     inv.flags.push((name.to_string(), value));
@@ -429,7 +420,7 @@ fn interactive_orchestration(args: &[String]) -> bool {
             "--non-interactive" => return false,
             "--format" => {
                 // --format json silences the hint (bots); --format text does not.
-                if args.get(i + 1).map(|v| v == "json").unwrap_or(false) {
+                if args.get(i + 1).is_some_and(|v| v == "json") {
                     return false;
                 }
                 i += 2;
@@ -718,7 +709,7 @@ impl Ctx {
     }
 }
 
-/// Build the ctx; on usage_error/help/version short-circuits, handle
+/// Build the ctx; on `usage_error/help/version` short-circuits, handle
 /// them right here and return None.
 fn begin(
     persona: Persona,
@@ -749,20 +740,19 @@ fn begin(
         // single-threaded before any I/O threads spawn, so this is sound.
         unsafe { std::env::set_var("PERUN_STORE_HTTP_DEBUG", "1") };
     }
-    Some(Ok(Ctx { out, inv, persona }))
+    Some(Ok(Ctx { inv, out, persona }))
 }
 
 /// Load the saved account (majd: keychain → we: the encrypted store; the
 /// `--keychain-passphrase` maps onto our KDF passphrase).
 fn require_account(ctx: &Ctx) -> Result<Account, i32> {
-    match account::load(&ctx.inv.keychain_passphrase) {
-        Ok(acc) => Ok(acc),
-        Err(_) => {
-            ctx.fail_msg(
-                "failed to get account: failed to get item: The specified item could not be found in the keyring",
-            );
-            Err(1)
-        }
+    if let Ok(acc) = account::load(&ctx.inv.keychain_passphrase) {
+        Ok(acc)
+    } else {
+        ctx.fail_msg(
+            "failed to get account: failed to get item: The specified item could not be found in the keyring",
+        );
+        Err(1)
     }
 }
 
@@ -794,7 +784,7 @@ fn resolve_app(ctx: &Ctx, acc: &Account) -> Result<appstore::App, i32> {
     // perun superset: a positional term resolves like the search UX —
     // id / bundle id / free-text (first hit). Strict ipatool ignores it.
     let positional = if ctx.persona == Persona::Perun {
-        ctx.inv.positional.first().map(|s| s.as_str())
+        ctx.inv.positional.first().map(std::string::String::as_str)
     } else {
         None
     };
@@ -867,7 +857,10 @@ fn resolve_cache_read(key: &str) -> Option<appstore::App> {
     let path = resolve_cache_dir()?.join(format!("{}.json", sanitize_cache_name(key)));
     let text = std::fs::read_to_string(path).ok()?;
     let entry = super::json::parse(&text).ok()?;
-    let ts = entry.get("ts").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
+    let ts = entry
+        .get("ts")
+        .and_then(super::json::Json::as_i64)
+        .unwrap_or(0) as u64;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
@@ -883,11 +876,17 @@ fn resolve_cache_read(key: &str) -> Option<appstore::App> {
             .to_string()
     };
     Some(appstore::App {
-        id: entry.get("id").and_then(|v| v.as_i64()).unwrap_or(0),
+        id: entry
+            .get("id")
+            .and_then(super::json::Json::as_i64)
+            .unwrap_or(0),
         bundle_id: get("bundleId"),
         name: get("name"),
         version: get("version"),
-        price: entry.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        price: entry
+            .get("price")
+            .and_then(super::json::Json::as_f64)
+            .unwrap_or(0.0),
         purchase_date: None,
         developer: get("developer"),
         description: get("description"),
@@ -910,8 +909,7 @@ fn resolve_cache_write(key: &str, app: &appstore::App) {
         json_quote(&app.description),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
+            .map_or(0, |d| d.as_secs()),
     );
     let _ = std::fs::write(dir.join(format!("{}.json", sanitize_cache_name(key))), json);
 }
@@ -1044,11 +1042,11 @@ fn read_prompt(prompt: &str, masked: bool) -> std::io::Result<String> {
     let mut term: Option<libc::termios> = None;
     unsafe {
         let mut t: libc::termios = std::mem::zeroed();
-        if libc::tcgetattr(libc::STDIN_FILENO, &mut t) == 0 {
+        if libc::tcgetattr(libc::STDIN_FILENO, &raw mut t) == 0 {
             term = Some(t);
             let mut raw = t;
-            libc::cfmakeraw(&mut raw);
-            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw);
+            libc::cfmakeraw(&raw mut raw);
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw const raw);
         }
     }
     let restore = |saved: &Option<libc::termios>| unsafe {
@@ -1346,21 +1344,18 @@ fn cmd_auth_info(persona: Persona, args: &[String]) -> i32 {
         Ok(c) => c,
         Err(code) => return code,
     };
-    match account::load(&ctx.inv.keychain_passphrase) {
-        Ok(acc) => {
-            ctx.out.log(&[
-                ("name", out::Field::Str(acc.name.clone())),
-                ("email", out::Field::Str(acc.email.clone())),
-                ("success", out::Field::Bool(true)),
-            ]);
-            0
-        }
-        Err(_) => {
-            ctx.fail_msg(
-                "failed to get account: failed to get item: The specified item could not be found in the keyring",
-            );
-            1
-        }
+    if let Ok(acc) = account::load(&ctx.inv.keychain_passphrase) {
+        ctx.out.log(&[
+            ("name", out::Field::Str(acc.name.clone())),
+            ("email", out::Field::Str(acc.email.clone())),
+            ("success", out::Field::Bool(true)),
+        ]);
+        0
+    } else {
+        ctx.fail_msg(
+            "failed to get account: failed to get item: The specified item could not be found in the keyring",
+        );
+        1
     }
 }
 
@@ -1420,11 +1415,10 @@ fn cmd_search(persona: Persona, args: &[String]) -> i32 {
             }
             ctx.inv.positional[0].clone()
         }
-        Persona::Perun => ctx
-            .inv
-            .get(&["-t", "--term"])
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| ctx.inv.positional.first().cloned().unwrap_or_default()),
+        Persona::Perun => ctx.inv.get(&["-t", "--term"]).map_or_else(
+            || ctx.inv.positional.first().cloned().unwrap_or_default(),
+            std::string::ToString::to_string,
+        ),
     };
     let limit_raw = ctx.inv.get(&["-l", "--limit"]).unwrap_or("5");
     let limit: i64 = match parse_search_limit_for(ctx.persona, limit_raw) {
@@ -1517,7 +1511,7 @@ fn cmd_search(persona: Persona, args: &[String]) -> i32 {
             let plats = if show_platforms {
                 a.platforms
                     .iter()
-                    .map(|s| s.as_str())
+                    .map(std::string::String::as_str)
                     .collect::<Vec<&str>>()
             } else {
                 Vec::new()
@@ -1898,7 +1892,7 @@ fn cmd_list_purchases(persona: Persona, args: &[String]) -> i32 {
                         a.purchase_date.as_deref(),
                         a.platforms
                             .iter()
-                            .map(|s| s.as_str())
+                            .map(std::string::String::as_str)
                             .collect::<Vec<&str>>(),
                     )
                 })

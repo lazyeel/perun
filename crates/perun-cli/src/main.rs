@@ -34,7 +34,7 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
     unsafe {
         let si_addr = (*info).si_addr() as u64;
         // ucontext_t.gregs layout (x86_64 glibc): REG_RIP=16, REG_RSP=19, etc.
-        let uc = ctx as *mut libc::ucontext_t;
+        let uc = ctx.cast::<libc::ucontext_t>();
         let regs = (*uc).uc_mcontext.gregs.as_mut_ptr();
         let rip = *regs.add(libc::REG_RIP as usize) as u64;
         let rsp = *regs.add(libc::REG_RSP as usize) as u64;
@@ -139,15 +139,15 @@ pub unsafe fn install_crash_probe() {
         let mut ss: libc::stack_t = std::mem::zeroed();
         ss.ss_sp = std::ptr::addr_of_mut!(ALT).cast();
         ss.ss_size = 64 * 1024;
-        libc::sigaltstack(&ss, std::ptr::null_mut());
+        libc::sigaltstack(&raw const ss, std::ptr::null_mut());
 
         let mut act: libc::sigaction = std::mem::zeroed();
         act.sa_sigaction = crash_handler as *const () as usize;
         act.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
-        libc::sigaction(libc::SIGSEGV, &act, std::ptr::null_mut());
-        libc::sigaction(libc::SIGFPE, &act, std::ptr::null_mut());
-        libc::sigaction(libc::SIGBUS, &act, std::ptr::null_mut());
-        libc::sigaction(libc::SIGTRAP, &act, std::ptr::null_mut());
+        libc::sigaction(libc::SIGSEGV, &raw const act, std::ptr::null_mut());
+        libc::sigaction(libc::SIGFPE, &raw const act, std::ptr::null_mut());
+        libc::sigaction(libc::SIGBUS, &raw const act, std::ptr::null_mut());
+        libc::sigaction(libc::SIGTRAP, &raw const act, std::ptr::null_mut());
     }
 }
 
@@ -388,7 +388,7 @@ fn cmd_run(args: &[String]) -> i32 {
     if opts.no_teb {
         println!("[perun] phase0: TEB/GS setup SKIPPED (--no-teb)");
     } else {
-        unsafe { perun_core::teb::init_thread_teb(image.base() as u64) };
+        let _ = unsafe { perun_core::teb::init_thread_teb(image.base() as u64) };
         println!("[perun] phase0: FakeTEB installed at GS_BASE");
     }
 
@@ -431,12 +431,11 @@ fn cmd_run(args: &[String]) -> i32 {
     }
 
     // Phase 2: DllMain(DLL_PROCESS_ATTACH).
-    let dll_main = match unsafe { image.entry_dll_main() } {
-        Some(f) => f,
-        None => {
-            eprintln!("error: image has no entry point");
-            return 1;
-        }
+    let dll_main = if let Some(f) = unsafe { image.entry_dll_main() } {
+        f
+    } else {
+        eprintln!("error: image has no entry point");
+        return 1;
     };
     println!("[perun] calling DllMain(DLL_PROCESS_ATTACH)...");
     let ret = unsafe { dll_main(image.base(), DLL_PROCESS_ATTACH, std::ptr::null_mut()) };
@@ -451,7 +450,7 @@ fn cmd_run(args: &[String]) -> i32 {
 
 /// `perun call <image.dll> <export> [arg0 arg1 arg2 arg3]`
 ///
-/// Loads the image, runs DllMain, then invokes the named export through the
+/// Loads the image, runs `DllMain`, then invokes the named export through the
 /// Win64 ABI with up to four integer/pointer arguments. Each argument is
 /// parsed as hex (0x…) or decimal. Arguments that look like pointers are
 /// backed by a zeroed scratch page so the guest can read/write them safely.
@@ -499,14 +498,13 @@ fn cmd_call(args: &[String]) -> i32 {
         }
     };
 
-    unsafe { perun_core::teb::init_thread_teb(image.base() as u64) };
+    let _ = unsafe { perun_core::teb::init_thread_teb(image.base() as u64) };
 
-    let dll_main = match unsafe { image.entry_dll_main() } {
-        Some(f) => f,
-        None => {
-            eprintln!("error: image has no entry point");
-            return 1;
-        }
+    let dll_main = if let Some(f) = unsafe { image.entry_dll_main() } {
+        f
+    } else {
+        eprintln!("error: image has no entry point");
+        return 1;
     };
     let ret = unsafe { dll_main(image.base(), DLL_PROCESS_ATTACH, std::ptr::null_mut()) };
     if ret == 0 {
@@ -515,12 +513,11 @@ fn cmd_call(args: &[String]) -> i32 {
     }
     println!("[perun] DllMain TRUE; shim table {} APIs", table.len());
 
-    let export_ptr = match image.get_export_by_name(export_name) {
-        Some(p) => p,
-        None => {
-            eprintln!("error: export {export_name:?} not found");
-            return 1;
-        }
+    let export_ptr = if let Some(p) = image.get_export_by_name(export_name) {
+        p
+    } else {
+        eprintln!("error: export {export_name:?} not found");
+        return 1;
     };
     println!("[perun] export {export_name} @ {:#x}", export_ptr as usize);
 
@@ -539,7 +536,7 @@ fn cmd_call(args: &[String]) -> i32 {
         eprintln!("error: scratch mmap failed");
         return 1;
     }
-    unsafe { std::ptr::write_bytes(scratch as *mut u8, 0, 0x1000) };
+    unsafe { std::ptr::write_bytes(scratch.cast::<u8>(), 0, 0x1000) };
 
     // A larger zeroed region to stand in for a guest context struct. The token
     // "ctx" resolves to it, so callers can point a global at a fake context.
@@ -558,7 +555,7 @@ fn cmd_call(args: &[String]) -> i32 {
         eprintln!("error: ctx mmap failed");
         return 1;
     }
-    unsafe { std::ptr::write_bytes(ctx as *mut u8, 0, ctx_size) };
+    unsafe { std::ptr::write_bytes(ctx.cast::<u8>(), 0, ctx_size) };
 
     // --load=NAME=FILE: read a file into a fresh guest-visible buffer and
     // register NAME as a token resolving to its address. This is how real
@@ -598,7 +595,7 @@ fn cmd_call(args: &[String]) -> i32 {
     let mut poke_ptr_specs: Vec<(u64, String)> = Vec::new();
     // The positional stream (with --verbose already filtered out) drives both
     // the argument slots and the --patch/--poke/--peek option parsing below.
-    for a in pos[2..].iter() {
+    for a in &pos[2..] {
         if let Some(spec) = a.strip_prefix("--load=") {
             let (name, path) = spec.split_once('=').unwrap_or((spec, ""));
             let data = match std::fs::read(path) {
@@ -623,7 +620,7 @@ fn cmd_call(args: &[String]) -> i32 {
                 eprintln!("error: --load mmap failed");
                 std::process::exit(2);
             }
-            unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), buf as *mut u8, len) };
+            unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), buf.cast::<u8>(), len) };
             println!("[perun] load {name:?} <- {path} ({len} bytes @ {buf:p})");
             loads.push((name.to_string(), buf as u64, len));
             continue;
@@ -634,7 +631,7 @@ fn cmd_call(args: &[String]) -> i32 {
                 eprintln!("error: bad --patch rva {rva_s:?}");
                 std::process::exit(2);
             });
-            let clean: String = hex_s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+            let clean: String = hex_s.chars().filter(char::is_ascii_hexdigit).collect();
             if !clean.len().is_multiple_of(2) || clean.is_empty() {
                 eprintln!("error: bad --patch bytes {hex_s:?}");
                 std::process::exit(2);
@@ -696,7 +693,7 @@ fn cmd_call(args: &[String]) -> i32 {
 
     // Resolve positional args after all options so --load/--poke/--patch are
     // registered first regardless of CLI order.
-    for a in positional.iter() {
+    for a in &positional {
         if ai >= 4 {
             break;
         }
@@ -812,7 +809,7 @@ fn cmd_call(args: &[String]) -> i32 {
 
     // --peek=RVA[,RVA...]: read qwords from guest memory after the call so the
     // caller can watch globals (e.g. the provisioning gate) for writes.
-    for spec in peeks.iter() {
+    for spec in &peeks {
         for part in spec.split(',') {
             let part = part.trim();
             if part.is_empty() {
@@ -831,7 +828,7 @@ fn cmd_call(args: &[String]) -> i32 {
     // --peek-ptr=RVA[,RVA...]: read the qword at each guest RVA as a host
     // pointer and dump the first 64 bytes of the pointed-to object. This is
     // how we inspect the provisioning-gate object behind the double deref.
-    for spec in peek_ptrs.iter() {
+    for spec in &peek_ptrs {
         for part in spec.split(',') {
             let part = part.trim();
             if part.is_empty() {
@@ -909,17 +906,17 @@ fn resolve_token(tok: &str, scratch: u64, ctx: u64, loads: &[(String, u64, usize
 
 /// `perun seq <image.dll> <export> --script=FILE`
 ///
-/// Load the image once, run DllMain once, then drive a SCRIPT of export calls
+/// Load the image once, run `DllMain` once, then drive a SCRIPT of export calls
 /// in the SAME process so guest state carries across calls. This mirrors how a
 /// real host (iTunes on Windows, the ADI engine on Android) drives the ADI
-/// provisioning sequence: SetProvisioningPath -> SetAndroidID -> GetLoginCode
-/// -> ProvisioningStart -> ProvisioningEnd, all folded into dispatcher command
+/// provisioning sequence: `SetProvisioningPath` -> `SetAndroidID` -> `GetLoginCode`
+/// -> `ProvisioningStart` -> `ProvisioningEnd`, all folded into dispatcher command
 /// codes on the Windows DLL.
 ///
 /// Script lines (whitespace-separated, `#` starts a comment):
 ///   load NAME FILE          read FILE into a named guest buffer
 ///   poke TARGET VALUE       write a qword; TARGET = scratch+OFF | ctx+OFF | RVA
-///   call A0 A1 A2 A3        call the export; args are tokens (see resolve_token)
+///   call A0 A1 A2 A3        call the export; args are tokens (see `resolve_token`)
 ///   zero scratch|ctx        clear the region
 ///   dump                    print non-zero qwords of scratch and ctx
 fn cmd_seq(args: &[String]) -> i32 {
@@ -930,17 +927,16 @@ fn cmd_seq(args: &[String]) -> i32 {
     let path = &args[0];
     let export_name = &args[1];
     let mut script_path: Option<String> = None;
-    for a in args[2..].iter() {
+    for a in &args[2..] {
         if let Some(p) = a.strip_prefix("--script=") {
             script_path = Some(p.to_string());
         }
     }
-    let script_path = match script_path {
-        Some(p) => p,
-        None => {
-            eprintln!("error: --script=FILE required");
-            return 2;
-        }
+    let script_path = if let Some(p) = script_path {
+        p
+    } else {
+        eprintln!("error: --script=FILE required");
+        return 2;
     };
 
     let bytes = match std::fs::read(path) {
@@ -958,13 +954,12 @@ fn cmd_seq(args: &[String]) -> i32 {
             return 1;
         }
     };
-    unsafe { perun_core::teb::init_thread_teb(image.base() as u64) };
-    let dll_main = match unsafe { image.entry_dll_main() } {
-        Some(f) => f,
-        None => {
-            eprintln!("error: image has no entry point");
-            return 1;
-        }
+    let _ = unsafe { perun_core::teb::init_thread_teb(image.base() as u64) };
+    let dll_main = if let Some(f) = unsafe { image.entry_dll_main() } {
+        f
+    } else {
+        eprintln!("error: image has no entry point");
+        return 1;
     };
     let ret = unsafe { dll_main(image.base(), DLL_PROCESS_ATTACH, std::ptr::null_mut()) };
     if ret == 0 {
@@ -972,12 +967,11 @@ fn cmd_seq(args: &[String]) -> i32 {
         return 3;
     }
     println!("[perun] DllMain TRUE; shim table {} APIs", table.len());
-    let export_ptr = match image.get_export_by_name(export_name) {
-        Some(p) => p,
-        None => {
-            eprintln!("error: export {export_name:?} not found");
-            return 1;
-        }
+    let export_ptr = if let Some(p) = image.get_export_by_name(export_name) {
+        p
+    } else {
+        eprintln!("error: export {export_name:?} not found");
+        return 1;
     };
     println!("[perun] export {export_name} @ {:#x}", export_ptr as usize);
 
@@ -995,7 +989,7 @@ fn cmd_seq(args: &[String]) -> i32 {
         eprintln!("error: scratch mmap failed");
         return 1;
     }
-    unsafe { std::ptr::write_bytes(scratch as *mut u8, 0, 0x1000) };
+    unsafe { std::ptr::write_bytes(scratch.cast::<u8>(), 0, 0x1000) };
     let ctx_size = 0x10000usize;
     let ctx = unsafe {
         libc::mmap(
@@ -1011,7 +1005,7 @@ fn cmd_seq(args: &[String]) -> i32 {
         eprintln!("error: ctx mmap failed");
         return 1;
     }
-    unsafe { std::ptr::write_bytes(ctx as *mut u8, 0, ctx_size) };
+    unsafe { std::ptr::write_bytes(ctx.cast::<u8>(), 0, ctx_size) };
 
     // Each `call` step re-resolves the export by name, so the default export
     // resolved above is only the fallback for scripts that never name one.
@@ -1074,7 +1068,7 @@ fn cmd_seq(args: &[String]) -> i32 {
                     eprintln!("[seq] step {step}: load mmap failed");
                     return 1;
                 }
-                unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), buf as *mut u8, len) };
+                unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), buf.cast::<u8>(), len) };
                 println!(
                     "[seq] step {step}: load {:?} <- {} ({len} bytes @ {buf:p})",
                     toks[1], toks[2]
@@ -1087,13 +1081,13 @@ fn cmd_seq(args: &[String]) -> i32 {
                     return 2;
                 }
                 let tgt = toks[1];
-                let val = match resolve_token(toks[2], scratch as u64, ctx as u64, &loads) {
-                    Some(v) => v,
-                    None => {
+                let val =
+                    if let Some(v) = resolve_token(toks[2], scratch as u64, ctx as u64, &loads) {
+                        v
+                    } else {
                         eprintln!("[seq] step {step}: bad poke value {:?}", toks[2]);
                         return 2;
-                    }
-                };
+                    };
                 let (dst, label) = if let Some(off_s) = tgt.strip_prefix("scratch+") {
                     let off = parse_num(off_s).unwrap();
                     (
@@ -1122,8 +1116,8 @@ fn cmd_seq(args: &[String]) -> i32 {
                     return 2;
                 }
                 match toks[1] {
-                    "scratch" => unsafe { std::ptr::write_bytes(scratch as *mut u8, 0, 0x1000) },
-                    "ctx" => unsafe { std::ptr::write_bytes(ctx as *mut u8, 0, ctx_size) },
+                    "scratch" => unsafe { std::ptr::write_bytes(scratch.cast::<u8>(), 0, 0x1000) },
+                    "ctx" => unsafe { std::ptr::write_bytes(ctx.cast::<u8>(), 0, ctx_size) },
                     other => {
                         eprintln!("[seq] step {step}: zero {other}?");
                         return 2;
@@ -1138,24 +1132,23 @@ fn cmd_seq(args: &[String]) -> i32 {
             }
             "call" => {
                 let export_name = toks.get(1).copied().unwrap_or("vdfut768ig");
-                let export_ptr = match image.get_export_by_name(export_name) {
-                    Some(p) => p,
-                    None => {
-                        eprintln!("[seq] step {step}: export {export_name:?} not found");
-                        return 1;
-                    }
+                let export_ptr = if let Some(p) = image.get_export_by_name(export_name) {
+                    p
+                } else {
+                    eprintln!("[seq] step {step}: export {export_name:?} not found");
+                    return 1;
                 };
                 type ExportFn = unsafe extern "win64" fn(u64, u64, u64, u64) -> u64;
                 let f: ExportFn = unsafe { std::mem::transmute(export_ptr) };
                 let mut argv = [0u64; 4];
                 for (i, slot) in argv.iter_mut().enumerate() {
                     let tok = toks.get(i + 2).copied().unwrap_or("0");
-                    *slot = match resolve_token(tok, scratch as u64, ctx as u64, &loads) {
-                        Some(v) => v,
-                        None => {
-                            eprintln!("[seq] step {step}: bad call arg {tok:?}");
-                            return 2;
-                        }
+                    *slot = if let Some(v) = resolve_token(tok, scratch as u64, ctx as u64, &loads)
+                    {
+                        v
+                    } else {
+                        eprintln!("[seq] step {step}: bad call arg {tok:?}");
+                        return 2;
                     };
                 }
                 println!(
@@ -1190,7 +1183,7 @@ unsafe fn probe_read(p: *const u8, len: usize) -> bool {
             return false;
         }
         // write(2) will return EFAULT instead of crashing if the range is bad.
-        let n = libc::write(fd, p as *const core::ffi::c_void, len);
+        let n = libc::write(fd, p.cast::<core::ffi::c_void>(), len);
         libc::close(fd);
         n == len as isize
     }
@@ -1287,73 +1280,70 @@ fn cmd_mach(args: &[String]) -> i32 {
         eprintln!("usage: perun mach info <macho-file>");
         return 2;
     }
-    match args[0].as_str() {
-        "info" => {
-            let data = match std::fs::read(&args[1]) {
-                Ok(d) => d,
-                Err(e) => {
-                    eprintln!("read {}: {e}", args[1]);
-                    return 1;
-                }
-            };
-            match perun_core::macho::MachInfo::parse(&data) {
-                Ok(info) => {
-                    println!("preferred base: {:#x}", info.base);
-                    println!("segments:");
-                    for s in &info.segments {
-                        println!(
-                            "  {:16} vm={:#018x}+{:#x} file={:#x}+{:#x}",
-                            s.name_str(),
-                            s.vmaddr,
-                            s.vmsize,
-                            s.fileoff,
-                            s.filesize,
-                        );
-                    }
+    if args[0].as_str() == "info" {
+        let data = match std::fs::read(&args[1]) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("read {}: {e}", args[1]);
+                return 1;
+            }
+        };
+        match perun_core::macho::MachInfo::parse(&data) {
+            Ok(info) => {
+                println!("preferred base: {:#x}", info.base);
+                println!("segments:");
+                for s in &info.segments {
                     println!(
-                        "fixups: {} rebases, {} binds, {} defined symbols",
-                        info.rebases.len(),
-                        info.binds.len(),
-                        info.symbols.len(),
+                        "  {:16} vm={:#018x}+{:#x} file={:#x}+{:#x}",
+                        s.name_str(),
+                        s.vmaddr,
+                        s.vmsize,
+                        s.fileoff,
+                        s.filesize,
                     );
-                    let obf: Vec<&str> = info
-                        .symbols
-                        .iter()
-                        .map(|s| s.name.as_str())
-                        .filter(|n| {
-                            matches!(
-                                *n,
-                                "_cp2g1b9ro"
-                                    | "_Mib5yocT"
-                                    | "_Fc3vhtJDvr"
-                                    | "_IPaI1oem5iL"
-                                    | "_jEHf8Xzsv8K"
-                                    | "_jfkdDAjba3jd"
-                                    | "_gLg1CWr7p"
-                                    | "_WIn9UJ86JKdV4dM"
-                                    | "_X46O5IeS"
-                                    | "_YlCJ3lg"
-                                    | "_dku592fbFAj"
-                                    | "_fdjkDSAFjklaf2s"
-                                    | "_lxpgvVMLd0S7uRl"
-                            )
-                        })
-                        .collect();
-                    if !obf.is_empty() {
-                        println!("SAP symbols present: {}", obf.join(", "));
-                    }
-                    0
                 }
-                Err(e) => {
-                    eprintln!("parse failed: {e}");
-                    1
+                println!(
+                    "fixups: {} rebases, {} binds, {} defined symbols",
+                    info.rebases.len(),
+                    info.binds.len(),
+                    info.symbols.len(),
+                );
+                let obf: Vec<&str> = info
+                    .symbols
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .filter(|n| {
+                        matches!(
+                            *n,
+                            "_cp2g1b9ro"
+                                | "_Mib5yocT"
+                                | "_Fc3vhtJDvr"
+                                | "_IPaI1oem5iL"
+                                | "_jEHf8Xzsv8K"
+                                | "_jfkdDAjba3jd"
+                                | "_gLg1CWr7p"
+                                | "_WIn9UJ86JKdV4dM"
+                                | "_X46O5IeS"
+                                | "_YlCJ3lg"
+                                | "_dku592fbFAj"
+                                | "_fdjkDSAFjklaf2s"
+                                | "_lxpgvVMLd0S7uRl"
+                        )
+                    })
+                    .collect();
+                if !obf.is_empty() {
+                    println!("SAP symbols present: {}", obf.join(", "));
                 }
+                0
+            }
+            Err(e) => {
+                eprintln!("parse failed: {e}");
+                1
             }
         }
-        _ => {
-            eprintln!("unknown mach subcommand: {}", args[0]);
-            2
-        }
+    } else {
+        eprintln!("unknown mach subcommand: {}", args[0]);
+        2
     }
 }
 
@@ -1375,12 +1365,11 @@ fn cmd_sap(args: &[String]) -> i32 {
             cmd_sap_inner(&args)
         })
         .expect("failed to spawn SAP thread");
-    match handle.join() {
-        Ok(code) => code,
-        Err(_) => {
-            eprintln!("[sap] thread panicked");
-            1
-        }
+    if let Ok(code) = handle.join() {
+        code
+    } else {
+        eprintln!("[sap] thread panicked");
+        1
     }
 }
 
@@ -1536,7 +1525,7 @@ fn cmd_sap_inner(args: &[String]) -> i32 {
 }
 
 fn hex_decode(s: &str) -> Vec<u8> {
-    let clean: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    let clean: String = s.chars().filter(char::is_ascii_hexdigit).collect();
     (0..clean.len() / 2)
         .map(|i| u8::from_str_radix(&clean[i * 2..i * 2 + 2], 16).unwrap_or(0))
         .collect()
@@ -1606,7 +1595,11 @@ mod help_tests {
 
     #[test]
     fn help_flag_is_found_in_any_position() {
-        let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+        let v = |s: &[&str]| {
+            s.iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<String>>()
+        };
         assert!(help_flag_present(&v(&["--help"])));
         assert!(help_flag_present(&v(&["-h"])));
         assert!(help_flag_present(&v(&[
@@ -1623,8 +1616,10 @@ mod help_tests {
         // it returns 0 without touching the filesystem, a guest thread or network.
         for sub in LOW_LEVEL {
             for flag in ["-h", "--help"] {
-                let args: Vec<String> =
-                    ["perun", sub, flag].iter().map(|x| x.to_string()).collect();
+                let args: Vec<String> = ["perun", sub, flag]
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect();
                 assert_eq!(run_with_args(&args), 0, "perun {sub} {flag}");
             }
         }

@@ -385,11 +385,10 @@ fn main() {
             run_stub(port)
         }
         Some("probe") => {
-            let base = args
-                .windows(2)
-                .find(|w| w[0] == "--base")
-                .map(|w| w[1].clone())
-                .unwrap_or_else(|| "https://fpinit.itunes.apple.com".to_string());
+            let base = args.windows(2).find(|w| w[0] == "--base").map_or_else(
+                || "https://fpinit.itunes.apple.com".to_string(),
+                |w| w[1].clone(),
+            );
             probe(&base)
         }
         Some("check") => check(),

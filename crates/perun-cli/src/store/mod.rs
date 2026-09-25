@@ -1,7 +1,7 @@
 // Copyright 2026 lazyeel (https://github.com/lazyeel)
 // SPDX-License-Identifier: Apache-2.0
 
-//! App Store client for the Perun CLI: login via MZFinance with 2FA,
+//! App Store client for the Perun CLI: login via `MZFinance` with 2FA,
 //! search/lookup via the iTunes API, purchase, streaming download with
 //! sinf replication, purchase history (DAAP), and version metadata —
 //! all request bodies that Apple gates with the action signature signed
@@ -22,7 +22,7 @@
 //! band (trusted-device push or SMS fallback) and the code is appended
 //! to the password on the retry round. The interactive phone-SMS flow
 //! of the GSA layer (selecting which trusted number receives the code)
-//! does not exist on MZFinance — there are no GSA tokens here to drive
+//! does not exist on `MZFinance` — there are no GSA tokens here to drive
 //! it; Apple sends to the default number on its own.
 
 pub mod account;
@@ -216,7 +216,7 @@ fn hardware_mac() -> Result<[u8; 6], String> {
 fn hardware_mac_in(dir: &std::path::Path) -> Result<[u8; 6], String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .map_err(|e| format!("net interfaces: {e}"))?
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
@@ -279,7 +279,7 @@ fn pseudo_mac_from(anchor: &str) -> [u8; 6] {
     mac
 }
 
-/// MAC as lowercase colon-separated hex (the C++ fork's machine_id).
+/// MAC as lowercase colon-separated hex (the C++ fork's `machine_id`).
 pub fn primary_mac_hex() -> String {
     let mac = primary_mac();
     mac.iter()

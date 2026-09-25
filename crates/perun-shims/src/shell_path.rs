@@ -1,6 +1,15 @@
 // Copyright 2026 lazyeel (https://github.com/lazyeel)
 // SPDX-License-Identifier: Apache-2.0
 
+// The shell shims return `HRESULT` values the guest will compare, and the
+// // buffer lengths they report are the caller's own.
+#![allow(unknown_lints)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
+
 //! Shell and path shims: folder locations (CSIDL) and SHLWAPI path helpers.
 //!
 //! Windows folder locations are mapped under a perun-owned root so guest
@@ -13,7 +22,7 @@
 //!   └── Common/    CSIDL_COMMON_APPDATA (0x0023)
 //! ```
 
-use crate::win32::*;
+use crate::win32::{BOOL, DWORD, FALSE, HANDLE, LPCWSTR, LPWSTR, TRUE};
 use crate::win32_api;
 
 const MAX_PATH: usize = 260;
@@ -53,7 +62,7 @@ fn mkdirs(path: &std::path::Path) {
     let _ = std::fs::create_dir_all(path);
 }
 
-/// Write a Rust string into a Win32 LPWSTR buffer (MAX_PATH wchars).
+/// Write a Rust string into a Win32 LPWSTR buffer (`MAX_PATH` wchars).
 fn write_wide(dst: LPWSTR, s: &str) {
     if dst.is_null() {
         return;
@@ -76,12 +85,9 @@ win32_api! {
         out_path: LPWSTR,
     ) -> i32 {
         let csidl = csidl as u32;
-        let subdir = match csidl_subdir(csidl) {
-            Some(s) => s,
-            None => {
-                eprintln!("[perun] SHGetFolderPathW(csidl={csidl:#x}) — unmapped CSIDL");
-                return E_INVALIDARG;
-            }
+        let subdir = if let Some(s) = csidl_subdir(csidl) { s } else {
+            eprintln!("[perun] SHGetFolderPathW(csidl={csidl:#x}) — unmapped CSIDL");
+            return E_INVALIDARG;
         };
         let dir = appdata_root().join(subdir);
         if csidl & CSIDL_FLAG_CREATE != 0 {
@@ -126,7 +132,7 @@ win32_api! {
             format!("{base}\\{extra}")
         };
         if std::env::var("PERUN_TRACE").is_ok() {
-            eprintln!("[perun] PathAppendW({:?} + {:?}) -> {:?}", base, extra, joined);
+            eprintln!("[perun] PathAppendW({base:?} + {extra:?}) -> {joined:?}");
         }
         write_wide(path, &joined);
         TRUE
@@ -140,7 +146,7 @@ win32_api! {
         let unix = p.replace('\\', "/");
         let is_dir = std::path::Path::new(&unix).is_dir();
         if std::env::var("PERUN_TRACE").is_ok() {
-            eprintln!("[perun] PathIsDirectoryW({:?}) -> {}", p, is_dir);
+            eprintln!("[perun] PathIsDirectoryW({p:?}) -> {is_dir}");
         }
         BOOL::from(is_dir)
     }
@@ -153,7 +159,7 @@ win32_api! {
         let unix = p.replace('\\', "/");
         let exists = std::path::Path::new(&unix).exists();
         if std::env::var("PERUN_TRACE").is_ok() {
-            eprintln!("[perun] PathFileExistsW({:?}) -> {}", p, exists);
+            eprintln!("[perun] PathFileExistsW({p:?}) -> {exists}");
         }
         BOOL::from(exists)
     }
@@ -169,7 +175,7 @@ win32_api! {
         let p = wide_to_string(name);
         let unix = p.replace('\\', "/");
         if std::env::var("PERUN_TRACE").is_ok() {
-            eprintln!("[perun] CreateDirectoryExW({:?})", p);
+            eprintln!("[perun] CreateDirectoryExW({p:?})");
         }
         match std::fs::create_dir_all(&unix) {
             Ok(()) => TRUE,

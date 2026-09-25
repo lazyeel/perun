@@ -1,11 +1,27 @@
 // Copyright 2026 lazyeel (https://github.com/lazyeel)
 // SPDX-License-Identifier: Apache-2.0
 
+// Same file-enumeration contract as `files.rs`: the guest's own widths are
+// // what the shim compares against.
+#![allow(unknown_lints)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
+
 //! Directory enumeration (Find* family), drive/volume queries and the
 //! remaining kernel32 surface the prototype's guests touched.
 
-use crate::util::*;
-use crate::win32::*;
+use crate::util::{
+    HostKind, handle_free, handle_get, handle_new, read_narrow, read_wide, set_last_error,
+    unix_to_filetime, wide_from_str, write_wide,
+};
+use crate::win32::{
+    BOOL, DWORD, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES, FALSE, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_NORMAL, FILETIME, HANDLE, INVALID_HANDLE_VALUE, LPCSTR, LPCWSTR, LPWSTR,
+    MAX_PATH_A, TRUE, UINT, WIN32_FIND_DATAA,
+};
 use crate::win32_api;
 
 fn filetime_from_timespec(secs: i64, nanos: i64) -> FILETIME {
@@ -60,7 +76,7 @@ win32_api! {
         let pattern = String::from_utf8_lossy(&raw).into_owned();
         let (dir_path, filter) = split_pattern(&pattern);
         if std::env::var("PERUN_TRACE").is_ok() {
-            eprintln!("[perun] FindFirstFileExA({:?})", pattern);
+            eprintln!("[perun] FindFirstFileExA({pattern:?})");
         }
 
         let cdir = match std::ffi::CString::new(dir_path.clone()) {
@@ -73,7 +89,7 @@ win32_api! {
             return INVALID_HANDLE_VALUE;
         }
 
-        let find = out_find_data as *mut WIN32_FIND_DATAA;
+        let find = out_find_data.cast::<WIN32_FIND_DATAA>();
 
         // FindFirstFile also returns the first matching entry directly.
         loop {
@@ -84,7 +100,7 @@ win32_api! {
                 return INVALID_HANDLE_VALUE;
             }
             let ent = &*ent;
-            let name = std::slice::from_raw_parts(ent.d_name.as_ptr() as *const u8, libc::strlen(ent.d_name.as_ptr()));
+            let name = std::slice::from_raw_parts(ent.d_name.as_ptr().cast::<u8>(), libc::strlen(ent.d_name.as_ptr()));
             if name != b"." && name != b".." {
                 if let Some(f) = filter.as_ref()
                     && !name.to_ascii_lowercase().ends_with(f.as_bytes())
@@ -94,7 +110,7 @@ win32_api! {
                 let full = format!("{}/{}", dir_path, String::from_utf8_lossy(name));
                 if let Ok(c) = std::ffi::CString::new(full) {
                     let mut st: libc::stat = std::mem::zeroed();
-                    if libc::stat(c.as_ptr(), &mut st) == 0 {
+                    if libc::stat(c.as_ptr(), &raw mut st) == 0 {
                         (*find).dwFileAttributes = 0; // zeroed then filled
                         fill_find_data(&mut *find, &st, name);
                     }
@@ -121,11 +137,11 @@ win32_api! {
                 return FALSE;
             }
             let ent = &*ent;
-            let name = std::slice::from_raw_parts(ent.d_name.as_ptr() as *const u8, libc::strlen(ent.d_name.as_ptr()));
+            let name = std::slice::from_raw_parts(ent.d_name.as_ptr().cast::<u8>(), libc::strlen(ent.d_name.as_ptr()));
             if name == b"." || name == b".." {
                 continue;
             }
-            let find = out_find_data as *mut WIN32_FIND_DATAA;
+            let find = out_find_data.cast::<WIN32_FIND_DATAA>();
             // Phase-1 note: per-handle filter is stored but suffix filtering
             // was applied during FindFirstFile; subsequent entries pass raw.
             (*find).dwFileAttributes = 0;
@@ -212,12 +228,12 @@ win32_api! {
             _ => return FALSE,
         };
         let mut pollfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-        let r = libc::poll(&mut pollfd, 1, 0);
+        let r = libc::poll(&raw mut pollfd, 1, 0);
         if r < 0 {
             return FALSE;
         }
         if !avail.is_null() {
-            *avail = if pollfd.revents & libc::POLLIN != 0 { 1 } else { 0 };
+            *avail = u32::from(pollfd.revents & libc::POLLIN != 0);
         }
         TRUE
     }
@@ -236,7 +252,7 @@ win32_api! {
             _ => return FALSE,
         };
         let mut st: libc::stat = std::mem::zeroed();
-        if libc::fstat(fd, &mut st) != 0 || info.is_null() {
+        if libc::fstat(fd, &raw mut st) != 0 || info.is_null() {
             return FALSE;
         }
         // Layout-compatible prefix of BY_HANDLE_FILE_INFORMATION:
@@ -250,7 +266,7 @@ win32_api! {
             size_high: DWORD,
             size_low: DWORD,
         }
-        let out = info as *mut InfoPrefix;
+        let out = info.cast::<InfoPrefix>();
         (*out).attributes = if (st.st_mode & libc::S_IFMT) == libc::S_IFDIR {
             FILE_ATTRIBUTE_DIRECTORY
         } else {

@@ -20,7 +20,7 @@ pub struct TrapCall {
 }
 
 /// Parse a single trap-report line. Accepts both the Win64 (`TRAP:`) and the
-/// SysV (`TRAP(sysv):`) shapes, with or without the `[perun]` prefix.
+/// `SysV` (`TRAP(sysv):`) shapes, with or without the `[perun]` prefix.
 /// Returns `None` for anything that is not a trap line. An empty function
 /// name (`DLL!` with nothing after the bang) is an ordinal import — the
 /// loader has no name to dispatch on — and parses with an empty `func`.
@@ -103,8 +103,7 @@ pub fn suggest_file(dll: &str) -> &'static str {
     let stem = dll
         .to_ascii_uppercase()
         .strip_suffix(".DLL")
-        .map(str::to_string)
-        .unwrap_or_else(|| dll.to_ascii_uppercase());
+        .map_or_else(|| dll.to_ascii_uppercase(), str::to_string);
     match stem.as_str() {
         "ADVAPI32" => "crates/perun-shims/src/process.rs (Crypt*/Reg* live there)",
         "SHELL32" | "SHLWAPI" => "crates/perun-shims/src/shell_path.rs",
@@ -180,15 +179,14 @@ pub fn run(args: &[String]) -> i32 {
     }
     let mut failed = false;
     for line in args {
-        match parse_trap_line(line) {
-            Some(call) => println!("{}", render_stub(&call)),
-            None => {
-                eprintln!("error: not a trap line: {line:?}");
-                failed = true;
-            }
+        if let Some(call) = parse_trap_line(line) {
+            println!("{}", render_stub(&call));
+        } else {
+            eprintln!("error: not a trap line: {line:?}");
+            failed = true;
         }
     }
-    if failed { 1 } else { 0 }
+    i32::from(failed)
 }
 
 #[cfg(test)]

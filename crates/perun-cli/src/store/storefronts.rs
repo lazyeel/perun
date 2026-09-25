@@ -150,7 +150,7 @@ mod tests {
     fn storefront_table_is_complete_and_unique() {
         // 134 storefronts, unique IDs, two-letter codes.
         let mut ids = Vec::new();
-        for (cc, id) in STOREFRONTS.iter() {
+        for (cc, id) in STOREFRONTS {
             assert_eq!(cc.len(), 2, "country code {cc}");
             assert!(id.starts_with("14"), "storefront id {id}");
             assert!(!ids.contains(id), "duplicate id {id}");

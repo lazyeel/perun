@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Minimal JSON parser — the iTunes Search API and the DAAP storefront
-//! pages return JSON, and pulling serde_json into a binary this focused is
+//! pages return JSON, and pulling `serde_json` into a binary this focused is
 //! overkill. Objects keep insertion order (Apple's API output is
 //! effectively unordered, but stable iteration helps deterministic
 //! downstream text output).
@@ -128,7 +128,7 @@ struct Parser<'a> {
     pos: usize,
 }
 
-impl<'a> Parser<'a> {
+impl Parser<'_> {
     fn skip_ws(&mut self) {
         while let Some(b) = self.bytes.get(self.pos) {
             if b.is_ascii_whitespace() {
@@ -197,7 +197,7 @@ impl<'a> Parser<'a> {
             }
         }
         if start == self.pos {
-            return Err(format!("bad number at {}", start));
+            return Err(format!("bad number at {start}"));
         }
         Ok(Json::Number(
             std::str::from_utf8(&self.bytes[start..self.pos])
@@ -436,7 +436,7 @@ mod tests {
             if i > 0 {
                 body.push(',');
             }
-            body.push_str(&format!("\"ключ-{i}\": \"значение-{i} 😀\"", i = i));
+            body.push_str(&format!("\"ключ-{i}\": \"значение-{i} 😀\""));
         }
         body.push('}');
         let v = parse(&body).unwrap();

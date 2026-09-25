@@ -153,21 +153,21 @@ pub fn set_landing(addr: u64) {
 
 /// The recorded landing-pad address (0 until `set_landing`).
 pub fn get_landing() -> u64 {
-    LANDING.with(|l| l.get())
+    LANDING.with(std::cell::Cell::get)
 }
 
-/// Set the magic return address the guest sees at [entry_rsp]. Must point
+/// Set the magic return address the guest sees at [`entry_rsp`]. Must point
 /// at a mapped thunk (`jmp .Lperun_guest_landing` equivalent).
 ///
 /// # Safety
 /// The thunk page must stay mapped for the process lifetime.
 pub unsafe fn set_return_magic(addr: u64) {
     unsafe {
-        core::ptr::write_volatile((&raw const perun_guest_return_magic) as *mut u64, addr);
+        core::ptr::write_volatile((&raw const perun_guest_return_magic).cast_mut(), addr);
     }
 }
 
-/// Enter `fn` with the guest SysV ABI on the dedicated guest stack,
+/// Enter `fn` with the guest `SysV` ABI on the dedicated guest stack,
 /// replicating the reference emulator's entry frame.
 ///
 /// # Safety

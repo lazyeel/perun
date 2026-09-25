@@ -1,12 +1,26 @@
 // Copyright 2026 lazyeel (https://github.com/lazyeel)
 // SPDX-License-Identifier: Apache-2.0
 
+// A Win32 string shim returns a pointer to memory it allocated; the length
+// // and the offset it writes back are the guest's own `DWORD` values being
+// // carried through, and the sign bit is part of what Windows means by
+// // them. The conversions are the ABI translation, not a shortcut.
+#![allow(unknown_lints)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
+
 //! String, environment, module and console shims.
 
 use crate::files::{WriteFile, file_of};
 use crate::util::set_last_error;
-use crate::util::*;
-use crate::win32::*;
+use crate::util::{get_last_error, read_narrow, read_wide, wide_from_str};
+use crate::win32::{
+    BOOL, DWORD, ERROR_INSUFFICIENT_BUFFER, FALSE, HANDLE, LPCSTR, LPCVOID, LPCWSTR, LPSTR, LPWSTR,
+    TRUE, UINT, WORD,
+};
 use crate::win32_api;
 
 // ── UTF conversion ───────────────────────────────────────────────────────
@@ -172,7 +186,7 @@ win32_api! {
             return FALSE;
         }
         for (i, ch) in wide.iter().enumerate() {
-            let c = *ch as u32;
+            let c = u32::from(*ch);
             let ascii = c < 0x80;
             let cls: WORD = if ascii && (c as u8).is_ascii_alphabetic() {
                 0x0001 | 0x0100 // C1_ALPHA | C1_UPPER approximated
@@ -226,9 +240,9 @@ win32_api! {
         block.push(0);
         // Leak: Windows frees this with FreeEnvironmentStringsW, which is our
         // no-op; the CRT calls it once per process.
-        let p = libc::malloc(block.len() * 2) as *mut u16;
+        let p = libc::malloc(block.len() * 2).cast::<u16>();
         std::ptr::copy_nonoverlapping(block.as_ptr(), p, block.len());
-        p as LPCWSTR
+        p.cast_const()
     }}
 }
 
@@ -311,11 +325,11 @@ win32_api! {
         //    the shim table so CRT dynamic resolution keeps working.
         if let Some(p) = crate::table::ShimTable::collect().get(&n) {
             if std::env::var("PERUN_TRACE").is_ok() {
-                eprintln!("[perun] GetProcAddress({:?}) -> shim", n);
+                eprintln!("[perun] GetProcAddress({n:?}) -> shim");
             }
             return p as *mut core::ffi::c_void;
         }
-        eprintln!("[perun] GetProcAddress({:?}) -> NULL (not implemented)", n);
+        eprintln!("[perun] GetProcAddress({n:?}) -> NULL (not implemented)");
         std::ptr::null_mut()
     }}
 }
@@ -335,9 +349,7 @@ win32_api! {
         buf: LPSTR,
         cap: DWORD,
     ) -> DWORD { unsafe {
-        let exe = std::env::current_exe()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| "perun".into());
+        let exe = std::env::current_exe().map_or_else(|_| "perun".into(), |p| p.to_string_lossy().into_owned());
         let bytes = exe.as_bytes();
         let need = bytes.len() + 1;
         if cap as usize >= need {

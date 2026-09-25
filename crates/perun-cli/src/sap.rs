@@ -1,11 +1,11 @@
 // Copyright 2026 lazyeel (https://github.com/lazyeel)
 // SPDX-License-Identifier: Apache-2.0
 
-//! The Apple FairPlay SAP runtime: native, in-process, no emulation.
+//! The Apple `FairPlay` SAP runtime: native, in-process, no emulation.
 //!
 //! Loads the four binaries Apple ships in the OS X 10.9 update package
-//! (CoreFP, CoreFP.icxs, CommerceKit), relocates them, and
-//! drives the five SAP entry points directly on the CPU under the SysV
+//! (`CoreFP`, CoreFP.icxs, `CommerceKit`), relocates them, and
+//! drives the five SAP entry points directly on the CPU under the `SysV`
 //! AMD64 convention:
 //!
 //! ```text
@@ -17,7 +17,7 @@
 //! ```
 //!
 //! The ICXS key material is served through the fake `open`/`read` path in
-//! `perun_shims::mach`, exactly as on macOS where CoreFP reads
+//! `perun_shims::mach`, exactly as on macOS where `CoreFP` reads
 //! `./../CoreFP.icxs` next to its bundle.
 
 use std::collections::HashMap;
@@ -60,7 +60,7 @@ pub const COMMERCE_KIT_BASE: u64 = 0x7FF8_0C00_0000;
 // storeagent is deliberately not mapped; see the note in SapRuntime::new.
 // Its reference base was 0x7FF8_1000_0000.
 
-/// The six obfuscated CoreFP exports the runtime self-resolves through
+/// The six obfuscated `CoreFP` exports the runtime self-resolves through
 /// `_dlsym` (names are Apple's, stable since 2013).
 const COREFP_EXPORTS: [&str; 6] = [
     "_WIn9UJ86JKdV4dM",
@@ -71,7 +71,7 @@ const COREFP_EXPORTS: [&str; 6] = [
     "_lxpgvVMLd0S7uRl",
 ];
 
-/// CommerceKit SAP entry points (same symbol family).
+/// `CommerceKit` SAP entry points (same symbol family).
 pub const SAP_INIT: &str = "_cp2g1b9ro";
 pub const SAP_EXCHANGE: &str = "_Mib5yocT";
 pub const SAP_SIGN: &str = "_Fc3vhtJDvr";
@@ -88,7 +88,7 @@ pub struct SapAssets {
     /// Pinned SHA-256 per image, from the fetcher's own table.
     ///
     /// These bytes were verified when the fetcher wrote them, so the loader can
-    /// take its AOT rdtsc table on trust instead of re-hashing 29 MB of CoreFP
+    /// take its AOT rdtsc table on trust instead of re-hashing 29 MB of `CoreFP`
     /// on every run — that hash measured 198 ms of the 206 ms image load.
     /// A caller that cannot vouch for a file simply gets `None` here and the
     /// loader falls back to hashing it.
@@ -148,7 +148,7 @@ const SCRATCH_BASE: u64 = 0x3000_0000_0000;
 const SCRATCH_SIZE: usize = 1 << 20;
 
 /// Bridge pages: argument buffers passed to SAP entry points. The reference
-/// emulator maps them sequentially from 0x6000_0000_0000 — a range the
+/// emulator maps them sequentially from `0x6000_0000_0000` — a range the
 /// obfuscated code folds into its scratch-pointer arithmetic, so the range
 /// must match (unlike the scratch arena, which the guest never sees).
 const BRIDGE_BASE: u64 = 0x6000_0000_0000;
@@ -159,16 +159,16 @@ const BRIDGE_BASE: u64 = 0x6000_0000_0000;
 const BRIDGE_SIZE: usize = 64 << 20;
 
 /// The reference emulator's guest entry thunk page (`callq *%rax; hlt`)
-/// lives at 0x1_0000_0000; the guest sees 0x1_0000_0002 as its return
+/// lives at `0x1_0000_0000`; the guest sees `0x1_0000_0002` as its return
 /// address. Replicated by a page that jumps back into the trampoline.
 const RETURN_PAGE_BASE: u64 = 0x1_0000_0000;
 
 /// Guest stack: the reference emulator maps an 8 MiB stack ending at
-/// 0x7FF7_C000_0000 and enters the guest with RSP at that top edge (its
+/// `0x7FF7_C000_0000` and enters the guest with RSP at that top edge (its
 /// `stackBottomAddr`). The obfuscated code computes scratch pointers as
 /// ctx + rbp + magic tuned for rbp in this range; a different stack range
 /// lands them off the mapping. The entry RSP stays at
-/// GUEST_ENTRY_RSP - 8 to keep the reference frame parity.
+/// `GUEST_ENTRY_RSP` - 8 to keep the reference frame parity.
 const GUEST_STACK_BASE: u64 = 0x7FF7_BF80_0000;
 const GUEST_STACK_SIZE: usize = 8 * 1024 * 1024; // 8 MiB, reference topology
 /// The guest entry RSP: the reference's stackBottomAddr, unchanged.
@@ -177,7 +177,7 @@ const GUEST_ENTRY_RSP: u64 = 0x7FF7_C000_0000;
 // ── thread-local alt stack ────────────────────────────────────────────────
 
 /// Per-thread sigaltstack for the SAP worker thread. `install_crash_probe`
-/// registers handlers with SA_ONSTACK, but sigaltstack is per-thread: a
+/// registers handlers with `SA_ONSTACK`, but sigaltstack is per-thread: a
 /// spawned thread inherits nothing. Without this, SIGTRAP raised while the
 /// guest has switched RSP onto its own stack runs the handler on whatever
 /// stack the fault found — which can be uncommitted guard pages → the
@@ -204,15 +204,16 @@ pub unsafe fn install_thread_altstack() {
         let mut ss: libc::stack_t = std::mem::zeroed();
         ss.ss_sp = ALT;
         ss.ss_size = 256 * 1024;
-        if libc::sigaltstack(&ss, std::ptr::null_mut()) != 0 {
-            panic!("sigaltstack failed");
-        }
+        assert!(
+            libc::sigaltstack(&raw const ss, std::ptr::null_mut()) == 0,
+            "sigaltstack failed"
+        );
     }
 }
 
 impl SapRuntime {
     /// Load all images and resolve entry points. `hw_mac` (6 bytes) seeds
-    /// the FairPlay hardware identity.
+    /// the `FairPlay` hardware identity.
     pub fn new(assets: &SapAssets) -> Result<SapRuntime, String> {
         // Host shim statics outlive a session; reset them so this session
         // starts from the documented first-call state (see `reset_shim_state`).
@@ -374,8 +375,8 @@ impl SapRuntime {
             code[0] = 0xFF;
             code[1] = 0xD0;
             code[2] = 0xF4;
-            std::ptr::copy_nonoverlapping(code.as_ptr(), p as *mut u8, code.len());
-            libc::mprotect(p as *mut _, 0x1000, libc::PROT_READ | libc::PROT_EXEC);
+            std::ptr::copy_nonoverlapping(code.as_ptr(), p.cast::<u8>(), code.len());
+            libc::mprotect(p.cast(), 0x1000, libc::PROT_READ | libc::PROT_EXEC);
             guest_stack::set_landing(landing);
             RETURN_PAGE_BASE + 2 // the `call` in the reference pushes start+2
         };
@@ -405,7 +406,7 @@ impl SapRuntime {
         page
     }
 
-    /// FairPlaySAPInit: `(ctx_out, hw_info)` where hw_info is the 24-byte
+    /// `FairPlaySAPInit`: `(ctx_out, hw_info)` where `hw_info` is the 24-byte
     /// `FairPlayHWInfo` block (u32 length + up to 20 bytes of MAC).
     pub fn init(&mut self, mac: [u8; 6]) -> Result<u64, String> {
         self.init_inner(mac)
@@ -440,7 +441,7 @@ impl SapRuntime {
         Ok(ctx)
     }
 
-    /// FairPlaySAPExchange — the server round-trip envelope. Returns
+    /// `FairPlaySAPExchange` — the server round-trip envelope. Returns
     /// `(output, state)`.
     pub fn exchange(
         &mut self,
@@ -507,7 +508,7 @@ impl SapRuntime {
         } else {
             let mut v = vec![0u8; len as usize];
             unsafe {
-                std::ptr::copy_nonoverlapping(ptr as *const u8, v.as_mut_ptr(), len as usize)
+                std::ptr::copy_nonoverlapping(ptr as *const u8, v.as_mut_ptr(), len as usize);
             };
             v
         };
@@ -526,7 +527,7 @@ impl SapRuntime {
         Ok((out, state))
     }
 
-    /// FairPlaySAPSign over arbitrary bytes.
+    /// `FairPlaySAPSign` over arbitrary bytes.
     pub fn sign(&mut self, input: &[u8]) -> Result<Vec<u8>, String> {
         if self.context == 0 {
             return Err("SAP not initialized".into());
@@ -577,7 +578,7 @@ impl SapRuntime {
         } else {
             let mut v = vec![0u8; len as usize];
             unsafe {
-                std::ptr::copy_nonoverlapping(ptr as *const u8, v.as_mut_ptr(), len as usize)
+                std::ptr::copy_nonoverlapping(ptr as *const u8, v.as_mut_ptr(), len as usize);
             };
             v
         };
@@ -704,7 +705,7 @@ fn base64_encode(data: &[u8]) -> String {
             chunk.get(1).copied().unwrap_or(0),
             chunk.get(2).copied().unwrap_or(0),
         ];
-        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
         out.push(TABLE[(n >> 18 & 63) as usize] as char);
         out.push(TABLE[(n >> 12 & 63) as usize] as char);
         out.push(if chunk.len() > 1 {
@@ -792,7 +793,7 @@ impl Drop for SapRuntime {
 }
 
 struct CoreResolver {
-    /// The shim table is fully deterministic once the CoreFP export
+    /// The shim table is fully deterministic once the `CoreFP` export
     /// addresses are known, so it is built once and reused for every import
     /// lookup instead of being reconstructed per bind (the fixup pass walks
     /// tens of thousands of entries per image).

@@ -1,7 +1,15 @@
 // Copyright 2026 lazyeel (https://github.com/lazyeel)
 // SPDX-License-Identifier: Apache-2.0
 
-//! Minimal Mach-O (x86_64) header parsing, fat-universal dispatch, and the
+// Mach-O offsets and sizes are 32-bit in the load commands, so the
+// narrowing is the format's own. The long functions are the parser
+// and the dyld rebase/bind interpreter: they are one linear pass
+// each, and splitting them would fragment a table walk that is
+// easier to follow — and to test — in one piece.
+#![allow(unknown_lints)]
+#![allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
+
+//! Minimal Mach-O (`x86_64`) header parsing, fat-universal dispatch, and the
 //! classic `LC_DYLD_INFO(_ONLY)` rebase/bind stream interpreter.
 //!
 //! The 2013 CoreFP/CommerceKit pair Apple ships in the OS X 10.9 update
@@ -13,10 +21,10 @@
 //! `image.rs`; no `#[repr(C)]` alignment traps.
 
 /// Mach-O 64-bit magic (little-endian file).
-pub const MH_MAGIC_64: u32 = 0xfeedfacf;
+pub const MH_MAGIC_64: u32 = 0xfeed_facf;
 /// Fat (universal) file magic.
-pub const FAT_MAGIC: u32 = 0xcafebabe;
-/// CPU type x86_64.
+pub const FAT_MAGIC: u32 = 0xcafe_babe;
+/// CPU type `x86_64`.
 pub const CPU_TYPE_X86_64: u32 = 0x0100_0007;
 
 pub const LC_SEGMENT_64: u32 = 0x19;
@@ -47,6 +55,7 @@ pub struct Segment64 {
 }
 
 impl Segment64 {
+    #[must_use]
     pub fn name_str(&self) -> String {
         let end = self.name.iter().position(|&b| b == 0).unwrap_or(16);
         String::from_utf8_lossy(&self.name[..end]).into_owned()
@@ -80,15 +89,15 @@ pub struct Symbol {
     pub addr: u64,
 }
 
-/// Parsed Mach-O x86_64 image (one slice of a fat file, or a thin file).
+/// Parsed Mach-O `x86_64` image (one slice of a fat file, or a thin file).
 #[derive(Debug, Clone)]
 pub struct MachInfo {
-    /// Executable __text section bounds in the x86_64 slice, as
-    /// (file_offset, size). Code-only patching (rdtsc neutralization)
+    /// Executable __text section bounds in the `x86_64` slice, as
+    /// (`file_offset`, size). Code-only patching (rdtsc neutralization)
     /// must stay inside these; __const holds crypto constants where the
     /// idiom bytes appear as data.
     pub text_section: Option<(u64, u64)>,
-    /// The x86_64 slice bytes (owned copy when sliced out of a fat file).
+    /// The `x86_64` slice bytes (owned copy when sliced out of a fat file).
     pub data: Vec<u8>,
     /// Preferred base: lowest `vmaddr` across non-__PAGEZERO segments.
     pub base: u64,
@@ -166,7 +175,7 @@ fn read_uleb(d: &[u8], mut p: usize) -> Result<(u64, usize), MachError> {
         }
         let b = d[p];
         p += 1;
-        result |= ((b & 0x7f) as u64) << shift;
+        result |= u64::from(b & 0x7f) << shift;
         if b & 0x80 == 0 {
             break;
         }
@@ -188,7 +197,7 @@ fn read_sleb(d: &[u8], mut p: usize) -> Result<(i64, usize), MachError> {
         }
         let b = d[p];
         p += 1;
-        result |= ((b & 0x7f) as i64) << shift;
+        result |= i64::from(b & 0x7f) << shift;
         shift += 7;
         if b & 0x80 == 0 {
             if b & 0x40 != 0 && shift < 64 {
@@ -214,8 +223,18 @@ fn cstr_at(d: &[u8], mut p: usize) -> Result<String, MachError> {
     Ok(String::from_utf8_lossy(&d[start..p]).into_owned())
 }
 
-/// Detect a fat container and return the x86_64 slice, or the input back if
+/// Detect a fat container and return the `x86_64` slice, or the input back if
 /// the file is a thin Mach-O.
+///
+/// # Errors
+///
+/// `MachError::NotMachO` if the magic is neither thin nor fat, `NoX86Slice` if a fat container carries no `x86_64` slice, and `Truncated` if the file ends inside its own header.
+///
+/// # Panics
+///
+/// Panics if a fat header declares more architectures than the file can hold:
+/// the per-architecture table is indexed with `try_into().unwrap()`. A real
+/// fat container is well formed; only a crafted one is not.
 pub fn x86_slice(input: &[u8]) -> Result<Vec<u8>, MachError> {
     if input.len() < 4 {
         return Err(MachError::Truncated);
@@ -244,14 +263,14 @@ pub fn x86_slice(input: &[u8]) -> Result<Vec<u8>, MachError> {
 
 /// Both classic streams share one opcode encoding; one decoder, two modes.
 /// Opcode tables per Apple's `mach-o/rebase.h` / `mach-o/bind.h`:
-/// rebase: 0x00 DONE, 0x10 SET_TYPE_IMM, 0x20 SET_SEGMENT_AND_OFFSET_ULEB,
-///         0x30 ADD_ADDR_ULEB, 0x40 ADD_ADDR_IMM_SCALED, 0x50 DO_REBASE_IMM_TIMES,
-///         0x60 DO_REBASE_ULEB_TIMES, 0x70 DO_REBASE_ADD_ADDR_ULEB,
-///         0x80 DO_REBASE_ULEB_TIMES_SKIPPING_ULEB.
-/// bind:   0x00 DONE, 0x10/0x20/0x30 SET_DYLIB_ORDINAL, 0x40 SET_SYMBOL_TRAILING_FLAGS,
-///         0x50 SET_TYPE_IMM, 0x60 SET_ADDEND_SLEB, 0x70 SET_SEGMENT_AND_OFFSET_ULEB,
-///         0x80 ADD_ADDR_ULEB, 0x90 DO_BIND, 0xA0 DO_BIND_ADD_ADDR_LEB,
-///         0xB0 DO_BIND_ADD_ADDR_IMM_SCALED, 0xC0 DO_BIND_ULEB_TIMES_SKIPPING_ULEB.
+/// rebase: 0x00 DONE, 0x10 `SET_TYPE_IMM`, 0x20 `SET_SEGMENT_AND_OFFSET_ULEB`,
+///         0x30 `ADD_ADDR_ULEB`, 0x40 `ADD_ADDR_IMM_SCALED`, 0x50 `DO_REBASE_IMM_TIMES`,
+///         0x60 `DO_REBASE_ULEB_TIMES`, 0x70 `DO_REBASE_ADD_ADDR_ULEB`,
+///         0x80 `DO_REBASE_ULEB_TIMES_SKIPPING_ULEB`.
+/// bind:   0x00 DONE, 0x10/0x20/0x30 `SET_DYLIB_ORDINAL`, 0x40 `SET_SYMBOL_TRAILING_FLAGS`,
+///         0x50 `SET_TYPE_IMM`, 0x60 `SET_ADDEND_SLEB`, 0x70 `SET_SEGMENT_AND_OFFSET_ULEB`,
+///         0x80 `ADD_ADDR_ULEB`, 0x90 `DO_BIND`, 0xA0 `DO_BIND_ADD_ADDR_LEB`,
+///         0xB0 `DO_BIND_ADD_ADDR_IMM_SCALED`, 0xC0 `DO_BIND_ULEB_TIMES_SKIPPING_ULEB`.
 #[allow(clippy::type_complexity)]
 fn decode_stream(
     d: &[u8],
@@ -283,9 +302,7 @@ fn decode_stream(
                 // DONE terminates the classic bind stream; in the lazy
                 // stream it only flushes the current record and parsing
                 // continues (each lazy entry is self-contained).
-                if !is_lazy {
-                    done = true;
-                } else {
+                if is_lazy {
                     // Reset per-record state, mirroring dyld.
                     seg_idx = 0;
                     cursor = 0;
@@ -293,6 +310,8 @@ fn decode_stream(
                     // Symbol name persists across records in lazy streams
                     // only until the next SET_SYMBOL; reset it too.
                     clear_symbol();
+                } else {
+                    done = true;
                 }
             }
             // ── rebase stream ──
@@ -321,7 +340,7 @@ fn decode_stream(
             (false, 0x40) => {
                 // ADD_ADDR_IMM_SCALED — advance only, no fixup emitted.
                 // Apple dyld: segOffset += immediate*ptrSize.
-                cursor = cursor.wrapping_add(8 * imm as u64);
+                cursor = cursor.wrapping_add(8 * u64::from(imm));
             }
             (false, 0x50) => {
                 // DO_REBASE_IMM_TIMES
@@ -358,11 +377,17 @@ fn decode_stream(
                 }
             }
             // ── bind stream ──
+            // `(true, 0x10)` and `(true, 0x20)` have identical bodies by
+            // design, and clippy is right that they could be one arm — but they
+            // are two documented opcodes, and merging them would erase which
+            // constant is being skipped.
+            #[allow(clippy::match_same_arms)]
             (true, 0x10) => {
                 // SET_DYLIB_ORDINAL_IMM — irrelevant (single flat table).
             }
+            // SET_DYLIB_ORDINAL_ULEB — also irrelevant, and its read is the
+            // only thing that could fail, so the skip has to happen.
             (true, 0x20) => {
-                // SET_DYLIB_ORDINAL_ULEB — irrelevant.
                 let (_v, np) = read_uleb(s, p)?;
                 p = np;
             }
@@ -408,7 +433,7 @@ fn decode_stream(
                 // DO_BIND_ADD_ADDR_IMM_SCALED
                 let name = take_symbol();
                 push(&mut out, seg_idx, cursor, Some((name, addend)));
-                cursor += 8 * (imm as u64 + 1);
+                cursor += 8 * (u64::from(imm) + 1);
             }
             (true, 0xC0) => {
                 // DO_BIND_ULEB_TIMES_SKIPPING_ULEB. Apple dyld:
@@ -461,16 +486,28 @@ fn push(out: &mut Vec<StreamEntry>, seg_idx: usize, cursor: u64, bind: Option<(S
 }
 
 impl MachInfo {
-    /// Parse an x86_64 Mach-O, accepting a thin file or a fat container.
+    /// Parse an `x86_64` Mach-O, accepting a thin file or a fat container.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `x86_slice` rejects the container with, plus `BadLoadCommands`, `BadSegment`, `MissingSegment` or `UnsupportedFixup` from the commands themselves.
     pub fn parse(input: &[u8]) -> Result<MachInfo, MachError> {
         let data = x86_slice(input)?;
         Self::parse_thin(&data)
     }
 
+    /// # Errors
+    ///
+    /// The same as `parse`; the owned buffer only decides whether the `x86_64` slice is copied out of a fat container or parsed in place.
     /// Parse from an owned buffer. Thin files (all five SAP images) are
     /// parsed in place with no intermediate copy; fat containers keep the
     /// `x86_slice` extraction. Callers that read the image from disk purely
     /// to load it should hand the buffer over instead of holding a copy.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the buffer is too short for the four-byte magic it is
+    /// about to read as a `u32`; a file this small is not an image.
     pub fn parse_owned(buffer: Vec<u8>) -> Result<MachInfo, MachError> {
         if buffer.len() >= 4 && u32::from_be_bytes(buffer[0..4].try_into().unwrap()) == FAT_MAGIC {
             let data = x86_slice(&buffer)?;
@@ -479,6 +516,9 @@ impl MachInfo {
         Self::parse_thin_owned(buffer)
     }
 
+    /// # Errors
+    ///
+    /// The same as `parse`, with `MachError::Io` standing in for a read or seek that failed part-way through the file.
     /// Parse metadata straight from a file handle without ever materializing
     /// the full image in memory: the header/load-commands are read into a
     /// small buffer, and the dyld rebase/bind streams plus the symbol table
@@ -486,6 +526,12 @@ impl MachInfo {
     /// typically the last few hundred KB of the file). The returned `MachInfo`
     /// carries an empty `data` buffer; segment contents are streamed into the
     /// mapping by `MachImage::load_file`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the reader reports a short read in the middle of a structure
+    /// it claimed to have: `read_exact` turns that into an error, and a reader
+    /// that violates its own contract is not recoverable here.
     pub fn parse_reader<R: std::io::Read + std::io::Seek>(
         r: &mut R,
     ) -> Result<MachInfo, MachError> {
@@ -502,7 +548,7 @@ impl MachInfo {
                 let mut rec = [0u8; 20];
                 r.read_exact(&mut rec)?;
                 let cputype = u32::from_be_bytes(rec[0..4].try_into().unwrap());
-                let offset = u32::from_be_bytes(rec[8..12].try_into().unwrap()) as u64;
+                let offset = u64::from(u32::from_be_bytes(rec[8..12].try_into().unwrap()));
                 if cputype == CPU_TYPE_X86_64 {
                     found = Some(offset);
                 }
@@ -610,7 +656,8 @@ impl MachInfo {
         // map so stream decoding addresses the tail buffer with the ORIGINAL
         // file offsets. Ranges in these images are contiguous in the tail.
         let mut tail = Vec::new();
-        let mut tail_map: std::collections::BTreeMap<usize, usize> = Default::default();
+        let mut tail_map: std::collections::BTreeMap<usize, usize> =
+            std::collections::BTreeMap::default();
         if !fetch_ranges.is_empty() {
             let start = fetch_ranges.iter().map(|(o, _)| *o).min().unwrap();
             let end = fetch_ranges.iter().map(|(o, s)| o + s).max().unwrap();
@@ -738,7 +785,7 @@ impl MachInfo {
                 if &sname[..6] == b"__text" {
                     let size = u64::from_le_bytes(d[so + 40..so + 48].try_into().unwrap());
                     let off = u32::from_le_bytes(d[so + 48..so + 52].try_into().unwrap());
-                    text_section = Some((off as u64, size));
+                    text_section = Some((u64::from(off), size));
                 }
             }
         }
@@ -910,7 +957,7 @@ impl MachInfo {
                     let off = u32::from_le_bytes(d[so + 48..so + 52].try_into().unwrap());
                     // In these images section addr == its file offset within
                     // the slice; guard anyway.
-                    text_section = Some((off as u64, size));
+                    text_section = Some((u64::from(off), size));
                 }
             }
         }
@@ -1083,7 +1130,7 @@ impl MachInfo {
                     let off = u32::from_le_bytes(d[so + 48..so + 52].try_into().unwrap());
                     // In these images section addr == its file offset within
                     // the slice; guard anyway.
-                    text_section = Some((off as u64, size));
+                    text_section = Some((u64::from(off), size));
                 }
             }
         }
@@ -1142,13 +1189,16 @@ impl MachInfo {
         Ok(out)
     }
 
-    /// File offset of a fixup located at `seg_off` inside the named segment.
     ///
     /// Fixups may legally target the zero-fill tail of a segment
     /// (`filesize < vmsize`); dyld maps the whole `vmsize`. For such slots
     /// there is no file backing — the caller patches post-map memory
     /// instead, so we report `None` rather than an error. Only offsets
     /// beyond `vmsize` (or past the file data when backed) are malformed.
+    /// # Errors
+    ///
+    /// `BadSegment` when the segment's `fileoff` plus its size runs past the end of the file.
+    /// File offset of a fixup located at `seg_off` inside the named segment.
     pub fn segment_file_offset(
         &self,
         seg_name: &[u8; 16],
@@ -1179,6 +1229,9 @@ impl MachInfo {
         })
     }
 
+    /// # Errors
+    ///
+    /// `BadSegment` when the segment's address plus size runs past the end of the mapping.
     /// Offset of a fixup located at `seg_off` inside the named segment,
     /// expressed in the LOADED MAPPING (vmaddr - preferred base). Same
     /// zero-fill-tail semantics as `segment_file_offset`: slots beyond the

@@ -39,6 +39,7 @@ static REGISTRY: LazyLock<Registry> = LazyLock::new(|| Registry {
 });
 
 impl Registry {
+    #[must_use]
     pub fn global() -> &'static Registry {
         &REGISTRY
     }

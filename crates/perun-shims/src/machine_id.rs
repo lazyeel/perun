@@ -1,6 +1,16 @@
 // Copyright 2026 lazyeel (https://github.com/lazyeel)
 // SPDX-License-Identifier: Apache-2.0
 
+// The MD5 and Blackwood-4NT recipes are the specification's own tables,
+// // and the shuffle indices are byte positions inside a 64-byte digest.
+// // Both are bounded by construction before the cast.
+#![allow(unknown_lints)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
+
 //! Windows machine identity after Blackwood-4NT: seven MD5 hashes over host
 //! properties, truncated to 32 bits each. Pure functions plus best-effort
 //! Linux collectors with documented fallbacks. MD5 below is a clean-room
@@ -20,7 +30,7 @@ pub struct MachineInputs {
 }
 
 /// Best-effort Linux collectors. No Windows hive here, so the registry-backed
-/// fields fall back in documented order: ProductId <- `/etc/machine-id`,
+/// fields fall back in documented order: `ProductId` <- `/etc/machine-id`,
 /// BIOS <- DMI `bios_version` <- kernel release, machine name <- gethostname
 /// via `/proc/sys/kernel/hostname`. Absent sysfs entries yield empty vecs
 /// (upstream hashes zeros in the same situation under WOW64).
@@ -32,19 +42,21 @@ pub fn collect_linux() -> MachineInputs {
             .map(trim_nl)
             .unwrap_or_default(),
         cpu_ascii: cpu_model(),
-        bios_ascii: std::fs::read("/sys/class/dmi/id/bios_version")
-            .map(trim_nl)
-            .unwrap_or_else(|_| {
+        bios_ascii: std::fs::read("/sys/class/dmi/id/bios_version").map_or_else(
+            |_| {
                 std::fs::read("/proc/sys/kernel/osrelease")
                     .map(trim_nl)
                     .unwrap_or_default()
-            }),
+            },
+            trim_nl,
+        ),
         machine_wide: wide(&hostname()),
         hwguid_wide: vec![],
     }
 }
 
 /// Modern `X-Mme-Device-Id`: `EEEEEEEE.VVVVVVVV....` (upper hex, dot-joined).
+#[must_use]
 pub fn modern_id(m: &MachineInputs) -> String {
     [
         h32(&m.mac, true),
@@ -61,6 +73,7 @@ pub fn modern_id(m: &MachineInputs) -> String {
 /// Legacy variant: `md5(mac)+md5(vol)+md5(biosW)+md5(cpuW)+md5(productW)`,
 /// lower hex, concatenated. The `cache-control`/`Ethernet` pre-hashes from
 /// the recipe only document the salt context, never the output.
+#[must_use]
 pub fn legacy_id(m: &MachineInputs) -> String {
     [
         h32(&m.mac, false),
@@ -85,13 +98,13 @@ fn h32(data: &[u8], upper: bool) -> String {
 }
 
 fn wide(s: &str) -> Vec<u8> {
-    s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect()
+    s.encode_utf16().flat_map(u16::to_le_bytes).collect()
 }
 
 fn wide_from_ascii(b: &[u8]) -> Vec<u8> {
     String::from_utf8_lossy(b)
         .encode_utf16()
-        .flat_map(|u| u.to_le_bytes())
+        .flat_map(u16::to_le_bytes)
         .collect()
 }
 
@@ -109,7 +122,7 @@ fn first_mac() -> Vec<u8> {
         let mut p = entry.path();
         p.push("address");
         let raw = std::fs::read_to_string(&p).unwrap_or_default();
-        let hex: String = raw.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        let hex: String = raw.chars().filter(char::is_ascii_hexdigit).collect();
         if hex.len() < 12 {
             continue;
         }
@@ -154,21 +167,77 @@ const S: [u32; 64] = [
 ];
 
 const K: [u32; 64] = [
-    0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
-    0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
-    0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
-    0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed, 0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
-    0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
-    0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
-    0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
-    0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
+    0xd7_6a_a4_78,
+    0xe8_c7_b7_56,
+    0x24_20_70_db,
+    0xc1_bd_ce_ee,
+    0xf5_7c_0f_af,
+    0x47_87_c6_2a,
+    0xa8_30_46_13,
+    0xfd_46_95_01,
+    0x69_80_98_d8,
+    0x8b_44_f7_af,
+    0xff_ff_5b_b1,
+    0x89_5c_d7_be,
+    0x6b_90_11_22,
+    0xfd_98_71_93,
+    0xa6_79_43_8e,
+    0x49_b4_08_21,
+    0xf6_1e_25_62,
+    0xc0_40_b3_40,
+    0x26_5e_5a_51,
+    0xe9_b6_c7_aa,
+    0xd6_2f_10_5d,
+    0x02_44_14_53,
+    0xd8_a1_e6_81,
+    0xe7_d3_fb_c8,
+    0x21_e1_cd_e6,
+    0xc3_37_07_d6,
+    0xf4_d5_0d_87,
+    0x45_5a_14_ed,
+    0xa9_e3_e9_05,
+    0xfc_ef_a3_f8,
+    0x67_6f_02_d9,
+    0x8d_2a_4c_8a,
+    0xff_fa_39_42,
+    0x87_71_f6_81,
+    0x6d_9d_61_22,
+    0xfd_e5_38_0c,
+    0xa4_be_ea_44,
+    0x4b_de_cf_a9,
+    0xf6_bb_4b_60,
+    0xbe_bf_bc_70,
+    0x28_9b_7e_c6,
+    0xea_a1_27_fa,
+    0xd4_ef_30_85,
+    0x04_88_1d_05,
+    0xd9_d4_d0_39,
+    0xe6_db_99_e5,
+    0x1f_a2_7c_f8,
+    0xc4_ac_56_65,
+    0xf4_29_22_44,
+    0x43_2a_ff_97,
+    0xab_94_23_a7,
+    0xfc_93_a0_39,
+    0x65_5b_59_c3,
+    0x8f_0c_cc_92,
+    0xff_ef_f4_7d,
+    0x85_84_5d_d1,
+    0x6f_a8_7e_4f,
+    0xfe_2c_e6_e0,
+    0xa3_01_43_14,
+    0x4e_08_11_a1,
+    0xf7_53_7e_82,
+    0xbd_3a_f2_35,
+    0x2a_d7_d2_bb,
+    0xeb_86_d3_91,
 ];
 
 fn md5(msg: &[u8]) -> [u8; 16] {
-    let mut a0: u32 = 0x67452301;
-    let mut b0: u32 = 0xefcdab89;
-    let mut c0: u32 = 0x98badcfe;
-    let mut d0: u32 = 0x10325476;
+    let mut a0: u32 = 0x67_45_23_01;
+    let mut b0: u32 = 0xef_cd_ab_89;
+    let mut c0: u32 = 0x98_ba_dc_fe;
+    let mut d0: u32 = 0x10_32_54_76;
     let bit_len = (msg.len() as u64).wrapping_mul(8);
     let mut data = msg.to_vec();
     data.push(0x80);
@@ -231,11 +300,11 @@ mod tests {
             bios_ascii: b"rel-1.17.0".to_vec(),
             machine_wide: "TESTHOST"
                 .encode_utf16()
-                .flat_map(|u| u.to_le_bytes())
+                .flat_map(u16::to_le_bytes)
                 .collect(),
             hwguid_wide: "{12345678-1234-1234-1234-123456789ABC}"
                 .encode_utf16()
-                .flat_map(|u| u.to_le_bytes())
+                .flat_map(u16::to_le_bytes)
                 .collect(),
         }
     }
