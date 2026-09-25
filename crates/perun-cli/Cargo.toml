@@ -17,6 +17,18 @@ path = "src/main.rs"
 name = "ipatool"
 path = "src/main.rs"
 
+
+# Memory benchmark for the IPA replicator (research only).
+# It is the same module tree the CLI uses, so `replicate()` is exercised for
+# real on a package already on disk, with no download in the measurement.
+[[bin]]
+name = "rep-bench"
+path = "src/rep_bench.rs"
+required-features = ["rep-bench"]
+
+[features]
+rep-bench = []
+
 [dependencies]
 perun-core = { workspace = true }
 perun-shims = { workspace = true }
