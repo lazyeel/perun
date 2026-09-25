@@ -1095,7 +1095,7 @@ mod rdtsc_table_tests {
         // The counts the generator reported, pinned so a regeneration that
         // silently finds fewer sites is caught.
         assert!(sites::COREFP_RDTSC_PATCHES.is_empty());
-        assert_eq!(sites::COMMERCEKIT_RDTSC_PATCHES.len(), 175);
+        assert_eq!(sites::COMMERCEKIT_RDTSC_PATCHES.len(), 178);
         assert!(sites::COMMERCECORE_RDTSC_PATCHES.is_empty());
     }
 
@@ -1126,14 +1126,14 @@ mod rdtsc_table_tests {
     #[test]
     fn idiom_type_counts_are_stable() {
         // The tables are the census union, not the full scan: CoreFP reaches
-        // none of its 6 269 sites, CommerceKit 175 of 251.
+        // none of its 6 269 sites, CommerceKit 178 of 251.
         let count = |t: &[(u32, u8)], k: u8| t.iter().filter(|(_, v)| *v == k).count();
         assert!(
             sites::COREFP_RDTSC_PATCHES.is_empty(),
             "CoreFP reaches no site"
         );
-        assert_eq!(sites::COMMERCEKIT_RDTSC_PATCHES.len(), 175);
-        assert_eq!(count(sites::COMMERCEKIT_RDTSC_PATCHES, 0), 172);
+        assert_eq!(sites::COMMERCEKIT_RDTSC_PATCHES.len(), 178);
+        assert_eq!(count(sites::COMMERCEKIT_RDTSC_PATCHES, 0), 175);
         assert_eq!(count(sites::COMMERCEKIT_RDTSC_PATCHES, 1), 3);
         assert_eq!(count(sites::COMMERCEKIT_RDTSC_PATCHES, 2), 0);
     }
