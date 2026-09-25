@@ -256,8 +256,23 @@ impl MachImage {
             return Err(MachLoadError::MapFailed { size: span });
         }
         let base = base as *mut u8;
+        let label = match path.file_name().and_then(|n| n.to_str()) {
+            Some("CoreFP") => "CoreFP",
+            Some("CommerceKit") => "CommerceKit",
+            Some("CommerceCore") => "CommerceCore",
+            _ => "unknown",
+        };
         let img = unsafe {
-            Self::map_and_fixup(file, info, base, span, load_base, resolver, known_sha256)?
+            Self::map_and_fixup(
+                file,
+                info,
+                base,
+                span,
+                load_base,
+                resolver,
+                known_sha256,
+                label,
+            )?
         };
         Ok(img)
     }
@@ -303,6 +318,14 @@ impl MachImage {
                 owned.as_str()
             }
         };
+        if std::env::var("PERUN_RDTSC_MINIMAL").is_ok() {
+            use crate::rdtsc_minimal as m;
+            return match digest {
+                s::COREFP_RDTSC_SHA256 => Some(m::COREFP_RDTSC_MINIMAL),
+                s::COMMERCEKIT_RDTSC_SHA256 => Some(m::COMMERCEKIT_RDTSC_MINIMAL),
+                _ => None,
+            };
+        }
         match digest {
             s::COREFP_RDTSC_SHA256 => Some(s::COREFP_RDTSC_PATCHES),
             s::COMMERCEKIT_RDTSC_SHA256 => Some(s::COMMERCEKIT_RDTSC_PATCHES),
@@ -316,6 +339,9 @@ impl MachImage {
     ///
     /// # Safety
     /// `base..base+span` must be a writable mapping owned by the caller.
+    // `image` exists for the census instrument alone, so the argument is
+    // present either way.
+    #[allow(clippy::too_many_arguments)]
     unsafe fn map_and_fixup(
         mut file: std::fs::File,
         info: MachInfo,
@@ -324,6 +350,7 @@ impl MachImage {
         load_base: u64,
         resolver: &mut dyn MachImportResolver,
         known_sha256: Option<&str>,
+        image: &'static str,
     ) -> Result<MachImage, MachLoadError> {
         unsafe {
             use std::os::unix::fs::FileExt;
@@ -420,7 +447,7 @@ impl MachImage {
             // rdtsc neutralization against mapped __TEXT,__text. A pinned
             // digest short-circuits the linear scan; anything else scans.
             let pinned = Self::pinned_rdtsc_table(&file, known_sha256);
-            Self::neutralize_rdtsc_mapped(&info, base, span, pinned);
+            Self::neutralize_rdtsc_mapped(&info, base, span, pinned, image);
 
             Ok(MachImage {
                 slide,
@@ -559,6 +586,42 @@ impl MachImage {
         true
     }
 
+    /// Census mode: mine every pinned site to `0xCC` and register it.
+    #[cfg(feature = "rdtsc-census")]
+    fn apply_census_table(
+        table: Option<&[(u32, u8)]>,
+        base: *mut u8,
+        text_off: usize,
+        span: usize,
+        image: &'static str,
+    ) {
+        use crate::census::{self, Site};
+        let img_base = base as u64;
+        let Some(table) = table else {
+            eprintln!("[census] {image}: no pinned table, nothing to mine");
+            return;
+        };
+        let mut sites = Vec::with_capacity(table.len());
+        for &(off, kind) in table {
+            let at = text_off + off as usize;
+            let len = Self::rdtsc_idiom(kind).len();
+            if at + len > span {
+                continue;
+            }
+            unsafe { census::mine(base.add(at), len) };
+            sites.push(Site {
+                lo: img_base + at as u64,
+                hi: img_base + (at + len) as u64,
+                base: img_base,
+                off,
+                image,
+            });
+        }
+        let n = sites.len();
+        census::register(&sites);
+        eprintln!("[census] {image}: mined {n} sites");
+    }
+
     /// In-mapping variant of `neutralize_rdtsc`: same three idioms, same
     /// two-byte prefilter, same patch bytes — written into mapped memory.
     ///
@@ -573,6 +636,7 @@ impl MachImage {
         base: *mut u8,
         span: usize,
         pinned: Option<&[(u32, u8)]>,
+        image: &'static str,
     ) {
         let Some((off, size)) = info.text_section else {
             return;
@@ -580,6 +644,13 @@ impl MachImage {
         let start = off as usize;
         let end = start + size as usize;
         if end > span {
+            return;
+        }
+        #[cfg(not(feature = "rdtsc-census"))]
+        let _ = image;
+        #[cfg(feature = "rdtsc-census")]
+        if std::env::var("PERUN_RDTSC_CENSUS").is_ok() {
+            Self::apply_census_table(pinned, base, start, span, image);
             return;
         }
         if let Some(table) = pinned
@@ -1053,16 +1124,24 @@ mod rdtsc_table_tests {
             tabled[at..at + repl.len()].copy_from_slice(repl);
         }
 
-        let diff = scanned
-            .iter()
-            .zip(tabled.iter())
-            .filter(|(a, b)| a != b)
-            .count();
-        assert_eq!(
-            diff, 0,
-            "{label}: {diff} byte(s) differ between scan and table"
-        );
+        // The shipped table is a SUBSET of what the scan finds (the census
+        // union), so "zero differing bytes" no longer applies — coverage would
+        // be the old full table. What must hold is that every row the table
+        // does patch is patched identically by the scan: the offsets are real
+        // idiom sites and the types are right. Anything less and the loader
+        // would neutralise the wrong bytes.
         assert_eq!(scanned.len(), tabled.len(), "{label}: length differs");
+        for &(off, kind) in table {
+            let at = off as usize;
+            let repl_len = match kind {
+                0 | 2 => 9,
+                _ => 12,
+            };
+            assert!(
+                scanned[at..at + repl_len] == tabled[at..at + repl_len],
+                "{label}: table entry 0x{off:x} is not a genuine scan site"
+            );
+        }
     }
 
     /// Structural check on the generated tables, independent of any file.
@@ -1086,23 +1165,27 @@ mod rdtsc_table_tests {
                 prev = Some(off);
             }
         }
-        // The counts the generator reported, pinned so a regeneration that
-        // silently finds fewer sites is caught.
-        assert_eq!(sites::COREFP_RDTSC_PATCHES.len(), 6269);
-        assert_eq!(sites::COMMERCEKIT_RDTSC_PATCHES.len(), 251);
+        // Row counts, pinned so a regeneration that silently changes the
+        // census union is caught in review rather than in production.
+        assert!(sites::COREFP_RDTSC_PATCHES.is_empty());
+        assert_eq!(sites::COMMERCEKIT_RDTSC_PATCHES.len(), 175);
         assert!(sites::COMMERCECORE_RDTSC_PATCHES.is_empty());
     }
 
     /// Site counts per idiom, as generated.
     #[test]
     fn idiom_type_counts_are_stable() {
+        // The tables are the census union, not the full scan: CoreFP reaches
+        // none of its 6 269 sites, CommerceKit 175 of 251.
         let count = |t: &[(u32, u8)], k: u8| t.iter().filter(|(_, v)| *v == k).count();
-        assert_eq!(count(sites::COREFP_RDTSC_PATCHES, 0), 6256);
-        assert_eq!(count(sites::COREFP_RDTSC_PATCHES, 1), 13);
-        assert_eq!(count(sites::COREFP_RDTSC_PATCHES, 2), 0);
-        assert_eq!(count(sites::COMMERCEKIT_RDTSC_PATCHES, 0), 246);
-        assert_eq!(count(sites::COMMERCEKIT_RDTSC_PATCHES, 1), 4);
-        assert_eq!(count(sites::COMMERCEKIT_RDTSC_PATCHES, 2), 1);
+        assert!(
+            sites::COREFP_RDTSC_PATCHES.is_empty(),
+            "CoreFP reaches no site"
+        );
+        assert_eq!(sites::COMMERCEKIT_RDTSC_PATCHES.len(), 175);
+        assert_eq!(count(sites::COMMERCEKIT_RDTSC_PATCHES, 0), 172);
+        assert_eq!(count(sites::COMMERCEKIT_RDTSC_PATCHES, 1), 3);
+        assert_eq!(count(sites::COMMERCEKIT_RDTSC_PATCHES, 2), 0);
     }
 
     /// Equivalence over the real images when they are present. The assets
@@ -1136,5 +1219,28 @@ mod rdtsc_table_tests {
             sites::COREFP_RDTSC_SHA256,
             "CoreFP digest drifted from the pin"
         );
+    }
+
+    /// The same equivalence for CommerceKit, which is where the shipped rows
+    /// actually live. Without this the CoreFP half runs vacuously over an
+    /// empty table and a mistyped CommerceKit offset would not be caught.
+    #[test]
+    fn commercekit_table_rows_are_genuine_scan_sites() {
+        let dir = std::env::var("PERUN_SAP_DIR").unwrap_or_else(|_| {
+            format!(
+                "{}/.cache/perun/sap",
+                std::env::var("HOME").unwrap_or_default()
+            )
+        });
+        let path = std::path::Path::new(&dir).join("CommerceKit");
+        let Ok(blob) = std::fs::read(&path) else {
+            eprintln!("skipping: {path:?} not present");
+            return;
+        };
+        let info = crate::macho::MachInfo::parse(&blob).expect("parse CommerceKit");
+        let (off, size) = info.text_section.expect("__text");
+        let slice = fat_slice_of(&blob);
+        let text = &blob[slice + off as usize..slice + (off + size) as usize];
+        assert_table_matches_scan(text, sites::COMMERCEKIT_RDTSC_PATCHES, "CommerceKit");
     }
 }

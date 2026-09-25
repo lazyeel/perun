@@ -54,6 +54,20 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             return;
         }
 
+        // Census mode: a `0xCC` we planted over a pinned rdtsc site. Record
+        // it, give the guest the same RAX/RDX the real patch gives it, and
+        // resume just past the idiom. Signal context, so the census module
+        // does a binary search and a bitmap store — no allocation, no locks.
+        #[cfg(feature = "rdtsc-census")]
+        if sig == libc::SIGTRAP
+            && let Some(resume) = perun_core::census::on_trap(rip.wrapping_sub(1))
+        {
+            *regs.add(libc::REG_RAX as usize) = 0;
+            *regs.add(libc::REG_RDX as usize) = 0;
+            *regs.add(libc::REG_RIP as usize) = resume as i64;
+            return;
+        }
+
         // SIGTRAP in production means an unexpected int3/ICEBP in the guest
         // image — the debug watchpoint plants are gone. Report and die: the
         // state at the trap is not recoverable.
@@ -149,6 +163,51 @@ pub unsafe fn install_crash_probe() {
         libc::sigaction(libc::SIGBUS, &act, std::ptr::null_mut());
         libc::sigaction(libc::SIGTRAP, &act, std::ptr::null_mut());
     }
+}
+
+/// TEMP (census branch): Rss/Dirty/Clean per guest VMA.
+#[cfg(feature = "rdtsc-census")]
+fn vma_report(tag: &str) {
+    use std::io::Read;
+    let path = "/proc/self/smaps";
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return;
+    };
+    let mut s = String::new();
+    let _ = f.read_to_string(&mut s);
+    let mut hdr = String::new();
+    let (mut r, mut d, mut c) = (0u64, 0u64, 0u64);
+    let emit = |h: &str, r: u64, d: u64, c: u64| {
+        if h.starts_with("7ff80") {
+            eprintln!("[vma:{tag}] rss={r} dirty={d} clean={c} {h}");
+        }
+    };
+    for line in s.lines() {
+        let first = line.split_whitespace().next().unwrap_or("");
+        let is_hdr =
+            first.contains('-') && first.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '-');
+        if is_hdr {
+            emit(&hdr, r, d, c);
+            hdr = line.to_string();
+            r = 0;
+            d = 0;
+            c = 0;
+            continue;
+        }
+        let v = |k: &str| -> Option<u64> {
+            line.strip_prefix(k)
+                .and_then(|x| x.split_whitespace().next())
+                .and_then(|x| x.parse().ok())
+        };
+        if let Some(kb) = v("Rss:") {
+            r = kb;
+        } else if let Some(kb) = v("Private_Dirty:") {
+            d = kb;
+        } else if let Some(kb) = v("Private_Clean:") {
+            c = kb;
+        }
+    }
+    emit(&hdr, r, d, c);
 }
 
 /// Help text for the low-level lane, printed without running anything.
@@ -1514,6 +1573,8 @@ fn cmd_sap_inner(args: &[String]) -> i32 {
     };
 
     let t0 = std::time::Instant::now();
+    #[cfg(feature = "rdtsc-census")]
+    vma_report("after-load");
     match rt.sign(&payload) {
         Ok(sig) => {
             println!(
@@ -1522,6 +1583,31 @@ fn cmd_sap_inner(args: &[String]) -> i32 {
                 t0.elapsed()
             );
             let mut hex = String::with_capacity(sig.len() * 2);
+
+            // Census report: which planted sites did the guest actually reach.
+            #[cfg(feature = "rdtsc-census")]
+            if std::env::var("PERUN_RDTSC_CENSUS").is_ok() {
+                let fired = perun_core::census::fired();
+                let total = perun_core::census::total();
+                eprintln!("[census] executed {}/{} sites", fired.len(), total);
+                let mut by_image: std::collections::BTreeMap<&str, Vec<u32>> =
+                    std::collections::BTreeMap::new();
+                for (img, off) in &fired {
+                    by_image.entry(img).or_default().push(*off);
+                }
+                // Every image is printed, including the ones that fired zero
+                // times: an absent line would be indistinguishable from a
+                // reporting bug, and "CoreFP: 0" is the whole result.
+                for img in ["CoreFP", "CommerceKit", "CommerceCore", "unknown"] {
+                    let empty: Vec<u32> = Vec::new();
+                    let offs = by_image.get(img).unwrap_or(&empty);
+                    if offs.is_empty() {
+                        eprintln!("[census] {img}: 0 executed");
+                    } else {
+                        eprintln!("[census] {img}: {} executed: {:x?}", offs.len(), offs);
+                    }
+                }
+            }
             for b in &sig {
                 hex.push_str(&format!("{b:02x}"));
             }

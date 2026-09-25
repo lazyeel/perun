@@ -3,10 +3,13 @@
 
 //! perun-core: binary projection of PE32+ images into a Linux process.
 
+#[cfg(feature = "rdtsc-census")]
+pub mod census;
 pub mod image;
 pub mod loader;
 pub mod macho;
 pub mod macho_loader;
+pub mod rdtsc_minimal;
 pub mod rdtsc_sites;
 pub mod sha256;
 pub mod stub;

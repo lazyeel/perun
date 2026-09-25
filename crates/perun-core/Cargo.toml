@@ -8,3 +8,8 @@ description = "Loader core for the Perun native binary projection runtime: PE32+
 
 [dependencies]
 libc = "0.2"
+
+[features]
+# Research instrument: mines every pinned rdtsc site to `0xCC` and records
+# which ones the guest actually reaches. Off by default; main never sees it.
+rdtsc-census = []

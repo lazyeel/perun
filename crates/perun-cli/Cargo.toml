@@ -17,6 +17,9 @@ path = "src/main.rs"
 name = "ipatool"
 path = "src/main.rs"
 
+[features]
+rdtsc-census = ["perun-core/rdtsc-census"]
+
 [dependencies]
 perun-core = { workspace = true }
 perun-shims = { workspace = true }
