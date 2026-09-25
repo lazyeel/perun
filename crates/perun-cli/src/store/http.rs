@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use ureq::Agent;
@@ -273,7 +273,7 @@ fn agent() -> Result<&'static Agent, String> {
         return Ok(a);
     }
     // Build before publishing, so a failure is not cached for the process.
-    let a = build_agent(&cookie_jar_path()?)?;
+    let a = build_agent()?;
     Ok(AGENT.get_or_init(|| a))
 }
 
@@ -290,7 +290,7 @@ fn with_headers<Any>(
     b
 }
 
-fn build_agent(jar: &PathBuf) -> Result<Agent, String> {
+fn build_agent() -> Result<Agent, String> {
     let builder = Agent::config_builder()
         .user_agent(USER_AGENT)
         .max_redirects(0)
@@ -299,229 +299,12 @@ fn build_agent(jar: &PathBuf) -> Result<Agent, String> {
         .timeout_send_body(Some(Duration::from_secs(60)))
         .http_status_as_error(false);
     let agent: Agent = builder.build().into();
-    load_cookies(&agent, jar);
+    // The jar is ours, not the agent's: the `cookies` feature is off, so nothing
+    // holds a session implicitly. Whatever is on disk is loaded once here.
+    if let Ok(jar) = cookie_jar_path() {
+        let _ = crate::store::cookie_jar::jar().load_netscape_file(&jar);
+    }
     Ok(agent)
-}
-
-/// Read the shared jar into the agent, and keep the rows for the writer.
-fn load_cookies(agent: &Agent, jar: &PathBuf) {
-    let Ok(text) = std::fs::read_to_string(jar) else {
-        return;
-    };
-    if text.trim().is_empty() {
-        return;
-    }
-    let mut rows: Vec<Vec<String>> = Vec::new();
-    let mut guard = agent.cookie_jar_lock();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('#') && !line.starts_with("#HttpOnly_") {
-            continue;
-        }
-        let f: Vec<&str> = line.split('\t').collect();
-        if f.len() < 7 {
-            continue;
-        }
-        let (domain, include_sub, path, secure, expires, name, value) =
-            (f[0], f[1], f[2], f[3], f[4], f[5], f[6]);
-        if name.is_empty() {
-            continue;
-        }
-        // A row whose deadline has passed is dead: loading it would hand the
-        // agent a cookie Apple has already withdrawn.
-        if let Ok(sec) = expires.parse::<i64>()
-            && (sec < 0 || (sec > 0 && sec <= now_unix()))
-        {
-            continue;
-        }
-        let _ = include_sub;
-        // curl prefixes HttpOnly rows with `#HttpOnly_`. It is not part of the
-        // domain, and leaving it in makes the Domain attribute unparseable, so
-        // the row is dropped. The flag only restricts script access, which has
-        // no meaning for a client that just sends the cookie back.
-        let domain = domain.trim_start_matches("#HttpOnly_");
-        // The netscape domain carries a leading dot (".apple.com"), which is
-        // not a URI host; the cookie's Domain attribute keeps the dot.
-        let host = domain.trim_start_matches('.');
-        let Ok(uri) = format!("https://{host}").parse::<ureq::http::Uri>() else {
-            continue;
-        };
-        // The Domain attribute is what makes this a suffix cookie: without it
-        // the jar would treat every cookie as host-only for `apple.com` and
-        // send none of them to the `*.itunes.apple.com` hosts.
-        let mut set = format!("{name}={value}; Domain={domain}; Path={path}");
-        if secure == "TRUE" {
-            set.push_str("; Secure");
-        }
-        if let Ok(cookie) = ureq::Cookie::parse(set, &uri)
-            && guard.insert(cookie, &uri).is_err()
-        {
-            eprintln!("[store:http] cookie import failed for {name} on {host}");
-        }
-        rows.push(vec![
-            domain.to_string(),
-            include_sub.to_string(),
-            path.to_string(),
-            secure.to_string(),
-            expires.to_string(),
-            name.to_string(),
-            value.to_string(),
-        ]);
-    }
-    drop(guard);
-    *JAR_LINES.lock().unwrap_or_else(|e| e.into_inner()) = rows;
-}
-
-/// The on-disk jar, in curl's netscape format, held in memory for the process.
-///
-/// This is the persistence layer, and it is deliberately NOT enumerated from
-/// the in-memory jar: `ureq::Cookie` exposes only `name()` and `value()`, so
-/// the domain, path and expiry needed for the format cannot be read back out of
-/// it. Nor can we use ureq's own JSON saver — `cookie_store`'s JSON writer keeps
-/// only `is_persistent()` cookies, and Apple's `hsaccnt`, `wosid`, `woinst` and
-/// `mzf_in` carry no `Expires`, so every save dropped the four cookies
-/// MZFinance authenticates with and DAAP answered 401. The netscape format has
-/// an explicit expiry column, so a session cookie is written as `0` and comes
-/// back as a session cookie.
-static JAR_LINES: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
-
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-fn default_path(url: &str) -> String {
-    let path = url
-        .split_once("://")
-        .map_or("/", |(_, rest)| rest.find('/').map_or("/", |i| &rest[i..]));
-    let trimmed = path.split(['?', '#']).next().unwrap_or("/");
-    if !trimmed.starts_with('/') {
-        return "/".to_string();
-    }
-    match trimmed.rfind('/') {
-        Some(0) | None => "/".to_string(),
-        Some(i) => trimmed[..i].to_string(),
-    }
-}
-
-/// Fold one `Set-Cookie` header into a netscape row for `url`.
-///
-/// Returns `None` when the header deletes the cookie (`Max-Age` zero or
-/// negative), which must remove the stored row rather than resurrect it: an
-/// Apple session cookie dropped this way is what makes the next authenticated
-/// call fail.
-fn set_cookie_line(set: &str, url: &str) -> Option<Vec<String>> {
-    let mut parts = set.split(';');
-    let pair = parts.next()?.trim();
-    let (name, value) = pair.split_once('=')?;
-    let name = name.trim();
-    if name.is_empty() {
-        return None;
-    }
-    let (scheme, rest) = url.split_once("://")?;
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if host.is_empty() {
-        return None;
-    }
-    let host = format!("{scheme}://{host}")
-        .parse::<ureq::http::Uri>()
-        .ok()
-        .and_then(|u| u.host().map(|h| h.to_string()))?;
-    let mut domain = String::new();
-    let mut path = String::new();
-    let mut secure = false;
-    let mut expires = String::from("0");
-    for attr in parts {
-        let attr = attr.trim();
-        let (key, val) = attr.split_once('=').unwrap_or((attr, ""));
-        match key.trim().to_ascii_lowercase().as_str() {
-            "domain" => domain = format!(".{}", val.trim().trim_start_matches('.')),
-            "path" => path = val.trim().to_string(),
-            "secure" => secure = true,
-            "max-age" => {
-                if let Ok(secs) = val.trim().parse::<i64>() {
-                    if secs <= 0 {
-                        return None;
-                    }
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0);
-                    expires = (now + secs).to_string();
-                }
-            }
-            "expires" => {
-                // Left as 0 (session): the absolute date is re-derived on the
-                // next response anyway, and a wrong one would expire early.
-                expires = String::from("0");
-            }
-            _ => {}
-        }
-    }
-    if path.is_empty() {
-        path = default_path(url);
-    }
-    if domain.is_empty() {
-        domain = host;
-    }
-    Some(vec![
-        domain,
-        "FALSE".to_string(),
-        path,
-        secure.to_string(),
-        expires,
-        name.to_string(),
-        value.trim().to_string(),
-    ])
-}
-
-/// Record the `Set-Cookie` headers of one response, replacing any row of the
-/// same name, domain and path.
-fn record_set_cookies(sets: &[String], url: &str) {
-    let mut rows = JAR_LINES.lock().unwrap_or_else(|e| e.into_inner());
-    for set in sets {
-        // The name identifies the row being set or deleted; the domain and path
-        // only say which of several same-named cookies it applies to.
-        let name = set.split(';').next().unwrap_or("").trim();
-        let Some((name, _)) = name.split_once('=') else {
-            continue;
-        };
-        let existing = |r: &Vec<String>| r[5] == name;
-        match set_cookie_line(set, url) {
-            Some(row) => match rows
-                .iter()
-                .position(|r| r[0] == row[0] && existing(r) && r[2] == row[2])
-            {
-                Some(i) => rows[i] = row,
-                None => rows.push(row),
-            },
-            None => rows.retain(|r| !existing(r)),
-        }
-    }
-}
-
-/// Write the jar back. Temp file plus rename, so a crash mid-write cannot
-/// truncate a live session.
-fn save_cookies(jar: &PathBuf) {
-    let rows = JAR_LINES.lock().unwrap_or_else(|e| e.into_inner());
-    if rows.is_empty() {
-        // Never replace a populated file with nothing: a failed load or a
-        // request that set no cookies must not destroy a live session.
-        return;
-    }
-    let mut out =
-        String::from("# Netscape HTTP Cookie File\n# Written by perun. Do not edit by hand.\n\n");
-    for r in rows.iter() {
-        out.push_str(&r.join("\t"));
-        out.push('\n');
-    }
-    let tmp = jar.with_extension("tmp");
-    if std::fs::write(&tmp, out).is_ok() && std::fs::rename(&tmp, jar).is_ok() {
-        return;
-    }
-    let _ = std::fs::remove_file(&tmp);
 }
 
 /// Issue one request, and follow hops ourselves when the caller wants them.
@@ -541,17 +324,30 @@ fn dispatch(
     let mut url = url;
     let mut hop = 0usize;
     loop {
+        // The session travels as an explicit header. ureq's `cookies` feature is
+        // off, so nothing is attached implicitly — and the header is recomputed
+        // per hop, because the IPA download answers with a 302 onto Apple's CDN
+        // and a suffix cookie must not follow the redirect off apple.com.
+        let cookie = crate::store::cookie_jar::jar().get_cookie_header_for_url(&url);
+        let mut headers = req.headers.clone();
+        if let Some(c) = cookie
+            && !headers
+                .iter()
+                .any(|(n, _)| n.eq_ignore_ascii_case("cookie"))
+        {
+            headers.push(("Cookie".to_string(), c));
+        }
         // `call()` exists only on the no-body builder, `send()` only on the
         // with-body one, so the two shapes are dispatched separately; the
         // header application is shared through with_headers().
         let res = match (req.method, req.body.as_ref()) {
-            ("GET", _) | ("DELETE", _) => with_headers(agent.get(&url), &req.headers).call(),
+            ("GET", _) | ("DELETE", _) => with_headers(agent.get(&url), &headers).call(),
             ("POST", Some(body)) | ("PUT", Some(body)) => {
-                with_headers(agent.post(&url), &req.headers).send(body.clone())
+                with_headers(agent.post(&url), &headers).send(body.clone())
             }
             // A POST with no payload still needs Content-Length: 0, or Apple's
             // front (Tomcat) answers 411 Length Required.
-            ("POST", None) => with_headers(agent.post(&url), &req.headers).send(Vec::new()),
+            ("POST", None) => with_headers(agent.post(&url), &headers).send(Vec::new()),
             (other, _) => {
                 return Err(format!(
                     "unsupported method {other:?}: the agent exposes GET/POST/PUT/DELETE only"
@@ -648,8 +444,20 @@ pub fn send(mut req: Request) -> Result<Response, String> {
             headers.insert(lower, v.to_string());
         }
     }
-    record_set_cookies(&set_cookies, req.url);
-    save_cookies(&cookie_jar_path().unwrap_or_default());
+    let jar = crate::store::cookie_jar::jar();
+    let host = req
+        .url
+        .split_once("://")
+        .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(""))
+        .unwrap_or("")
+        .to_string();
+    for set in &set_cookies {
+        jar.add_from_set_cookie(set, &host);
+    }
+    jar.retain_live();
+    if let Ok(path) = cookie_jar_path() {
+        let _ = jar.save_netscape_file(&path);
+    }
 
     // The resume gate runs before a single body byte can reach a sink.
     let mut file_buf: Option<std::io::BufWriter<&mut std::fs::File>> =
@@ -703,7 +511,9 @@ pub fn send(mut req: Request) -> Result<Response, String> {
         buf.flush().map_err(|e| format!("sink flush: {e}"))?;
     }
 
-    save_cookies(&cookie_jar_path()?);
+    if let Ok(path) = cookie_jar_path() {
+        let _ = crate::store::cookie_jar::jar().save_netscape_file(&path);
+    }
 
     Ok(Response {
         status,
@@ -884,136 +694,6 @@ mod tests {
         assert!(check_range_response(403, &range_hdrs(&[]), 0).is_err());
         assert!(check_range_response(500, &range_hdrs(&[]), 0).is_err());
         assert!(check_range_response(302, &range_hdrs(&[]), 0).is_err());
-    }
-
-    /// The legacy curl jar is what an existing install has on disk. If this
-    /// import silently yields nothing, the next save wipes the session — the
-    /// failure is invisible until a signed request 401s.
-    #[test]
-    fn legacy_netscape_jar_is_imported() {
-        let scratch = std::env::temp_dir().join(format!("perun-cj-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&scratch);
-        std::fs::create_dir_all(&scratch).unwrap();
-        let jar = scratch.join("cookies.txt");
-        std::fs::write(
-            &jar,
-            concat!(
-                "# Netscape HTTP Cookie File\n",
-                "\n",
-                ".apple.com\tTRUE\t/\tFALSE\t0\titspod\t48\n",
-                "#HttpOnly_.apple.com\tTRUE\t/\tTRUE\t0\tmz_at0\tSECRETVALUE\n",
-                "#HttpOnly_.apple.com\tTRUE\t/WebObjects\tTRUE\t0\twosid\tSID\n",
-            ),
-        )
-        .unwrap();
-
-        let agent: Agent = Agent::config_builder().build().into();
-        load_cookies(&agent, &jar);
-        let guard = agent.cookie_jar_lock();
-        let names: Vec<String> = guard.iter().map(|c| c.name().to_string()).collect();
-        assert!(
-            names.contains(&"itspod".to_string()),
-            "plain cookie: {names:?}"
-        );
-        assert!(
-            names.contains(&"mz_at0".to_string()),
-            "HttpOnly cookie: {names:?}"
-        );
-        assert!(
-            names.contains(&"wosid".to_string()),
-            "path-scoped cookie: {names:?}"
-        );
-        assert!(
-            guard.iter().any(|c| c.value() == "SECRETVALUE"),
-            "cookie value must survive the import"
-        );
-        drop(guard);
-        let _ = std::fs::remove_dir_all(&scratch);
-    }
-
-    /// The bug this file exists to prevent: `cookie_store`'s JSON saver keeps
-    /// only `is_persistent()` cookies, so Apple's session cookies — `hsaccnt`,
-    /// `wosid`, `woinst`, `mzf_in`, none of which carry an `Expires` — were
-    /// dropped on every save, and DAAP answered 401. The netscape format has an
-    /// explicit expiry column, so `0` (session) must survive the round trip.
-    #[test]
-    fn session_cookies_survive_the_jar_round_trip() {
-        let scratch = std::env::temp_dir().join(format!("perun-cj-rt-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&scratch);
-        std::fs::create_dir_all(&scratch).unwrap();
-        let jar = scratch.join("cookies.txt");
-
-        {
-            let mut rows = JAR_LINES.lock().unwrap();
-            rows.clear();
-            rows.push(vec![
-                ".apple.com".into(),
-                "TRUE".into(),
-                "/WebObjects".into(),
-                "FALSE".into(),
-                "0".into(),
-                "hsaccnt".into(),
-                "session-value".into(),
-            ]);
-            rows.push(vec![
-                ".apple.com".into(),
-                "TRUE".into(),
-                "/".into(),
-                "TRUE".into(),
-                "0".into(),
-                "mz_at_ssl-1".into(),
-                "ssl-value".into(),
-            ]);
-        }
-        save_cookies(&jar);
-
-        let written = std::fs::read_to_string(&jar).unwrap();
-        assert!(
-            written.contains("hsaccnt\tsession-value"),
-            "session cookie missing from the jar file:\n{written}"
-        );
-
-        // Reload into a fresh agent: the row must come back as a real cookie.
-        {
-            let mut rows = JAR_LINES.lock().unwrap();
-            rows.clear();
-        }
-        let agent: Agent = Agent::config_builder().build().into();
-        load_cookies(&agent, &jar);
-        let names: Vec<String> = agent
-            .cookie_jar_lock()
-            .iter()
-            .map(|c| c.name().to_string())
-            .collect();
-        assert!(
-            names.contains(&"hsaccnt".to_string()),
-            "hsaccnt did not come back: {names:?}"
-        );
-        let _ = std::fs::remove_dir_all(&scratch);
-    }
-
-    /// An empty jar must never overwrite a populated file: that is how a failed
-    /// import used to destroy a live session with no error anywhere.
-    #[test]
-    fn empty_jar_does_not_overwrite_a_populated_file() {
-        let scratch = std::env::temp_dir().join(format!("perun-cj2-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&scratch);
-        std::fs::create_dir_all(&scratch).unwrap();
-        let jar = scratch.join("cookies.txt");
-        let original =
-            b"# Netscape HTTP Cookie File\n.apple.com\tTRUE\t/\tFALSE\t0\thsaccnt\tkeep-me\n";
-        std::fs::write(&jar, original).unwrap();
-
-        let mut rows = JAR_LINES.lock().unwrap();
-        rows.clear();
-        drop(rows);
-        save_cookies(&jar);
-        assert_eq!(
-            std::fs::read(&jar).unwrap(),
-            original,
-            "the on-disk jar must survive an empty in-memory one"
-        );
-        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     /// End-to-end through the real curl binary against a localhost server:

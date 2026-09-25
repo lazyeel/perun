@@ -35,9 +35,10 @@ perun-shims = { workspace = true }
 libc = "0.2"
 bzip2-rs = "0.1.2"
 # HTTP for the Store lane and the asset fetcher, replacing the external curl
-# binary. `cookies` is what backs the shared mz_at0 session jar (ureq speaks the
-# same netscape format curl wrote), `tls` is rustls + webpki-roots, so no OpenSSL.
-# `cookie_store` is the same version ureq pins, so the Cookie the jar hands us
-# is this type and its domain/path/expiry are readable for the jar file.
-cookie_store = "0.22"
-ureq = { version = "3", default-features = false, features = ["rustls", "gzip", "json", "cookies"] }
+# binary. `cookies` is deliberately NOT enabled: it pulls `cookie_store`, and
+# through it `url` -> `idna` -> the whole ICU4X slice, 15 crates under the
+# copyleft Unicode-3.0, so that a cookie jar can validate public suffixes.
+# Perun only ever talks to *.apple.com, and `store::cookie_jar` is 200 lines of
+# std that read the same curl-format file.
+# `tls` is rustls + webpki-roots, so no OpenSSL.
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip", "json"] }

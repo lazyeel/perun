@@ -33,6 +33,7 @@ pub mod completion_bash;
 pub mod completion_fish;
 pub mod completion_powershell;
 pub mod completion_zsh;
+pub mod cookie_jar;
 pub mod dmap;
 pub mod http;
 pub mod ipa;
