@@ -124,7 +124,11 @@ fn parse_central_at(data: &[u8], start: usize, eocd: &Eocd) -> Result<Vec<Centra
             ])
         };
         let method = u16_at(10);
-        let modified = (u16_at(12), u16_at(14));
+        // The tuple is (date, time) everywhere else in this module: that is
+        // the order `add_stored` and `finish` write, and the order the callers
+        // pass. Reading the record as (time, date) made every copied entry
+        // land its two halves in each other's field.
+        let modified = (u16_at(14), u16_at(12));
         let crc32 = u32_at(16);
         let compressed_size = u32_at(20) as u64;
         let uncompressed_size = u32_at(24) as u64;
@@ -2149,5 +2153,132 @@ mod tests {
         assert_eq!(compressed, 2);
         assert!(data_start < small.local_offset + 64);
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ── regression: DOS time and date kept in their own fields (F1) ─────────
+    //
+    // The central record stores the modification time at offset 12 and the
+    // modification date at offset 14. The pair is a tuple in the writer, and
+    // a transposition there silently rewrites every timestamp in the package.
+    #[test]
+    fn central_records_preserve_dos_time_and_date_order() {
+        const TIME: u16 = 0x0C5D; // 06:11:00
+        const DATE: u16 = 0x5A21; // 2022-09-01
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut z = ZipWriter::new(&mut buf);
+            let mut ip = Plist::dict();
+            ip.set("CFBundleExecutable", Plist::string("Stamp"));
+            z.add_stored(
+                "Payload/Stamp.app/Info.plist",
+                &plist::to_binary(&ip),
+                (DATE, TIME),
+            )
+            .unwrap();
+            z.add_stored("Payload/Stamp.app/Stamp", b"hi", (DATE, TIME))
+                .unwrap();
+            z.add_stored("Payload/Stamp.app/Second", b"ho", (DATE, TIME))
+                .unwrap();
+            z.finish().unwrap();
+        }
+        let out = replicate_bytes(&buf);
+        let (_, eocd) = find_eocd(&out).unwrap();
+        let records = central_records(&out, &eocd);
+        // Info.plist, two copied bodies, and the metadata sidecar.
+        assert_eq!(
+            records.len(),
+            4,
+            "{:?}",
+            records.iter().map(|(_, e)| &e.name).collect::<Vec<_>>()
+        );
+        for (at, e) in &records {
+            if e.name == "iTunesMetadata.plist" {
+                continue;
+            }
+            let time = u16::from_le_bytes([out[at + 12], out[at + 13]]);
+            let date = u16::from_le_bytes([out[at + 14], out[at + 15]]);
+            assert_eq!(time, TIME, "{}: the time field holds the date", e.name);
+            assert_eq!(date, DATE, "{}: the date field holds the time", e.name);
+        }
+        // The injected sidecar is written by a different code path and must
+        // keep the same field order: a real DOS date, not the time value.
+        let (at, _) = records
+            .iter()
+            .find(|(_, e)| e.name == "iTunesMetadata.plist")
+            .expect("metadata record");
+        let time = u16::from_le_bytes([out[at + 12], out[at + 13]]);
+        let date = u16::from_le_bytes([out[at + 14], out[at + 15]]);
+        let year = 1980 + ((date >> 9) & 0x7f);
+        assert!(
+            (2020..2100).contains(&year),
+            "injected date must be a real date, got {date:#06x} (year {year})"
+        );
+        assert_ne!(time, date, "injected time and date must not be transposed");
+    }
+
+    /// Every central record as `(offset in blob, parsed record)`, walked from
+    /// the directory's own start rather than by scanning for the signature.
+    fn central_records(blob: &[u8], eocd: &Eocd) -> Vec<(usize, CentralEntry)> {
+        let mut out = Vec::with_capacity(eocd.entry_count as usize);
+        let mut at = eocd.cd_offset as usize;
+        let end = at + eocd.cd_size as usize;
+        while at + 46 <= end {
+            if blob[at..at + 4] != CEN_SIG {
+                break;
+            }
+            let nl = u16::from_le_bytes([blob[at + 28], blob[at + 29]]) as usize;
+            let el = u16::from_le_bytes([blob[at + 30], blob[at + 31]]) as usize;
+            let cl = u16::from_le_bytes([blob[at + 32], blob[at + 33]]) as usize;
+            let mut rec = CentralEntry {
+                name: String::from_utf8_lossy(&blob[at + 46..at + 46 + nl]).into_owned(),
+                method: 0,
+                flags: 0,
+                crc32: 0,
+                compressed_size: 0,
+                uncompressed_size: 0,
+                local_offset: 0,
+                external_attrs: 0,
+                modified: (0, 0),
+                central_extra: Vec::new(),
+            };
+            rec.modified = (
+                u16::from_le_bytes([blob[at + 12], blob[at + 13]]),
+                u16::from_le_bytes([blob[at + 14], blob[at + 15]]),
+            );
+            out.push((at, rec));
+            at += 46 + nl + el + cl;
+        }
+        out
+    }
+
+    /// Replicate an in-memory package through the file-backed path, which is
+    /// the only path the tests for the fixes below can exercise.
+    fn replicate_bytes(src: &[u8]) -> Vec<u8> {
+        let id = std::process::id();
+        let src_path = std::env::temp_dir().join(format!("perun-byt-src-{id}.zip"));
+        let out_path = std::env::temp_dir().join(format!("perun-byt-out-{id}.ipa"));
+        let _ = std::fs::remove_file(&out_path);
+        std::fs::write(&src_path, src).unwrap();
+        replicate(
+            src_path.to_str().unwrap(),
+            out_path.to_str().unwrap(),
+            &DownloadInfo {
+                url: String::new(),
+                sinfs: Vec::new(),
+                metadata: Plist::dict(),
+                version: "1.0".into(),
+                artwork_url: String::new(),
+                artwork: None,
+            },
+            &crate::store::account::Account {
+                email: "tester@example.com".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let out = std::fs::read(&out_path).unwrap();
+        let _ = std::fs::remove_file(&src_path);
+        let _ = std::fs::remove_file(&out_path);
+        out
     }
 }
