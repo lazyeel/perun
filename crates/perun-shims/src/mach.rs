@@ -382,6 +382,35 @@ pub fn mach_shim_table(corefp_exports: &HashMap<String, u64>) -> HashMap<String,
 
 static GUEST_MAC: std::sync::Mutex<[u8; 6]> = std::sync::Mutex::new([0; 6]);
 
+/// Reset the per-session shim state so a fresh `SapRuntime` in the same
+/// process starts from the same place the first one does.
+///
+/// The guest's state spray is sensitive to host statics that outlive a
+/// session. `IOIteratorNext` is `--counter % 2` (HANDOVER 3.7), so a
+/// counter left at odd parity makes the very first call return 0 instead of
+/// the documented `0xFFFFFFFF`; the guest then finds no IOKit interface and
+/// emits the MAC-less form, which is 485 bytes instead of 501. The guest heap
+/// has the same problem: a carried-over bump pointer hands the next session
+/// an arena that is not at its documented origin.
+///
+/// The shim table is deliberately NOT reset: it is keyed by name and
+/// allocates deterministically, so rebuilding it per session would only
+/// churn. Its `NEXT` counter must keep climbing anyway so slot addresses
+/// stay unique for the process lifetime.
+///
+/// Call this before creating a new `SapRuntime`.
+pub fn reset_shim_state() {
+    with_state(|st| {
+        st.icxs_cursor = 0;
+        st.iterator = 0;
+    });
+    // The guest heap is deliberately NOT reset: it is one 64 MiB arena mapped
+    // once per process at a fixed base, shared by every session in that
+    // process. Rewinding its bump pointer hands a new session an arena the
+    // previous one still has live pointers into, and the guest wedges.
+    *GUEST_MAC.lock().unwrap_or_else(|e| e.into_inner()) = [0; 6];
+}
+
 /// Publish the MAC that `_get_mac_address` will report.
 pub fn set_guest_mac(mac: &[u8; 6]) {
     *GUEST_MAC.lock().unwrap_or_else(|e| e.into_inner()) = *mac;

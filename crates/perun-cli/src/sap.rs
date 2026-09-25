@@ -214,6 +214,10 @@ impl SapRuntime {
     /// Load all images and resolve entry points. `hw_mac` (6 bytes) seeds
     /// the FairPlay hardware identity.
     pub fn new(assets: &SapAssets) -> Result<SapRuntime, String> {
+        // Host shim statics outlive a session; reset them so this session
+        // starts from the documented first-call state (see `reset_shim_state`).
+        perun_shims::mach::reset_shim_state();
+
         // Serve the ICXS blob through the fake file path before CoreFP loads.
         // Opened, not read: the shim preads from it on demand.
         let image_path =
