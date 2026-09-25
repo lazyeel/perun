@@ -334,15 +334,22 @@ fn strip_zip64_extra(extra: &[u8]) -> Vec<u8> {
         let size = u16::from_le_bytes([extra[i + 2], extra[i + 3]]) as usize;
         let end = i + 4 + size;
         if end > extra.len() {
-            // Truncated block: keep the tail verbatim rather than dropping.
+            // Truncated block: keep the tail verbatim rather than dropping,
+            // and return. Falling through would append the same bytes a
+            // second time — the loop leaves `i` where it was, so the trailing
+            // `i < len` check below sees the very tail this branch just
+            // emitted. The extra then comes out longer than it went in, which
+            // moves the payload off its 16 KiB boundary and, near the `u16`
+            // ceiling, trips the length check with the wrong reason.
             out.extend_from_slice(&extra[i..]);
-            break;
+            return out;
         }
         if id != ZIP64_EXTRA_ID {
             out.extend_from_slice(&extra[i..end]);
         }
         i = end;
     }
+    // Fewer than four bytes left: a header we cannot read. Keep them, once.
     if i < extra.len() {
         out.extend_from_slice(&extra[i..]);
     }
@@ -1913,6 +1920,86 @@ mod tests {
         let deflated: Vec<u8> = vec![0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x57, 0xc8, 0x40, 0x90, 0x00];
         let out = inflate(&deflated, 17).unwrap();
         assert_eq!(String::from_utf8_lossy(&out), "hello hello hello");
+    }
+
+    /// A truncated trailing field must be carried over exactly once.
+    ///
+    /// The field declares a size that runs past the end of the buffer, which
+    /// is malformed by definition. The function's job is to keep the tail
+    /// rather than drop it, and it used to do that twice: the truncated branch
+    /// appended `extra[i..]` and broke, and the trailing `if i < extra.len()`
+    /// then appended the same bytes again. A 9-byte extra came back as 18, and
+    /// near the 64 KiB ceiling the doubling crossed the `u16` limit and the
+    /// entry was refused as "local extra too long" — a size limit reporting the
+    /// wrong cause. The duplication is silent in the small case: the extra
+    /// grows, the entry replicates, and the output's extra is longer than the
+    /// input's.
+    #[test]
+    fn truncated_extra_tail() {
+        // id 0x5855, declared size 4096, nine bytes actually present.
+        let mut extra = vec![0x55, 0x58, 0x00, 0x10];
+        extra.extend_from_slice(&[0x01, 0x00, 0x00, 0x00, 0x00]);
+        let stripped = strip_zip64_extra(&extra);
+        assert_eq!(
+            stripped.len(),
+            extra.len(),
+            "the tail must appear once, not twice"
+        );
+        assert_eq!(stripped, extra, "a truncated field is carried verbatim");
+
+        // A whole field followed by a truncated one: only the truncated part
+        // is at risk, and the well-formed field before it must still survive.
+        let mut two = vec![0x55, 0x54, 0x02, 0x00, 0xAA, 0xBB];
+        two.extend_from_slice(&extra);
+        let stripped = strip_zip64_extra(&two);
+        assert_eq!(stripped, two);
+        assert_eq!(stripped.len(), two.len());
+
+        // And the ZIP64 block before the truncation is still removed.
+        let mut with_z64 = zip64_central_extra(ZIP64_SUB as u64, 20, 30);
+        with_z64.extend_from_slice(&extra);
+        let stripped = strip_zip64_extra(&with_z64);
+        assert_eq!(stripped, extra, "zip64 block dropped, tail kept once");
+    }
+
+    /// Every extra the writer is handed must come out no longer than it went in:
+    /// the only transformation allowed is dropping ZIP64 blocks. This is the
+    /// property the alignment padding depends on, since a longer extra moves
+    /// the payload off its 16 KiB boundary.
+    #[test]
+    fn strip_zip64_extra_never_grows() {
+        let mut rng: u32 = 0x1234_5678;
+        let mut next = || {
+            rng = rng.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            rng >> 8
+        };
+        for case in 0..2_000 {
+            let len = (next() % 48) as usize;
+            let mut extra: Vec<u8> = (0..len).map(|_| (next() & 0xFF) as u8).collect();
+            // Half the cases get a well-formed ZIP64 block to strip, and a
+            // third of those a size that deliberately overruns.
+            if case % 2 == 0 && extra.len() >= 4 {
+                let size = if case % 6 == 0 {
+                    (next() as usize % 0x1_0000) | 0x8000
+                } else {
+                    4 + (next() as usize % 8)
+                };
+                extra.splice(0..4, [0x01, 0x00, (size & 0xFF) as u8, (size >> 8) as u8]);
+            }
+            let stripped = strip_zip64_extra(&extra);
+            assert!(
+                stripped.len() <= extra.len(),
+                "case {case}: {} bytes in, {} bytes out",
+                extra.len(),
+                stripped.len()
+            );
+            // Whatever survives must be a prefix-preserving subsequence: every
+            // output byte comes from the input, in order.
+            let mut k = 0;
+            for &b in &stripped {
+                k += extra[k..].iter().position(|&x| x == b).expect("stray byte") + 1;
+            }
+        }
     }
 
     #[test]
