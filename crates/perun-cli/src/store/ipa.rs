@@ -784,8 +784,41 @@ pub fn replicate(
     metadata.set("userName", Plist::string(&account.email));
     let itunes_meta = plist::to_xml(&metadata).into_bytes();
 
+    // Sliding-window reclaim state (see the copy loop). 32 MiB by default;
+    // PERUN_REPLICA_WINDOW_MB overrides it, 0 turns the sweep off.
+    let page = 4096usize;
+    let window: usize = match std::env::var("PERUN_REPLICA_WINDOW_MB") {
+        Ok(v) => v.parse::<usize>().unwrap_or(32),
+        Err(_) => 32,
+    } * 1024
+        * 1024;
+    let mut swept_to: usize = 0;
+
     for entry in &entries {
         zip.copy_raw(src, entry)?;
+        // Sliding-window reclaim: once the cursor is a whole window ahead,
+        // tell the kernel to drop the pages behind it. MADV_SEQUENTIAL on its
+        // own only *asks* the reclaimer to keep up, and measured peak RSS on a
+        // 3.6 GiB package swung 532..1012 MiB between identical runs — the
+        // resident set was being decided by kernel timing, not by us. This
+        // makes it ours. Enabled with PERUN_REPLICA_WINDOW_MB; 0 = off.
+        if window > 0 {
+            let cur = entry.local_offset as usize;
+            if cur > swept_to + window {
+                // Leave a half-window of slack so a later entry that reaches
+                // backwards does not re-fault a mountain of pages.
+                let mut upto = cur - window / 2;
+                upto &= !(page - 1);
+                unsafe {
+                    let _ = madvise(
+                        src_map.as_ptr() as *mut std::ffi::c_void,
+                        upto,
+                        MADV_DONTNEED,
+                    );
+                }
+                swept_to = upto;
+            }
+        }
     }
     zip.add_stored("iTunesMetadata.plist", &itunes_meta, (ddate, dtime))?;
     if let Some(artwork) = &info.artwork {
