@@ -487,29 +487,113 @@ Perun's implementation shares no code with the above; the obfuscated names, offs
 
 ### 8.1 Third-party crates: runtime and compile-time
 
-The dependency set (Cargo.lock), with licenses read from each crate's own manifest. The split matters for compliance scanners (FOSSA, Black Duck) and for NOTICE obligations under Apache-2.0/MIT, which attach to code compiled into the distributed binary (object form):
+The dependency set, read from `cargo metadata` at the target triple, with each licence taken from the crate's own manifest. The split matters for compliance scanners (FOSSA, Black Duck) and for NOTICE obligations under Apache-2.0/MIT, which attach to code compiled into the distributed binary (object form). The two tables below are generated — `python3 tmp/gen_license_tables.py`, and `--check` to detect drift — so a dependency bump cannot add a crate that no notice names.
 
-**Runtime — compiled into the `perun` ELF:**
+<!-- BEGIN GENERATED: license-tables -->
+**Runtime — compiled into the `perun` ELF (71 crates):**
 
 | Crate | Version | License | Author / repository | Role |
 |---|---|---|---|---|
+| `adler2` | 2.0.1 | 0BSD OR MIT OR Apache-2.0 | Jonas Schievink, oyvindln (oyvindln/adler2) | transitive under ureq |
+| `base64` | 0.23.1 | MIT OR Apache-2.0 | Marshall Pierce (marshallpierce/rust-base64) | transitive under ureq |
+| `bytes` | 1.12.1 | MIT | Carl Lerche, Sean McArthur (tokio-rs/bytes) | transitive under ureq |
+| `bzip2-rs` | 0.1.2 | MIT/Apache-2.0 | Paolo Barbolini (paolobarbolini/bzip2-rs) | pure-Rust bzip2 decoder in the first-run asset fetcher |
+| `cfg-if` | 1.0.4 | MIT OR Apache-2.0 | Alex Crichton (rust-lang/cfg-if) | transitive under bzip2-rs |
+| `cookie` | 0.18.2 | MIT OR Apache-2.0 | Sergio Benitez, Alex Crichton (SergioBenitez/cookie-rs) | the `Cookie` type cookie_store's jar is built from |
+| `cookie_store` | 0.22.1 | MIT OR Apache-2.0 | Patrick Fernie (pfernie/cookie_store) | the netscape-format jar behind the shared `mz_at0` store session; same version ureq pins, so the `Cookie` it returns is that crate's type |
+| `crc32fast` | 1.5.1 | MIT OR Apache-2.0 | Sam Rijs, Alex Crichton (srijs/rust-crc32fast) | transitive under bzip2-rs |
+| `deranged` | 0.5.8 | MIT OR Apache-2.0 | Jacob Pratt (jhpratt/deranged) | transitive under cookie_store |
+| `equivalent` | 1.0.2 | Apache-2.0 OR MIT | indexmap-rs/equivalent | transitive under cookie_store |
+| `flate2` | 1.1.10 | MIT OR Apache-2.0 | Alex Crichton, Josh Triplett (rust-lang/flate2-rs) | the bzip2 decoder's DEFLATE half, for callers that need gzip |
+| `form_urlencoded` | 1.2.2 | MIT OR Apache-2.0 | The rust-url developers (servo/rust-url) | transitive under cookie_store |
+| `getrandom` | 0.2.17 | MIT OR Apache-2.0 | The Rand Project Developers (rust-random/getrandom) | OS entropy for the account vault's salt and the SAP signature |
+| `hashbrown` | 0.17.1 | MIT OR Apache-2.0 | rust-lang/hashbrown | transitive under cookie_store |
+| `http` | 1.5.0 | MIT OR Apache-2.0 | Alex Crichton, Carl Lerche, Sean McArthur (hyperium/http) | the HTTP/1.1 message model under ureq |
+| `httparse` | 1.10.1 | MIT OR Apache-2.0 | Sean McArthur (seanmonstar/httparse) | transitive under ureq |
+| `icu_collections` | 2.3.0 | Unicode-3.0 | The ICU4X Project Developers (unicode-org/icu4x) | transitive under cookie_store |
+| `icu_locale_core` | 2.3.0 | Unicode-3.0 | The ICU4X Project Developers (unicode-org/icu4x) | transitive under cookie_store |
+| `icu_normalizer` | 2.3.0 | Unicode-3.0 | The ICU4X Project Developers (unicode-org/icu4x) | transitive under cookie_store |
+| `icu_normalizer_data` | 2.3.0 | Unicode-3.0 | The ICU4X Project Developers (unicode-org/icu4x) | the Unicode normalisation tables `idna` needs |
+| `icu_properties` | 2.3.0 | Unicode-3.0 | The ICU4X Project Developers (unicode-org/icu4x) | transitive under cookie_store |
+| `icu_properties_data` | 2.3.0 | Unicode-3.0 | The ICU4X Project Developers (unicode-org/icu4x) | the Unicode property tables `idna` needs |
+| `icu_provider` | 2.3.1 | Unicode-3.0 | The ICU4X Project Developers (unicode-org/icu4x) | transitive under cookie_store |
+| `idna` | 1.1.0 | MIT OR Apache-2.0 | The rust-url developers (servo/rust-url) | IDNA/punycode for the internationalised hosts in the API URLs |
+| `idna_adapter` | 1.2.2 | Apache-2.0 OR MIT | The rust-url developers (hsivonen/idna_adapter) | transitive under cookie_store |
+| `indexmap` | 2.14.2 | Apache-2.0 OR MIT | indexmap-rs/indexmap | transitive under cookie_store |
+| `itoa` | 1.0.18 | MIT OR Apache-2.0 | David Tolnay (dtolnay/itoa) | transitive under cookie_store |
 | `libc` | 0.2.189 | MIT OR Apache-2.0 | The Rust Project (rust-lang/libc) | host libc ABI: mmap, sigaction, ucontext, wait4 |
-| `linkme` + `linkme-impl` | 0.3.37 | MIT OR Apache-2.0 | David Tolnay (dtolnay/linkme) | `distributed_slice` — the shim-table registration macro; the emitted linker sections and runtime slices land in the binary |
-| `bzip2-rs` | 0.1.2 | MIT OR Apache-2.0 | Paolo Barbolini (paolobarbolini/bzip2-rs) | pure-Rust bzip2 decoder in the first-run asset fetcher |
+| `linkme` | 0.3.37 | MIT OR Apache-2.0 | David Tolnay (dtolnay/linkme) | `distributed_slice` — the shim-table registration macro; the emitted linker sections and runtime slices land in the binary |
+| `linkme-impl` | 0.3.37 | MIT OR Apache-2.0 | David Tolnay (dtolnay/linkme) | proc macro for `linkme`; the code it generates is linked in |
+| `litemap` | 0.8.3 | Unicode-3.0 | The ICU4X Project Developers (unicode-org/icu4x) | transitive under cookie_store |
+| `log` | 0.4.34 | MIT OR Apache-2.0 | The Rust Project Developers (rust-lang/log) | transitive under cookie_store |
+| `memchr` | 2.8.3 | Unlicense OR MIT | Andrew Gallant, bluss (BurntSushi/memchr) | transitive under cookie_store |
+| `miniz_oxide` | 0.9.1 | MIT OR Zlib OR Apache-2.0 | Frommi, oyvindln, Rich Geldreich richgel99@gmail.com (Frommi/miniz_oxide/tree/master/miniz_oxide) | the DEFLATE decompressor under flate2 |
+| `num-conv` | 0.2.2 | MIT OR Apache-2.0 | Jacob Pratt (jhpratt/num-conv) | transitive under cookie_store |
+| `once_cell` | 1.21.4 | MIT OR Apache-2.0 | Aleksey Kladov (matklad/once_cell) | transitive under ureq |
+| `percent-encoding` | 2.3.2 | MIT OR Apache-2.0 | The rust-url developers (servo/rust-url) | transitive under ureq |
+| `potential_utf` | 0.1.6 | Unicode-3.0 | The ICU4X Project Developers (unicode-org/icu4x) | transitive under cookie_store |
+| `powerfmt` | 0.2.0 | MIT OR Apache-2.0 | Jacob Pratt (jhpratt/powerfmt) | transitive under cookie_store |
+| `psl-types` | 2.0.11 | MIT/Apache-2.0 | rushmorem (addr-rs/psl-types) | transitive under cookie_store |
+| `publicsuffix` | 2.3.0 | MIT/Apache-2.0 | rushmorem (rushmorem/publicsuffix) | transitive under cookie_store |
+| `ring` | 0.17.14 | Apache-2.0 AND ISC | briansmith/ring | crypto primitives under rustls: SHA-256, HMAC, AES-GCM, ECDSA |
+| `rustls` | 0.23.45 | Apache-2.0 OR ISC OR MIT | rustls/rustls | TLS 1.2/1.3 for every App Store and CDN connection |
+| `rustls-pki-types` | 1.15.1 | MIT OR Apache-2.0 | rustls/pki-types | transitive under ureq |
+| `rustls-webpki` | 0.103.15 | ISC | rustls/webpki | certificate chain verification under rustls |
+| `serde` | 1.0.229 | MIT OR Apache-2.0 | Erick Tryzelaar, David Tolnay (serde-rs/serde) | transitive under cookie_store |
+| `serde_core` | 1.0.229 | MIT OR Apache-2.0 | Erick Tryzelaar, David Tolnay (serde-rs/serde) | transitive under cookie_store |
+| `serde_json` | 1.0.151 | MIT OR Apache-2.0 | Erick Tryzelaar, David Tolnay (serde-rs/json) | transitive under cookie_store |
+| `simd-adler32` | 0.3.10 | MIT | Marvin Countryman (mcountryman/simd-adler32) | transitive under ureq |
+| `smallvec` | 1.16.1 | MIT OR Apache-2.0 | The Servo Project Developers (servo/rust-smallvec) | transitive under cookie_store |
+| `stable_deref_trait` | 1.2.1 | MIT OR Apache-2.0 | Robert Grosse (storyyeller/stable_deref_trait) | transitive under cookie_store |
+| `subtle` | 2.6.1 | BSD-3-Clause | Isis Lovecruft, Henry de Valence (dalek-cryptography/subtle) | transitive under ureq |
+| `time` | 0.3.55 | MIT OR Apache-2.0 | Jacob Pratt, Time contributors (time-rs/time) | transitive under cookie_store |
+| `time-core` | 0.1.9 | MIT OR Apache-2.0 | Jacob Pratt, Time contributors (time-rs/time) | transitive under cookie_store |
+| `tinystr` | 0.8.4 | Unicode-3.0 | The ICU4X Project Developers (unicode-org/icu4x) | transitive under cookie_store |
+| `tinyvec` | 1.13.2 | Zlib OR Apache-2.0 OR MIT | Lokathor (Lokathor/tinyvec) | transitive under bzip2-rs |
+| `untrusted` | 0.9.0 | ISC | Brian Smith (briansmith/untrusted) | transitive under ureq |
 | `ureq` | 3.4.2 | MIT OR Apache-2.0 | Martin Algesten, Jacob Hoffman-Andrews (algesten/ureq) | HTTP client for the Store lane and the asset fetcher, replacing the external curl binary |
-| `cookie_store` | 0.22.1 | MIT OR Apache-2.0 | Patrick Fernie (pfernie/cookie_store) | the netscape-format jar behind the shared `mz_at0` store session; same version ureq pins, so the `Cookie` the jar returns is that crate's type |
-| `crc32fast` | 1.5.1 | MIT OR Apache-2.0 | srijs (srijs/rust-crc32fast) | checksum primitive under bzip2-rs |
-| `cfg-if` | 1.0.4 | MIT OR Apache-2.0 | Alex Crichton (rust-lang/cfg-if) | conditional compilation under crc32fast |
-| `tinyvec` | 1.13.2 | Zlib OR Apache-2.0 OR MIT | Lokathor (Lokathor/tinyvec) | small-vector abstraction under bzip2-rs |
+| `ureq-proto` | 0.6.4 | MIT OR Apache-2.0 | Martin Algesten (algesten/ureq-proto) | transitive under ureq |
+| `url` | 2.5.8 | MIT OR Apache-2.0 | The rust-url developers (servo/rust-url) | transitive under cookie_store |
+| `utf8-zero` | 0.8.1 | MIT OR Apache-2.0 | Simon Sapin, Martin Algesten (algesten/utf8-zero) | transitive under ureq |
+| `utf8_iter` | 1.0.4 | Apache-2.0 OR MIT | Henri Sivonen (hsivonen/utf8_iter) | transitive under cookie_store |
+| `webpki-roots` | 1.0.9 | CDLA-Permissive-2.0 | rustls/webpki-roots | the compiled Mozilla root store rustls anchors against |
+| `writeable` | 0.6.4 | Unicode-3.0 | The ICU4X Project Developers (unicode-org/icu4x) | transitive under cookie_store |
+| `yoke` | 0.8.3 | Unicode-3.0 | Manish Goregaokar (unicode-org/icu4x) | transitive under cookie_store |
+| `zerofrom` | 0.1.8 | Unicode-3.0 | The ICU4X Project Developers (unicode-org/icu4x) | transitive under cookie_store |
+| `zeroize` | 1.9.0 | Apache-2.0 OR MIT | The RustCrypto Project Developers (RustCrypto/utils) | transitive under ureq |
+| `zerotrie` | 0.2.5 | Unicode-3.0 | The ICU4X Project Developers (unicode-org/icu4x) | transitive under cookie_store |
+| `zerovec` | 0.11.8 | Unicode-3.0 | The ICU4X Project Developers (unicode-org/icu4x) | transitive under cookie_store |
+| `zlib-rs` | 0.6.8 | Zlib | trifectatechfoundation/zlib-rs | transitive under ureq |
+| `zmij` | 1.0.23 | MIT | David Tolnay (dtolnay/zmij) | transitive under cookie_store |
 
-**Compile-time only — executed by rustc during the build, absent from the binary:**
+**Compile-time only — executed by rustc during the build, absent from the binary (13 crates):**
 
-| Crate | Version | License | Author | Role |
-|---|---|---|---|---|
-| `proc-macro2`, `quote`, `syn` | 1.0.107, 1.0.47, 3.0.5 | MIT OR Apache-2.0 | David Tolnay | macro machinery behind linkme's `distributed_slice` |
-| `unicode-ident` | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 | David Tolnay | identifier tables for the macro crates |
+| Crate | Version | License | Author / repository |
+|---|---|---|---|
+| `displaydoc` | 0.2.7 | MIT OR Apache-2.0 | Jane Lusby (yaahc/displaydoc) |
+| `document-features` | 0.2.12 | MIT OR Apache-2.0 | Slint Developers (slint-ui/document-features) |
+| `litrs` | 1.0.0 | MIT OR Apache-2.0 | Lukas Kalbertodt (LukasKalbertodt/litrs) |
+| `proc-macro2` | 1.0.107 | MIT OR Apache-2.0 | David Tolnay, Alex Crichton (dtolnay/proc-macro2) |
+| `quote` | 1.0.47 | MIT OR Apache-2.0 | David Tolnay (dtolnay/quote) |
+| `serde_derive` | 1.0.229 | MIT OR Apache-2.0 | Erick Tryzelaar, David Tolnay (serde-rs/serde) |
+| `syn` | 3.0.5 | MIT OR Apache-2.0 | David Tolnay (dtolnay/syn) |
+| `synstructure` | 0.14.0 | MIT | Nika Layzell (mystor/synstructure) |
+| `time-macros` | 0.2.32 | MIT OR Apache-2.0 | Jacob Pratt, Time contributors (time-rs/time) |
+| `unicode-ident` | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 | David Tolnay (dtolnay/unicode-ident) |
+| `yoke-derive` | 0.8.3 | Unicode-3.0 | Manish Goregaokar (unicode-org/icu4x) |
+| `zerofrom-derive` | 0.1.8 | Unicode-3.0 | Manish Goregaokar (unicode-org/icu4x) |
+| `zerovec-derive` | 0.11.6 | Unicode-3.0 | Manish Goregaokar (unicode-org/icu4x) |
 
-All runtime licenses are MIT, Apache-2.0, or Zlib — permissive and compatible with the Apache-2.0 terms perun's own code is distributed under. The crates are consumed from the crates.io registry, not vendored; their license notices live in each crate's registry payload. The NOTICE file mirrors the runtime set for anyone distributing binaries.
+<!-- END GENERATED: license-tables -->
+
+The runtime set is **not** uniformly MIT-or-Apache, and the earlier claim that it was has been corrected here. Fifty-five of the 71 object-form crates are under MIT, Apache-2.0, Zlib, ISC, 0BSD, BSD-3-Clause or Unlicense. Sixteen are not, and they arrive as a single cluster:
+
+* **15 crates under `Unicode-3.0`** — the whole ICU4X slice: `icu_collections`, `icu_locale_core`, `icu_normalizer`, `icu_normalizer_data`, `icu_properties`, `icu_properties_data`, `icu_provider`, `litemap`, `potential_utf`, `tinystr`, `writeable`, `yoke`, `zerofrom`, `zerotrie`, `zerovec`. Unicode-3.0 is **copyleft**: the covered files must keep their notices, and any *modified* version of them must be redistributed under the same terms. Perun modifies none of them, so the obligation is attribution plus shipping the licence text, not source disclosure. The cluster has one entry point — `cookie_store → idna → idna_adapter → icu_normalizer` — and `idna` is what drags the entire normalisation corpus in behind it, two of the fifteen being large generated Unicode data tables.
+* **`webpki-roots` 1.0.9 — `CDLA-Permissive-2.0`.** The compiled Mozilla root store under rustls. Permissive, with a patent grant and a notice condition, but not OSI-approved, which is why a compliance scanner flags it where it would pass the others.
+
+Two further licences are permissive but worth naming because they are conjunctions rather than choices: **`ring` 0.17.14 is `Apache-2.0 AND ISC`** (the crypto provider under rustls; both terms are permissive, and the `AND` is not ours to make), and **`unicode-ident` 1.0.24 is `(MIT OR Apache-2.0) AND Unicode-3.0`** (build-time only; the crate is dual-licensed but its embedded identifier table is licensed separately, the usual SPDX shape for a data file inside a permissively licensed crate).
+
+None of these requires perun to disclose its own source or to relicence its code, and all are compatible with distributing perun under Apache-2.0. What they do require is that the notices travel with the binary, which is what the two generated tables exist to make possible. The crates are consumed from the crates.io registry, not vendored, so each crate's full licence text lives in its registry payload rather than in this repository.
 
 ## 9. License and Revision History
 

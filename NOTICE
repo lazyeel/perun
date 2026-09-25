@@ -9,17 +9,83 @@ This product compiles and links the following software developed by lazyeel:
 - Command-line runner, image inspector, FairPlay SAP session driver, and
   the App Store client (perun-cli)
 
-This product contains third-party open source software in object form,
-under its own license:
+<!-- BEGIN GENERATED: license-notice -->
+This product contains third-party open source software in object form, under its own license:
 
-- libc 0.2.189 (MIT OR Apache-2.0) — The Rust Project — https://github.com/rust-lang/libc
-- linkme, linkme-impl 0.3.37 (MIT OR Apache-2.0) — David Tolnay — https://github.com/dtolnay/linkme
-- bzip2-rs 0.1.2 (MIT OR Apache-2.0) — Paolo Barbolini — https://github.com/paolobarbolini/bzip2-rs
-- ureq 3.4.2 (MIT OR Apache-2.0) — Martin Algesten, Jacob Hoffman-Andrews — https://github.com/algesten/ureq
-- cookie_store 0.22.1 (MIT OR Apache-2.0) — Patrick Fernie — https://github.com/pfernie/cookie_store
-- crc32fast 1.5.1 (MIT OR Apache-2.0) — Sam Rijs (srijs), Alex Crichton — https://github.com/srijs/rust-crc32fast
+- adler2 2.0.1 (0BSD OR MIT OR Apache-2.0) — Jonas Schievink, oyvindln — https://github.com/oyvindln/adler2
+- base64 0.23.1 (MIT OR Apache-2.0) — Marshall Pierce — https://github.com/marshallpierce/rust-base64
+- bytes 1.12.1 (MIT) — Carl Lerche, Sean McArthur — https://github.com/tokio-rs/bytes
+- bzip2-rs 0.1.2 (MIT/Apache-2.0) — Paolo Barbolini — https://github.com/paolobarbolini/bzip2-rs
 - cfg-if 1.0.4 (MIT OR Apache-2.0) — Alex Crichton — https://github.com/rust-lang/cfg-if
+- cookie 0.18.2 (MIT OR Apache-2.0) — Sergio Benitez, Alex Crichton — https://github.com/SergioBenitez/cookie-rs
+- cookie_store 0.22.1 (MIT OR Apache-2.0) — Patrick Fernie — https://github.com/pfernie/cookie_store
+- crc32fast 1.5.1 (MIT OR Apache-2.0) — Sam Rijs, Alex Crichton — https://github.com/srijs/rust-crc32fast
+- deranged 0.5.8 (MIT OR Apache-2.0) — Jacob Pratt — https://github.com/jhpratt/deranged
+- equivalent 1.0.2 (Apache-2.0 OR MIT) — indexmap-rs/equivalent — —
+- flate2 1.1.10 (MIT OR Apache-2.0) — Alex Crichton, Josh Triplett — https://github.com/rust-lang/flate2-rs
+- form_urlencoded 1.2.2 (MIT OR Apache-2.0) — The rust-url developers — https://github.com/servo/rust-url
+- getrandom 0.2.17 (MIT OR Apache-2.0) — The Rand Project Developers — https://github.com/rust-random/getrandom
+- hashbrown 0.17.1 (MIT OR Apache-2.0) — rust-lang/hashbrown — —
+- http 1.5.0 (MIT OR Apache-2.0) — Alex Crichton, Carl Lerche, Sean McArthur — https://github.com/hyperium/http
+- httparse 1.10.1 (MIT OR Apache-2.0) — Sean McArthur — https://github.com/seanmonstar/httparse
+- icu_collections 2.3.0 (Unicode-3.0) — The ICU4X Project Developers — https://github.com/unicode-org/icu4x
+- icu_locale_core 2.3.0 (Unicode-3.0) — The ICU4X Project Developers — https://github.com/unicode-org/icu4x
+- icu_normalizer 2.3.0 (Unicode-3.0) — The ICU4X Project Developers — https://github.com/unicode-org/icu4x
+- icu_normalizer_data 2.3.0 (Unicode-3.0) — The ICU4X Project Developers — https://github.com/unicode-org/icu4x
+- icu_properties 2.3.0 (Unicode-3.0) — The ICU4X Project Developers — https://github.com/unicode-org/icu4x
+- icu_properties_data 2.3.0 (Unicode-3.0) — The ICU4X Project Developers — https://github.com/unicode-org/icu4x
+- icu_provider 2.3.1 (Unicode-3.0) — The ICU4X Project Developers — https://github.com/unicode-org/icu4x
+- idna 1.1.0 (MIT OR Apache-2.0) — The rust-url developers — https://github.com/servo/rust-url
+- idna_adapter 1.2.2 (Apache-2.0 OR MIT) — The rust-url developers — https://github.com/hsivonen/idna_adapter
+- indexmap 2.14.2 (Apache-2.0 OR MIT) — indexmap-rs/indexmap — —
+- itoa 1.0.18 (MIT OR Apache-2.0) — David Tolnay — https://github.com/dtolnay/itoa
+- libc 0.2.189 (MIT OR Apache-2.0) — The Rust Project — https://github.com/rust-lang/libc
+- linkme 0.3.37 (MIT OR Apache-2.0) — David Tolnay — https://github.com/dtolnay/linkme
+- linkme-impl 0.3.37 (MIT OR Apache-2.0) — David Tolnay — https://github.com/dtolnay/linkme
+- litemap 0.8.3 (Unicode-3.0) — The ICU4X Project Developers — https://github.com/unicode-org/icu4x
+- log 0.4.34 (MIT OR Apache-2.0) — The Rust Project Developers — https://github.com/rust-lang/log
+- memchr 2.8.3 (Unlicense OR MIT) — Andrew Gallant, bluss — https://github.com/BurntSushi/memchr
+- miniz_oxide 0.9.1 (MIT OR Zlib OR Apache-2.0) — Frommi, oyvindln, Rich Geldreich richgel99@gmail.com — https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide
+- num-conv 0.2.2 (MIT OR Apache-2.0) — Jacob Pratt — https://github.com/jhpratt/num-conv
+- once_cell 1.21.4 (MIT OR Apache-2.0) — Aleksey Kladov — https://github.com/matklad/once_cell
+- percent-encoding 2.3.2 (MIT OR Apache-2.0) — The rust-url developers — https://github.com/servo/rust-url
+- potential_utf 0.1.6 (Unicode-3.0) — The ICU4X Project Developers — https://github.com/unicode-org/icu4x
+- powerfmt 0.2.0 (MIT OR Apache-2.0) — Jacob Pratt — https://github.com/jhpratt/powerfmt
+- psl-types 2.0.11 (MIT/Apache-2.0) — rushmorem — https://github.com/addr-rs/psl-types
+- publicsuffix 2.3.0 (MIT/Apache-2.0) — rushmorem — https://github.com/rushmorem/publicsuffix
+- ring 0.17.14 (Apache-2.0 AND ISC) — briansmith/ring — —
+- rustls 0.23.45 (Apache-2.0 OR ISC OR MIT) — rustls/rustls — —
+- rustls-pki-types 1.15.1 (MIT OR Apache-2.0) — rustls/pki-types — —
+- rustls-webpki 0.103.15 (ISC) — rustls/webpki — —
+- serde 1.0.229 (MIT OR Apache-2.0) — Erick Tryzelaar, David Tolnay — https://github.com/serde-rs/serde
+- serde_core 1.0.229 (MIT OR Apache-2.0) — Erick Tryzelaar, David Tolnay — https://github.com/serde-rs/serde
+- serde_json 1.0.151 (MIT OR Apache-2.0) — Erick Tryzelaar, David Tolnay — https://github.com/serde-rs/json
+- simd-adler32 0.3.10 (MIT) — Marvin Countryman — https://github.com/mcountryman/simd-adler32
+- smallvec 1.16.1 (MIT OR Apache-2.0) — The Servo Project Developers — https://github.com/servo/rust-smallvec
+- stable_deref_trait 1.2.1 (MIT OR Apache-2.0) — Robert Grosse — https://github.com/storyyeller/stable_deref_trait
+- subtle 2.6.1 (BSD-3-Clause) — Isis Lovecruft, Henry de Valence — https://github.com/dalek-cryptography/subtle
+- time 0.3.55 (MIT OR Apache-2.0) — Jacob Pratt, Time contributors — https://github.com/time-rs/time
+- time-core 0.1.9 (MIT OR Apache-2.0) — Jacob Pratt, Time contributors — https://github.com/time-rs/time
+- tinystr 0.8.4 (Unicode-3.0) — The ICU4X Project Developers — https://github.com/unicode-org/icu4x
 - tinyvec 1.13.2 (Zlib OR Apache-2.0 OR MIT) — Lokathor — https://github.com/Lokathor/tinyvec
+- untrusted 0.9.0 (ISC) — Brian Smith — https://github.com/briansmith/untrusted
+- ureq 3.4.2 (MIT OR Apache-2.0) — Martin Algesten, Jacob Hoffman-Andrews — https://github.com/algesten/ureq
+- ureq-proto 0.6.4 (MIT OR Apache-2.0) — Martin Algesten — https://github.com/algesten/ureq-proto
+- url 2.5.8 (MIT OR Apache-2.0) — The rust-url developers — https://github.com/servo/rust-url
+- utf8-zero 0.8.1 (MIT OR Apache-2.0) — Simon Sapin, Martin Algesten — https://github.com/algesten/utf8-zero
+- utf8_iter 1.0.4 (Apache-2.0 OR MIT) — Henri Sivonen — https://github.com/hsivonen/utf8_iter
+- webpki-roots 1.0.9 (CDLA-Permissive-2.0) — rustls/webpki-roots — —
+- writeable 0.6.4 (Unicode-3.0) — The ICU4X Project Developers — https://github.com/unicode-org/icu4x
+- yoke 0.8.3 (Unicode-3.0) — Manish Goregaokar — https://github.com/unicode-org/icu4x
+- zerofrom 0.1.8 (Unicode-3.0) — The ICU4X Project Developers — https://github.com/unicode-org/icu4x
+- zeroize 1.9.0 (Apache-2.0 OR MIT) — The RustCrypto Project Developers — https://github.com/RustCrypto/utils
+- zerotrie 0.2.5 (Unicode-3.0) — The ICU4X Project Developers — https://github.com/unicode-org/icu4x
+- zerovec 0.11.8 (Unicode-3.0) — The ICU4X Project Developers — https://github.com/unicode-org/icu4x
+- zlib-rs 0.6.8 (Zlib) — trifectatechfoundation/zlib-rs — —
+- zmij 1.0.23 (MIT) — David Tolnay — https://github.com/dtolnay/zmij
 
-Crates used only to build the macro machinery (proc-macro2, quote, syn, unicode-ident) do not reach the distributed object form and are therefore not listed above.
-linkme-impl is a proc macro, but the code it generates is compiled into the binaries, so it is listed.
+Build-time only, and therefore absent from the distributed object: `displaydoc` 0.2.7, `document-features` 0.2.12, `litrs` 1.0.0, `proc-macro2` 1.0.107, `quote` 1.0.47, `serde_derive` 1.0.229, `syn` 3.0.5, `synstructure` 0.14.0, `time-macros` 0.2.32, `unicode-ident` 1.0.24, `yoke-derive` 0.8.3, `zerofrom-derive` 0.1.8, `zerovec-derive` 0.11.6.
+
+`linkme-impl` is a proc macro, but the code it generates is compiled into the binaries, so it is listed above.
+<!-- END GENERATED: license-notice -->
+
