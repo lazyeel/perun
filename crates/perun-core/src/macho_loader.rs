@@ -1053,16 +1053,22 @@ mod rdtsc_table_tests {
             tabled[at..at + repl.len()].copy_from_slice(repl);
         }
 
-        let diff = scanned
-            .iter()
-            .zip(tabled.iter())
-            .filter(|(a, b)| a != b)
-            .count();
-        assert_eq!(
-            diff, 0,
-            "{label}: {diff} byte(s) differ between scan and table"
-        );
+        // The shipped table is a SUBSET of what the scan finds (the census
+        // union), so "zero differing bytes" no longer applies - coverage would
+        // be the old full table. What must hold is that every row the table
+        // does patch is patched identically by the scan.
         assert_eq!(scanned.len(), tabled.len(), "{label}: length differs");
+        for &(off, kind) in table {
+            let at = off as usize;
+            let repl_len = match kind {
+                0 | 2 => 9,
+                _ => 12,
+            };
+            assert!(
+                scanned[at..at + repl_len] == tabled[at..at + repl_len],
+                "{label}: table entry 0x{off:x} is not a genuine scan site"
+            );
+        }
     }
 
     /// Structural check on the generated tables, independent of any file.
@@ -1088,21 +1094,48 @@ mod rdtsc_table_tests {
         }
         // The counts the generator reported, pinned so a regeneration that
         // silently finds fewer sites is caught.
-        assert_eq!(sites::COREFP_RDTSC_PATCHES.len(), 6269);
-        assert_eq!(sites::COMMERCEKIT_RDTSC_PATCHES.len(), 251);
+        assert!(sites::COREFP_RDTSC_PATCHES.is_empty());
+        assert_eq!(sites::COMMERCEKIT_RDTSC_PATCHES.len(), 175);
         assert!(sites::COMMERCECORE_RDTSC_PATCHES.is_empty());
+    }
+
+    /// The same equivalence for CommerceKit, which is where the shipped rows
+    /// actually live. Without this the CoreFP half runs vacuously over an
+    /// empty table and a mistyped CommerceKit offset would not be caught.
+    #[test]
+    fn commercekit_table_rows_are_genuine_scan_sites() {
+        let dir = std::env::var("PERUN_SAP_DIR").unwrap_or_else(|_| {
+            format!(
+                "{}/.cache/perun/sap",
+                std::env::var("HOME").unwrap_or_default()
+            )
+        });
+        let path = std::path::Path::new(&dir).join("CommerceKit");
+        let Ok(blob) = std::fs::read(&path) else {
+            eprintln!("skipping: {path:?} not present");
+            return;
+        };
+        let info = crate::macho::MachInfo::parse(&blob).expect("parse CommerceKit");
+        let (off, size) = info.text_section.expect("__text");
+        let slice = fat_slice_of(&blob);
+        let text = &blob[slice + off as usize..slice + (off + size) as usize];
+        assert_table_matches_scan(text, sites::COMMERCEKIT_RDTSC_PATCHES, "CommerceKit");
     }
 
     /// Site counts per idiom, as generated.
     #[test]
     fn idiom_type_counts_are_stable() {
+        // The tables are the census union, not the full scan: CoreFP reaches
+        // none of its 6 269 sites, CommerceKit 175 of 251.
         let count = |t: &[(u32, u8)], k: u8| t.iter().filter(|(_, v)| *v == k).count();
-        assert_eq!(count(sites::COREFP_RDTSC_PATCHES, 0), 6256);
-        assert_eq!(count(sites::COREFP_RDTSC_PATCHES, 1), 13);
-        assert_eq!(count(sites::COREFP_RDTSC_PATCHES, 2), 0);
-        assert_eq!(count(sites::COMMERCEKIT_RDTSC_PATCHES, 0), 246);
-        assert_eq!(count(sites::COMMERCEKIT_RDTSC_PATCHES, 1), 4);
-        assert_eq!(count(sites::COMMERCEKIT_RDTSC_PATCHES, 2), 1);
+        assert!(
+            sites::COREFP_RDTSC_PATCHES.is_empty(),
+            "CoreFP reaches no site"
+        );
+        assert_eq!(sites::COMMERCEKIT_RDTSC_PATCHES.len(), 175);
+        assert_eq!(count(sites::COMMERCEKIT_RDTSC_PATCHES, 0), 172);
+        assert_eq!(count(sites::COMMERCEKIT_RDTSC_PATCHES, 1), 3);
+        assert_eq!(count(sites::COMMERCEKIT_RDTSC_PATCHES, 2), 0);
     }
 
     /// Equivalence over the real images when they are present. The assets
