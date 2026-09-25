@@ -29,6 +29,34 @@ impl Signer {
         let mut runtime = SapRuntime::new(&assets).map_err(|e| format!("SAP runtime: {e}"))?;
         runtime.init(mac).map_err(|e| format!("SAPInit: {e}"))?;
 
+        // Census report on every construction, so any lane that builds a
+        // signer (not just the bare `perun sap` command) shows the union.
+        #[cfg(feature = "rdtsc-census")]
+        if std::env::var("PERUN_RDTSC_CENSUS").is_ok() {
+            use std::collections::BTreeMap;
+            let fired = perun_core::census::fired();
+            let mut by: BTreeMap<&str, usize> = BTreeMap::new();
+            for (img, _) in &fired {
+                *by.entry(img).or_default() += 1;
+            }
+            let mut un: Vec<u32> = fired
+                .iter()
+                .filter(|(img, off)| {
+                    !perun_core::rdtsc_sites::COMMERCEKIT_RDTSC_PATCHES
+                        .iter()
+                        .any(|(o, _)| o == off)
+                        && !perun_core::rdtsc_sites::COREFP_RDTSC_PATCHES
+                            .iter()
+                            .any(|(o, _)| o == off)
+                        && *img != "CommerceCore"
+                })
+                .map(|(_, off)| *off)
+                .collect();
+            un.sort_unstable();
+            un.dedup();
+            eprintln!("[census] fired={} {by:?} unpatched={un:?}", fired.len());
+        }
+
         // Certificate: the bag endpoint serves a plist envelope, not raw DER
         // (unlike the legacy CDN path the bare `perun sap` command uses).
         let cert_res = http::send(Request::new("GET", &config.certificate_url))?;

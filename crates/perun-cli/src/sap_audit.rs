@@ -130,6 +130,18 @@ fn block_b(assets_dir: &str, mac: [u8; 6]) {
     }
 }
 
+/// Classify a soak failure: the transport error already carries the
+/// HTTP status, so this names the server side rather than the guest.
+fn classify(e: &str) -> String {
+    let head: String = e.chars().take(160).collect();
+    if let Some(p) = head.find("HTTP ") {
+        let rest = &head[p + 5..];
+        let code: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        return format!("SERVER http {code} — {}", first(e));
+    }
+    format!("GUEST/LOCAL — {}", first(e))
+}
+
 fn first(s: &str) -> String {
     s.lines().next().unwrap_or("").chars().take(90).collect()
 }
@@ -163,8 +175,14 @@ fn block_c(assets_dir: &str, mac: [u8; 6]) {
             .and_then(|_| rt.sign(b"soak payload"));
         match r {
             Ok(sig) if sig.len() == 501 => ok += 1,
-            Ok(_) => bad += 1,
-            Err(_) => bad += 1,
+            Ok(sig) => {
+                bad += 1;
+                println!("    C cycle {i}: short signature {} bytes", sig.len());
+            }
+            Err(e) => {
+                bad += 1;
+                println!("    C cycle {i}: {}", classify(&e));
+            }
         }
         if i == 0 {
             for n in 0..500 {
