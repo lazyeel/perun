@@ -278,12 +278,14 @@ impl SapRuntime {
         // Publish the dlsym table with final addresses.
         perun_shims::mach::set_dlsym_table(&corefp_exports);
 
-        // All transient load buffers (image reads, parse scratch) are dead by
-        // now; glibc's arena still holds them because freeing a large block
-        // raises the dynamic mmap threshold and later equally-sized reads
-        // came from the brk arena, which free() never returns to the OS.
-        // Measured effect: ~20 MB off the peak. Guest mappings are untouched
-        // (they are separate mmaps, not malloc).
+        // Release the parse scratch back to the OS. This used to carry the SAP
+        // peak on its own ("~20 MB off the peak") because `cache_complete`
+        // read all three pinned assets whole; that is now streamed
+        // (`fetcher::cache_complete`), and the warm peak is 9.2 MiB with or
+        // without this call — measured, 9.2 vs 9.2 over four runs each. What
+        // it still has is the cold path, where the fetcher's per-asset download
+        // buffer goes through malloc. Guest mappings are untouched (they are
+        // separate mmaps, not malloc).
         unsafe { libc::malloc_trim(0) };
 
         let find = |img: &MachImage, name: &str| -> Result<u64, String> {

@@ -503,14 +503,40 @@ pub fn ensure_cache(verbose: bool) -> Result<PathBuf, String> {
 fn cache_complete(dir: &Path) -> bool {
     for (name, size, sha) in PINNED {
         let path = dir.join(name);
-        let Ok(data) = std::fs::read(&path) else {
+        // Size from metadata, digest streamed. This used to `fs::read` the
+        // whole file purely to check its length and its hash, and the largest
+        // pinned asset is 27.7 MiB of `CoreFP`: three whole-file buffers,
+        // 35.8 MiB of transient heap, and the peak was reached right here --
+        // before the `malloc_trim` in `SapRuntime::new`, which cannot lower
+        // a high-water mark that has already been recorded.
+        let Ok(meta) = std::fs::metadata(&path) else {
             return false;
         };
-        if data.len() as u64 != *size || sha256_hex(&data) != *sha {
+        if meta.len() != *size {
             return false;
+        }
+        match file_sha256_hex(&path) {
+            Ok(d) if d == *sha => {}
+            _ => return false,
         }
     }
     true
+}
+
+/// SHA-256 of a file, streamed through a fixed buffer.
+fn file_sha256_hex(path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut h = perun_core::sha256::Sha256::new();
+    let mut buf = vec![0u8; 1 << 16];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(h.finish_hex())
 }
 
 /// Ensure the setup certificate is cached (fetched at most once per day).
@@ -571,6 +597,40 @@ mod tests {
         // file when the test corpus is present (it is gitignored; skip is fine).
         if let Ok(data) = std::fs::read("test-sap/CoreFP") {
             assert_eq!(sha256_hex(&data), PINNED[0].2);
+        }
+    }
+
+    /// The streaming digest used by `cache_complete` must agree with the
+    /// in-memory one, on a real pinned asset.
+    ///
+    /// The whole-file read it replaced cost 27.7 MiB of transient heap for
+    /// `CoreFP` alone and set the SAP peak at 57.9 MiB; streaming brings it to
+    /// 9.2. This pins the replacement to the digests that were already known
+    /// good, so the optimisation cannot quietly start accepting a corrupt
+    /// cache. Skips when the asset cache is not populated.
+    #[test]
+    fn streamed_digest_matches_the_pinned_one() {
+        let dir = match cache_dir() {
+            Ok(d) if d.exists() => d,
+            _ => return,
+        };
+        for (name, size, sha) in PINNED {
+            let path = dir.join(name);
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if meta.len() != *size {
+                continue;
+            }
+            let Ok(streamed) = file_sha256_hex(&path) else {
+                continue;
+            };
+            assert_eq!(streamed, *sha, "{name}: streamed digest differs");
+            // and the same file hashed whole, when it is small enough to read
+            if *size < (1 << 20) {
+                let whole = std::fs::read(&path).unwrap();
+                assert_eq!(file_sha256_hex(&path).unwrap(), sha256_hex(&whole));
+            }
         }
     }
 }
