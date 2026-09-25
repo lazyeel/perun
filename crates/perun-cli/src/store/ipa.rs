@@ -825,12 +825,48 @@ pub fn replicate(
     info: &DownloadInfo,
     account: &Account,
 ) -> Result<bool, String> {
+    // The destination is only ever created by an atomic rename, so a failure
+    // anywhere in the copy loop cannot leave a truncated package at the path
+    // the caller was told would hold a finished one. Same filesystem, so
+    // `rename` is atomic; the temp name sits beside the destination to keep it
+    // that way.
+    let partial = format!("{dst_path}.partial");
+    match replicate_to(&partial, src_path, info, account) {
+        Ok(true) => {
+            std::fs::rename(&partial, dst_path).map_err(|e| {
+                let _ = std::fs::remove_file(&partial);
+                format!("finish {dst_path}: {e}")
+            })?;
+            Ok(true)
+        }
+        Ok(false) => {
+            // No bundle found (rare): the caller decides what to keep.
+            let _ = std::fs::remove_file(&partial);
+            Ok(false)
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&partial);
+            Err(e)
+        }
+    }
+}
+
+/// Write the replicated package to `dst_path`. The caller owns publication:
+/// see `replicate`, which renames this file into place only on success.
+fn replicate_to(
+    dst_path: &str,
+    src_path: &str,
+    info: &DownloadInfo,
+    account: &Account,
+) -> Result<bool, String> {
     // Stream the source through a File: nothing is mapped, so the resident
     // set is the largest single read (the central directory) and not the
     // package. Entry bodies move through a fixed 512 KiB buffer.
     let mut pkg = Pkg::open(src_path)?;
     // The EOCD lives in the last 66 KB; nothing before it is needed to
-    // locate the central directory, which is then read as one block.
+    // locate the central directory, which is then read as one block. The
+    // window's own offset has to travel with it: the offsets inside the
+    // record are absolute, and this package is 3 GB long.
     let tail_at = pkg.len.saturating_sub(66_000);
     let tail = pkg.read_at(tail_at, pkg.len - tail_at)?;
     let (_, eocd) = find_eocd(&tail)?;
@@ -2139,7 +2175,10 @@ mod tests {
             &buf[off as usize..off as usize + 64]
         );
 
-        // the CD is reachable and parses from a CD-only buffer
+        // the CD is reachable and parses from a CD-only buffer. The tail is a
+        // window, so its offset inside the package travels with it: a 300 KB
+        // file's last 66 KB start at 234 KB, and every offset in the record
+        // is absolute.
         let tail_at = pkg.len.saturating_sub(66_000);
         let tail = pkg.read_at(tail_at, pkg.len - tail_at).unwrap();
         let (_, eocd) = find_eocd(&tail).unwrap();
@@ -2280,5 +2319,94 @@ mod tests {
         let _ = std::fs::remove_file(&src_path);
         let _ = std::fs::remove_file(&out_path);
         out
+    }
+
+    // ── regression: a failed replication leaves no destination (F3) ─────────
+    //
+    // The destination used to be created before the copy loop, so an error
+    // inside the loop left a truncated package sitting at the path the caller
+    // was told would hold a finished one.
+    #[test]
+    fn failed_replicate_leaves_no_destination_file() {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut z = ZipWriter::new(&mut buf);
+            // A bundle Info.plist: `replicate` resolves the bundle name from
+            // it, so without one the run stops before the copy loop and the
+            // test would not exercise the failure path it is about.
+            let mut ip = Plist::dict();
+            ip.set("CFBundleExecutable", Plist::string("Break"));
+            z.add_stored(
+                "Payload/Break.app/Info.plist",
+                &plist::to_binary(&ip),
+                (0x5A21, 0x0C00),
+            )
+            .unwrap();
+            z.add_stored(
+                "Payload/Break.app/Break",
+                &vec![b'B'; 20_000],
+                (0x5A21, 0x0C00),
+            )
+            .unwrap();
+            z.add_stored(
+                "Payload/Break.app/Late",
+                &vec![b'L'; 20_000],
+                (0x5A21, 0x0C00),
+            )
+            .unwrap();
+            z.finish().unwrap();
+        }
+        // Point the last record's local offset 7 bytes into the first entry's
+        // header: the range check passes, the signature check does not, and the
+        // failure lands inside the copy loop with one entry already written.
+        let mut broken = buf.clone();
+        let mut at = broken.len() - 22;
+        let cd_off = u32::from_le_bytes([
+            broken[at + 16],
+            broken[at + 17],
+            broken[at + 18],
+            broken[at + 19],
+        ]) as usize;
+        at = cd_off;
+        let mut last = None;
+        while at + 46 <= broken.len() && broken[at..at + 4] == CEN_SIG {
+            last = Some(at);
+            let nl = u16::from_le_bytes([broken[at + 28], broken[at + 29]]) as usize;
+            let el = u16::from_le_bytes([broken[at + 30], broken[at + 31]]) as usize;
+            let cl = u16::from_le_bytes([broken[at + 32], broken[at + 33]]) as usize;
+            at += 46 + nl + el + cl;
+        }
+        let last = last.expect("at least one central record");
+        broken[last + 42..last + 46].copy_from_slice(&7u32.to_le_bytes());
+
+        let id = std::process::id();
+        let src_path = std::env::temp_dir().join(format!("perun-f3-src-{id}.zip"));
+        let out_path = std::env::temp_dir().join(format!("perun-f3-out-{id}.ipa"));
+        let _ = std::fs::remove_file(&out_path);
+        std::fs::write(&src_path, &broken).unwrap();
+
+        let err = replicate(
+            src_path.to_str().unwrap(),
+            out_path.to_str().unwrap(),
+            &DownloadInfo {
+                url: String::new(),
+                sinfs: Vec::new(),
+                metadata: Plist::dict(),
+                version: "1.0".into(),
+                artwork_url: String::new(),
+                artwork: None,
+            },
+            &crate::store::account::Account {
+                email: "tester@example.com".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("zip:"), "{err}");
+        assert!(
+            !out_path.exists(),
+            "a failed replication must not leave a file at the destination"
+        );
+        let _ = std::fs::remove_file(&src_path);
     }
 }
