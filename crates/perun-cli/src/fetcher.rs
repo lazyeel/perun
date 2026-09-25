@@ -51,7 +51,7 @@ const SETUP_CERT_MIN_LEN: usize = 64;
 
 /// (name, expected size, pinned sha256) — kept byte-identical with the loader's
 /// validation, which re-checks whatever this fetcher writes.
-const PINNED: &[(&str, u64, &str)] = &[
+pub(crate) const PINNED: &[(&str, u64, &str)] = &[
     (
         "CoreFP",
         29_014_912,

@@ -85,9 +85,22 @@ pub const SAP_DISPOSE: &str = "_jEHf8Xzsv8K";
 /// the guest reads it through the fake `open`/`read` shim path.
 pub struct SapAssets {
     pub dir: String,
+    /// Pinned SHA-256 per image, from the fetcher's own table.
+    ///
+    /// These bytes were verified when the fetcher wrote them, so the loader can
+    /// take its AOT rdtsc table on trust instead of re-hashing 29 MB of CoreFP
+    /// on every run — that hash measured 198 ms of the 206 ms image load.
+    /// A caller that cannot vouch for a file simply gets `None` here and the
+    /// loader falls back to hashing it.
+    pins: std::collections::HashMap<&'static str, &'static str>,
 }
 
 impl SapAssets {
+    /// Pinned digest for `name`, or `None` when the caller cannot vouch for it.
+    pub fn pin(&self, name: &str) -> Option<&str> {
+        self.pins.get(name).copied()
+    }
+
     pub fn load_dir(dir: &str) -> Result<SapAssets, String> {
         // Validate early so failures surface before any mapping happens.
         // storeagent is intentionally absent: it is not mapped (see the note
@@ -100,6 +113,10 @@ impl SapAssets {
         }
         Ok(SapAssets {
             dir: dir.to_string(),
+            pins: crate::fetcher::PINNED
+                .iter()
+                .map(|(name, _, sha)| (*name, *sha))
+                .collect(),
         })
     }
 }
@@ -230,16 +247,21 @@ impl SapRuntime {
         }
 
         let mut resolver = CoreResolver::new(&corefp_exports);
-        let corefp = MachImage::load_file(
+        let corefp = MachImage::load_file_with_pin(
             &image_path("CoreFP"),
             COREFP_BASE,
             &mut CoreResolver::new(&corefp_exports),
+            assets.pin("CoreFP"),
         )
         .map_err(|e| e.to_string())?;
 
-        let commerce_kit =
-            MachImage::load_file(&image_path("CommerceKit"), COMMERCE_KIT_BASE, &mut resolver)
-                .map_err(|e| e.to_string())?;
+        let commerce_kit = MachImage::load_file_with_pin(
+            &image_path("CommerceKit"),
+            COMMERCE_KIT_BASE,
+            &mut resolver,
+            assets.pin("CommerceKit"),
+        )
+        .map_err(|e| e.to_string())?;
 
         // storeagent is NOT mapped: it defines only two symbols
         // (`__mh_execute_header`, `radr://5614542`), none of the commerce

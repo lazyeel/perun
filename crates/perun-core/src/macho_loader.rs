@@ -186,6 +186,18 @@ impl MachImage {
         load_base: u64,
         resolver: &mut dyn MachImportResolver,
     ) -> Result<MachImage, MachLoadError> {
+        Self::load_file_with_pin(path, load_base, resolver, None)
+    }
+
+    /// `known_sha256` is a caller-supplied digest for this exact file, letting
+    /// the pinned rdtsc table be taken without re-hashing the whole image. See
+    /// [`MachImage::pinned_rdtsc_table`] for what a wrong claim does.
+    pub fn load_file_with_pin(
+        path: &std::path::Path,
+        load_base: u64,
+        resolver: &mut dyn MachImportResolver,
+        known_sha256: Option<&str>,
+    ) -> Result<MachImage, MachLoadError> {
         let mut file = std::fs::File::open(path).map_err(|e| MachLoadError::Parse(e.into()))?;
         // POSIX_FADV_RANDOM, because this file is then touched in a scattered
         // way: a header, a LINKEDIT tail, and ~988 rdtsc sites spread over
@@ -244,7 +256,9 @@ impl MachImage {
             return Err(MachLoadError::MapFailed { size: span });
         }
         let base = base as *mut u8;
-        let img = unsafe { Self::map_and_fixup(file, info, base, span, load_base, resolver)? };
+        let img = unsafe {
+            Self::map_and_fixup(file, info, base, span, load_base, resolver, known_sha256)?
+        };
         Ok(img)
     }
 
@@ -265,11 +279,31 @@ impl MachImage {
         Ok(h.finish_hex())
     }
 
-    /// Pinned rdtsc table for a file whose digest we recognise, else `None`.
-    fn pinned_rdtsc_table(file: &std::fs::File) -> Option<&'static [(u32, u8)]> {
+    /// Pinned rdtsc table for a file, given the digest the caller already knows.
+    ///
+    /// `known` is the caller's claim about this exact file. On the stock path it
+    /// comes from the fetcher's own pin table, which verified the bytes when it
+    /// wrote them, so re-hashing 29 MB to rediscover that fact costs ~180 ms for
+    /// no new information. Passing `None` recomputes it, which is the right thing
+    /// for any file the caller cannot vouch for.
+    ///
+    /// A wrong claim is not a silent-corruption risk: `apply_rdtsc_table`
+    /// checks that every entry sits on the idiom it claims, and returns false
+    /// on the first mismatch, which sends the caller to the linear scan.
+    fn pinned_rdtsc_table(
+        file: &std::fs::File,
+        known: Option<&str>,
+    ) -> Option<&'static [(u32, u8)]> {
         use crate::rdtsc_sites as s;
-        let digest = Self::file_sha256(file).ok()?;
-        match digest.as_str() {
+        let owned;
+        let digest = match known {
+            Some(d) => d,
+            None => {
+                owned = Self::file_sha256(file).ok()?;
+                owned.as_str()
+            }
+        };
+        match digest {
             s::COREFP_RDTSC_SHA256 => Some(s::COREFP_RDTSC_PATCHES),
             s::COMMERCEKIT_RDTSC_SHA256 => Some(s::COMMERCEKIT_RDTSC_PATCHES),
             s::COMMERCECORE_RDTSC_SHA256 => Some(s::COMMERCECORE_RDTSC_PATCHES),
@@ -289,6 +323,7 @@ impl MachImage {
         span: usize,
         load_base: u64,
         resolver: &mut dyn MachImportResolver,
+        known_sha256: Option<&str>,
     ) -> Result<MachImage, MachLoadError> {
         unsafe {
             use std::os::unix::fs::FileExt;
@@ -384,7 +419,7 @@ impl MachImage {
 
             // rdtsc neutralization against mapped __TEXT,__text. A pinned
             // digest short-circuits the linear scan; anything else scans.
-            let pinned = Self::pinned_rdtsc_table(&file);
+            let pinned = Self::pinned_rdtsc_table(&file, known_sha256);
             Self::neutralize_rdtsc_mapped(&info, base, span, pinned);
 
             Ok(MachImage {
@@ -902,6 +937,7 @@ mod file_backed_tests {
 
 #[cfg(test)]
 mod rdtsc_table_tests {
+    use super::MachImage;
     use crate::rdtsc_sites as sites;
 
     /// Byte offset of the x86_64 slice in a (possibly fat) Mach-O.
@@ -918,6 +954,36 @@ mod rdtsc_table_tests {
             }
         }
         0
+    }
+
+    /// The caller-supplied digest selects the table. A claim that matches
+    /// nothing yields `None`, which is the signal to recompute, and only a
+    /// claim that names a known build yields a table at all.
+    #[test]
+    fn a_supplied_digest_selects_the_table_and_a_wrong_one_selects_nothing() {
+        let dir = std::env::var("PERUN_SAP_DIR").unwrap_or_else(|_| {
+            format!(
+                "{}/.cache/perun/sap",
+                std::env::var("HOME").unwrap_or_default()
+            )
+        });
+        let path = std::path::Path::new(&dir).join("CoreFP");
+        let Ok(file) = std::fs::File::open(&path) else {
+            eprintln!("skipping: {path:?} not present");
+            return;
+        };
+        assert!(
+            MachImage::pinned_rdtsc_table(&file, Some(sites::COREFP_RDTSC_SHA256)).is_some(),
+            "the pinned digest must select CoreFP's table"
+        );
+        assert!(
+            MachImage::pinned_rdtsc_table(&file, Some("0000000000000000")).is_none(),
+            "an unknown digest must select nothing, so the caller recomputes"
+        );
+        assert!(
+            MachImage::pinned_rdtsc_table(&file, None).is_some(),
+            "recomputing the digest must reach the same table"
+        );
     }
 
     /// The point of the pinned tables is that they reproduce the linear scan
