@@ -98,6 +98,8 @@ Endpoints are bag-driven (fetched per session), the account is stored encrypted 
 
 **Packages are rebuilt with a real ZIP64 writer** (end-of-central-directory record plus locator, placeholders regenerated rather than truncated), so archives past 4 GB or 65 535 entries are written correctly instead of silently clipped. The streaming path uses the OTA framing Apple's kernel expects, with general-purpose flag bit 3 and the sizes and CRC in a trailing data descriptor. Replication is O(1) in package size: the input is never mapped. It is read as a `File` — a 66 KB tail for the end-of-central-directory, one read for the central directory, 30 bytes per local header, and entry bodies through a 512 KiB buffer — so the footprint is the parsed entry table, not the archive. Measured with `wait4`/`ru_maxrss` (median, N=5): 3.62 GiB PUBG with 1 580 entries peaks at **12.8 MiB**, 2.92 GiB Tanks Blitz with 47 007 entries at **31.9 MiB**, down from 675 MiB and 611 MiB when the input was memory-mapped. Exercised live on **31 real App Store packages** (32.3 GB downloaded in total). Verified live across 31 production packages up to 3.89 GB (PUBG Mobile) and 47,007 entries in a single archive (Tanks Blitz) with zero errors. Reading a ZIP64 *central directory* is still refused: the writer emits it, the reader does not accept one.
 
+**The footprint scales with the entry count, not the download size.** Peak RSS is a function of the central directory, which is the only thing that accumulates: `peak ≈ 2.8 MiB + 165 B × entries + 2.95 × cd_size`, fitted on 40 packages and accurate to 8 %. A 3.14 GB package and a 4.6 MB one differ 683× in size and 10.6× in resident set. Real App Store packages land between 3.8 and 32.0 MiB, but this is not a 35 MiB guarantee: 65 534 entries with 255-byte names carry a 19.3 MiB directory and measure 70.2 MiB. Bound your memory by entry count, not by package size. Details in [RESEARCH.md § 5](RESEARCH.md).
+
 **Download URLs resolve through a three-step recovery chain** — the legacy `volumeStoreDownloadProduct`, then `redownloadProduct` when the legacy call returns a silent empty `songList`, then `updateProduct` when that answers an empty HTTP 500. This mirrors the reference tool's recovery since Apple's 2026 migration, when the legacy call began returning empty song lists for newer apps.
 
 ### ipatool persona
@@ -268,7 +270,7 @@ Third-party code compiled into the binary (all permissive; the full table with v
 | `linkme` + `linkme-impl` | MIT OR Apache-2.0 | shim-table registration |
 | `bzip2-rs` | MIT OR Apache-2.0 | first-run asset fetcher |
 | `crc32fast`, `cfg-if`, `tinyvec` | MIT/Apache-2.0/Zlib | under bzip2-rs |
-| `memmap2` | MIT OR Apache-2.0 | memory-mapped IPA input in the replicator |
+| `memmap2` | MIT OR Apache-2.0 | declared but no longer used: the replicator streams through `File` instead of mapping the input |
 
 The reference measurement oracle used in the benchmarks (t0rr3sp3dr0/sapsigner, Apache-2.0) and its Unicorn engine (GPL-2.0) are third-party projects; no code from either is linked into, derived from, or redistributed with this repository — Perun exists precisely because that approach was measured and found too slow. Credits and the precise legal statement are in [RESEARCH.md § 8](RESEARCH.md).
 
