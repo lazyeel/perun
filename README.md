@@ -12,7 +12,7 @@ The FairPlay SAP session, measured against the stock Unicorn-based reference sig
 |---|---|---|
 | Whole-process wall | 9.09 s | **0.26 s** |
 | CPU (user + sys) | 7.46 s | **0.083 s** |
-| Peak RSS | 234 MiB | **27.1 MiB** |
+| Peak RSS | 234 MiB | **9.5 MiB** |
 
 The two columns were measured in different sessions — perun re-measured at N=10 on 2026-09-24, the oracle carried over from 2026-09-02 at N=3, because its build vendors a pinned Unicorn blob from `ghcr.io` that no longer pulls anonymously. Read the ratio as an order of magnitude, not a measurement.
 
@@ -96,7 +96,7 @@ Endpoints are bag-driven (fetched per session), the account is stored encrypted 
 
 **Transfers are resumable.** An interrupted download keeps its `.tmp` partial and the next run continues it with an HTTP `Range` request, after the 206/416/200 answer is validated — a server that ignored the range can never append onto a good prefix.
 
-**Packages are rebuilt with a real ZIP64 writer** (end-of-central-directory record plus locator, placeholders regenerated rather than truncated), so archives past 4 GB or 65 535 entries are written correctly instead of silently clipped. The streaming path uses the OTA framing Apple's kernel expects, with general-purpose flag bit 3 and the sizes and CRC in a trailing data descriptor. Replication stays well below package size: the input is memory-mapped and walked with `MADV_SEQUENTIAL`, so the kernel retires pages behind the scan instead of holding the archive. Measured with `wait4`/`ru_maxrss`: a 3.14 GB package peaks at 1.0–1.1 GiB of RSS, not 3.14 GB. Exercised live on **31 real App Store packages** (32.3 GB downloaded in total). Verified live across 31 production packages up to 3.89 GB (PUBG Mobile) and 47,007 entries in a single archive (Tanks Blitz) with zero errors. Reading a ZIP64 *central directory* is still refused: the writer emits it, the reader does not accept one.
+**Packages are rebuilt with a real ZIP64 writer** (end-of-central-directory record plus locator, placeholders regenerated rather than truncated), so archives past 4 GB or 65 535 entries are written correctly instead of silently clipped. The streaming path uses the OTA framing Apple's kernel expects, with general-purpose flag bit 3 and the sizes and CRC in a trailing data descriptor. Replication is O(1) in package size: the input is never mapped. It is read as a `File` — a 66 KB tail for the end-of-central-directory, one read for the central directory, 30 bytes per local header, and entry bodies through a 512 KiB buffer — so the footprint is the parsed entry table, not the archive. Measured with `wait4`/`ru_maxrss` (median, N=5): 3.62 GiB PUBG with 1 580 entries peaks at **12.8 MiB**, 2.92 GiB Tanks Blitz with 47 007 entries at **31.9 MiB**, down from 675 MiB and 611 MiB when the input was memory-mapped. Exercised live on **31 real App Store packages** (32.3 GB downloaded in total). Verified live across 31 production packages up to 3.89 GB (PUBG Mobile) and 47,007 entries in a single archive (Tanks Blitz) with zero errors. Reading a ZIP64 *central directory* is still refused: the writer emits it, the reader does not accept one.
 
 **Download URLs resolve through a three-step recovery chain** — the legacy `volumeStoreDownloadProduct`, then `redownloadProduct` when the legacy call returns a silent empty `songList`, then `updateProduct` when that answers an empty HTTP 500. This mirrors the reference tool's recovery since Apple's 2026 migration, when the legacy call began returning empty song lists for newer apps.
 
