@@ -496,6 +496,8 @@ The dependency set (Cargo.lock), with licenses read from each crate's own manife
 | `libc` | 0.2.189 | MIT OR Apache-2.0 | The Rust Project (rust-lang/libc) | host libc ABI: mmap, sigaction, ucontext, wait4 |
 | `linkme` + `linkme-impl` | 0.3.37 | MIT OR Apache-2.0 | David Tolnay (dtolnay/linkme) | `distributed_slice` — the shim-table registration macro; the emitted linker sections and runtime slices land in the binary |
 | `bzip2-rs` | 0.1.2 | MIT OR Apache-2.0 | Paolo Barbolini (paolobarbolini/bzip2-rs) | pure-Rust bzip2 decoder in the first-run asset fetcher |
+| `ureq` | 3.4.2 | MIT OR Apache-2.0 | Martin Algesten, Jacob Hoffman-Andrews (algesten/ureq) | HTTP client for the Store lane and the asset fetcher, replacing the external curl binary |
+| `cookie_store` | 0.22.1 | MIT OR Apache-2.0 | Patrick Fernie (pfernie/cookie_store) | the netscape-format jar behind the shared `mz_at0` store session; same version ureq pins, so the `Cookie` the jar returns is that crate's type |
 | `crc32fast` | 1.5.1 | MIT OR Apache-2.0 | srijs (srijs/rust-crc32fast) | checksum primitive under bzip2-rs |
 | `cfg-if` | 1.0.4 | MIT OR Apache-2.0 | Alex Crichton (rust-lang/cfg-if) | conditional compilation under crc32fast |
 | `tinyvec` | 1.13.2 | Zlib OR Apache-2.0 OR MIT | Lokathor (Lokathor/tinyvec) | small-vector abstraction under bzip2-rs |

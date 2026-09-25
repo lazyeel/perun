@@ -269,6 +269,8 @@ Third-party code compiled into the binary (all permissive; the full table with v
 | `libc` | MIT OR Apache-2.0 | host libc ABI |
 | `linkme` + `linkme-impl` | MIT OR Apache-2.0 | shim-table registration |
 | `bzip2-rs` | MIT OR Apache-2.0 | first-run asset fetcher |
+| `ureq` | MIT OR Apache-2.0 | Store-lane HTTP, replacing the external curl binary |
+| `cookie_store` | MIT OR Apache-2.0 | netscape cookie jar for the store session |
 | `crc32fast`, `cfg-if`, `tinyvec` | MIT/Apache-2.0/Zlib | under bzip2-rs |
 
 The reference measurement oracle used in the benchmarks (t0rr3sp3dr0/sapsigner, Apache-2.0) and its Unicorn engine (GPL-2.0) are third-party projects; no code from either is linked into, derived from, or redistributed with this repository — Perun exists precisely because that approach was measured and found too slow. Credits and the precise legal statement are in [RESEARCH.md § 8](RESEARCH.md).
