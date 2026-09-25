@@ -96,6 +96,7 @@ fn find_eocd(data: &[u8]) -> Result<(usize, Eocd), String> {
     ))
 }
 
+#[cfg(test)]
 fn parse_central(data: &[u8], eocd: &Eocd) -> Result<Vec<CentralEntry>, String> {
     parse_central_at(data, eocd.cd_offset as usize, eocd)
 }
@@ -163,6 +164,7 @@ fn parse_central_at(data: &[u8], start: usize, eocd: &Eocd) -> Result<Vec<Centra
 }
 
 /// Local header span for an entry: (local_header_len, compressed_size).
+#[cfg(test)]
 fn local_span(data: &[u8], entry: &CentralEntry) -> Result<(usize, u64), String> {
     let off = entry.local_offset as usize;
     if off + 30 > data.len() {
@@ -178,8 +180,115 @@ fn local_span(data: &[u8], entry: &CentralEntry) -> Result<(usize, u64), String>
 
 // ── writing ───────────────────────────────────────────────────────────────
 
+// ── streaming package source ───────────────────────────────────────────────
+
+/// A package read through the file rather than a whole-file mapping.
+///
+/// The replicator used to `mmap` the entire archive and lean on
+/// `MADV_SEQUENTIAL` to keep the resident set down, which only *asks* the
+/// reclaimer to keep up: measured peak RSS on 3.6 GiB swung 532..1012 MiB
+/// between identical runs. Here nothing is mapped at all, so the resident set
+/// is the largest single read — the central directory, a few MiB — and nothing
+/// else. Bulk entry bodies are moved through a fixed buffer.
+struct Pkg {
+    file: std::fs::File,
+    len: u64,
+}
+
+impl Pkg {
+    fn open(path: &str) -> Result<Pkg, String> {
+        let file = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+        let len = file
+            .metadata()
+            .map_err(|e| format!("stat {path}: {e}"))?
+            .len();
+        Ok(Pkg { file, len })
+    }
+
+    /// Positional read. Callers use this only for metadata-sized ranges.
+    fn read_at(&self, off: u64, len: u64) -> Result<Vec<u8>, String> {
+        let mut out = vec![0u8; len as usize];
+        let mut done = 0usize;
+        while done < out.len() {
+            let n = read_at(&self.file, &mut out[done..], off + done as u64)
+                .map_err(|e| format!("read: {e}"))?;
+            if n == 0 {
+                return Err("zip: unexpected end of file".into());
+            }
+            done += n;
+        }
+        Ok(out)
+    }
+
+    /// Stream `len` bytes at `off` through a fixed buffer into the writer.
+    fn copy_range_to(
+        &mut self,
+        off: u64,
+        len: u64,
+        out: &mut dyn std::io::Write,
+    ) -> Result<u64, String> {
+        use std::io::{Read, Seek, SeekFrom};
+        self.file
+            .seek(SeekFrom::Start(off))
+            .map_err(|e| format!("seek: {e}"))?;
+        let mut left = len;
+        let mut buf = [0u8; 512 * 1024];
+        while left > 0 {
+            let want = left.min(buf.len() as u64) as usize;
+            let n = self
+                .file
+                .read(&mut buf[..want])
+                .map_err(|e| format!("read: {e}"))?;
+            if n == 0 {
+                return Err("zip: unexpected end of file".into());
+            }
+            out.write_all(&buf[..n])
+                .map_err(|e| format!("zip write: {e}"))?;
+            left -= n as u64;
+        }
+        Ok(len)
+    }
+}
+
+fn read_at(f: &std::fs::File, buf: &mut [u8], off: u64) -> std::io::Result<usize> {
+    use std::os::unix::fs::FileExt;
+    f.read_at(buf, off)
+}
+
+/// Where an entry's payload starts, and how long it is — from the 30-byte
+/// local header alone, so no body bytes are touched to find out.
+fn local_span_file(pkg: &Pkg, entry: &CentralEntry) -> Result<(u64, u64), String> {
+    let off = entry.local_offset;
+    if off + 30 > pkg.len {
+        return Err("zip: local header out of range".into());
+    }
+    let h = pkg.read_at(off, 30)?;
+    if h[..4] != LOC_SIG {
+        return Err(format!("zip: bad local signature for {}", entry.name));
+    }
+    let name_len = u16::from_le_bytes([h[26], h[27]]) as u64;
+    let extra_len = u16::from_le_bytes([h[28], h[29]]) as u64;
+    Ok((off + 30 + name_len + extra_len, entry.compressed_size))
+}
+
+/// Read and inflate one entry straight from the file. Only the compressed
+/// body of a small archive member is materialised here (Info.plist, the
+/// manifest), never an entry-sized blob of the whole package.
+fn decompress_entry_pkg(pkg: &mut Pkg, entry: &CentralEntry) -> Result<Vec<u8>, String> {
+    let (data_start, compressed) = local_span_file(pkg, entry)?;
+    let body = pkg.read_at(data_start, compressed)?;
+    decompress_bytes(&body, entry)
+}
+
 /// Strip ZIP64 extra blocks (id 0x0001) so the writer can regenerate
 /// structural values instead of re-emitting stale ones.
+fn decompress_bytes(body: &[u8], entry: &CentralEntry) -> Result<Vec<u8>, String> {
+    if entry.method == 0 {
+        return Ok(body.to_vec());
+    }
+    inflate(body, entry.uncompressed_size as usize)
+}
+
 fn strip_zip64_extra(extra: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(extra.len());
     let mut i = 0;
@@ -356,11 +465,14 @@ impl<'w> ZipWriter<'w> {
     /// trailing data descriptor (local sizes/CRC zeroed), stored entries and
     /// directory markers stay inline (a descriptor has no stream terminator to
     /// anchor on). The compressed bytes are written verbatim.
-    fn copy_raw(&mut self, src: &[u8], entry: &CentralEntry) -> Result<(), String> {
-        let (data_start, compressed) = local_span(src, entry)?;
-        let src_header = src
-            .get(entry.local_offset as usize..data_start)
-            .ok_or("zip: entry header out of range")?;
+    /// Build the rebuilt local header for one entry, plus the framing flags
+    /// the tail of `copy_raw` needs. Shared by the slice path (tests) and the
+    /// file path (production) so the bytes cannot drift apart.
+    fn build_local_header(
+        &self,
+        src_header: &[u8],
+        entry: &CentralEntry,
+    ) -> Result<(Vec<u8>, bool, bool), String> {
         if src_header.len() < 30 {
             return Err("zip: local header too short".into());
         }
@@ -434,32 +546,36 @@ impl<'w> ZipWriter<'w> {
         header.extend_from_slice(&(local_extra.len() as u16).to_le_bytes());
         header.extend_from_slice(name_bytes);
         header.extend_from_slice(&local_extra);
+        Ok((header, streaming, need64))
+    }
 
-        let local_offset = self.offset;
-        self.raw(&header)?;
-        let data = src
-            .get(data_start..data_start + compressed as usize)
-            .ok_or("zip: entry data out of range")?;
-        self.raw(data)?;
-        if streaming {
-            // Data descriptor: 0x08074b50 + crc + sizes (64-bit when the
-            // entry overflows 32 bits, matching the ZIP64 central extra).
-            if need64 {
-                let mut descriptor = [0u8; 24];
-                descriptor[..4].copy_from_slice(&0x0807_4b50u32.to_le_bytes());
-                descriptor[4..8].copy_from_slice(&entry.crc32.to_le_bytes());
-                descriptor[8..16].copy_from_slice(&entry.compressed_size.to_le_bytes());
-                descriptor[16..24].copy_from_slice(&entry.uncompressed_size.to_le_bytes());
-                self.raw(&descriptor)?;
-            } else {
-                let mut descriptor = [0u8; 16];
-                descriptor[..4].copy_from_slice(&0x0807_4b50u32.to_le_bytes());
-                descriptor[4..8].copy_from_slice(&entry.crc32.to_le_bytes());
-                descriptor[8..12].copy_from_slice(&(entry.compressed_size as u32).to_le_bytes());
-                descriptor[12..16].copy_from_slice(&(entry.uncompressed_size as u32).to_le_bytes());
-                self.raw(&descriptor)?;
-            }
-        }
+    /// Write the data descriptor a streaming (bit 3) entry needs.
+    fn write_descriptor(&mut self, entry: &CentralEntry, need64: bool) -> Result<(), String> {
+        let mut descriptor = if need64 {
+            let mut d = [0u8; 24].to_vec();
+            d[8..16].copy_from_slice(&entry.compressed_size.to_le_bytes());
+            d[16..24].copy_from_slice(&entry.uncompressed_size.to_le_bytes());
+            d
+        } else {
+            let mut d = [0u8; 16].to_vec();
+            d[8..12].copy_from_slice(&(entry.compressed_size as u32).to_le_bytes());
+            d[12..16].copy_from_slice(&(entry.uncompressed_size as u32).to_le_bytes());
+            d
+        };
+        descriptor[..4].copy_from_slice(&0x0807_4b50u32.to_le_bytes());
+        descriptor[4..8].copy_from_slice(&entry.crc32.to_le_bytes());
+        self.raw(&descriptor)
+    }
+
+    /// Remember a written entry for the central directory. `local_offset` is
+    /// captured by the caller *before* the header is written, because
+    /// `self.offset` advances with every byte.
+    fn record_entry(&mut self, entry: &CentralEntry, streaming: bool, local_offset: u64) {
+        let flags = if streaming {
+            entry.flags | 0x8
+        } else {
+            entry.flags & !0x8
+        };
         self.entries.push(WrittenEntry {
             name: entry.name.clone(),
             method: entry.method,
@@ -472,6 +588,46 @@ impl<'w> ZipWriter<'w> {
             modified: entry.modified,
             central_extra: entry.central_extra.clone(),
         });
+    }
+
+    /// Slice path, used by the tests and by anything already holding bytes.
+    #[cfg(test)]
+    fn copy_raw(&mut self, src: &[u8], entry: &CentralEntry) -> Result<(), String> {
+        let (data_start, compressed) = local_span(src, entry)?;
+        let src_header = src
+            .get(entry.local_offset as usize..data_start)
+            .ok_or("zip: entry header out of range")?;
+        let (header, streaming, need64) = self.build_local_header(src_header, entry)?;
+        let local_offset = self.offset;
+        self.raw(&header)?;
+        let data = src
+            .get(data_start..data_start + compressed as usize)
+            .ok_or("zip: entry data out of range")?;
+        self.raw(data)?;
+        if streaming {
+            self.write_descriptor(entry, need64)?;
+        }
+        self.record_entry(entry, streaming, local_offset);
+        Ok(())
+    }
+
+    /// File path: header from a small read, body streamed in fixed chunks, so
+    /// nothing proportional to the package is ever resident.
+    fn copy_raw_from_file(&mut self, pkg: &mut Pkg, entry: &CentralEntry) -> Result<(), String> {
+        let (data_start, compressed) = local_span_file(pkg, entry)?;
+        let hlen = data_start - entry.local_offset;
+        let src_header = pkg.read_at(entry.local_offset, hlen)?;
+        let (header, streaming, need64) = self.build_local_header(&src_header, entry)?;
+        let local_offset = self.offset;
+        self.raw(&header)?;
+        let wrote = pkg.copy_range_to(data_start, compressed, &mut *self.out)?;
+        // copy_range_to writes straight to the sink, so the writer's own
+        // offset bookkeeping (self.raw) never saw these bytes.
+        self.offset += wrote;
+        if streaming {
+            self.write_descriptor(entry, need64)?;
+        }
+        self.record_entry(entry, streaming, local_offset);
         Ok(())
     }
 
@@ -665,56 +821,19 @@ pub fn replicate(
     info: &DownloadInfo,
     account: &Account,
 ) -> Result<bool, String> {
-    // Stream the source via mmap: peak RSS stays O(1) instead of tracking
-    // the package size (a 3 GiB package would otherwise pin 3+ GiB of heap).
-    // Pages flow through the kernel cache on demand.
-    let src_file = std::fs::File::open(src_path).map_err(|e| format!("open {src_path}: {e}"))?;
-    let src_len = src_file
-        .metadata()
-        .map_err(|e| format!("stat {src_path}: {e}"))?
-        .len();
-    let src_map = unsafe {
-        memmap2::MmapOptions::new()
-            .len(src_len as usize)
-            .map(&src_file)
-            .map_err(|e| format!("mmap {src_path}: {e}"))?
-    };
-    // madvise(MADV_SEQUENTIAL): kernel prefetches ahead for our linear scan
-    // and drops pages we've already passed, so the resident set stays well
-    // below the package. Measured with wait4/ru_maxrss: a 3.14 GB
-    // (2.92 GiB) Tanks Blitz with 47 007 zip entries peaks at 1.0-1.1 GiB.
-    unsafe extern "C" {
-        fn madvise(addr: *mut std::ffi::c_void, len: usize, advise: i32) -> i32;
-    }
-    const MADV_SEQUENTIAL: i32 = 2;
-    const MADV_DONTNEED: i32 = 4;
-    unsafe {
-        let _ = madvise(
-            src_map.as_ptr() as *mut std::ffi::c_void,
-            src_len as usize,
-            MADV_SEQUENTIAL,
-        );
-    }
-    let src: &[u8] = &src_map[..];
-    let (_, eocd) = find_eocd(src)?;
-    let entries = parse_central(src, &eocd)?;
-    // After parsing the central directory (a pass over the tail of the
-    // file), the high-offset pages are dead to us — replicate() jumps
-    // around. Tell the kernel it may reclaim the CD range we just scanned.
-    {
-        let cd_start = (eocd.cd_offset as usize).min(src.len());
-        let cd_len = (eocd.cd_size as usize).min(src.len().saturating_sub(cd_start));
-        if cd_len > 0 {
-            unsafe {
-                let _ = madvise(
-                    src_map.as_ptr().add(cd_start) as *mut std::ffi::c_void,
-                    cd_len,
-                    MADV_DONTNEED,
-                );
-            }
-        }
-    }
-
+    // Stream the source through a File: nothing is mapped, so the resident
+    // set is the largest single read (the central directory) and not the
+    // package. Entry bodies move through a fixed 512 KiB buffer.
+    let mut pkg = Pkg::open(src_path)?;
+    // The EOCD lives in the last 66 KB; nothing before it is needed to
+    // locate the central directory, which is then read as one block.
+    let tail_at = pkg.len.saturating_sub(66_000);
+    let tail = pkg.read_at(tail_at, pkg.len - tail_at)?;
+    let (_, eocd) = find_eocd(&tail)?;
+    let cd = pkg.read_at(eocd.cd_offset, eocd.cd_size)?;
+    let entries = parse_central_at(&cd, 0, &eocd)?;
+    drop(tail);
+    drop(cd);
     // Locate the main bundle (skip Watch/ extensions like the reference).
     let bundle_name = entries
         .iter()
@@ -747,7 +866,7 @@ pub fn replicate(
         .iter()
         .find(|e| e.name == format!("{sc_dir}Manifest.plist"))
     {
-        let raw = decompress_entry(src, manifest_entry)?;
+        let raw = decompress_entry_pkg(&mut pkg, manifest_entry)?;
         if let Ok(doc) = plist::parse_binary(&raw).or_else(|_| plist::parse_xml(&raw)) {
             // Replication destinations first (the full set); SinfPaths fills
             // in anything it lists that replication did not (defensive:
@@ -769,7 +888,7 @@ pub fn replicate(
     }
     let fallback_sinf_path = format!(
         "{sc_dir}{}.sinf",
-        read_bundle_executable(src, &entries, &bundle_name)?
+        read_bundle_executable_pkg(&mut pkg, &entries, &bundle_name)?
     );
 
     let now = std::time::SystemTime::now()
@@ -784,41 +903,8 @@ pub fn replicate(
     metadata.set("userName", Plist::string(&account.email));
     let itunes_meta = plist::to_xml(&metadata).into_bytes();
 
-    // Sliding-window reclaim state (see the copy loop). 32 MiB by default;
-    // PERUN_REPLICA_WINDOW_MB overrides it, 0 turns the sweep off.
-    let page = 4096usize;
-    let window: usize = match std::env::var("PERUN_REPLICA_WINDOW_MB") {
-        Ok(v) => v.parse::<usize>().unwrap_or(32),
-        Err(_) => 32,
-    } * 1024
-        * 1024;
-    let mut swept_to: usize = 0;
-
     for entry in &entries {
-        zip.copy_raw(src, entry)?;
-        // Sliding-window reclaim: once the cursor is a whole window ahead,
-        // tell the kernel to drop the pages behind it. MADV_SEQUENTIAL on its
-        // own only *asks* the reclaimer to keep up, and measured peak RSS on a
-        // 3.6 GiB package swung 532..1012 MiB between identical runs — the
-        // resident set was being decided by kernel timing, not by us. This
-        // makes it ours. Enabled with PERUN_REPLICA_WINDOW_MB; 0 = off.
-        if window > 0 {
-            let cur = entry.local_offset as usize;
-            if cur > swept_to + window {
-                // Leave a half-window of slack so a later entry that reaches
-                // backwards does not re-fault a mountain of pages.
-                let mut upto = cur - window / 2;
-                upto &= !(page - 1);
-                unsafe {
-                    let _ = madvise(
-                        src_map.as_ptr() as *mut std::ffi::c_void,
-                        upto,
-                        MADV_DONTNEED,
-                    );
-                }
-                swept_to = upto;
-            }
-        }
+        zip.copy_raw_from_file(&mut pkg, entry)?;
     }
     zip.add_stored("iTunesMetadata.plist", &itunes_meta, (ddate, dtime))?;
     if let Some(artwork) = &info.artwork {
@@ -877,8 +963,8 @@ pub fn replicate(
 }
 
 /// CFBundleExecutable from the bundle's Info.plist (binary or XML).
-fn read_bundle_executable(
-    src: &[u8],
+fn read_bundle_executable_pkg(
+    pkg: &mut Pkg,
     entries: &[CentralEntry],
     bundle: &str,
 ) -> Result<String, String> {
@@ -886,7 +972,7 @@ fn read_bundle_executable(
         .iter()
         .find(|e| e.name == format!("Payload/{bundle}.app/Info.plist"))
         .ok_or("bundle Info.plist not found")?;
-    let raw = decompress_entry(src, info_entry)?;
+    let raw = decompress_entry_pkg(pkg, info_entry)?;
     let doc = plist::parse_binary(&raw).or_else(|_| plist::parse_xml(&raw))?;
     Ok(doc
         .get("CFBundleExecutable")
@@ -897,6 +983,7 @@ fn read_bundle_executable(
 
 /// Extract one entry's bytes (stored or deflate via the fetcher's bzip2?
 /// No — deflate; a compact inflate for the few plist files we read).
+#[cfg(test)]
 fn decompress_entry(src: &[u8], entry: &CentralEntry) -> Result<Vec<u8>, String> {
     let (data_start, compressed) = local_span(src, entry)?;
     let raw = src
@@ -2014,5 +2101,53 @@ mod tests {
 
         let _ = std::fs::remove_file(&src_path);
         let _ = std::fs::remove_file(&out_path);
+    }
+
+    /// `Pkg` is the only thing standing between the writer and a 3.6 GiB
+    /// mapping, so its positional read gets checked against a real file
+    /// rather than trusted.
+    #[test]
+    fn pkg_reads_ranges_and_local_spans() {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut z = ZipWriter::new(&mut buf);
+            let (d, t) = (0x5A21, 0x0C00);
+            let mut big = vec![0xABu8; 300_000];
+            for (i, b) in big.iter_mut().enumerate() {
+                *b = (i % 251) as u8;
+            }
+            z.add_stored("Payload/Big.app/Big", &big, (d, t)).unwrap();
+            z.add_stored("Payload/Big.app/Small", b"hi", (d, t))
+                .unwrap();
+            z.finish().unwrap();
+        }
+        let path = std::env::temp_dir().join(format!("perun-pkg-{}.zip", std::process::id()));
+        std::fs::write(&path, &buf).unwrap();
+        let pkg = Pkg::open(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(pkg.len, buf.len() as u64);
+        // whole-file read, then a range in the middle
+        assert_eq!(pkg.read_at(0, pkg.len).unwrap(), buf);
+        let mid = pkg.len / 2;
+        let off = 37u64.min(mid);
+        assert_eq!(
+            pkg.read_at(off, 64).unwrap(),
+            &buf[off as usize..off as usize + 64]
+        );
+
+        // the CD is reachable and parses from a CD-only buffer
+        let tail_at = pkg.len.saturating_sub(66_000);
+        let tail = pkg.read_at(tail_at, pkg.len - tail_at).unwrap();
+        let (_, eocd) = find_eocd(&tail).unwrap();
+        let cd = pkg.read_at(eocd.cd_offset, eocd.cd_size).unwrap();
+        let entries = parse_central_at(&cd, 0, &eocd).unwrap();
+        assert_eq!(entries.len(), 2);
+
+        // and a local header is found without touching the body
+        let small = entries.iter().find(|e| e.name.ends_with("/Small")).unwrap();
+        let (data_start, compressed) = local_span_file(&pkg, small).unwrap();
+        assert_eq!(compressed, 2);
+        assert!(data_start < small.local_offset + 64);
+        let _ = std::fs::remove_file(&path);
     }
 }
