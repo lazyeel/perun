@@ -494,58 +494,58 @@ The dependency set, read from `cargo metadata` at the target triple, with each l
 
 | Crate | Version | License | Author / repository | Role |
 |---|---|---|---|---|
-| `adler2` | 2.0.1 | 0BSD OR MIT OR Apache-2.0 | Jonas Schievink, oyvindln (oyvindln/adler2) | transitive under ureq |
-| `base64` | 0.23.1 | MIT OR Apache-2.0 | Marshall Pierce (marshallpierce/rust-base64) | transitive under ureq |
+| `adler2` | 2.0.1 | MIT | Jonas Schievink, oyvindln (oyvindln/adler2) | transitive under ureq |
+| `base64` | 0.23.1 | MIT | Marshall Pierce (marshallpierce/rust-base64) | transitive under ureq |
 | `bytes` | 1.12.1 | MIT | Carl Lerche, Sean McArthur (tokio-rs/bytes) | transitive under ureq |
-| `bzip2-rs` | 0.1.2 | MIT/Apache-2.0 | Paolo Barbolini (paolobarbolini/bzip2-rs) | pure-Rust bzip2 decoder in the first-run asset fetcher |
-| `cfg-if` | 1.0.4 | MIT OR Apache-2.0 | Alex Crichton (rust-lang/cfg-if) | transitive under bzip2-rs |
-| `crc32fast` | 1.5.1 | MIT OR Apache-2.0 | Sam Rijs, Alex Crichton (srijs/rust-crc32fast) | transitive under bzip2-rs |
-| `flate2` | 1.1.10 | MIT OR Apache-2.0 | Alex Crichton, Josh Triplett (rust-lang/flate2-rs) | the bzip2 decoder's DEFLATE half, for callers that need gzip |
-| `getrandom` | 0.2.17 | MIT OR Apache-2.0 | The Rand Project Developers (rust-random/getrandom) | OS entropy for the account vault's salt and the SAP signature |
-| `http` | 1.5.0 | MIT OR Apache-2.0 | Alex Crichton, Carl Lerche, Sean McArthur (hyperium/http) | the HTTP/1.1 message model under ureq |
-| `httparse` | 1.10.1 | MIT OR Apache-2.0 | Sean McArthur (seanmonstar/httparse) | transitive under ureq |
-| `itoa` | 1.0.18 | MIT OR Apache-2.0 | David Tolnay (dtolnay/itoa) | transitive under ureq |
-| `libc` | 0.2.189 | MIT OR Apache-2.0 | The Rust Project (rust-lang/libc) | host libc ABI: mmap, sigaction, ucontext, wait4 |
-| `linkme` | 0.3.37 | MIT OR Apache-2.0 | David Tolnay (dtolnay/linkme) | `distributed_slice` — the shim-table registration macro; the emitted linker sections and runtime slices land in the binary |
-| `linkme-impl` | 0.3.37 | MIT OR Apache-2.0 | David Tolnay (dtolnay/linkme) | proc macro for `linkme`; the code it generates is linked in |
-| `log` | 0.4.34 | MIT OR Apache-2.0 | The Rust Project Developers (rust-lang/log) | transitive under ureq |
-| `memchr` | 2.8.3 | Unlicense OR MIT | Andrew Gallant, bluss (BurntSushi/memchr) | transitive under ureq |
-| `miniz_oxide` | 0.9.1 | MIT OR Zlib OR Apache-2.0 | Frommi, oyvindln, Rich Geldreich richgel99@gmail.com (Frommi/miniz_oxide/tree/master/miniz_oxide) | the DEFLATE decompressor under flate2 |
-| `once_cell` | 1.21.4 | MIT OR Apache-2.0 | Aleksey Kladov (matklad/once_cell) | transitive under ureq |
-| `percent-encoding` | 2.3.2 | MIT OR Apache-2.0 | The rust-url developers (servo/rust-url) | transitive under ureq |
+| `bzip2-rs` | 0.1.2 | MIT | Paolo Barbolini (paolobarbolini/bzip2-rs) | pure-Rust bzip2 decoder in the first-run asset fetcher |
+| `cfg-if` | 1.0.4 | MIT | Alex Crichton (rust-lang/cfg-if) | transitive under bzip2-rs |
+| `crc32fast` | 1.5.1 | MIT | Sam Rijs, Alex Crichton (srijs/rust-crc32fast) | transitive under bzip2-rs |
+| `flate2` | 1.1.10 | MIT | Alex Crichton, Josh Triplett (rust-lang/flate2-rs) | the bzip2 decoder's DEFLATE half, for callers that need gzip |
+| `getrandom` | 0.2.17 | MIT | The Rand Project Developers (rust-random/getrandom) | OS entropy for the account vault's salt and the SAP signature |
+| `http` | 1.5.0 | MIT | Alex Crichton, Carl Lerche, Sean McArthur (hyperium/http) | the HTTP/1.1 message model under ureq |
+| `httparse` | 1.10.1 | MIT | Sean McArthur (seanmonstar/httparse) | transitive under ureq |
+| `itoa` | 1.0.18 | MIT | David Tolnay (dtolnay/itoa) | transitive under ureq |
+| `libc` | 0.2.189 | MIT | The Rust Project (rust-lang/libc) | host libc ABI: mmap, sigaction, ucontext, wait4 |
+| `linkme` | 0.3.37 | MIT | David Tolnay (dtolnay/linkme) | `distributed_slice` — the shim-table registration macro; the emitted linker sections and runtime slices land in the binary |
+| `linkme-impl` | 0.3.37 | MIT | David Tolnay (dtolnay/linkme) | proc macro for `linkme`; the code it generates is linked in |
+| `log` | 0.4.34 | MIT | The Rust Project Developers (rust-lang/log) | transitive under ureq |
+| `memchr` | 2.8.3 | MIT | Andrew Gallant, bluss (BurntSushi/memchr) | transitive under ureq |
+| `miniz_oxide` | 0.9.1 | MIT | Frommi, oyvindln, Rich Geldreich richgel99@gmail.com (Frommi/miniz_oxide/tree/master/miniz_oxide) | the DEFLATE decompressor under flate2 |
+| `once_cell` | 1.21.4 | MIT | Aleksey Kladov (matklad/once_cell) | transitive under ureq |
+| `percent-encoding` | 2.3.2 | MIT | The rust-url developers (servo/rust-url) | transitive under ureq |
 | `ring` | 0.17.14 | Apache-2.0 AND ISC | briansmith/ring | crypto primitives under rustls: SHA-256, HMAC, AES-GCM, ECDSA |
-| `rustls` | 0.23.45 | Apache-2.0 OR ISC OR MIT | rustls/rustls | TLS 1.2/1.3 for every App Store and CDN connection |
-| `rustls-pki-types` | 1.15.1 | MIT OR Apache-2.0 | rustls/pki-types | transitive under ureq |
+| `rustls` | 0.23.45 | MIT | rustls/rustls | TLS 1.2/1.3 for every App Store and CDN connection |
+| `rustls-pki-types` | 1.15.1 | MIT | rustls/pki-types | transitive under ureq |
 | `rustls-webpki` | 0.103.15 | ISC | rustls/webpki | certificate chain verification under rustls |
-| `serde` | 1.0.229 | MIT OR Apache-2.0 | Erick Tryzelaar, David Tolnay (serde-rs/serde) | transitive under ureq |
-| `serde_core` | 1.0.229 | MIT OR Apache-2.0 | Erick Tryzelaar, David Tolnay (serde-rs/serde) | transitive under ureq |
-| `serde_json` | 1.0.151 | MIT OR Apache-2.0 | Erick Tryzelaar, David Tolnay (serde-rs/json) | transitive under ureq |
+| `serde` | 1.0.229 | MIT | Erick Tryzelaar, David Tolnay (serde-rs/serde) | transitive under ureq |
+| `serde_core` | 1.0.229 | MIT | Erick Tryzelaar, David Tolnay (serde-rs/serde) | transitive under ureq |
+| `serde_json` | 1.0.151 | MIT | Erick Tryzelaar, David Tolnay (serde-rs/json) | transitive under ureq |
 | `simd-adler32` | 0.3.10 | MIT | Marvin Countryman (mcountryman/simd-adler32) | transitive under ureq |
 | `subtle` | 2.6.1 | BSD-3-Clause | Isis Lovecruft, Henry de Valence (dalek-cryptography/subtle) | transitive under ureq |
-| `tinyvec` | 1.13.2 | Zlib OR Apache-2.0 OR MIT | Lokathor (Lokathor/tinyvec) | transitive under bzip2-rs |
+| `tinyvec` | 1.13.2 | MIT | Lokathor (Lokathor/tinyvec) | transitive under bzip2-rs |
 | `untrusted` | 0.9.0 | ISC | Brian Smith (briansmith/untrusted) | transitive under ureq |
-| `ureq` | 3.4.2 | MIT OR Apache-2.0 | Martin Algesten, Jacob Hoffman-Andrews (algesten/ureq) | HTTP client for the Store lane and the asset fetcher, replacing the external curl binary |
-| `ureq-proto` | 0.6.4 | MIT OR Apache-2.0 | Martin Algesten (algesten/ureq-proto) | transitive under ureq |
-| `utf8-zero` | 0.8.1 | MIT OR Apache-2.0 | Simon Sapin, Martin Algesten (algesten/utf8-zero) | transitive under ureq |
+| `ureq` | 3.4.2 | MIT | Martin Algesten, Jacob Hoffman-Andrews (algesten/ureq) | HTTP client for the Store lane and the asset fetcher, replacing the external curl binary |
+| `ureq-proto` | 0.6.4 | MIT | Martin Algesten (algesten/ureq-proto) | transitive under ureq |
+| `utf8-zero` | 0.8.1 | MIT | Simon Sapin, Martin Algesten (algesten/utf8-zero) | transitive under ureq |
 | `webpki-roots` | 1.0.9 | CDLA-Permissive-2.0 | rustls/webpki-roots | the compiled Mozilla root store rustls anchors against |
-| `zeroize` | 1.9.0 | Apache-2.0 OR MIT | The RustCrypto Project Developers (RustCrypto/utils) | transitive under ureq |
+| `zeroize` | 1.9.0 | MIT | The RustCrypto Project Developers (RustCrypto/utils) | transitive under ureq |
 | `zmij` | 1.0.23 | MIT | David Tolnay (dtolnay/zmij) | transitive under ureq |
 
 **Compile-time only — executed by rustc during the build, absent from the binary (4 crates):**
 
 | Crate | Version | License | Author / repository |
 |---|---|---|---|
-| `proc-macro2` | 1.0.107 | MIT OR Apache-2.0 | David Tolnay, Alex Crichton (dtolnay/proc-macro2) |
-| `quote` | 1.0.47 | MIT OR Apache-2.0 | David Tolnay (dtolnay/quote) |
-| `syn` | 3.0.5 | MIT OR Apache-2.0 | David Tolnay (dtolnay/syn) |
-| `unicode-ident` | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 | David Tolnay (dtolnay/unicode-ident) |
+| `proc-macro2` | 1.0.107 | MIT | David Tolnay, Alex Crichton (dtolnay/proc-macro2) |
+| `quote` | 1.0.47 | MIT | David Tolnay (dtolnay/quote) |
+| `syn` | 3.0.5 | MIT | David Tolnay (dtolnay/syn) |
+| `unicode-ident` | 1.0.24 | MIT AND Unicode-3.0 | David Tolnay (dtolnay/unicode-ident) |
 
 <!-- END GENERATED: license-tables -->
 
-The runtime set is small and, apart from one crate, uniformly MIT-or-Apache. Thirty-four of the 36 object-form crates are under MIT, Apache-2.0, Zlib, ISC, 0BSD, BSD-3-Clause or Unlicense. The other two are worth naming, each for a different reason:
+The runtime set is small and, apart from one crate, uniformly permissive. Thirty-four of the 36 object-form crates are under MIT (31), ISC (2) or BSD-3-Clause (1) — the License column states the licence perun takes, which for an `MIT OR Apache-2.0` disjunction is the `MIT` term. The other two are worth naming:
 
 * **`webpki-roots` 1.0.9 — `CDLA-Permissive-2.0`.** The compiled Mozilla root store under rustls. Permissive in effect, with a patent grant and a notice condition, but not OSI-approved, which is why a compliance scanner flags it where it would pass the others.
-* **`ring` 0.17.14 — `Apache-2.0 AND ISC`.** The crypto provider under rustls. Both terms are permissive; it is listed separately only because it is a conjunction rather than a choice, so there is no "or" to take.
+* **`ring` 0.17.14 — `Apache-2.0 AND ISC`.** The crypto provider under rustls. Both terms are permissive, and both are required: an `AND` is a requirement, not a choice, so there is nothing to resolve and nothing is taken.
 
 Neither requires perun to disclose its own source or to relicence its code, and both are compatible with distributing perun under Apache-2.0. What they do require is that the notices travel with the binary, which is what the two generated tables exist to make possible.
 

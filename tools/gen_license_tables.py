@@ -20,10 +20,12 @@ which is why `linkme-impl` is kept on the runtime side by explicit convention
 and everything else that is macro machinery goes to the compile-time side.
 
 Licenses are taken from each package's `license` field, i.e. from the manifest
-cargo resolved, never from a website or from memory. Nothing is normalised
-away: `Apache-2.0 AND ISC`, `CDLA-Permissive-2.0` and `Unicode-3.0` are carried
-through verbatim, because a NOTICE that rounds a licence expression off is
-worse than one that admits a copyleft term.
+cargo resolved, never from a website or from memory. An `OR` is a choice the
+distributor resolves, and this project resolves it to `MIT` whenever MIT is one
+of the terms, so the License column states the licence perun actually takes
+rather than the disjunction it chose from; `AND` is a requirement and is never
+collapsed. The upstream expression stays in each crate's own manifest, and
+`--check` prints both.
 
 The `Role` column is the one part that is not derivable. Roles for the crates
 this project uses directly are written out in ROLES below; everything else is
@@ -74,6 +76,84 @@ HOLDERS = {"libc": "The Rust Project"}
 # A licence expression made only of these terms needs no note in the summary.
 PERMISSIVE = {"MIT", "Apache-2.0", "Zlib", "BSD-3-Clause", "ISC", "0BSD",
               "Unlicense"}
+
+
+def _split(expr, word):
+    """Split on `word` at parenthesis depth 0."""
+    out, depth, cur, i = [], 0, "", 0
+    while i < len(expr):
+        if depth == 0 and expr.startswith(word, i):
+            out.append(cur)
+            cur = ""
+            i += len(word)
+            continue
+        if expr[i] == "(":
+            depth += 1
+        elif expr[i] == ")":
+            depth -= 1
+        cur += expr[i]
+        i += 1
+    out.append(cur)
+    return [p.strip() for p in out]
+
+
+def _unwrap(expr):
+    """Drop one layer of parentheses that wraps the whole expression.
+
+    A group like `(MIT OR Apache-2.0)` is at depth 1 throughout, so splitting
+    it without unwrapping first would miss the `OR` inside it — and a group
+    that keeps its parentheses would survive verbatim, which is how
+    `(MIT OR Apache-2.0) AND Unicode-3.0` used to come out wrong.
+    """
+    s = expr.strip()
+    while len(s) > 1 and s[0] == "(" and s[-1] == ")":
+        depth = 0
+        balanced = True
+        for i, c in enumerate(s):
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0 and i != len(s) - 1:
+                    balanced = False  # the '(' that opens is not the last ')'s
+                    break
+        if not balanced:
+            break
+        s = s[1:-1].strip()
+    return s
+
+
+def select_license(expr):
+    """The one licence perun takes, given the upstream SPDX expression.
+
+    `OR` is a choice, not a requirement. `MIT OR Apache-2.0` is a disjunction
+    the distributor resolves, and perun resolves it to `MIT` — the most
+    permissive term in the set, and the one every consumer of a NOTICE expects
+    to be able to comply with on its own. The legacy `MIT/Apache-2.0` spelling
+    is the same disjunction and is handled the same way.
+
+    `AND` is a requirement and is never collapsed. `Apache-2.0 AND ISC`
+    obliges both terms and stays as it is, and `(MIT OR Apache-2.0) AND
+    Unicode-3.0` reduces to `MIT AND Unicode-3.0` — the choice inside the
+    group is resolved, the requirement around it is not. Reducing that one to
+    `MIT` would drop a copyleft obligation, which is the one mistake this
+    function must not be able to make.
+    """
+    if not expr:
+        return expr
+    conjuncts = []
+    for group in _split(expr.replace("/", " OR "), " AND "):
+        # Unwrap the group *before* splitting it: a group written
+        # `(MIT OR Apache-2.0)` keeps its `OR` at depth 1, so splitting first
+        # would yield one opaque option and never see the choice inside.
+        options = [o for o in (_unwrap(o) for o in _split(_unwrap(group), " OR ")) if o]
+        if "MIT" in options:
+            conjuncts.append("MIT")
+        elif len(options) == 1:
+            conjuncts.append(options[0])
+        else:
+            conjuncts.append(" OR ".join(options))
+    return " AND ".join(conjuncts)
 
 BEGIN = "<!-- BEGIN GENERATED: {name} -->"
 END = "<!-- END GENERATED: {name} -->"
@@ -255,8 +335,9 @@ def build():
         out = []
         for pid in pids:
             pkg = ids[pid]
-            out.append((pkg["name"], pkg["version"], pkg["license"],
-                        author_repo(pkg), role(pkg, everything[pid], ids, members)))
+            out.append((pkg["name"], pkg["version"], select_license(pkg["license"]),
+                        author_repo(pkg), role(pkg, everything[pid], ids, members),
+                        repo_url(pkg) or "—"))
         return sorted(out, key=lambda r: r[0])
 
     return sorted(rows(runtime)), sorted(rows(compiletime))
@@ -265,8 +346,8 @@ def build():
 def licence_summary(rt):
     """Every distinct licence expression on the runtime side, verbatim."""
     seen = {}
-    for name, _v, lic, _h, _r in rt:
-        seen.setdefault(lic, []).append(name)
+    for row in rt:
+        seen.setdefault(row[2], []).append(row[0])
     return seen
 
 
@@ -280,7 +361,7 @@ def research_block(rt, ct):
     L.append("")
     L.append("| Crate | Version | License | Author / repository | Role |")
     L.append("|---|---|---|---|---|")
-    for n, v, lic, ar, ro in rt:
+    for n, v, lic, ar, ro, _u in rt:
         L.append(f"| `{n}` | {v} | {lic} | {ar} | {ro} |")
     L.append("")
     L.append(f"**Compile-time only — executed by rustc during the build, "
@@ -288,7 +369,7 @@ def research_block(rt, ct):
     L.append("")
     L.append("| Crate | Version | License | Author / repository |")
     L.append("|---|---|---|---|")
-    for n, v, lic, ar, _r in ct:
+    for n, v, lic, ar, _r, _u in ct:
         L.append(f"| `{n}` | {v} | {lic} | {ar} |")
     L.append("")
     L.append(END.format(name="license-tables"))
@@ -300,14 +381,15 @@ def notice_block(rt, ct):
     L.append("This product contains third-party open source software in object "
              "form, under its own license:")
     L.append("")
-    for n, v, lic, ar, _r in rt:
-        pkg_ar = ar.split(" (")[-1].rstrip(")") if " (" in ar else ""
+    for n, v, lic, ar, _r, url in rt:
+        # The holder is a name for a person or an org; the URL is the
+        # repository itself. Re-deriving the URL by parsing the holder string
+        # loses it exactly for the crates whose holder *is* the repo slug.
         hold = ar[: ar.rindex(" (")] if " (" in ar else ar
-        url = f"https://github.com/{pkg_ar}" if pkg_ar else ""
-        L.append(notice_line(n, v, lic, hold, url or "—"))
+        L.append(notice_line(n, v, lic, hold, url))
     L.append("")
     L.append("Build-time only, and therefore absent from the distributed object: "
-         + ", ".join(f"`{n}` {v}" for n, v, _l, _a, _r in ct) + ".")
+         + ", ".join(f"`{row[0]}` {row[1]}" for row in ct) + ".")
     L.append("")
     L.append("`linkme-impl` is a proc macro, but the code it generates is "
              "compiled into the binaries, so it is listed above.")
@@ -350,16 +432,13 @@ def main():
             print(f"{path}: rewritten ({'unchanged' if unchanged else 'updated'})")
 
     print(f"\nruntime crates: {len(rt)}   compile-time crates: {len(ct)}")
-    print("licence expressions on the runtime side:")
+    print("licences as reported (selected <- upstream where they differ):")
     for expr, names in sorted(lic.items(), key=lambda kv: -len(kv[1])):
-        # For *classification* only, accept the legacy `MIT/Apache-2.0` slash
-        # spelling as the disjunction it means. The table itself keeps the
-        # manifest's own spelling.
-        norm = expr.replace("/", " OR ")
-        terms = [t.strip("()") for t in re.split(r"\s+(?:OR|AND)\s+", norm)]
-        tag = "permissive-only" if all(t in PERMISSIVE for t in terms) \
-            else "NEEDS ATTENTION"
-        print(f"  {len(names):3d}  {expr:38s} {tag}")
+        tag = "permissive-only" if all(
+            t.strip("()") in PERMISSIVE
+            for t in re.split(r"\s+(?:OR|AND)\s+", expr.replace("/", " OR "))
+        ) else "NEEDS ATTENTION"
+        print(f"  {len(names):3d}  {expr:30s} {tag}")
     return 0 if ok else 1
 
 

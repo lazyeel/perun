@@ -12,41 +12,41 @@ This product compiles and links the following software developed by lazyeel:
 <!-- BEGIN GENERATED: license-notice -->
 This product contains third-party open source software in object form, under its own license:
 
-- adler2 2.0.1 (0BSD OR MIT OR Apache-2.0) — Jonas Schievink, oyvindln — https://github.com/oyvindln/adler2
-- base64 0.23.1 (MIT OR Apache-2.0) — Marshall Pierce — https://github.com/marshallpierce/rust-base64
+- adler2 2.0.1 (MIT) — Jonas Schievink, oyvindln — https://github.com/oyvindln/adler2
+- base64 0.23.1 (MIT) — Marshall Pierce — https://github.com/marshallpierce/rust-base64
 - bytes 1.12.1 (MIT) — Carl Lerche, Sean McArthur — https://github.com/tokio-rs/bytes
-- bzip2-rs 0.1.2 (MIT/Apache-2.0) — Paolo Barbolini — https://github.com/paolobarbolini/bzip2-rs
-- cfg-if 1.0.4 (MIT OR Apache-2.0) — Alex Crichton — https://github.com/rust-lang/cfg-if
-- crc32fast 1.5.1 (MIT OR Apache-2.0) — Sam Rijs, Alex Crichton — https://github.com/srijs/rust-crc32fast
-- flate2 1.1.10 (MIT OR Apache-2.0) — Alex Crichton, Josh Triplett — https://github.com/rust-lang/flate2-rs
-- getrandom 0.2.17 (MIT OR Apache-2.0) — The Rand Project Developers — https://github.com/rust-random/getrandom
-- http 1.5.0 (MIT OR Apache-2.0) — Alex Crichton, Carl Lerche, Sean McArthur — https://github.com/hyperium/http
-- httparse 1.10.1 (MIT OR Apache-2.0) — Sean McArthur — https://github.com/seanmonstar/httparse
-- itoa 1.0.18 (MIT OR Apache-2.0) — David Tolnay — https://github.com/dtolnay/itoa
-- libc 0.2.189 (MIT OR Apache-2.0) — The Rust Project — https://github.com/rust-lang/libc
-- linkme 0.3.37 (MIT OR Apache-2.0) — David Tolnay — https://github.com/dtolnay/linkme
-- linkme-impl 0.3.37 (MIT OR Apache-2.0) — David Tolnay — https://github.com/dtolnay/linkme
-- log 0.4.34 (MIT OR Apache-2.0) — The Rust Project Developers — https://github.com/rust-lang/log
-- memchr 2.8.3 (Unlicense OR MIT) — Andrew Gallant, bluss — https://github.com/BurntSushi/memchr
-- miniz_oxide 0.9.1 (MIT OR Zlib OR Apache-2.0) — Frommi, oyvindln, Rich Geldreich richgel99@gmail.com — https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide
-- once_cell 1.21.4 (MIT OR Apache-2.0) — Aleksey Kladov — https://github.com/matklad/once_cell
-- percent-encoding 2.3.2 (MIT OR Apache-2.0) — The rust-url developers — https://github.com/servo/rust-url
-- ring 0.17.14 (Apache-2.0 AND ISC) — briansmith/ring — —
-- rustls 0.23.45 (Apache-2.0 OR ISC OR MIT) — rustls/rustls — —
-- rustls-pki-types 1.15.1 (MIT OR Apache-2.0) — rustls/pki-types — —
-- rustls-webpki 0.103.15 (ISC) — rustls/webpki — —
-- serde 1.0.229 (MIT OR Apache-2.0) — Erick Tryzelaar, David Tolnay — https://github.com/serde-rs/serde
-- serde_core 1.0.229 (MIT OR Apache-2.0) — Erick Tryzelaar, David Tolnay — https://github.com/serde-rs/serde
-- serde_json 1.0.151 (MIT OR Apache-2.0) — Erick Tryzelaar, David Tolnay — https://github.com/serde-rs/json
+- bzip2-rs 0.1.2 (MIT) — Paolo Barbolini — https://github.com/paolobarbolini/bzip2-rs
+- cfg-if 1.0.4 (MIT) — Alex Crichton — https://github.com/rust-lang/cfg-if
+- crc32fast 1.5.1 (MIT) — Sam Rijs, Alex Crichton — https://github.com/srijs/rust-crc32fast
+- flate2 1.1.10 (MIT) — Alex Crichton, Josh Triplett — https://github.com/rust-lang/flate2-rs
+- getrandom 0.2.17 (MIT) — The Rand Project Developers — https://github.com/rust-random/getrandom
+- http 1.5.0 (MIT) — Alex Crichton, Carl Lerche, Sean McArthur — https://github.com/hyperium/http
+- httparse 1.10.1 (MIT) — Sean McArthur — https://github.com/seanmonstar/httparse
+- itoa 1.0.18 (MIT) — David Tolnay — https://github.com/dtolnay/itoa
+- libc 0.2.189 (MIT) — The Rust Project — https://github.com/rust-lang/libc
+- linkme 0.3.37 (MIT) — David Tolnay — https://github.com/dtolnay/linkme
+- linkme-impl 0.3.37 (MIT) — David Tolnay — https://github.com/dtolnay/linkme
+- log 0.4.34 (MIT) — The Rust Project Developers — https://github.com/rust-lang/log
+- memchr 2.8.3 (MIT) — Andrew Gallant, bluss — https://github.com/BurntSushi/memchr
+- miniz_oxide 0.9.1 (MIT) — Frommi, oyvindln, Rich Geldreich richgel99@gmail.com — https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide
+- once_cell 1.21.4 (MIT) — Aleksey Kladov — https://github.com/matklad/once_cell
+- percent-encoding 2.3.2 (MIT) — The rust-url developers — https://github.com/servo/rust-url/
+- ring 0.17.14 (Apache-2.0 AND ISC) — briansmith/ring — https://github.com/briansmith/ring
+- rustls 0.23.45 (MIT) — rustls/rustls — https://github.com/rustls/rustls
+- rustls-pki-types 1.15.1 (MIT) — rustls/pki-types — https://github.com/rustls/pki-types
+- rustls-webpki 0.103.15 (ISC) — rustls/webpki — https://github.com/rustls/webpki
+- serde 1.0.229 (MIT) — Erick Tryzelaar, David Tolnay — https://github.com/serde-rs/serde
+- serde_core 1.0.229 (MIT) — Erick Tryzelaar, David Tolnay — https://github.com/serde-rs/serde
+- serde_json 1.0.151 (MIT) — Erick Tryzelaar, David Tolnay — https://github.com/serde-rs/json
 - simd-adler32 0.3.10 (MIT) — Marvin Countryman — https://github.com/mcountryman/simd-adler32
 - subtle 2.6.1 (BSD-3-Clause) — Isis Lovecruft, Henry de Valence — https://github.com/dalek-cryptography/subtle
-- tinyvec 1.13.2 (Zlib OR Apache-2.0 OR MIT) — Lokathor — https://github.com/Lokathor/tinyvec
+- tinyvec 1.13.2 (MIT) — Lokathor — https://github.com/Lokathor/tinyvec
 - untrusted 0.9.0 (ISC) — Brian Smith — https://github.com/briansmith/untrusted
-- ureq 3.4.2 (MIT OR Apache-2.0) — Martin Algesten, Jacob Hoffman-Andrews — https://github.com/algesten/ureq
-- ureq-proto 0.6.4 (MIT OR Apache-2.0) — Martin Algesten — https://github.com/algesten/ureq-proto
-- utf8-zero 0.8.1 (MIT OR Apache-2.0) — Simon Sapin, Martin Algesten — https://github.com/algesten/utf8-zero
-- webpki-roots 1.0.9 (CDLA-Permissive-2.0) — rustls/webpki-roots — —
-- zeroize 1.9.0 (Apache-2.0 OR MIT) — The RustCrypto Project Developers — https://github.com/RustCrypto/utils
+- ureq 3.4.2 (MIT) — Martin Algesten, Jacob Hoffman-Andrews — https://github.com/algesten/ureq
+- ureq-proto 0.6.4 (MIT) — Martin Algesten — https://github.com/algesten/ureq-proto
+- utf8-zero 0.8.1 (MIT) — Simon Sapin, Martin Algesten — https://github.com/algesten/utf8-zero
+- webpki-roots 1.0.9 (CDLA-Permissive-2.0) — rustls/webpki-roots — https://github.com/rustls/webpki-roots
+- zeroize 1.9.0 (MIT) — The RustCrypto Project Developers — https://github.com/RustCrypto/utils
 - zmij 1.0.23 (MIT) — David Tolnay — https://github.com/dtolnay/zmij
 
 Build-time only, and therefore absent from the distributed object: `proc-macro2` 1.0.107, `quote` 1.0.47, `syn` 3.0.5, `unicode-ident` 1.0.24.
