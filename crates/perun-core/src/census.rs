@@ -35,9 +35,19 @@ const WORDS: usize = (1 << 13) / 64;
 static FIRED: [AtomicU64; WORDS] = [const { AtomicU64::new(0) }; WORDS];
 
 /// Install the instrumented sites. Called once per image, at load time.
+///
+/// Repeated loads of the same images land at the same fixed bases, so a site
+/// already present is the SAME site: skipping the duplicate keeps the table
+/// stable across a soak loop instead of growing without bound (50 cycles ×
+/// 6 520 sites would blow the fired bitmap) while still accumulating which
+/// sites fired over every cycle, which is the point of the soak.
 pub fn register(sites: &[Site]) {
     if let Ok(mut v) = SITES.lock() {
-        v.extend_from_slice(sites);
+        for s in sites {
+            if !v.iter().any(|e| e.lo == s.lo && e.hi == s.hi) {
+                v.push(s.clone());
+            }
+        }
         v.sort_by_key(|s| s.lo);
     }
 }

@@ -20,6 +20,14 @@ path = "src/main.rs"
 [features]
 rdtsc-census = ["perun-core/rdtsc-census"]
 
+# Audit harness: drives SapRuntime in-process so the census instrument can be
+# exercised across blocks the CLI cannot reach (partial contexts, soak loops).
+# Research only; never built by the default profile.
+[[bin]]
+name = "sap-audit"
+path = "src/sap_audit.rs"
+required-features = ["rdtsc-census"]
+
 [dependencies]
 perun-core = { workspace = true }
 perun-shims = { workspace = true }

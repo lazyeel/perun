@@ -588,38 +588,71 @@ impl MachImage {
 
     /// Census mode: mine every pinned site to `0xCC` and register it.
     #[cfg(feature = "rdtsc-census")]
+    /// Census mode: mine EVERY site the linear scan finds, not just the ones
+    /// the shipped table patches.
+    ///
+    /// This distinction is the whole point of the instrument. Mining the
+    /// shipped table would make "CoreFP reached 0" a tautology once that
+    /// table is empty, and the census could never discover a site the table
+    /// forgot. Mining the ground truth instead means any executed site
+    /// outside the shipped table shows up in the union, which is exactly the
+    /// signal the audit is looking for.
     fn apply_census_table(
-        table: Option<&[(u32, u8)]>,
+        _table: Option<&[(u32, u8)]>,
         base: *mut u8,
         text_off: usize,
+        text_size: usize,
         span: usize,
         image: &'static str,
     ) {
         use crate::census::{self, Site};
         let img_base = base as u64;
-        let Some(table) = table else {
-            eprintln!("[census] {image}: no pinned table, nothing to mine");
+        const IDIOM_A: [u8; 9] = [0x0F, 0x31, 0x48, 0xC1, 0xE2, 0x20, 0x48, 0x09, 0xC2];
+        const IDIOM_B: [u8; 12] = [
+            0x0F, 0x31, 0x48, 0x89, 0xD1, 0x48, 0xC1, 0xE1, 0x20, 0x48, 0x09, 0xC1,
+        ];
+        const IDIOM_C: [u8; 10] = [0x0F, 0x31, 0x48, 0xC1, 0xE0, 0x04, 0x48, 0x83, 0xE0, 0x70];
+        let end = text_off + text_size;
+        if end > span {
+            eprintln!("[census] {image}: __text out of span, nothing mined");
             return;
-        };
-        let mut sites = Vec::with_capacity(table.len());
-        for &(off, kind) in table {
-            let at = text_off + off as usize;
-            let len = Self::rdtsc_idiom(kind).len();
-            if at + len > span {
-                continue;
+        }
+        let mut sites: Vec<Site> = Vec::new();
+        unsafe {
+            let work = std::slice::from_raw_parts_mut(base, span);
+            let mut i = text_off;
+            while i + 12 <= end {
+                if work[i] != 0x0F || work[i + 1] != 0x31 {
+                    i += 1;
+                    continue;
+                }
+                // The idiom id is not needed here: the census records the
+                // address range, and the replacement is applied by whatever
+                // patches it. Only the length matters to skip past it.
+                let len = if work[i..i + 9] == IDIOM_A {
+                    9usize
+                } else if work[i..i + 12] == IDIOM_B {
+                    12
+                } else if work[i..i + 10] == IDIOM_C {
+                    10
+                } else {
+                    i += 1;
+                    continue;
+                };
+                census::mine(work.as_mut_ptr().add(i), len);
+                sites.push(Site {
+                    lo: img_base + i as u64,
+                    hi: img_base + (i + len) as u64,
+                    base: img_base,
+                    off: (i - text_off) as u32,
+                    image,
+                });
+                i += len;
             }
-            unsafe { census::mine(base.add(at), len) };
-            sites.push(Site {
-                lo: img_base + at as u64,
-                hi: img_base + (at + len) as u64,
-                base: img_base,
-                off,
-                image,
-            });
         }
         let n = sites.len();
         census::register(&sites);
-        eprintln!("[census] {image}: mined {n} sites");
+        eprintln!("[census] {image}: mined {n} sites (ground truth, not the shipped table)");
     }
 
     /// In-mapping variant of `neutralize_rdtsc`: same three idioms, same
@@ -650,7 +683,7 @@ impl MachImage {
         let _ = image;
         #[cfg(feature = "rdtsc-census")]
         if std::env::var("PERUN_RDTSC_CENSUS").is_ok() {
-            Self::apply_census_table(pinned, base, start, span, image);
+            Self::apply_census_table(pinned, base, start, size as usize, span, image);
             return;
         }
         if let Some(table) = pinned
