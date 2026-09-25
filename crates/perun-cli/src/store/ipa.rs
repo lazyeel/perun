@@ -62,20 +62,32 @@ struct Eocd {
     cd_size: u64,
 }
 
-fn find_eocd(data: &[u8]) -> Result<(usize, Eocd), String> {
-    let window_start = data.len().saturating_sub(66_000);
-    let window = &data[window_start..];
+/// Locate the end-of-central-directory record.
+///
+/// `data` is a window onto the archive that ends at the archive's end, and
+/// `base` is that window's offset within the archive. Every offset this
+/// returns is absolute, which matters because the offsets inside the record
+/// are: a 66 KB tail of a 3 GB package starts three gigabytes into the file.
+fn find_eocd_at(data: &[u8], base: u64) -> Result<(u64, Eocd), String> {
     let mut pos = None;
     let mut i = 0;
-    while i + 22 <= window.len() {
-        if window[i..i + 4] == EOCD_SIG {
-            pos = Some(i); // keep scanning: a nested zip's EOCD could precede ours
+    while i + 22 <= data.len() {
+        let at = base + i as u64;
+        if data[i..i + 4] == EOCD_SIG && candidate_is_plausible(&data[i..i + 22], at) {
+            // Keep scanning: a nested zip's own record can precede ours, and a
+            // comment or entry body can carry the signature bytes. Only a
+            // candidate whose directory ends at or before the record is
+            // believed, and the last believed candidate is the archive's.
+            pos = Some(i);
         }
         i += 1;
     }
     let at = pos.ok_or("zip: no end-of-central-directory record")?;
-    let eocd = &window[at..at + 22];
-    if eocd[20] != 0 || eocd[21] != 0 {
+    let eocd = &data[at..at + 22];
+    // Bytes 4..8 are the two disk numbers. Bytes 20..22 are the comment
+    // length, which says nothing about validity — reading it as a disk number
+    // rejected every archive carrying a comment and named the wrong cause.
+    if u16::from_le_bytes([eocd[4], eocd[5]]) != 0 || u16::from_le_bytes([eocd[6], eocd[7]]) != 0 {
         return Err("zip: multi-disk archives are not supported".into());
     }
     let entry_count = u16::from_le_bytes([eocd[10], eocd[11]]);
@@ -87,13 +99,34 @@ fn find_eocd(data: &[u8]) -> Result<(usize, Eocd), String> {
         return Err("zip: zip64 central directory is not supported".into());
     }
     Ok((
-        window_start + at,
+        base + at as u64,
         Eocd {
             entry_count,
             cd_offset,
             cd_size,
         },
     ))
+}
+
+fn find_eocd(data: &[u8]) -> Result<(usize, Eocd), String> {
+    let (at, eocd) = find_eocd_at(data, 0)?;
+    Ok((at as usize, eocd))
+}
+
+/// Whether a 22-byte record found at absolute offset `at` can be an archive's
+/// own end-of-central-directory record.
+///
+/// The central directory it names must start inside the archive and end at or
+/// before the record itself. A ZIP64 archive carries 0xFFFF_FFFF placeholders
+/// here and its real numbers live in the zip64 record, so it is left to the
+/// caller's explicit zip64 rejection rather than judged here.
+fn candidate_is_plausible(eocd: &[u8], at: u64) -> bool {
+    let cd_size = u32::from_le_bytes([eocd[12], eocd[13], eocd[14], eocd[15]]) as u64;
+    let cd_offset = u32::from_le_bytes([eocd[16], eocd[17], eocd[18], eocd[19]]) as u64;
+    if cd_size == 0xFFFF_FFFF || cd_offset == 0xFFFF_FFFF {
+        return true;
+    }
+    cd_offset + cd_size <= at
 }
 
 #[cfg(test)]
@@ -869,7 +902,7 @@ fn replicate_to(
     // record are absolute, and this package is 3 GB long.
     let tail_at = pkg.len.saturating_sub(66_000);
     let tail = pkg.read_at(tail_at, pkg.len - tail_at)?;
-    let (_, eocd) = find_eocd(&tail)?;
+    let (_, eocd) = find_eocd_at(&tail, tail_at)?;
     let cd = pkg.read_at(eocd.cd_offset, eocd.cd_size)?;
     let entries = parse_central_at(&cd, 0, &eocd)?;
     drop(tail);
@@ -2181,7 +2214,12 @@ mod tests {
         // is absolute.
         let tail_at = pkg.len.saturating_sub(66_000);
         let tail = pkg.read_at(tail_at, pkg.len - tail_at).unwrap();
-        let (_, eocd) = find_eocd(&tail).unwrap();
+        let (eocd_at, eocd) = find_eocd_at(&tail, tail_at).unwrap();
+        assert_eq!(
+            eocd_at,
+            pkg.len - 22,
+            "the record is the file's last 22 bytes"
+        );
         let cd = pkg.read_at(eocd.cd_offset, eocd.cd_size).unwrap();
         let entries = parse_central_at(&cd, 0, &eocd).unwrap();
         assert_eq!(entries.len(), 2);
@@ -2192,6 +2230,111 @@ mod tests {
         assert_eq!(compressed, 2);
         assert!(data_start < small.local_offset + 64);
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ── regression: EOCD comment length read as the disk number (F4) ────────
+    //
+    // The end-of-central-directory record ends with a 2-byte comment length.
+    // Reading that as "disk number must be zero" rejects every valid archive
+    // that carries a comment, and reports the cause as a multi-disk archive,
+    // which it is not.
+    #[test]
+    fn eocd_with_a_comment_is_accepted() {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut z = ZipWriter::new(&mut buf);
+            z.add_stored("Payload/Comment.app/Comment", b"hi", (0x5A21, 0x0C00))
+                .unwrap();
+            z.finish().unwrap();
+        }
+        let plain = find_eocd(&buf).is_ok();
+        assert!(plain, "control: a comment-free archive must be found");
+
+        // Append a comment the way APPNOTE describes: the length goes in the
+        // last two bytes of the record, the text follows it.
+        let mut commented = buf.clone();
+        let at = commented.len() - 22;
+        let text = b"an archive comment";
+        let n = text.len() as u16;
+        commented[at + 20..at + 22].copy_from_slice(&n.to_le_bytes());
+        commented.extend_from_slice(text);
+
+        let (off, eocd) =
+            find_eocd(&commented).expect("an archive with a comment must be located, not rejected");
+        assert_eq!(off, commented.len() - 22 - text.len());
+        assert_eq!(eocd.entry_count, 1);
+        assert!(eocd.cd_offset + eocd.cd_size <= off as u64);
+
+        // A real multi-disk archive must still be refused, and named as such.
+        let mut multidisk = buf.clone();
+        let at = multidisk.len() - 22;
+        multidisk[at + 4..at + 6].copy_from_slice(&1u16.to_le_bytes());
+        let err = match find_eocd(&multidisk) {
+            Err(e) => e,
+            Ok(_) => panic!("a multi-disk archive must be refused"),
+        };
+        assert!(err.contains("multi-disk"), "{err}");
+    }
+
+    // ── regression: a signature inside the comment is not the record (F7) ───
+    //
+    // `PK\x05\x06` also occurs inside entry data and inside a comment. A
+    // candidate is only believed when the directory it points at ends at or
+    // before the candidate itself, which is what stops a forgery sitting in a
+    // comment from displacing the archive's own record.
+    #[test]
+    fn eocd_scan_ignores_a_forged_record_in_the_comment() {
+        // 22 bytes that look exactly like a record. The numbers are ordinary
+        // 32-bit values on purpose: the ZIP64 0xFFFF_FFFF placeholders are
+        // deliberately let through by the filter (their real numbers live in
+        // the zip64 record, which the caller rejects by name), so a forgery
+        // carrying them would be believed and would test the wrong thing.
+        let mut forged = Vec::new();
+        forged.extend_from_slice(&[0x50, 0x4B, 0x05, 0x06]);
+        forged.extend_from_slice(&0u16.to_le_bytes()); // disk
+        forged.extend_from_slice(&0u16.to_le_bytes()); // cd disk
+        forged.extend_from_slice(&1u16.to_le_bytes()); // entries this disk
+        forged.extend_from_slice(&1u16.to_le_bytes()); // entries total
+        forged.extend_from_slice(&0x100u32.to_le_bytes()); // cd size
+        forged.extend_from_slice(&0xDEAD_BEEFu32.to_le_bytes()); // cd offset
+        forged.extend_from_slice(&0u16.to_le_bytes()); // comment length
+
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut z = ZipWriter::new(&mut buf);
+            z.add_stored("Payload/Forge.app/Forge", b"hi", (0x5A21, 0x0C00))
+                .unwrap();
+            z.finish().unwrap();
+        }
+        // Control: an archive with no forgery at all is still found.
+        let mut clean: Vec<u8> = Vec::new();
+        {
+            let mut z = ZipWriter::new(&mut clean);
+            z.add_stored("Payload/Forge.app/Forge", b"hi", (0x5A21, 0x0C00))
+                .unwrap();
+            z.finish().unwrap();
+        }
+        find_eocd(&clean).expect("control");
+
+        // The forgery goes in the comment, i.e. *after* the real record, so
+        // "the last candidate wins" is exactly what has to reject it. Without
+        // the filter it is believed, it is last, and the archive's own
+        // directory offsets are lost.
+        let mut commented = buf.clone();
+        let at = commented.len() - 22;
+        let n = forged.len() as u16;
+        commented[at + 20..at + 22].copy_from_slice(&n.to_le_bytes());
+        commented.extend_from_slice(&forged);
+
+        let (off, eocd) =
+            find_eocd(&commented).expect("the archive's own record must win over the forgery");
+        assert_eq!(off, buf.len() - 22, "the real record, not the forgery");
+        assert_eq!(eocd.entry_count, 1);
+        assert_ne!(eocd.cd_offset, 0xDEAD_BEEF);
+        // And the directory it names is the real one.
+        let (_, real) = find_eocd(&buf).unwrap();
+        assert_eq!(eocd.cd_offset, real.cd_offset);
+        assert_eq!(eocd.cd_size, real.cd_size);
     }
 
     // ── regression: DOS time and date kept in their own fields (F1) ─────────
