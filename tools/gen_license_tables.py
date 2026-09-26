@@ -47,7 +47,8 @@ ROLES = {
     "linkme": "`distributed_slice` — the shim-table registration macro; the "
               "emitted linker sections and runtime slices land in the binary",
     "linkme-impl": "proc macro for `linkme`; the code it generates is linked in",
-    "bzip2-rs": "pure-Rust bzip2 decoder in the first-run asset fetcher",
+    "bzip2-rs": "pure-Rust bzip2 decoder in the first-run asset fetcher, "
+                 "VENDORED under `vendor/` with a bounded input buffer",
     "ureq": "HTTP client for the Store lane and the asset fetcher, replacing "
             "the external curl binary",
     "cookie_store": "the netscape-format jar behind the shared `mz_at0` store "
@@ -185,6 +186,16 @@ def built_crates():
         line = line.strip()
         if line.endswith(" (*)"):
             line = line[: -len(" (*)")]
+        # `{p}` appends ` (path)` for anything cargo resolved locally, which
+        # includes a `[patch.crates-io]` entry now that `bzip2-rs` is vendored
+        # under `vendor/`. That is still a real package that goes into the
+        # object form and still needs its attribution, so strip the annotation
+        # instead of dropping the line the way a genuinely relative path is
+        # dropped below.
+        if " " in line and line.endswith(")") and "(" in line:
+            head, _, tail = line.rpartition(" (")
+            if tail.endswith(")") and ("/" in tail or head.split(" ")[0].startswith(".")):
+                line = head
         if " " not in line:
             continue
         macro = line.endswith(" (proc-macro)")

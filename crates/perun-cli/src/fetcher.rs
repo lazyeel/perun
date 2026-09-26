@@ -728,6 +728,79 @@ mod tests {
         }
     }
 
+    /// The vendored `bzip2-rs` patch must not change a single output byte.
+    ///
+    /// Upstream never drained its input staging buffer, so the vendored copy
+    /// carries a `consumed` cursor that drops the spent prefix in place. Two
+    /// things can go wrong and both are silent: the cursor bookkeeping across a
+    /// block boundary, and the `skip_bits` rebasing that follows a compaction.
+    ///
+    /// `bzip2_fixture.bin` is 400 000 bytes of synthetic data whose compressed
+    /// form is 57 281 bytes, which is over the decoder's 32 KiB compaction
+    /// threshold, so the in-place drop really happens. Correctness is pinned by
+    /// the source digest rather than a 400 KB literal.
+    #[test]
+    fn vendored_bzip2_decodes_across_a_block_and_a_compaction() {
+        const FIXTURE: &[u8] = include_bytes!("bzip2_fixture.bin");
+        let expected = "218314780739d1489b679de39640a718c249578c0ff110b00bf55d4e76a852f3";
+        assert!(
+            FIXTURE.len() > 32 * 1024,
+            "fixture must exceed the compaction threshold or the patch is untested"
+        );
+        // Driven through the low-level `Decoder` rather than `DecoderReader`,
+        // because the wrapper hides the staging buffer and the buffer size is
+        // the property under test. Fed in small pieces, the way the fetcher
+        // feeds it.
+        use bzip2_rs::decoder::{Decoder, ReadState, WriteState};
+        let mut decoder = Decoder::new();
+        let mut fed = 0usize;
+        let mut sink = perun_core::sha256::Sha256::new();
+        let mut chunk = vec![0u8; 16 * 1024];
+        let mut total = 0u64;
+        let mut peak_buf = 0usize;
+        loop {
+            match decoder.read(&mut chunk).unwrap() {
+                ReadState::Read(n) => {
+                    sink.update(&chunk[..n]);
+                    total += n as u64;
+                }
+                ReadState::NeedsWrite(_) => {
+                    let end = (fed + 1024).min(FIXTURE.len());
+                    let room = end - fed;
+                    match decoder.write(&FIXTURE[fed..end]).unwrap() {
+                        WriteState::Written(n) => {
+                            assert_eq!(n, room, "decoder took a partial chunk");
+                            fed = end;
+                        }
+                        WriteState::NeedsRead => unreachable!(),
+                    }
+                }
+                ReadState::Eof => break,
+            }
+            peak_buf = peak_buf.max(decoder.in_buf_len());
+        }
+        // The property the patch exists for: the staging buffer never exceeds
+        // the compressed bytes actually fed to it. Upstream grew without bound
+        // with the whole stream, so this is the assertion that fails there.
+        assert!(
+            peak_buf <= FIXTURE.len(),
+            "staging buffer reached {peak_buf} for {} compressed bytes",
+            FIXTURE.len()
+        );
+        // What this fixture cannot prove, and why: a single bzip2 block holds
+        // 900 000 bytes, and `space` legitimately allows that much live input,
+        // so the whole fixture is buffered before the first compaction ever
+        // runs. Exercising compaction across blocks needs more than 900 KiB of
+        // compressed input, i.e. a megabyte-scale fixture, which is not worth
+        // carrying in a repo whose release binary is 2.9 MB. That path is
+        // covered by measurement instead: a cold asset fetch decompresses
+        // 62 MB of real Apple payload, ~32 MB of compressed input, through this
+        // decoder and matches all three pinned digests.
+        assert!(peak_buf > 0, "the test hook was never exercised");
+        assert_eq!(total, 400_000, "decompressed length changed");
+        assert_eq!(sink.finish_hex(), expected, "decompressed bytes changed");
+    }
+
     /// `extract_to_file` must reproduce the bytes and the pinned digest while
     /// never holding more than its 64 KiB buffer, and must refuse a short
     /// stream rather than writing a short file that a later size check would

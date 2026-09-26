@@ -268,7 +268,7 @@ Third-party code compiled into the binary (all permissive; the full table with v
 |---|---|---|
 | `libc` | MIT OR Apache-2.0 | host libc ABI |
 | `linkme` + `linkme-impl` | MIT OR Apache-2.0 | shim-table registration |
-| `bzip2-rs` | MIT OR Apache-2.0 | first-run asset fetcher |
+| `bzip2-rs` | MIT OR Apache-2.0 | first-run asset fetcher; **vendored** under `vendor/` with a bounded input buffer |
 | `ureq` | MIT OR Apache-2.0 | Store-lane HTTP, replacing the external curl binary |
 | `crc32fast`, `cfg-if`, `tinyvec` | MIT/Apache-2.0/Zlib | under bzip2-rs |
 

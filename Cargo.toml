@@ -45,3 +45,13 @@ codegen-units = 1
 # O2 collapses the once-shim to the same 16-byte frame as O2 C.
 [profile.dev.package.perun-shims]
 opt-level = 2
+
+# `bzip2-rs` 0.1.2 is vendored under `vendor/` with a bounded staging buffer.
+# Upstream never drained its input buffer — the one `drain` sat in a branch that
+# cannot be reached — so decompressing the asset payload grew RSS in step with
+# the compressed bytes consumed, +22 MiB after 32 MiB on the SAP cold path. The
+# patch is in `src/decoder/mod.rs` and is marked `VENDORED PATCH` throughout.
+# The alternative was `libbz2`, measured at 65.6 MB/s against this crate's
+# 109.2 MB/s on the same data, i.e. the fix would have cost ~1.5 s of wall.
+[patch.crates-io]
+bzip2-rs = { path = "vendor/bzip2-rs" }

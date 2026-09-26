@@ -497,7 +497,7 @@ The dependency set, read from `cargo metadata` at the target triple, with each l
 | `adler2` | 2.0.1 | MIT | Jonas Schievink, oyvindln (oyvindln/adler2) | transitive under ureq |
 | `base64` | 0.23.1 | MIT | Marshall Pierce (marshallpierce/rust-base64) | transitive under ureq |
 | `bytes` | 1.12.1 | MIT | Carl Lerche, Sean McArthur (tokio-rs/bytes) | transitive under ureq |
-| `bzip2-rs` | 0.1.2 | MIT | Paolo Barbolini (paolobarbolini/bzip2-rs) | pure-Rust bzip2 decoder in the first-run asset fetcher |
+| `bzip2-rs` | 0.1.2 | MIT | Paolo Barbolini (paolobarbolini/bzip2-rs) | pure-Rust bzip2 decoder in the first-run asset fetcher, VENDORED under `vendor/` with a bounded input buffer |
 | `cfg-if` | 1.0.4 | MIT | Alex Crichton (rust-lang/cfg-if) | transitive under bzip2-rs |
 | `crc32fast` | 1.5.1 | MIT | Sam Rijs, Alex Crichton (srijs/rust-crc32fast) | transitive under bzip2-rs |
 | `flate2` | 1.1.10 | MIT | Alex Crichton, Josh Triplett (rust-lang/flate2-rs) | the bzip2 decoder's DEFLATE half, for callers that need gzip |
