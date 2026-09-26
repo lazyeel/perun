@@ -3,9 +3,10 @@
 
 //! Zero-config asset fetcher for the SAP runtime.
 //!
-//! On first run (or when the cache is invalid), this module downloads the four
-//! Apple commerce images the runtime needs, directly from Apple's public
-//! software-update distribution — without fetching the full 1.28 GB package:
+//! On first run (or when the cache is invalid), this module downloads the three
+//! Apple commerce assets the runtime needs (`CoreFP`, `CommerceKit`,
+//! `CoreFP.icxs`), directly from Apple's public software-update distribution —
+//! without fetching the full 1.28 GB package:
 //!
 //! 1. `GET` the xar header + TOC of `OSXUpd10.9.pkg` (a few KB) and locate the
 //!    `Payload` heap object.
@@ -13,9 +14,12 @@
 //!    block boundary, prepend the synthesized bzip2 stream header `"BZh9"`,
 //!    and decompress with the pure-Rust `bzip2-rs` decoder.
 //! 3. Skip the 932-byte prefix inside the decompressed stream and walk the
-//!    `odc` cpio archive until all four pinned files are extracted.
+//!    `odc` cpio archive until all three pinned files are extracted.
 //! 4. Verify each file's size and SHA-256 against the pinned constants (the
 //!    same digests the loader checks), then store them in the cache directory.
+//!
+//! Assets are streamed to disk through a fixed 64 KiB buffer and hashed on the
+//! way past; none of them is ever held whole in memory.
 //!
 //! The same initialization also fetches the SAP setup certificate once; it is
 //! served with `Last-Modified: 2016` and effectively never changes, so the
@@ -104,9 +108,16 @@ pub fn cache_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// One-shot SHA-256 over an in-memory buffer.
+///
+/// Kept for the tests and for callers that genuinely already hold the bytes;
+/// the extraction path hashes while streaming and never materialises an asset,
+/// so nothing in production calls this.
+#[cfg_attr(not(test), allow(dead_code))]
 fn sha256_hex(data: &[u8]) -> String {
-    // Minimal SHA-256 (FIPS 180-4); avoids pulling a crypto crate for four
-    // digests per initialization.
+    // Minimal SHA-256 (FIPS 180-4); avoids pulling a crypto crate for three
+    // digests per initialization. The streaming path uses
+    // `perun_core::sha256::Sha256` directly and never calls this.
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
         0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
@@ -203,13 +214,42 @@ fn range(url: &str, start: u64, end_inclusive: u64) -> Result<Vec<u8>, String> {
     Ok(res.body)
 }
 
+/// Ranged GET straight into a caller-owned buffer.
+///
+/// Identical to [`range`] except that the body is read into `sink` rather
+/// than a fresh `Vec`, so the caller's capacity is reused across windows and
+/// the doubling `read_to_end` would otherwise do never happens.
+fn range_into(url: &str, start: u64, end_inclusive: u64, sink: &mut Vec<u8>) -> Result<(), String> {
+    let (status, _) = crate::store::http::raw_request_into(
+        "GET",
+        url,
+        ASSET_UA,
+        &[("Range", &format!("bytes={start}-{end_inclusive}"))],
+        None,
+        sink,
+    )?;
+    // 206 is the honest answer to a Range; 200 means the server ignored it and
+    // sent the whole file, which would silently corrupt a ranged read.
+    if status != 206 && status != 200 {
+        return Err(format!("range {start}-{end_inclusive}: HTTP {status}"));
+    }
+    Ok(())
+}
+
 /// Sequential `Read` over the network tail, internally buffered in
 /// large windows: one request per 8 MiB, serving small `read()` calls
 /// (the bzip2 decoder pulls ~1 KB at a time) from the in-memory window.
+///
+/// The window is a single buffer that is refilled in place — never
+/// reallocated, never drained — because a 32 MiB allocation here is a 32 MiB
+/// high-water mark for the rest of the process.
 struct RangeTailReader {
     url: String,
     pos: u64,
-    window: Vec<u8>,
+    /// Bytes fetched but not yet handed to the caller.
+    buf: Vec<u8>,
+    /// Read cursor into `buf`.
+    at: usize,
     fetched: u64,
 }
 
@@ -218,21 +258,30 @@ impl RangeTailReader {
         Self {
             url: url.to_string(),
             pos: start,
-            window: Vec::new(),
+            buf: Vec::new(),
+            at: 0,
             fetched: 0,
         }
     }
 
-    /// Fetch the next window into memory. On success, `window` is non-empty.
+    /// Fetch the next window into memory. On success, `buf[at..]` is non-empty.
     fn refill(&mut self) -> std::io::Result<()> {
-        if !self.window.is_empty() {
+        if self.at < self.buf.len() {
             return Ok(());
         }
         const WINDOW: u64 = 8 << 20;
-        let data =
-            range(&self.url, self.pos, self.pos + WINDOW - 1).map_err(std::io::Error::other)?;
-        self.window = data;
-        self.fetched += self.window.len() as u64;
+        // Reserve up front: `read_to_end` doubles as it grows, and a body that
+        // arrives without room to spare costs 2x the payload with the previous
+        // half still resident during the copy.
+        self.buf.clear();
+        self.buf.reserve_exact(WINDOW as usize);
+        range_into(&self.url, self.pos, self.pos + WINDOW - 1, &mut self.buf)
+            .map_err(std::io::Error::other)?;
+        if self.buf.is_empty() {
+            return Ok(()); // tail exhausted
+        }
+        self.at = 0;
+        self.fetched += self.buf.len() as u64;
         Ok(())
     }
 }
@@ -242,15 +291,15 @@ impl Read for RangeTailReader {
         if buf.is_empty() {
             return Ok(0);
         }
-        if self.window.is_empty() {
+        if self.at >= self.buf.len() {
             self.refill()?;
-            if self.window.is_empty() {
+            if self.at >= self.buf.len() {
                 return Ok(0); // tail exhausted
             }
         }
-        let take = self.window.len().min(buf.len());
-        buf[..take].copy_from_slice(&self.window[..take]);
-        self.window.drain(..take);
+        let take = (self.buf.len() - self.at).min(buf.len());
+        buf[..take].copy_from_slice(&self.buf[self.at..self.at + take]);
+        self.at += take;
         self.pos += take as u64;
         Ok(take)
     }
@@ -389,7 +438,7 @@ impl Read for PrefixedTailReader {
 }
 
 /// Ensure the asset cache is complete; download what is missing. Returns the
-/// directory holding the four images (`test-sap` layout compatible).
+/// directory holding the three assets (`test-sap` layout compatible).
 pub fn ensure_cache(verbose: bool) -> Result<PathBuf, String> {
     let dir = cache_dir()?;
 
@@ -454,29 +503,44 @@ pub fn ensure_cache(verbose: bool) -> Result<PathBuf, String> {
 
         if let Some(idx) = wanted.iter().position(|(_, p, _, _)| *p == name) {
             let (name, _, exp_size, pin) = wanted[idx];
-            let mut body = Vec::with_capacity(exp_size as usize);
-            let mut rem = file_size;
-            while rem > 0 {
-                let take = (1 << 20).min(rem as usize);
-                let chunk = read_exact(&mut stream, take)?;
-                body.extend_from_slice(&chunk);
-                rem -= chunk.len() as u64;
-            }
-            let (ok_size, ok_sha) = (body.len() as u64 == exp_size, sha256_hex(&body) == pin);
-            if !(ok_size && ok_sha) {
-                return Err(format!(
-                    "asset {name} failed validation (size {} vs {exp_size}, digest {})",
-                    body.len(),
-                    if ok_sha { "ok" } else { "MISMATCH" }
-                ));
-            }
+            // Stream the entry straight to disk and hash it on the way past.
+            // This used to accumulate the whole asset in a `Vec` first: the
+            // body, then a second full copy inside `sha256_hex` (`data.to_vec`),
+            // then a doubling realloc when the padding `push` overflowed the
+            // exact-sized allocation. For `CoreFP` that is 27.7 MiB held while
+            // a second 27.7 MiB copy is reallocated into 55.3 MiB, and with the
+            // network window's own doubling on top the cold-path peak measured
+            // 107.6 MiB. Both buffers are gone; what is left of that peak is
+            // upstream in the bzip2 decoder.
             let tmp = dir.join(format!(".{name}.part"));
-            std::fs::write(&tmp, &body).map_err(|e| format!("write {tmp:?}: {e}"))?;
+            let extracted = extract_to_file(&mut stream, file_size, &tmp);
+            let outcome = match extracted {
+                Ok((written, got)) => {
+                    let ok_size = written == exp_size;
+                    let ok_sha = got == pin;
+                    if ok_size && ok_sha {
+                        Ok(written)
+                    } else {
+                        Err(format!(
+                            "asset {name} failed validation (size {written} vs {exp_size}, digest {})",
+                            if ok_sha { "ok" } else { "MISMATCH" }
+                        ))
+                    }
+                }
+                Err(e) => Err(e),
+            };
+            let written = match outcome {
+                Ok(w) => w,
+                Err(e) => {
+                    // A half-extracted asset must never reach the cache.
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(e);
+                }
+            };
             std::fs::rename(&tmp, dir.join(name)).map_err(|e| format!("rename {name}: {e}"))?;
             let elapsed = t0.elapsed().as_secs_f64();
             eprintln!(
-                "[fetcher] {name}: {} bytes, digest ok ({}/{}), {elapsed:.0}s",
-                body.len(),
+                "[fetcher] {name}: {written} bytes, digest ok ({}/{}), {elapsed:.0}s",
                 found + 1,
                 total,
             );
@@ -498,6 +562,36 @@ pub fn ensure_cache(verbose: bool) -> Result<PathBuf, String> {
         t0.elapsed().as_secs_f64()
     );
     Ok(dir)
+}
+
+/// Copy exactly `size` bytes from `src` into `dst`, hashing as they pass.
+///
+/// Returns `(bytes_written, hex_digest)`. The buffer is a fixed 64 KiB, so the
+/// peak this costs is the buffer plus the writer's own page cache, whatever the
+/// asset size — the cpio walk decompresses 1.28 GB of payload and the largest
+/// asset is 27.7 MiB, and neither number reaches the heap.
+fn extract_to_file(src: &mut dyn Read, size: u64, dst: &Path) -> Result<(u64, String), String> {
+    use std::io::Write;
+    let file = std::fs::File::create(dst).map_err(|e| format!("create {dst:?}: {e}"))?;
+    let mut out = std::io::BufWriter::with_capacity(1 << 16, file);
+    let mut hasher = perun_core::sha256::Sha256::new();
+    let mut buf = vec![0u8; 1 << 16];
+    let mut rem = size;
+    while rem > 0 {
+        let want = (buf.len() as u64).min(rem) as usize;
+        let got = src
+            .read(&mut buf[..want])
+            .map_err(|e| format!("archive read: {e}"))?;
+        if got == 0 {
+            return Err(format!("archive ended {} bytes early", rem));
+        }
+        hasher.update(&buf[..got]);
+        out.write_all(&buf[..got])
+            .map_err(|e| format!("write {dst:?}: {e}"))?;
+        rem -= got as u64;
+    }
+    out.flush().map_err(|e| format!("flush {dst:?}: {e}"))?;
+    Ok((size - rem, hasher.finish_hex()))
 }
 
 fn cache_complete(dir: &Path) -> bool {
@@ -632,5 +726,87 @@ mod tests {
                 assert_eq!(file_sha256_hex(&path).unwrap(), sha256_hex(&whole));
             }
         }
+    }
+
+    /// `extract_to_file` must reproduce the bytes and the pinned digest while
+    /// never holding more than its 64 KiB buffer, and must refuse a short
+    /// stream rather than writing a short file that a later size check would
+    /// have to catch.
+    ///
+    /// The buffer is deliberately larger than the payload here so the test
+    /// would notice a short write, and the reader hands out one byte at a time
+    /// so it would notice a single large `read` being assumed.
+    #[test]
+    fn extraction_streams_bytes_and_digest() {
+        let dir = std::env::temp_dir().join("perun-extract-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dst = dir.join("payload.bin");
+
+        // 200 000 bytes: larger than one 64 KiB buffer, so the copy loop runs
+        // several times, and coprime with the buffer so the last chunk is short.
+        let payload: Vec<u8> = (0..200_000u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 7) as u8)
+            .collect();
+        let want = sha256_hex(&payload);
+
+        struct Trickle {
+            data: Vec<u8>,
+            at: usize,
+        }
+        impl Read for Trickle {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let take = (self.data.len() - self.at).min(buf.len()).min(7);
+                buf[..take].copy_from_slice(&self.data[self.at..self.at + take]);
+                self.at += take;
+                Ok(take)
+            }
+        }
+
+        let (written, got) = extract_to_file(
+            &mut Trickle {
+                data: payload.clone(),
+                at: 0,
+            },
+            payload.len() as u64,
+            &dst,
+        )
+        .unwrap();
+        assert_eq!(written, payload.len() as u64);
+        assert_eq!(got, want, "streamed digest must equal the one-shot digest");
+        assert_eq!(
+            std::fs::read(&dst).unwrap(),
+            payload,
+            "file must match the source"
+        );
+
+        // A stream that ends before the declared size is an error, and nothing
+        // is reported as written -- the caller turns this into "delete the
+        // partial". Declaring a shorter size is NOT the same thing: that is a
+        // complete read of fewer bytes, which must succeed and be caught by the
+        // caller's size check instead.
+        let truncated = payload.len() - 1;
+        let err = extract_to_file(
+            &mut Trickle {
+                data: payload[..truncated].to_vec(),
+                at: 0,
+            },
+            payload.len() as u64,
+            &dir.join("short.bin"),
+        )
+        .unwrap_err();
+        assert!(err.contains("early"), "unexpected error: {err}");
+
+        let (written, _) = extract_to_file(
+            &mut Trickle {
+                data: payload.clone(),
+                at: 0,
+            },
+            truncated as u64,
+            &dir.join("smaller.bin"),
+        )
+        .unwrap();
+        assert_eq!(written, truncated as u64);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

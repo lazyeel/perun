@@ -602,6 +602,68 @@ pub fn raw_request(
     })
 }
 
+/// Like [`raw_request`], but the body is streamed into `sink` instead of
+/// collected into a fresh `Vec`; only the status and headers come back.
+///
+/// `read_to_end` grows its buffer by doubling, so an 8 MiB ranged window
+/// arrives through a 32 MiB allocation while the 16 MiB it grew out of is
+/// still resident during the copy. That transient pair is ~48 MiB, and the
+/// asset fetcher — which issues 8 MiB range requests by design — was paying
+/// it on every window. Handing the reader a buffer that is already big enough
+/// makes the cost exactly the payload, with no reallocation at all.
+///
+/// `sink` is cleared first, so a short body leaves its true length behind
+/// rather than the tail of a previous read.
+pub fn raw_request_into(
+    method: &str,
+    url: &str,
+    user_agent: &str,
+    headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+    sink: &mut Vec<u8>,
+) -> Result<(u16, HashMap<String, String>), String> {
+    let agent = sap_agent();
+    let res = match (method, body) {
+        ("GET", _) => {
+            let mut b = agent.get(url).header("User-Agent", user_agent);
+            for (k, v) in headers {
+                b = b.header(*k, *v);
+            }
+            b.call()
+        }
+        (_, Some(data)) => {
+            let mut b = agent.post(url).header("User-Agent", user_agent);
+            for (k, v) in headers {
+                b = b.header(*k, *v);
+            }
+            b.send(data.to_vec())
+        }
+        _ => {
+            let mut b = agent.post(url).header("User-Agent", user_agent);
+            for (k, v) in headers {
+                b = b.header(*k, *v);
+            }
+            b.send(Vec::new())
+        }
+    }
+    .map_err(|e| format!("{method} {url}: {}", describe(&e)))?;
+
+    let status = res.status().as_u16();
+    let mut out: HashMap<String, String> = HashMap::new();
+    for (name, value) in res.headers() {
+        if let Ok(v) = value.to_str() {
+            out.insert(name.as_str().to_ascii_lowercase(), v.to_string());
+        }
+    }
+    sink.clear();
+    let mut res = res;
+    res.body_mut()
+        .as_reader()
+        .read_to_end(sink)
+        .map_err(|e| format!("read body: {e}"))?;
+    Ok((status, out))
+}
+
 /// A short, human-readable reason for a transport error.
 fn describe(e: &ureq::Error) -> String {
     match e {

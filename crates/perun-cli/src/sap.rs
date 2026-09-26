@@ -3,10 +3,10 @@
 
 //! The Apple `FairPlay` SAP runtime: native, in-process, no emulation.
 //!
-//! Loads the four binaries Apple ships in the OS X 10.9 update package
-//! (`CoreFP`, CoreFP.icxs, `CommerceKit`), relocates them, and
-//! drives the five SAP entry points directly on the CPU under the `SysV`
-//! AMD64 convention:
+//! Loads the three assets Apple ships in the OS X 10.9 update package
+//! (`CoreFP`, `CoreFP.icxs`, `CommerceKit`), relocates the two that are
+//! Mach-O images, and drives the five SAP entry points directly on the CPU
+//! under the `SysV` AMD64 convention:
 //!
 //! ```text
 //! SAPInit(&ctx_out, hw_info)                     → int32
@@ -78,8 +78,9 @@ pub const SAP_SIGN: &str = "_Fc3vhtJDvr";
 pub const SAP_TEARDOWN: &str = "_IPaI1oem5iL";
 pub const SAP_DISPOSE: &str = "_jEHf8Xzsv8K";
 
-/// Directory holding the four Apple images used by the runtime (`CoreFP`,
-/// `CoreFP.icxs`, `CommerceKit`). Images
+/// Directory holding the three Apple assets used by the runtime (`CoreFP`,
+/// `CoreFP.icxs`, `CommerceKit`; the first and third are the Mach-O images,
+/// the second is the data blob). Images
 /// are read transiently at load time and handed over to the loader (owned
 /// buffers, no persistent copies); only the ICXS blob stays resident because
 /// the guest reads it through the fake `open`/`read` shim path.
