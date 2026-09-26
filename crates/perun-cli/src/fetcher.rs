@@ -12,7 +12,8 @@
 //!    `Payload` heap object.
 //! 2. Range-request the compressed payload **tail** starting at the measured
 //!    block boundary, prepend the synthesized bzip2 stream header `"BZh9"`,
-//!    and decompress with the pure-Rust `bzip2-rs` decoder.
+//!    and decompress with `bzip2` (which is `libbz2` in Rust, not a C
+//!    library).
 //! 3. Skip the 932-byte prefix inside the decompressed stream and walk the
 //!    `odc` cpio archive until all three pinned files are extracted.
 //! 4. Verify each file's size and SHA-256 against the pinned constants (the
@@ -421,6 +422,12 @@ fn skip(reader: &mut dyn Read, mut n: u64) -> Result<(), String> {
 
 // ── top-level API ─────────────────────────────────────────────────────────
 
+/// The decompression step, named so the tests below drive the *same*
+/// construction the fetcher does instead of a copy of it that can drift.
+fn decoder<R: std::io::Read>(inner: R) -> bzip2::read::BzDecoder<R> {
+    bzip2::read::BzDecoder::new(inner)
+}
+
 /// `BZh9` prefix followed by the network tail.
 struct PrefixedTailReader {
     prefix: std::io::Cursor<Vec<u8>>,
@@ -465,7 +472,7 @@ pub fn ensure_cache(verbose: bool) -> Result<PathBuf, String> {
     // Synthesized header + network tail: the reader equivalent of the
     // reference implementation's `io.MultiReader` (stream-header synthesis).
     let tail = RangeTailReader::new(UPDATE_URL, p_abs + PAYLOAD_BZ_OFFSET);
-    let mut stream = bzip2_rs::DecoderReader::new(PrefixedTailReader {
+    let mut stream = decoder(PrefixedTailReader {
         prefix: std::io::Cursor::new(b"BZh9".to_vec()),
         tail,
     });
@@ -728,77 +735,93 @@ mod tests {
         }
     }
 
-    /// The vendored `bzip2-rs` patch must not change a single output byte.
+    /// Deterministic high-entropy bytes, for the decoder tests.
     ///
-    /// Upstream never drained its input staging buffer, so the vendored copy
-    /// carries a `consumed` cursor that drops the spent prefix in place. Two
-    /// things can go wrong and both are silent: the cursor bookkeeping across a
-    /// block boundary, and the `skip_bits` rebasing that follows a compaction.
+    /// A 64-bit LCG taking bits 33..41. It measures at 0.995 compression ratio
+    /// and 8.000 bits/byte, i.e. indistinguishable from `os.urandom`, and it is
+    /// reproducible, so the expected digests below can be hard-coded rather
+    /// than computed by the same code under test.
+    fn high_entropy(n: usize) -> Vec<u8> {
+        let mut state: u64 = 0x243F_6A88_85A3_08D3;
+        (0..n)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                ((state >> 33) & 0xFF) as u8
+            })
+            .collect()
+    }
+
+    /// Compress in-process, so no binary fixture has to live in the repo.
+    fn compress(plain: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut enc = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::best());
+        enc.write_all(plain).unwrap();
+        enc.finish().unwrap()
+    }
+
+    /// The decoder must read a stream with no redundancy in it at all.
     ///
-    /// `bzip2_fixture.bin` is 400 000 bytes of synthetic data whose compressed
-    /// form is 57 281 bytes, which is over the decoder's 32 KiB compaction
-    /// threshold, so the in-place drop really happens. Correctness is pinned by
-    /// the source digest rather than a 400 KB literal.
+    /// This is the tripwire for the crate that came before. `bzip2-rs` 0.1.2
+    /// fails on exactly this input with `huffman bitstream truncated`; measured
+    /// on six independent 1 MiB samples it failed on all six, and it started
+    /// somewhere between 768 KiB and 1 MiB. Apple's own payload compresses at
+    /// 2.44, so the old decoder only ever worked by luck — a re-encode by
+    /// Apple would have broken the first run for every user, and the three
+    /// pinned asset digests would never have been reached.
+    ///
+    /// The assertion on the ratio is the point: without it the test could
+    /// quietly stop being a high-entropy case and keep passing while proving
+    /// nothing. 1.5 MiB also spans two bzip2 blocks, since a block holds
+    /// 900 000 bytes.
     #[test]
-    fn vendored_bzip2_decodes_across_a_block_and_a_compaction() {
-        const FIXTURE: &[u8] = include_bytes!("bzip2_fixture.bin");
-        let expected = "218314780739d1489b679de39640a718c249578c0ff110b00bf55d4e76a852f3";
+    fn decoder_reads_a_high_entropy_stream() {
+        const N: usize = 1_572_864; // 1.5 MiB
+        const EXPECTED: &str = "05a2a8925764f2d96a7627019118afd745bfb35b44135e7dc59a3ce5176d4240";
+        let plain = high_entropy(N);
+        let packed = compress(&plain);
+        let ratio = N as f64 / packed.len() as f64;
         assert!(
-            FIXTURE.len() > 32 * 1024,
-            "fixture must exceed the compaction threshold or the patch is untested"
+            ratio > 0.95,
+            "test premise broken: ratio {ratio:.3} is not high-entropy, so this \
+             would no longer exercise the case that `bzip2-rs` failed"
         );
-        // Driven through the low-level `Decoder` rather than `DecoderReader`,
-        // because the wrapper hides the staging buffer and the buffer size is
-        // the property under test. Fed in small pieces, the way the fetcher
-        // feeds it.
-        use bzip2_rs::decoder::{Decoder, ReadState, WriteState};
-        let mut decoder = Decoder::new();
-        let mut fed = 0usize;
-        let mut sink = perun_core::sha256::Sha256::new();
-        let mut chunk = vec![0u8; 16 * 1024];
-        let mut total = 0u64;
-        let mut peak_buf = 0usize;
-        loop {
-            match decoder.read(&mut chunk).unwrap() {
-                ReadState::Read(n) => {
-                    sink.update(&chunk[..n]);
-                    total += n as u64;
-                }
-                ReadState::NeedsWrite(_) => {
-                    let end = (fed + 1024).min(FIXTURE.len());
-                    let room = end - fed;
-                    match decoder.write(&FIXTURE[fed..end]).unwrap() {
-                        WriteState::Written(n) => {
-                            assert_eq!(n, room, "decoder took a partial chunk");
-                            fed = end;
-                        }
-                        WriteState::NeedsRead => unreachable!(),
-                    }
-                }
-                ReadState::Eof => break,
-            }
-            peak_buf = peak_buf.max(decoder.in_buf_len());
-        }
-        // The property the patch exists for: the staging buffer never exceeds
-        // the compressed bytes actually fed to it. Upstream grew without bound
-        // with the whole stream, so this is the assertion that fails there.
+        let mut d = decoder(std::io::Cursor::new(packed));
+        let mut got = Vec::new();
+        std::io::Read::read_to_end(&mut d, &mut got).unwrap();
+        assert_eq!(got.len(), N, "decompressed length changed");
+        assert_eq!(
+            perun_core::sha256::sha256_hex(&got),
+            EXPECTED,
+            "decompressed bytes changed"
+        );
+    }
+
+    /// And it must read an ordinary, compressible stream that spans blocks.
+    ///
+    /// `bzip2-rs` handled this shape fine, so on its own it would not have
+    /// caught anything — it is here as the control that says the tripwire above
+    /// is testing entropy and not just size.
+    #[test]
+    fn decoder_reads_a_multi_block_compressible_stream() {
+        const N: usize = 1_200_000; // > 900 000, so two blocks
+        const EXPECTED: &str = "43551249b68a740506b917ec4908f87314c6720cc4c5764886516bac201b24f3";
+        let plain: Vec<u8> = (0..N).map(|i| ((i * 7 + (i >> 11)) % 251) as u8).collect();
+        let packed = compress(&plain);
         assert!(
-            peak_buf <= FIXTURE.len(),
-            "staging buffer reached {peak_buf} for {} compressed bytes",
-            FIXTURE.len()
+            N as f64 / packed.len() as f64 > 3.0,
+            "test premise broken: the control must actually be compressible"
         );
-        // What this fixture cannot prove, and why: a single bzip2 block holds
-        // 900 000 bytes, and `space` legitimately allows that much live input,
-        // so the whole fixture is buffered before the first compaction ever
-        // runs. Exercising compaction across blocks needs more than 900 KiB of
-        // compressed input, i.e. a megabyte-scale fixture, which is not worth
-        // carrying in a repo whose release binary is 2.9 MB. That path is
-        // covered by measurement instead: a cold asset fetch decompresses
-        // 62 MB of real Apple payload, ~32 MB of compressed input, through this
-        // decoder and matches all three pinned digests.
-        assert!(peak_buf > 0, "the test hook was never exercised");
-        assert_eq!(total, 400_000, "decompressed length changed");
-        assert_eq!(sink.finish_hex(), expected, "decompressed bytes changed");
+        let mut d = decoder(std::io::Cursor::new(packed));
+        let mut got = Vec::new();
+        std::io::Read::read_to_end(&mut d, &mut got).unwrap();
+        assert_eq!(got.len(), N, "decompressed length changed");
+        assert_eq!(
+            perun_core::sha256::sha256_hex(&got),
+            EXPECTED,
+            "decompressed bytes changed"
+        );
     }
 
     /// `extract_to_file` must reproduce the bytes and the pinned digest while

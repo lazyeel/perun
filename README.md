@@ -268,9 +268,9 @@ Third-party code compiled into the binary (all permissive; the full table with v
 |---|---|---|
 | `libc` | MIT OR Apache-2.0 | host libc ABI |
 | `linkme` + `linkme-impl` | MIT OR Apache-2.0 | shim-table registration |
-| `bzip2-rs` | MIT OR Apache-2.0 | first-run asset fetcher; **vendored** under `vendor/` with a bounded input buffer |
+| `bzip2` | MIT OR Apache-2.0 | first-run asset fetcher; 0.6 resolves to `libbz2-rs-sys`, a pure-Rust libbzip2 |
 | `ureq` | MIT OR Apache-2.0 | Store-lane HTTP, replacing the external curl binary |
-| `crc32fast`, `cfg-if`, `tinyvec` | MIT/Apache-2.0/Zlib | under bzip2-rs |
+| `libbz2-rs-sys` | bzip2-1.0.6 | the libbzip2 `bzip2` 0.6 resolves to |
 
 The store session's cookie jar is `store::cookie_jar`, about 200 lines of `std` in this repository: it reads and writes the same curl-format file, and it is the reason no third-party cookie crate is listed above. See [RESEARCH.md § 8.1](RESEARCH.md).
 

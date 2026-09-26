@@ -32,6 +32,7 @@ this project uses directly are written out in ROLES below; everything else is
 described mechanically as the transitive of whichever direct dependency pulls
 it in, which is a fact rather than an opinion.
 """
+import ast
 import json
 import re
 import subprocess
@@ -47,14 +48,15 @@ ROLES = {
     "linkme": "`distributed_slice` — the shim-table registration macro; the "
               "emitted linker sections and runtime slices land in the binary",
     "linkme-impl": "proc macro for `linkme`; the code it generates is linked in",
-    "bzip2-rs": "pure-Rust bzip2 decoder in the first-run asset fetcher, "
-                 "VENDORED under `vendor/` with a bounded input buffer",
+    "bzip2": "bzip2 for the first-run asset fetcher; 0.6 resolves to "
+             "`libbz2-rs-sys`, a pure-Rust libbzip2, so this is not a C "
+             "dependency",
     "ureq": "HTTP client for the Store lane and the asset fetcher, replacing "
             "the external curl binary",
     "cookie_store": "the netscape-format jar behind the shared `mz_at0` store "
                     "session; same version ureq pins, so the `Cookie` it "
                     "returns is that crate's type",
-    "flate2": "the bzip2 decoder's DEFLATE half, for callers that need gzip",
+    "flate2": "gzip and zlib behind ureq's `gzip` feature",
     "cookie": "the `Cookie` type cookie_store's jar is built from",
     "getrandom": "OS entropy for the account vault's salt and the SAP signature",
     "ring": "crypto primitives under rustls: SHA-256, HMAC, AES-GCM, ECDSA",
@@ -66,8 +68,28 @@ ROLES = {
     "icu_normalizer_data": "the Unicode normalisation tables `idna` needs",
     "icu_properties_data": "the Unicode property tables `idna` needs",
     "miniz_oxide": "the DEFLATE decompressor under flate2",
-    "bzip2": "the bzip2 backend under flate2",
 }
+
+# A duplicate key in the ROLES literal is silent in Python -- the last one wins
+# -- and it already cost the table a correct description: adding the real
+# `bzip2` entry left the stale "the bzip2 backend under flate2" one further
+# down, and the stale text is what got published. `bzip2` is a direct
+# dependency of perun-cli, not a flate2 backend. Re-read this file's own AST
+# and refuse to run on a repeat, because the failure mode is invisible.
+for _node in ast.walk(ast.parse(open(__file__).read())):
+    if isinstance(_node, ast.Assign) and any(
+        isinstance(t, ast.Name) and t.id == "ROLES" for t in _node.targets
+    ):
+        _keys = [k.value for k in _node.value.keys if isinstance(k, ast.Constant)]
+        _dupes = {k for k in _keys if _keys.count(k) > 1}
+        if _dupes:
+            raise SystemExit(
+                f"gen_license_tables: duplicate ROLES keys {sorted(_dupes)}; "
+                "Python keeps the last one and the table would publish stale text"
+            )
+        break
+else:
+    raise SystemExit("gen_license_tables: ROLES assignment not found")
 
 # Where the manifest has no `authors` field, the crate's own name for its
 # holder is used rather than a guess at a person or an organisation's legal
@@ -75,8 +97,15 @@ ROLES = {
 HOLDERS = {"libc": "The Rust Project"}
 
 # A licence expression made only of these terms needs no note in the summary.
+# `bzip2-1.0.6` is not an SPDX identifier, so it cannot be recognised
+# automatically; it was read and judged here. It is the bzip2 licence, a
+# 4-clause BSD: redistribution in source or binary form with or without
+# modification, provided the notice and conditions are retained, the origin is
+# not misrepresented, altered versions are marked, and the author's name is not
+# used to endorse. No copyleft, no source-disclosure obligation, so it is
+# compatible with this project's MIT/Apache-2.0 distribution.
 PERMISSIVE = {"MIT", "Apache-2.0", "Zlib", "BSD-3-Clause", "ISC", "0BSD",
-              "Unlicense"}
+              "Unlicense", "bzip2-1.0.6"}
 
 
 def _split(expr, word):

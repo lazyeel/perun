@@ -15,7 +15,7 @@ This product contains third-party open source software in object form, under its
 - adler2 2.0.1 (MIT) — Jonas Schievink, oyvindln — https://github.com/oyvindln/adler2
 - base64 0.23.1 (MIT) — Marshall Pierce — https://github.com/marshallpierce/rust-base64
 - bytes 1.12.1 (MIT) — Carl Lerche, Sean McArthur — https://github.com/tokio-rs/bytes
-- bzip2-rs 0.1.2 (MIT) — Paolo Barbolini — https://github.com/paolobarbolini/bzip2-rs
+- bzip2 0.6.1 (MIT) — trifectatechfoundation/bzip2-rs — https://github.com/trifectatechfoundation/bzip2-rs
 - cfg-if 1.0.4 (MIT) — Alex Crichton — https://github.com/rust-lang/cfg-if
 - crc32fast 1.5.1 (MIT) — Sam Rijs, Alex Crichton — https://github.com/srijs/rust-crc32fast
 - flate2 1.1.10 (MIT) — Alex Crichton, Josh Triplett — https://github.com/rust-lang/flate2-rs
@@ -23,6 +23,7 @@ This product contains third-party open source software in object form, under its
 - http 1.5.0 (MIT) — Alex Crichton, Carl Lerche, Sean McArthur — https://github.com/hyperium/http
 - httparse 1.10.1 (MIT) — Sean McArthur — https://github.com/seanmonstar/httparse
 - itoa 1.0.18 (MIT) — David Tolnay — https://github.com/dtolnay/itoa
+- libbz2-rs-sys 0.2.5 (bzip2-1.0.6) — trifectatechfoundation/libbzip2-rs — https://github.com/trifectatechfoundation/libbzip2-rs
 - libc 0.2.189 (MIT) — The Rust Project — https://github.com/rust-lang/libc
 - linkme 0.3.37 (MIT) — David Tolnay — https://github.com/dtolnay/linkme
 - linkme-impl 0.3.37 (MIT) — David Tolnay — https://github.com/dtolnay/linkme
@@ -40,7 +41,6 @@ This product contains third-party open source software in object form, under its
 - serde_json 1.0.151 (MIT) — Erick Tryzelaar, David Tolnay — https://github.com/serde-rs/json
 - simd-adler32 0.3.10 (MIT) — Marvin Countryman — https://github.com/mcountryman/simd-adler32
 - subtle 2.6.1 (BSD-3-Clause) — Isis Lovecruft, Henry de Valence — https://github.com/dalek-cryptography/subtle
-- tinyvec 1.13.2 (MIT) — Lokathor — https://github.com/Lokathor/tinyvec
 - untrusted 0.9.0 (ISC) — Brian Smith — https://github.com/briansmith/untrusted
 - ureq 3.4.2 (MIT) — Martin Algesten, Jacob Hoffman-Andrews — https://github.com/algesten/ureq
 - ureq-proto 0.6.4 (MIT) — Martin Algesten — https://github.com/algesten/ureq-proto

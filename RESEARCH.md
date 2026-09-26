@@ -497,14 +497,15 @@ The dependency set, read from `cargo metadata` at the target triple, with each l
 | `adler2` | 2.0.1 | MIT | Jonas Schievink, oyvindln (oyvindln/adler2) | transitive under ureq |
 | `base64` | 0.23.1 | MIT | Marshall Pierce (marshallpierce/rust-base64) | transitive under ureq |
 | `bytes` | 1.12.1 | MIT | Carl Lerche, Sean McArthur (tokio-rs/bytes) | transitive under ureq |
-| `bzip2-rs` | 0.1.2 | MIT | Paolo Barbolini (paolobarbolini/bzip2-rs) | pure-Rust bzip2 decoder in the first-run asset fetcher, VENDORED under `vendor/` with a bounded input buffer |
-| `cfg-if` | 1.0.4 | MIT | Alex Crichton (rust-lang/cfg-if) | transitive under bzip2-rs |
-| `crc32fast` | 1.5.1 | MIT | Sam Rijs, Alex Crichton (srijs/rust-crc32fast) | transitive under bzip2-rs |
-| `flate2` | 1.1.10 | MIT | Alex Crichton, Josh Triplett (rust-lang/flate2-rs) | the bzip2 decoder's DEFLATE half, for callers that need gzip |
+| `bzip2` | 0.6.1 | MIT | trifectatechfoundation/bzip2-rs | bzip2 for the first-run asset fetcher; 0.6 resolves to `libbz2-rs-sys`, a pure-Rust libbzip2, so this is not a C dependency |
+| `cfg-if` | 1.0.4 | MIT | Alex Crichton (rust-lang/cfg-if) | transitive under ureq |
+| `crc32fast` | 1.5.1 | MIT | Sam Rijs, Alex Crichton (srijs/rust-crc32fast) | transitive under ureq |
+| `flate2` | 1.1.10 | MIT | Alex Crichton, Josh Triplett (rust-lang/flate2-rs) | gzip and zlib behind ureq's `gzip` feature |
 | `getrandom` | 0.2.17 | MIT | The Rand Project Developers (rust-random/getrandom) | OS entropy for the account vault's salt and the SAP signature |
 | `http` | 1.5.0 | MIT | Alex Crichton, Carl Lerche, Sean McArthur (hyperium/http) | the HTTP/1.1 message model under ureq |
 | `httparse` | 1.10.1 | MIT | Sean McArthur (seanmonstar/httparse) | transitive under ureq |
 | `itoa` | 1.0.18 | MIT | David Tolnay (dtolnay/itoa) | transitive under ureq |
+| `libbz2-rs-sys` | 0.2.5 | bzip2-1.0.6 | trifectatechfoundation/libbzip2-rs | transitive under bzip2 |
 | `libc` | 0.2.189 | MIT | The Rust Project (rust-lang/libc) | host libc ABI: mmap, sigaction, ucontext, wait4 |
 | `linkme` | 0.3.37 | MIT | David Tolnay (dtolnay/linkme) | `distributed_slice` — the shim-table registration macro; the emitted linker sections and runtime slices land in the binary |
 | `linkme-impl` | 0.3.37 | MIT | David Tolnay (dtolnay/linkme) | proc macro for `linkme`; the code it generates is linked in |
@@ -522,7 +523,6 @@ The dependency set, read from `cargo metadata` at the target triple, with each l
 | `serde_json` | 1.0.151 | MIT | Erick Tryzelaar, David Tolnay (serde-rs/json) | transitive under ureq |
 | `simd-adler32` | 0.3.10 | MIT | Marvin Countryman (mcountryman/simd-adler32) | transitive under ureq |
 | `subtle` | 2.6.1 | BSD-3-Clause | Isis Lovecruft, Henry de Valence (dalek-cryptography/subtle) | transitive under ureq |
-| `tinyvec` | 1.13.2 | MIT | Lokathor (Lokathor/tinyvec) | transitive under bzip2-rs |
 | `untrusted` | 0.9.0 | ISC | Brian Smith (briansmith/untrusted) | transitive under ureq |
 | `ureq` | 3.4.2 | MIT | Martin Algesten, Jacob Hoffman-Andrews (algesten/ureq) | HTTP client for the Store lane and the asset fetcher, replacing the external curl binary |
 | `ureq-proto` | 0.6.4 | MIT | Martin Algesten (algesten/ureq-proto) | transitive under ureq |

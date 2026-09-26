@@ -33,7 +33,11 @@ rep-bench = []
 perun-core = { workspace = true }
 perun-shims = { workspace = true }
 libc = "0.2"
-bzip2-rs = "0.1.2"
+# bzip2 for the first-run asset fetcher. 0.6 defaults to `libbz2-rs-sys`, a
+# pure-Rust translation of libbzip2, so this is not a C dependency. It replaced
+# `bzip2-rs` 0.1.2, which leaked its input staging buffer and could not decode a
+# valid high-entropy stream at all (see HANDOVER 10.8).
+bzip2 = "0.6"
 # HTTP for the Store lane and the asset fetcher, replacing the external curl
 # binary. `cookies` is deliberately NOT enabled: it pulls `cookie_store`, and
 # through it `url` -> `idna` -> the whole ICU4X slice, 15 crates under the
