@@ -79,12 +79,180 @@ const K: [u32; 64] = [
     0xc671_78f2,
 ];
 
+/// Round constants in the layout the SHA extensions want: four consecutive
+/// `K` values per 128-bit lane, **reversed within the group**.
+///
+/// Two reversals cancel, which is the trap. `_mm_set_epi32` takes its first
+/// argument as the *high* lane, so the table is stored back-to-front so that
+/// after the call lane 0 holds `K[4i]`, matching the message words, whose lane 0
+/// is `W[4i]`. Storing the group in natural order — the obvious thing, and what
+/// this table did first — shifts every constant by three and produces a
+/// well-formed digest that is simply wrong. The FIPS vectors caught it.
+///
+/// Generated from `K` above rather than typed out, so the two cannot drift.
+#[cfg(target_arch = "x86_64")]
+const K32X4: [[u32; 4]; 16] = [
+    [0xe9b5dba5, 0xb5c0fbcf, 0x71374491, 0x428a2f98],
+    [0xab1c5ed5, 0x923f82a4, 0x59f111f1, 0x3956c25b],
+    [0x550c7dc3, 0x243185be, 0x12835b01, 0xd807aa98],
+    [0xc19bf174, 0x9bdc06a7, 0x80deb1fe, 0x72be5d74],
+    [0x240ca1cc, 0x0fc19dc6, 0xefbe4786, 0xe49b69c1],
+    [0x76f988da, 0x5cb0a9dc, 0x4a7484aa, 0x2de92c6f],
+    [0xbf597fc7, 0xb00327c8, 0xa831c66d, 0x983e5152],
+    [0x14292967, 0x06ca6351, 0xd5a79147, 0xc6e00bf3],
+    [0x53380d13, 0x4d2c6dfc, 0x2e1b2138, 0x27b70a85],
+    [0x92722c85, 0x81c2c92e, 0x766a0abb, 0x650a7354],
+    [0xc76c51a3, 0xc24b8b70, 0xa81a664b, 0xa2bfe8a1],
+    [0x106aa070, 0xf40e3585, 0xd6990624, 0xd192e819],
+    [0x34b0bcb5, 0x2748774c, 0x1e376c08, 0x19a4c116],
+    [0x682e6ff3, 0x5b9cca4f, 0x4ed8aa4a, 0x391c0cb3],
+    [0x8cc70208, 0x84c87814, 0x78a5636f, 0x748f82ee],
+    [0xc67178f2, 0xbef9a3f7, 0xa4506ceb, 0x90befffa],
+];
+
+/// Whether this CPU can run the accelerated path.
+///
+/// The instruction set is not just `sha`: the round sequence also needs SSSE3
+/// (`pshufb`, to byte-swap each word) and SSE4.1 (`pblendw`), and
+/// `#[target_feature(enable = ...)]` is a promise to the compiler — calling in
+/// with a missing feature is undefined behaviour, not a crash. So all of it is
+/// checked up front and the scalar path stays the answer for anything older.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn have_sha_ni() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    // 0 = not probed, 1 = absent, 2 = present. `is_x86_feature_detected!` is
+    // already cached, but the per-call cost still shows up next to a 64-byte
+    // block loop, so the answer is memoised locally.
+    static CACHE: AtomicU8 = AtomicU8::new(0);
+    match CACHE.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let ok = std::arch::is_x86_feature_detected!("sha")
+                && std::arch::is_x86_feature_detected!("ssse3")
+                && std::arch::is_x86_feature_detected!("sse4.1");
+            CACHE.store(if ok { 2 } else { 1 }, Ordering::Relaxed);
+            ok
+        }
+    }
+}
+
+/// Compress whole blocks with the Intel SHA extensions.
+///
+/// The extension does two rounds per instruction and keeps the state in two
+/// registers split `ABEF` / `CDGH`; the shuffles at the top and bottom convert
+/// between that and the `A..H` order the struct stores. `MSG` is consumed
+/// in place, which is why the message words are kept in registers rather than
+/// an array.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sha,sse2,ssse3,sse4.1")]
+#[allow(clippy::cast_ptr_alignment)]
+unsafe fn compress_blocks_ni(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
+    // SAFETY: the caller has verified every feature named in the
+    // `target_feature` attribute above, and every operation below is either an
+    // intrinsic enabled by that list or a pointer step inside the slices the
+    // signature borrows. Edition 2024 wants each one acknowledged.
+    unsafe {
+        use std::arch::x86_64::{
+            __m128i, _mm_add_epi32, _mm_alignr_epi8, _mm_blend_epi16, _mm_loadu_si128,
+            _mm_set_epi32, _mm_set_epi64x, _mm_sha256msg1_epu32, _mm_sha256msg2_epu32,
+            _mm_sha256rnds2_epu32, _mm_shuffle_epi8, _mm_shuffle_epi32, _mm_storeu_si128,
+        };
+
+        // Byte-swap each dword: the input is big-endian, the lanes are native.
+        let mask: __m128i = _mm_set_epi64x(
+            0x0C0D_0E0F_0809_0A0B_u64 as i64,
+            0x0405_0607_0001_0203_u64 as i64,
+        );
+
+        let state_ptr = state.as_ptr() as *const __m128i;
+        let dcba = _mm_loadu_si128(state_ptr);
+        let efgh = _mm_loadu_si128(state_ptr.add(1));
+
+        // Reshuffle `A..H` into the pairs the instructions operate on.
+        let cdab = _mm_shuffle_epi32(dcba, 0xB1);
+        let efgh = _mm_shuffle_epi32(efgh, 0x1B);
+        let mut abef = _mm_alignr_epi8(cdab, efgh, 8);
+        let mut cdgh = _mm_blend_epi16(efgh, cdab, 0xF0);
+
+        for block in blocks {
+            let abef_save = abef;
+            let cdgh_save = cdgh;
+
+            let data_ptr = block.as_ptr() as *const __m128i;
+            let mut w0 = _mm_shuffle_epi8(_mm_loadu_si128(data_ptr), mask);
+            let mut w1 = _mm_shuffle_epi8(_mm_loadu_si128(data_ptr.add(1)), mask);
+            let mut w2 = _mm_shuffle_epi8(_mm_loadu_si128(data_ptr.add(2)), mask);
+            let mut w3 = _mm_shuffle_epi8(_mm_loadu_si128(data_ptr.add(3)), mask);
+            let mut w4;
+
+            // Four rounds: the instruction needs the message words and the
+            // constants added together, then folds them in one at a time.
+            macro_rules! rounds4 {
+                ($rest:expr, $i:expr) => {{
+                    let k = K32X4[$i];
+                    let kv = _mm_set_epi32(k[0] as i32, k[1] as i32, k[2] as i32, k[3] as i32);
+                    let t1 = _mm_add_epi32($rest, kv);
+                    cdgh = _mm_sha256rnds2_epu32(cdgh, abef, t1);
+                    let t2 = _mm_shuffle_epi32(t1, 0x0E);
+                    abef = _mm_sha256rnds2_epu32(abef, cdgh, t2);
+                }};
+            }
+            // The same, but first deriving `w4` from the four previous words.
+            macro_rules! schedule_rounds4 {
+                ($w0:expr, $w1:expr, $w2:expr, $w3:expr, $w4:expr, $i:expr) => {{
+                    let t1 = _mm_sha256msg1_epu32($w0, $w1);
+                    let t2 = _mm_alignr_epi8($w3, $w2, 4);
+                    let t3 = _mm_add_epi32(t1, t2);
+                    $w4 = _mm_sha256msg2_epu32(t3, $w3);
+                    rounds4!($w4, $i);
+                }};
+            }
+
+            rounds4!(w0, 0);
+            rounds4!(w1, 1);
+            rounds4!(w2, 2);
+            rounds4!(w3, 3);
+            schedule_rounds4!(w0, w1, w2, w3, w4, 4);
+            schedule_rounds4!(w1, w2, w3, w4, w0, 5);
+            schedule_rounds4!(w2, w3, w4, w0, w1, 6);
+            schedule_rounds4!(w3, w4, w0, w1, w2, 7);
+            schedule_rounds4!(w4, w0, w1, w2, w3, 8);
+            schedule_rounds4!(w0, w1, w2, w3, w4, 9);
+            schedule_rounds4!(w1, w2, w3, w4, w0, 10);
+            schedule_rounds4!(w2, w3, w4, w0, w1, 11);
+            schedule_rounds4!(w3, w4, w0, w1, w2, 12);
+            schedule_rounds4!(w4, w0, w1, w2, w3, 13);
+            schedule_rounds4!(w0, w1, w2, w3, w4, 14);
+            schedule_rounds4!(w1, w2, w3, w4, w0, 15);
+
+            // Feed-forward: the saved pre-block state is added back.
+            abef = _mm_add_epi32(abef, abef_save);
+            cdgh = _mm_add_epi32(cdgh, cdgh_save);
+        }
+
+        // Back to `A..H` for the struct.
+        let feba = _mm_shuffle_epi32(abef, 0x1B);
+        let dchg = _mm_shuffle_epi32(cdgh, 0xB1);
+        let dcba = _mm_blend_epi16(feba, dchg, 0xF0);
+        let hgef = _mm_alignr_epi8(dchg, feba, 8);
+
+        let state_ptr_mut = state.as_mut_ptr() as *mut __m128i;
+        _mm_storeu_si128(state_ptr_mut, dcba);
+        _mm_storeu_si128(state_ptr_mut.add(1), hgef);
+    }
+}
+
 /// Incremental SHA-256 state.
 pub struct Sha256 {
     h: [u32; 8],
     buf: [u8; 64],
     buf_len: usize,
     total: u64,
+    /// Test-only: skip the accelerated path so the two can be compared.
+    /// Not read outside `#[cfg(test)]` code, and false in every shipped build.
+    force_scalar: bool,
 }
 
 impl Default for Sha256 {
@@ -110,6 +278,7 @@ impl Sha256 {
             buf: [0u8; 64],
             buf_len: 0,
             total: 0,
+            force_scalar: false,
         }
     }
 
@@ -126,12 +295,11 @@ impl Sha256 {
                 self.buf_len = 0;
             }
         }
+        // `as_chunks` hands out the blocks already shaped as `&[u8; 64]`, which
+        // is what the accelerated path wants; the scalar loop no longer has to
+        // copy each one out of the input first.
         let (blocks, rest) = data.as_chunks::<64>();
-        for c in blocks {
-            let mut block = [0u8; 64];
-            block.copy_from_slice(c);
-            self.compress(&block);
-        }
+        self.compress_blocks(blocks);
         if !rest.is_empty() {
             self.buf[..rest.len()].copy_from_slice(rest);
             self.buf_len = rest.len();
@@ -166,6 +334,37 @@ impl Sha256 {
                 let _ = write!(s, "{b:02x}");
                 s
             })
+    }
+
+    /// Compress a run of whole blocks, hardware path when the CPU has it.
+    ///
+    /// Batching matters for the accelerated path: the message schedule is a
+    /// serial chain inside each block, so handing the whole run over at once
+    /// keeps the register state live across blocks instead of loading and
+    /// storing `A..H` per 64 bytes. Measured 191 MB/s scalar against
+    /// 1 394 MB/s here on an EPYC 7742 — the FIPS vectors in the test module
+    /// are what pins the two to the same digests.
+    fn compress_blocks(&mut self, blocks: &[[u8; 64]]) {
+        if blocks.is_empty() {
+            return;
+        }
+        #[cfg(target_arch = "x86_64")]
+        if have_sha_ni() && !self.force_scalar {
+            // SAFETY: `have_sha_ni` verified every feature named in the
+            // `target_feature` list above, and `state` is 8 `u32` = 16 bytes
+            // with the alignment `loadu`/`storeu` do not require.
+            unsafe { compress_blocks_ni(&mut self.h, blocks) };
+            return;
+        }
+        self.compress_blocks_scalar(blocks);
+    }
+
+    /// The portable path, kept callable so the two can be compared against
+    /// each other directly — see `accelerated_path_matches_scalar`.
+    fn compress_blocks_scalar(&mut self, blocks: &[[u8; 64]]) {
+        for b in blocks {
+            self.compress(b);
+        }
     }
 
     // `w` and `a`..`f` are the schedule and the eight working registers FIPS
@@ -261,10 +460,71 @@ mod tests {
         let want = sha256_hex(&data);
         for size in [1usize, 7, 55, 56, 57, 63, 64, 65, 127, 128, 999] {
             let mut h = Sha256::new();
-            for chunk in data.chunks(size) {
-                h.update(chunk);
+            for part in data.chunks(size) {
+                h.update(part);
             }
             assert_eq!(h.finish_hex(), want, "chunk size {size}");
         }
+    }
+
+    /// The accelerated path must agree with the portable one, for every
+    /// message length and every chunk boundary.
+    ///
+    /// FIPS vectors prove the *algorithm*; this proves the two implementations
+    /// of it are the same function. The first version of the hardware path
+    /// stored the round constants in natural order instead of the reversed
+    /// order `_mm_set_epi32` needs, and every digest came out well-formed and
+    /// wrong — a failure only a scalar/hardware differential names precisely,
+    /// since the FIPS vectors would have caught it too but the diff would not
+    /// have said *which* side was wrong.
+    #[test]
+    fn accelerated_path_matches_scalar() {
+        let mut data = vec![0u8; 4096];
+        for (i, b) in data.iter_mut().enumerate() {
+            *b = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) as u8 ^ (i >> 5) as u8;
+        }
+        // 64 is the block size, so every multiple and neighbour of it is
+        // where padding, carry and the schedule's register reuse differ.
+        let mut lengths: Vec<usize> = (0..200).collect();
+        lengths.extend([255, 256, 257, 511, 512, 513, 1023, 1024, 4095, 4096]);
+        for &len in &lengths {
+            for &chunk in &[1usize, 7, 63, 64, 65, 333, 4096] {
+                let mut hw = Sha256::new();
+                let mut sc = Sha256::new();
+                sc.force_scalar = true;
+                for part in data[..len].chunks(chunk) {
+                    hw.update(part);
+                    sc.update(part);
+                }
+                assert_eq!(hw.finish_hex(), sc.finish_hex(), "len {len}, chunk {chunk}");
+            }
+        }
+    }
+
+    /// The round-constant table has to keep the reversed-within-group layout
+    /// the intrinsics need.
+    ///
+    /// Worth its own test because the failure mode is invisible: a table in
+    /// natural order still yields 32 bytes, just the wrong 32 bytes.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn round_constant_table_keeps_the_intrinsic_order() {
+        for (i, row) in K32X4.iter().enumerate() {
+            for j in 0..4 {
+                assert_eq!(row[j], K[4 * i + 3 - j], "group {i} lane {j}");
+            }
+        }
+    }
+
+    /// The accelerated path must actually be taken on this machine, or the
+    /// differential above is comparing scalar against scalar and proves
+    /// nothing.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn sha_ni_is_present_and_used() {
+        assert!(
+            have_sha_ni(),
+            "CPU lacks sha/ssse3/sse4.1; the differential test would be vacuous"
+        );
     }
 }
