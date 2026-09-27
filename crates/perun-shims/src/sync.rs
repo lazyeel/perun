@@ -89,8 +89,16 @@ win32_api! {
         _sa: *const SECURITY_ATTRIBUTES,
         manual_reset: BOOL,
         initial_state: BOOL,
-        _name: LPCSTR,
+        name: LPCSTR,
     ) -> HANDLE {
+        if std::env::var_os("PERUN_TRACE_SYNC").is_some() {
+            eprintln!(
+                "[sync] CreateEventA(manual_reset={}, initial={}, name={:?})",
+                manual_reset,
+                initial_state,
+                name as *const i8 as usize
+            );
+        }
         handle_new(HostKind::Event(EventState {
             state: std::sync::Mutex::new(EventFlags {
                 manual_reset: manual_reset != 0,
@@ -118,6 +126,9 @@ win32_api! {
 win32_api! {
     /// BOOL SetEvent(HANDLE);
     unsafe extern "win64" fn SetEvent(h: HANDLE) -> BOOL { unsafe {
+        if std::env::var_os("PERUN_TRACE_SYNC").is_some() {
+            eprintln!("[sync] SetEvent({:#x})", h as usize);
+        }
         match handle_get(h).map(|o| &o.kind) {
             Some(HostKind::Event(e)) => {
                 let mut f = e.state.lock().unwrap();
@@ -181,6 +192,10 @@ fn wait_on_event(e: &EventState, timeout_ms: DWORD) -> DWORD {
 win32_api! {
     /// DWORD WaitForSingleObject(HANDLE, DWORD);
     unsafe extern "win64" fn WaitForSingleObject(h: HANDLE, timeout_ms: DWORD) -> DWORD { unsafe {
+        if std::env::var_os("PERUN_TRACE_SYNC").is_some() {
+            eprintln!("[sync] WaitForSingleObject({:#x}, {timeout_ms}) kind={:?}", h as usize,
+                handle_get(h).map(|o| match o.kind { HostKind::Event(_) => "Event", HostKind::Mutex{..} => "Mutex", _ => "other" }));
+        }
         match handle_get(h).map(|o| &o.kind) {
             Some(HostKind::Event(e)) => wait_on_event(e, timeout_ms),
             Some(HostKind::Mutex { state, cond }) => {
@@ -255,6 +270,9 @@ win32_api! {
 win32_api! {
     /// BOOL ReleaseMutex(HANDLE);
     unsafe extern "win64" fn ReleaseMutex(h: HANDLE) -> BOOL { unsafe {
+        if std::env::var_os("PERUN_TRACE_SYNC").is_some() {
+            eprintln!("[sync] ReleaseMutex({:#x})", h as usize);
+        }
         match handle_get(h).map(|o| &o.kind) {
             Some(HostKind::Mutex { state, cond }) => {
                 let mut l = state.lock().unwrap();

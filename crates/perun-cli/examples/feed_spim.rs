@@ -24,6 +24,7 @@ static mut FAULT_RDI: u64 = 0;
 static mut FAULT_OFF: u64 = u64::MAX;
 static mut FAULT_N: usize = 0;
 static mut PROBE_BASE: u64 = 0;
+static mut PROBE2_BASE: u64 = 0;
 static mut PROBE_LEN: usize = 0;
 
 unsafe extern "C" fn probe_fault(_sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
@@ -31,18 +32,24 @@ unsafe extern "C" fn probe_fault(_sig: i32, info: *mut libc::siginfo_t, ctx: *mu
         let addr = (*info).si_addr() as u64;
         let uc = ctx.cast::<libc::ucontext_t>();
         let rip = *(*uc).uc_mcontext.gregs.as_ptr().add(libc::REG_RIP as usize) as u64;
-        if FAULT_N == 0 {
+        // First fault: the gate object. Second: a page reached by dereferencing
+        // [+0x10] as a pointer. Unprotect whichever faulted so it can retry.
+        let base = if addr >= PROBE2_BASE && addr < PROBE2_BASE + 0x1000 {
+            PROBE2_BASE
+        } else {
+            PROBE_BASE
+        };
+        if FAULT_N < 2 {
             let g = (*uc).uc_mcontext.gregs.as_ptr();
-            FAULT_OFF = addr.wrapping_sub(PROBE_BASE);
+            FAULT_OFF = addr.wrapping_sub(base);
             FAULT_RIP = rip;
             FAULT_RSI = *g.add(libc::REG_RSI as usize) as u64;
             FAULT_RDI = *g.add(libc::REG_RDI as usize) as u64;
         }
         FAULT_N += 1;
-        // Let the faulting instruction retry: the page becomes readable.
         libc::mprotect(
-            PROBE_BASE as *mut libc::c_void,
-            PROBE_LEN,
+            base as *mut libc::c_void,
+            0x1000,
             libc::PROT_READ | libc::PROT_WRITE,
         );
     }
@@ -794,10 +801,13 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
                 )
             };
             assert_ne!(m2, libc::MAP_FAILED, "second mmap failed");
+            // Point [+0x10] at a SECOND PROT_NONE page: if the guest dereferences
+            // [+0x10] as a pointer after the wait, this faults and names the offset.
             unsafe {
-                std::ptr::write_bytes(m2, 0, 0x100);
+                PROBE2_BASE = m2 as u64;
+                libc::mprotect(m2, 0x1000, libc::PROT_NONE);
                 std::ptr::write_unaligned(page.add(0x10).cast::<u64>(), m2 as u64);
-                eprintln!("[feed] EGATE3 [+0x10] -> {m2:p} (valid, readable)");
+                eprintln!("[feed] EGATE3 [+0x10] -> {m2:p} (PROT_NONE)");
             }
         }
         let g = unsafe { image.base().add(0x19dda0) as *mut u64 };
