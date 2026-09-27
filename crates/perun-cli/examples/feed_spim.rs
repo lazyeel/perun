@@ -480,7 +480,7 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
             watches.push((rotpn.cast_const(), 8));
             layout_b(rpacket as u64, 0)
         }
-        "ENV" | "ENVL" | "ENVO" | "ENVF" | "ENVI" | "ENVH" | "ENVS" => {
+        "ENV" | "ENVL" | "ENVO" | "ENVF" | "ENVI" | "ENVH" | "ENVS" | "ECM" | "EGATE" => {
             // Honest ADI envelope (the "Common ADI Header" of ionescu007):
             // {buffer_ptr@+0, u32 len@+8, u32 cursor@+0xC, out_ptr@+0x10,
             //  u32 out_len@+0x18, u32 flags@+0x1C}. Independent knobs:
@@ -511,7 +511,13 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
             // so the dispatcher sees the exact bytes Apple produced. fill_packet
             // is NOT used here: it would overwrite the spim with a magic+ptrs
             // blob, which is what made the earlier "real spim" run vacuous.
-            if model == "ENVS" {
+            if model == "ECM" {
+                // ionescu007/Blackwood-4NT line 241: the FIRST argument (ECX) of
+                // every Anisette request is a magic identifying the operation; the
+                // Common ADI Header is the second. opv carries the magic.
+                split = Some((opv, rstruct as u64));
+            }
+            if model == "ENVS" || model == "ECM" || model == "EGATE" {
                 unsafe {
                     std::ptr::write_bytes(rbuf, 0, 0x400);
                 }
@@ -616,11 +622,25 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
     unsafe {
         std::ptr::copy_nonoverlapping(blob.as_ptr(), rstruct, blob.len());
     }
+    if model == "EGATE" {
+        // HANDOVER 4.5: the gate compares qword at .data RVA 0x19dda0 against
+        // 0 and, in a working run, that slot holds a host pointer to a 0x28-byte
+        // object. Satisfy the comparison directly and see if the wall moves.
+        // Point the gate at a real, zeroed 0x28-byte object rather than a
+        // sentinel: a bogus non-null value moved the wall to a SIGSEGV, which
+        // means the null check is the gate and the guest then dereferences it.
+        let obj = unsafe { region(0x28) };
+        unsafe { std::ptr::write_bytes(obj, 0, 0x28) };
+        let g = unsafe { image.base().add(0x19dda0) as *mut u64 };
+        unsafe { std::ptr::write_volatile(g, obj as u64) };
+        let v = unsafe { std::ptr::read_volatile(g) };
+        eprintln!("[feed] EGATE gate@0x19dda0 = {v:#x} (obj {obj:p})");
+    }
     let r = match split {
         Some((a0, a1)) => unsafe { op(a0, a1, 0, 0) },
         None => unsafe { op(rstruct as u64, rstruct as u64, 0, 0) },
     };
-    if model.starts_with("ENV") {
+    if model.starts_with("ENV") || model == "ECM" || model == "EGATE" {
         // Read the envelope fields and the output buffer via the HOST-captured
         // pointers: the guest mutates env+0x0C, so a field read after the call
         // can be a wild pointer. out buffer count is over 64 KiB.
