@@ -34,8 +34,11 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <dlfcn.h>
+#include <signal.h>
+#include <ucontext.h>
 
 typedef struct {
+    char name[96];
     unsigned char *base;
     uint64_t lo;
     size_t span;
@@ -51,6 +54,53 @@ typedef struct {
 
 static Lib g_libs[32];
 static int g_nlibs;
+
+// gdb cannot see these mappings -- they are ours, not the loader's -- so the
+// loader attributes the fault itself. On aarch64 glibc mcontext_t is the
+// legacy struct with __pc/__sp directly; there is no gregs[] and no REG_PC.
+// gdb cannot see these mappings -- they are ours, not the loader's -- so the
+// loader attributes the fault itself. On aarch64 glibc mcontext_t is the
+// legacy struct with `pc` and `regs[]` directly; there is no gregs[].
+//
+// Everything here is write(2) on purpose. The Apple constructors have already
+// left glibc complaining "invalid stdio handle", so printf inside a signal
+// handler faults on the very thing it is trying to report; write is the only
+// async-signal-safe option.
+static void say(const char *s) { (void)!write(2, s, strlen(s)); }
+static void sayhex(const char *tag, uint64_t v) {
+    char b[80]; size_t n = 0;
+    while (*tag) b[n++] = *tag++;
+    b[n++] = '0'; b[n++] = 'x';
+    int started = 0;
+    for (int i = 15; i >= 0; i--) {
+        int d = (int)((v >> (i * 4)) & 0xF);
+        if (d || started || i == 0) { b[n++] = (char)(d < 10 ? '0' + d : 'a' + d - 10); started = 1; }
+    }
+    b[n++] = '\n';
+    (void)!write(2, b, n);
+}
+
+static void on_abort(int sig, siginfo_t *si, void *uc_) {
+    (void)sig; (void)si;
+    ucontext_t *uc = (ucontext_t *)uc_;
+    uint64_t pc = (uint64_t)uc->uc_mcontext.pc;
+    uint64_t lr = (uint64_t)uc->uc_mcontext.regs[30];
+    say("[elfload] SIGABRT pc="); sayhex("", pc);
+    for (int i = 0; i < g_nlibs; i++) {
+        Lib *L = &g_libs[i];
+        if (pc >= (uint64_t)L->base && pc < (uint64_t)L->base + L->span) {
+            say("[elfload]   in "); say(L->name);
+            say("[elfload]   rva="); sayhex("", pc - (uint64_t)L->base);
+            for (int j = 0; j < g_nlibs; j++)
+                if (lr >= (uint64_t)g_libs[j].base && lr < (uint64_t)g_libs[j].base + g_libs[j].span) {
+                    say("[elfload]   called from "); say(g_libs[j].name);
+                    say("[elfload]   rva="); sayhex("", lr - (uint64_t)g_libs[j].base);
+                }
+            break;
+        }
+    }
+    _exit(86);
+}
 
 static void die(const char *m, const char *d) {
     fprintf(stderr, "[elfload] FATAL %s: %s\n", m, d ? d : "(null)");
@@ -142,7 +192,9 @@ static void map_lib(const char *path) {
     }
     if (!dyn) die("no PT_DYNAMIC", path);
 
-    Lib *L = &g_libs[g_nlibs++];
+    Lib *L = &g_libs[g_nlibs];
+    snprintf(L->name, sizeof L->name, "%s", path);
+    g_nlibs++;
     L->base = base; L->lo = lo; L->span = span; L->dyn = dyn;
     for (Elf64_Dyn *d = dyn; d->d_tag; d++) {
         switch (d->d_tag) {
@@ -206,7 +258,7 @@ static void run_init(Lib *L) {
                     size_t n = e->d_un.d_val / sizeof(Elf64_Addr);
                     for (size_t k = 0; k < n; k++) {
                         void (*fn)(void) = (void (*)(void))a[k];
-                        if (fn) { printf("  init[%zu] %p\n", k, (void *)fn); fn(); }
+                        if (fn) { printf("  init[%s] #%zu %p\n", L->name, k, (void *)fn); fflush(stdout); fn(); }
                     }
                 }
         }
@@ -215,6 +267,9 @@ static void run_init(Lib *L) {
 
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: elfload <so>...\n"); return 2; }
+    struct sigaction sa; memset(&sa,0,sizeof sa);
+    sa.sa_sigaction = on_abort; sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGABRT, &sa, NULL);
     for (int i = 1; i < argc; i++) map_lib(argv[i]);
     for (int i = 0; i < g_nlibs; i++) relocate(&g_libs[i]);
     for (int i = 0; i < g_nlibs; i++) run_init(&g_libs[i]);
