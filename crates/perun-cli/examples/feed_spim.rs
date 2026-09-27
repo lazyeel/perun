@@ -26,32 +26,60 @@ static mut FAULT_N: usize = 0;
 static mut PROBE_BASE: u64 = 0;
 static mut PROBE2_BASE: u64 = 0;
 static mut PROBE_LEN: usize = 0;
+// Every fault, not just the first two: the handler used to unprotect a page
+// chosen by a two-way range test, so a fault on any THIRD address retried
+// forever. Counting them is the only way to see that.
+static mut FAULT_TOTAL: u64 = 0;
+static mut FAULT_ADDR: [u64; 24] = [0; 24];
+static mut FAULT_ADDR_N: usize = 0;
+static mut MPROT_N: u64 = 0;
 
 unsafe extern "C" fn probe_fault(_sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
     unsafe {
         let addr = (*info).si_addr() as u64;
         let uc = ctx.cast::<libc::ucontext_t>();
         let rip = *(*uc).uc_mcontext.gregs.as_ptr().add(libc::REG_RIP as usize) as u64;
-        // First fault: the gate object. Second: a page reached by dereferencing
-        // [+0x10] as a pointer. Unprotect whichever faulted so it can retry.
-        let base = if addr >= PROBE2_BASE && addr < PROBE2_BASE + 0x1000 {
-            PROBE2_BASE
-        } else {
-            PROBE_BASE
-        };
+        FAULT_TOTAL += 1;
+        if FAULT_ADDR_N < 24 {
+            FAULT_ADDR[FAULT_ADDR_N] = addr;
+            FAULT_ADDR_N += 1;
+        }
+        // A guest that spins on a fault never reaches the report at the end of
+        // main, so the first faults have to announce themselves from here.
+        if FAULT_TOTAL <= 12 {
+            let n = FAULT_TOTAL;
+            eprintln!("[fault] #{n} addr={addr:#x} rip={rip:#x}");
+        }
+        // Unprotect exactly the page that faulted. Picking a page by a
+        // two-way range test against two known pages leaves every other
+        // address protected, so the retry faults again, forever.
+        let page = addr & !0xFFF;
         if FAULT_N < 2 {
             let g = (*uc).uc_mcontext.gregs.as_ptr();
-            FAULT_OFF = addr.wrapping_sub(base);
+            FAULT_OFF = addr.wrapping_sub(PROBE_BASE);
             FAULT_RIP = rip;
             FAULT_RSI = *g.add(libc::REG_RSI as usize) as u64;
             FAULT_RDI = *g.add(libc::REG_RDI as usize) as u64;
         }
         FAULT_N += 1;
-        libc::mprotect(
-            base as *mut libc::c_void,
+        MPROT_N += 1;
+        // If the page cannot be unprotected the retry faults again, forever:
+        // mprotect on the unmapped zero page always fails, so the instruction
+        // below never advances. That is an instrument artifact, not a guest
+        // loop, so refuse to spin instead of hanging the run.
+        if libc::mprotect(
+            page as *mut libc::c_void,
             0x1000,
             libc::PROT_READ | libc::PROT_WRITE,
-        );
+        ) != 0
+        {
+            let n = FAULT_TOTAL;
+            eprintln!(
+                "[fault] cannot unprotect {page:#x} (fault #{n}, rip={rip:#x}) \
+                 -- giving up instead of spinning"
+            );
+            libc::_exit(91);
+        }
     }
 }
 
@@ -615,7 +643,7 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
             layout_b(rpacket as u64, 0)
         }
         "ENV" | "ENVL" | "ENVO" | "ENVF" | "ENVI" | "ENVH" | "ENVS" | "ECM" | "EGATE"
-        | "EGATE2" => {
+        | "EGATE2" | "EGATE3" | "EGATE5" => {
             // Honest ADI envelope (the "Common ADI Header" of ionescu007):
             // {buffer_ptr@+0, u32 len@+8, u32 cursor@+0xC, out_ptr@+0x10,
             //  u32 out_len@+0x18, u32 flags@+0x1C}. Independent knobs:
@@ -883,7 +911,7 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
             );
         }
     }
-    if model == "EGATE2" || model == "EGATE3" || model == "EVAL" {
+    if model == "EGATE2" || model == "EGATE3" || model == "EVAL" || model == "EGATE5" {
         let (n, off, rip, base, rsi, rdi) = unsafe {
             (
                 FAULT_N, FAULT_OFF, FAULT_RIP, PROBE_BASE, FAULT_RSI, FAULT_RDI,
@@ -892,6 +920,30 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
         eprintln!(
             "[feed] EGATE2 faults={n} off={off:#x} rip={rip:#x} rsi={rsi:#x} rdi={rdi:#x} (base={base:#x})"
         );
+        let (tot, naddr, mprot) = unsafe { (FAULT_TOTAL, FAULT_ADDR_N, MPROT_N) };
+        eprintln!("[feed] {model} fault_total={tot} mprotect_calls={mprot}");
+        // A copied snapshot: iterating the static directly is a denied
+        // `static_mut_refs` borrow, and a plain range loop trips
+        // `needless_range_loop`. Copying sidesteps both.
+        let snap: [u64; 8] = unsafe {
+            let p = std::ptr::addr_of!(FAULT_ADDR) as *const u64;
+            let mut s = [0u64; 8];
+            for (i, slot) in s.iter_mut().enumerate() {
+                *slot = std::ptr::read_volatile(p.add(i));
+            }
+            s
+        };
+        let (pb, p2) = unsafe { (PROBE_BASE, PROBE2_BASE) };
+        for (i, &a) in snap.iter().enumerate().take(naddr.min(8)) {
+            let tag = if a >= pb && a < pb + 0x1000 {
+                "PROBE_BASE"
+            } else if p2 != 0 && a >= p2 && a < p2 + 0x1000 {
+                "PROBE2_BASE"
+            } else {
+                "OTHER"
+            };
+            eprintln!("[feed]   fault[{i}] addr={a:#x} ({tag})");
+        }
     }
     let scpim = unsafe { std::slice::from_raw_parts(rcp.cast_const(), CPIM_CAP) };
     let sslots = unsafe { std::slice::from_raw_parts(rslots.cast_const(), 16) };
