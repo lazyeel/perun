@@ -1,0 +1,6 @@
+# The Apple Music libraries and the extracted Android sysroot are inputs, not
+# sources: the .so files are Apple's and are never vendored here.
+*.so
+/lib64/
+/bin/
+build/
