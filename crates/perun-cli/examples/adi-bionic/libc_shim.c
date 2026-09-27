@@ -197,8 +197,22 @@ int *__errno(void) {
     return f();
 }
 
-// Bionic-only symbols that libc++_shared.so needs and glibc does not have.
-// __sF is a CFI alias target (never actually called through); the abort
-// hook is only reached on an assert failure.
-void __sF(void) {}
-int android_set_abort_message(const char *msg) { (void)msg; return 0; }
+// Bionic-only symbols that libc++_shared.so and libCoreADI.so need and glibc
+// does not have.
+//
+// They must be marked USED: a shared object built with -shared lets the
+// linker drop definitions that nothing in the link references, and it does --
+// __system_property_get vanished from the export table that way. A version
+// script cannot rescue a symbol that was never emitted.
+#define ADI_KEEP __attribute__((used, retain))
+
+// CFI alias target; never actually called through.
+ADI_KEEP void __sF(void) {}
+// Only reached on an assert failure.
+ADI_KEEP int android_set_abort_message(const char *msg) { (void)msg; return 0; }
+// Android reads build properties; an empty value is the honest answer here.
+ADI_KEEP int __system_property_get(const char *name, char *value) {
+    (void)name;
+    if (value) { value[0] = 0; }
+    return 0;
+}
