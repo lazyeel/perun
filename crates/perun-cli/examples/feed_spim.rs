@@ -17,6 +17,50 @@ type ExportFn = unsafe extern "win64" fn(u64, u64, u64, u64) -> u64;
 const KNOWN: [u64; 3] = [0xffff5016, 0xffff5026, 0xffff5036];
 const CPIM_CAP: usize = 4096;
 
+// ── PROT_NONE probe: the first field the guest reads out of the gate object ──
+static mut FAULT_RIP: u64 = 0;
+static mut FAULT_OFF: u64 = u64::MAX;
+static mut FAULT_N: usize = 0;
+static mut PROBE_BASE: u64 = 0;
+static mut PROBE_LEN: usize = 0;
+
+unsafe extern "C" fn probe_fault(_sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
+    unsafe {
+        let addr = (*info).si_addr() as u64;
+        let uc = ctx.cast::<libc::ucontext_t>();
+        let rip = *(*uc).uc_mcontext.gregs.as_ptr().add(libc::REG_RIP as usize) as u64;
+        if FAULT_N == 0 {
+            FAULT_OFF = addr.wrapping_sub(PROBE_BASE);
+            FAULT_RIP = rip;
+        }
+        FAULT_N += 1;
+        // Let the faulting instruction retry: the page becomes readable.
+        libc::mprotect(
+            PROBE_BASE as *mut libc::c_void,
+            PROBE_LEN,
+            libc::PROT_READ | libc::PROT_WRITE,
+        );
+    }
+}
+
+fn probe_fault_install() {
+    unsafe {
+        // Same altstack requirement as the crash probe: the guest leaves RSP
+        // wherever it likes, so SA_ONSTACK without a stack is a fault in the
+        // fault handler.
+        static mut ALT: [u8; 64 * 1024] = [0; 64 * 1024];
+        let mut ss: libc::stack_t = std::mem::zeroed();
+        ss.ss_sp = std::ptr::addr_of_mut!(ALT).cast();
+        ss.ss_size = 64 * 1024;
+        libc::sigaltstack(&raw const ss, std::ptr::null_mut());
+        let mut act: libc::sigaction = std::mem::zeroed();
+        act.sa_sigaction = probe_fault as *const () as usize;
+        act.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
+        libc::sigemptyset(&raw mut act.sa_mask);
+        libc::sigaction(libc::SIGSEGV, &raw const act, std::ptr::null_mut());
+    }
+}
+
 fn w64(mem: &mut [u8], off: usize, v: u64) {
     mem[off..off + 8].copy_from_slice(&v.to_le_bytes());
 }
@@ -480,7 +524,8 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
             watches.push((rotpn.cast_const(), 8));
             layout_b(rpacket as u64, 0)
         }
-        "ENV" | "ENVL" | "ENVO" | "ENVF" | "ENVI" | "ENVH" | "ENVS" | "ECM" | "EGATE" => {
+        "ENV" | "ENVL" | "ENVO" | "ENVF" | "ENVI" | "ENVH" | "ENVS" | "ECM" | "EGATE"
+        | "EGATE2" => {
             // Honest ADI envelope (the "Common ADI Header" of ionescu007):
             // {buffer_ptr@+0, u32 len@+8, u32 cursor@+0xC, out_ptr@+0x10,
             //  u32 out_len@+0x18, u32 flags@+0x1C}. Independent knobs:
@@ -517,7 +562,7 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
                 // Common ADI Header is the second. opv carries the magic.
                 split = Some((opv, rstruct as u64));
             }
-            if model == "ENVS" || model == "ECM" || model == "EGATE" {
+            if model == "ENVS" || model == "ECM" || model == "EGATE" || model == "EGATE2" {
                 unsafe {
                     std::ptr::write_bytes(rbuf, 0, 0x400);
                 }
@@ -622,6 +667,37 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
     unsafe {
         std::ptr::copy_nonoverlapping(blob.as_ptr(), rstruct, blob.len());
     }
+    if model == "EGATE2" {
+        // A dedicated page, mapped PROT_NONE, so the guest's first read out of
+        // the gate object faults and hands us (offset, RIP) of the instruction
+        // that did it. 0x28 = 40 bytes = 5 qwords.
+        probe_fault_install();
+        let page = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                0x1000,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(page, libc::MAP_FAILED, "mmap for the probe object failed");
+        unsafe {
+            PROBE_BASE = page as u64;
+            PROBE_LEN = 0x1000;
+            FAULT_N = 0;
+            FAULT_OFF = u64::MAX;
+            std::ptr::write_bytes(page, 0, 0x28);
+            libc::mprotect(page, 0x1000, libc::PROT_NONE);
+        }
+        let g = unsafe { image.base().add(0x19dda0) as *mut u64 };
+        unsafe { std::ptr::write_volatile(g, page as u64) };
+        eprintln!(
+            "[feed] EGATE2 object at {page:p}, page PROT_NONE, gate -> {:#x}",
+            page as u64
+        );
+    }
     if model == "EGATE" {
         // HANDOVER 4.5: the gate compares qword at .data RVA 0x19dda0 against
         // 0 and, in a working run, that slot holds a host pointer to a 0x28-byte
@@ -640,7 +716,7 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
         Some((a0, a1)) => unsafe { op(a0, a1, 0, 0) },
         None => unsafe { op(rstruct as u64, rstruct as u64, 0, 0) },
     };
-    if model.starts_with("ENV") || model == "ECM" || model == "EGATE" {
+    if model.starts_with("ENV") || model == "ECM" || model == "EGATE" || model == "EGATE2" {
         // Read the envelope fields and the output buffer via the HOST-captured
         // pointers: the guest mutates env+0x0C, so a field read after the call
         // can be a wild pointer. out buffer count is over 64 KiB.
@@ -660,6 +736,10 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
                  OUT_nonzero={nonzero} OUT_lead_zeros={lead} rc={r:#x}"
             );
         }
+    }
+    if model == "EGATE2" {
+        let (n, off, rip, base) = unsafe { (FAULT_N, FAULT_OFF, FAULT_RIP, PROBE_BASE) };
+        eprintln!("[feed] EGATE2 faults={n} first_off={off:#x} rip={rip:#x} (base={base:#x})");
     }
     let scpim = unsafe { std::slice::from_raw_parts(rcp.cast_const(), CPIM_CAP) };
     let sslots = unsafe { std::slice::from_raw_parts(rslots.cast_const(), 16) };
