@@ -169,6 +169,128 @@ fn exe_base() -> u64 {
     lo
 }
 
+// ── Dynamic dispatch tracer (FEED_TRACE=1) ──
+//
+// Plant int3 on every `lea rcx,[rip+TBL]` that targets the shared state table,
+// catch SIGTRAP, record the registers, restore the opcode and rewind RIP.
+//
+// The kernel advances RIP *past* an int3, so a breakpoint planted at RVA A
+// traps with RIP == A+1. Matching A silently misses, leaves the 0xCC in
+// place, and lets the guest resume mid-instruction -> SIGILL. Rewinding to A
+// makes the guest re-execute the real instruction from its first byte.
+static mut TRACE_N: usize = 0;
+static mut TRACE_RIP: [u64; 4096] = [0; 4096];
+static mut TRACE_EDX: [u64; 4096] = [0; 4096];
+static mut TRACE_RAX: [u64; 4096] = [0; 4096];
+static mut TRACE_R9: [u64; 4096] = [0; 4096];
+static mut TRACE_SITE: [u64; 4096] = [0; 4096];
+
+unsafe extern "C" fn trace_trap(_sig: i32, _i: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
+    unsafe {
+        let uc = ctx.cast::<libc::ucontext_t>();
+        let g = (*uc).uc_mcontext.gregs.as_ptr();
+        let rip = *g.add(libc::REG_RIP as usize) as u64;
+        let site = rip.wrapping_sub(1); // RIP is A+1
+        // Restore the planted byte at `site`, then rewind so the real
+        // instruction re-executes from its first byte.
+        if site != 0 {
+            libc::mprotect(
+                (site & !0xFFF) as *mut libc::c_void,
+                0x1000,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+            );
+            std::ptr::write_volatile(site as *mut u8, 0x48);
+        }
+        *(*uc)
+            .uc_mcontext
+            .gregs
+            .as_mut_ptr()
+            .add(libc::REG_RIP as usize) = site as i64;
+        let n = std::ptr::read_volatile(&raw const TRACE_N);
+        if n < 4096 {
+            // One helper for every field: `&raw mut ARR[i]` and then a shared
+            // reference to it is a denied `static_mut_refs` borrow, and
+            // `*mut u64 + usize` is not a pointer add.
+            unsafe fn put(arr: *mut u64, i: usize, v: u64) {
+                unsafe { std::ptr::write_volatile(arr.add(i), v) };
+            }
+            let rip_p = std::ptr::addr_of!(TRACE_RIP) as *mut u64;
+            let edx_p = std::ptr::addr_of!(TRACE_EDX) as *mut u64;
+            let rax_p = std::ptr::addr_of!(TRACE_RAX) as *mut u64;
+            let r9_p = std::ptr::addr_of!(TRACE_R9) as *mut u64;
+            let site_p = std::ptr::addr_of!(TRACE_SITE) as *mut u64;
+            put(rip_p, n, site);
+            put(edx_p, n, *g.add(libc::REG_RDX as usize) as u64);
+            put(rax_p, n, *g.add(libc::REG_RAX as usize) as u64);
+            put(r9_p, n, *g.add(libc::REG_R9 as usize) as u64);
+            put(site_p, n, site);
+            std::ptr::write_volatile(&raw mut TRACE_N, n + 1);
+        }
+    }
+}
+
+fn tracer_install(image_base: u64) {
+    unsafe {
+        // SA_ONSTACK needs a real altstack: the guest leaves RSP wherever it
+        // likes, so a handler on the guest stack is a fault in the handler.
+        static mut ALT: [u8; 64 * 1024] = [0; 64 * 1024];
+        let mut ss: libc::stack_t = std::mem::zeroed();
+        ss.ss_sp = std::ptr::addr_of_mut!(ALT).cast();
+        ss.ss_size = 64 * 1024;
+        libc::sigaltstack(&raw const ss, std::ptr::null_mut());
+        let mut act: libc::sigaction = std::mem::zeroed();
+        act.sa_sigaction = trace_trap as *const () as usize;
+        act.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
+        libc::sigemptyset(&raw mut act.sa_mask);
+        libc::sigaction(libc::SIGTRAP, &raw const act, std::ptr::null_mut());
+    }
+    // Arm every site: `48 8D 0D disp32` whose target is the state table.
+    const TBL: u64 = 0x15fc90;
+    let mut armed = 0usize;
+    let text = 0x1000u64..0x1000 + 0x140b70u64;
+    for rva in text {
+        // Read the instruction through the exact address, but mprotect and
+        // write through the page base -- masking the instruction pointer to
+        // the page would read the page header, not the opcode.
+        let at = (image_base + rva) as *const u8;
+        let b = unsafe { std::slice::from_raw_parts(at, 7) };
+        if b[0] != 0x48 || b[1] != 0x8D || b[2] != 0x0D {
+            continue;
+        }
+        let disp = i32::from_le_bytes([b[3], b[4], b[5], b[6]]) as i64;
+        let target = rva as i64 + 7 + disp;
+        if target != TBL as i64 {
+            continue;
+        }
+        unsafe {
+            libc::mprotect(
+                ((image_base + rva) & !0xFFF) as *mut libc::c_void,
+                0x1000,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+            );
+            std::ptr::write_volatile(at as *mut u8, 0xCC);
+        }
+        armed += 1;
+    }
+    eprintln!("[trace] armed {armed} dispatch sites, table {TBL:#x}");
+}
+
+fn trace_report() {
+    let n = unsafe { std::ptr::read_volatile(&raw const TRACE_N) };
+    eprintln!("[trace] {n} transitions:");
+    for i in 0..n.min(4096) {
+        let rip =
+            unsafe { std::ptr::read_volatile(std::ptr::addr_of!(TRACE_RIP).cast::<u64>().add(i)) };
+        let edx =
+            unsafe { std::ptr::read_volatile(std::ptr::addr_of!(TRACE_EDX).cast::<u64>().add(i)) };
+        let rax =
+            unsafe { std::ptr::read_volatile(std::ptr::addr_of!(TRACE_RAX).cast::<u64>().add(i)) };
+        let r9 =
+            unsafe { std::ptr::read_volatile(std::ptr::addr_of!(TRACE_R9).cast::<u64>().add(i)) };
+        eprintln!("[trace] #{i} rva={rip:#x} rdx={edx:#x} rax={rax:#x} r9={r9:#x}");
+    }
+}
+
 fn sampler_start(base: u64) {
     let exe = exe_base();
     eprintln!("[samp] exe_base={exe:#x} guest_image_base={base:#x}");
@@ -961,6 +1083,9 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
     if std::env::var_os("FEED_SAMPLE").is_some() {
         sampler_start(image.base() as u64);
     }
+    if std::env::var_os("FEED_TRACE").is_some() {
+        tracer_install(image.base() as u64);
+    }
     if model == "TWOSTEP" {
         // Two calls in ONE process, in the order that actually tests anything.
         //
@@ -1130,6 +1255,9 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
             };
             eprintln!("[feed]   fault[{i}] addr={a:#x} ({tag})");
         }
+    }
+    if std::env::var_os("FEED_TRACE").is_some() {
+        trace_report();
     }
     let scpim = unsafe { std::slice::from_raw_parts(rcp.cast_const(), CPIM_CAP) };
     let sslots = unsafe { std::slice::from_raw_parts(rslots.cast_const(), 16) };
