@@ -132,7 +132,46 @@ unsafe extern "C" fn samp_alarm(_sig: i32, _i: *mut libc::siginfo_t, ctx: *mut l
     }
 }
 
+/// Lowest mapping of our own executable, so the sampler can report an RVA
+/// instead of an ASLR-dependent address. Without it every sample needs the
+/// process maps re-read by hand before it can be symbolized, and a sample
+/// outside the guest image is indistinguishable from one inside it.
+fn exe_base() -> u64 {
+    let Ok(exe) = std::env::current_exe() else {
+        return 0;
+    };
+    let Ok(maps) = std::fs::read_to_string("/proc/self/maps") else {
+        return 0;
+    };
+    let want = exe.to_string_lossy().into_owned();
+    let mut lo = 0u64;
+    for line in maps.lines() {
+        // "addr-lo perms off dev inode path" -- six fields, and the path is
+        // everything after the fifth, so split on the LAST space and keep the
+        // remainder whole: a path may contain spaces.
+        let Some((head, path)) = line.rsplit_once(' ') else {
+            continue;
+        };
+        if path.trim() != want {
+            continue;
+        }
+        let Some(range) = head.split_whitespace().next() else {
+            continue;
+        };
+        let Some(addr) = range.split_once('-').map(|(a, _)| a) else {
+            continue;
+        };
+        let Ok(v) = u64::from_str_radix(addr, 16) else {
+            continue;
+        };
+        lo = if lo == 0 || v < lo { v } else { lo };
+    }
+    lo
+}
+
 fn sampler_start(base: u64) {
+    let exe = exe_base();
+    eprintln!("[samp] exe_base={exe:#x} guest_image_base={base:#x}");
     unsafe {
         static mut ALT: [u8; 64 * 1024] = [0; 64 * 1024];
         let mut ss: libc::stack_t = std::mem::zeroed();
@@ -170,10 +209,21 @@ fn sampler_start(base: u64) {
             }
         }
         hist.sort_by_key(|a| std::cmp::Reverse(a.1));
-        eprintln!("[samp] {n} samples, top RIPs (RVA, count, in-image?):");
+        eprintln!("[samp] {n} samples, top RIPs (exe RVA, guest RVA, count, where):");
         for (rip, c) in hist.iter().take(12) {
-            let rva = rip.wrapping_sub(base);
-            eprintln!("[samp]   {rip:#x}  rva={rva:#x}  n={c}");
+            let rva = rip.wrapping_sub(exe);
+            let grva = rip.wrapping_sub(base);
+            // Both bases are printable, so a subtraction is meaningless. Compare
+            // each against its own image size instead: guest first, because a
+            // sample inside the guest is the one worth chasing.
+            let where_ = if base != 0 && *rip >= base && *rip < base + 0x200_000 {
+                "GUEST"
+            } else if exe != 0 && *rip >= exe && *rip < exe + 0x200_000 {
+                "HOST"
+            } else {
+                "other (libc/vdso/anon)"
+            };
+            eprintln!("[samp]   {rip:#x}  exe_rva={rva:#x}  guest_rva={grva:#x}  n={c}  {where_}");
         }
         unsafe { libc::_exit(9) };
     });
@@ -643,7 +693,7 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
             layout_b(rpacket as u64, 0)
         }
         "ENV" | "ENVL" | "ENVO" | "ENVF" | "ENVI" | "ENVH" | "ENVS" | "ECM" | "EGATE"
-        | "EGATE2" | "EGATE3" | "EGATE5" => {
+        | "EGATE2" | "EGATE3" | "EGATE5" | "EGATE6" | "EGATE7" | "EGATE8" => {
             // Honest ADI envelope (the "Common ADI Header" of ionescu007):
             // {buffer_ptr@+0, u32 len@+8, u32 cursor@+0xC, out_ptr@+0x10,
             //  u32 out_len@+0x18, u32 flags@+0x1C}. Independent knobs:
@@ -790,7 +840,14 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
     unsafe {
         std::ptr::copy_nonoverlapping(blob.as_ptr(), rstruct, blob.len());
     }
-    if model == "EGATE2" || model == "EGATE3" || model == "EVAL" || model == "EGATE5" {
+    if model == "EGATE2"
+        || model == "EGATE3"
+        || model == "EVAL"
+        || model == "EGATE5"
+        || model == "EGATE6"
+        || model == "EGATE7"
+        || model == "EGATE8"
+    {
         // A dedicated page, mapped PROT_NONE, so the guest's first read out of
         // the gate object faults and hands us (offset, RIP) of the instruction
         // that did it. 0x28 = 40 bytes = 5 qwords.
@@ -855,6 +912,29 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
                 eprintln!("[feed] EGATE3 [+0x10] -> {m2:p} (readable)");
             }
         }
+        if model == "EGATE6" || model == "EGATE7" || model == "EGATE8" {
+            // A REAL synchronization object, not a page the shim has never
+            // heard of. Every other lane hands the shim a value it cannot
+            // resolve, and the shim answers WAIT_OBJECT_0 at once -- which is a
+            // fiction, because on Windows an unsignaled event would park this
+            // thread forever. EGATE6 is that honest blocking case, EGATE7 the
+            // same object already signaled, so the pair separates "the guest
+            // needs the wait to succeed" from "the guest needs the wait to
+            // succeed against something real".
+            let h = match model {
+                "EGATE6" => perun_shims::sync::host_event(false, false),
+                "EGATE7" => perun_shims::sync::host_event(false, true),
+                _ => perun_shims::sync::host_event(true, true),
+            };
+            unsafe { std::ptr::write_unaligned(page.add(0x10).cast::<u64>(), h as u64) };
+            eprintln!(
+                "[feed] {model} [+0x10] -> real event handle {:#x} \
+                 (signaled={} manual_reset={})",
+                h as usize,
+                model != "EGATE6",
+                model == "EGATE8"
+            );
+        }
         // Now protect, and only now.
         unsafe { libc::mprotect(page, 0x1000, libc::PROT_NONE) };
         let g = unsafe { image.base().add(0x19dda0) as *mut u64 };
@@ -890,6 +970,9 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
         || model == "EGATE"
         || model == "EGATE2"
         || model == "EGATE3"
+        || model == "EGATE6"
+        || model == "EGATE7"
+        || model == "EGATE8"
     {
         // Read the envelope fields and the output buffer via the HOST-captured
         // pointers: the guest mutates env+0x0C, so a field read after the call
@@ -911,7 +994,14 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
             );
         }
     }
-    if model == "EGATE2" || model == "EGATE3" || model == "EVAL" || model == "EGATE5" {
+    if model == "EGATE2"
+        || model == "EGATE3"
+        || model == "EVAL"
+        || model == "EGATE5"
+        || model == "EGATE6"
+        || model == "EGATE7"
+        || model == "EGATE8"
+    {
         let (n, off, rip, base, rsi, rdi) = unsafe {
             (
                 FAULT_N, FAULT_OFF, FAULT_RIP, PROBE_BASE, FAULT_RSI, FAULT_RDI,

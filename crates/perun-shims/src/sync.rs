@@ -83,6 +83,25 @@ win32_api! {
     }}
 }
 
+/// Build a real event object and hand back its handle, so a harness can put a
+/// genuine synchronization object where the guest expects one.
+///
+/// The guest's first move inside the gate object is a blocking
+/// `WaitForSingleObject([+0x10], INFINITE)`. An unknown handle makes that shim
+/// answer `WAIT_OBJECT_0` at once, which is a fiction: on Windows an unsignaled
+/// event would park the thread. This constructor is the only way to give the
+/// guest a handle the shim really has to wait on, and therefore the only way to
+/// find out whether the guest depends on that answer.
+pub fn host_event(manual_reset: bool, signaled: bool) -> HANDLE {
+    handle_new(HostKind::Event(EventState {
+        state: std::sync::Mutex::new(EventFlags {
+            manual_reset,
+            signaled,
+        }),
+        cond: Condvar::new(),
+    }))
+}
+
 win32_api! {
     /// HANDLE CreateEventA(LPSECURITY_ATTRIBUTES, BOOL, BOOL, LPCSTR);
     unsafe extern "win64" fn CreateEventA(
