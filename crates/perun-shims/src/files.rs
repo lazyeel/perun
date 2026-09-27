@@ -56,7 +56,7 @@ win32_api! {
     ) -> HANDLE { unsafe {
         let _ = (sa, template);
         let wide = read_wide(name);
-        let path = String::from_utf16_lossy(&wide);
+        let path = to_unix_path(&String::from_utf16_lossy(&wide));
 
         if std::env::var("PERUN_TRACE").is_ok() {
             eprintln!(
@@ -266,10 +266,19 @@ win32_api! {
     }}
 }
 
+/// Windows paths arrive with backslash separators. A guest mixes the shell32
+/// helpers (which normalise) with the file APIs (which did not), so the same
+/// logical directory got two different names on disk: `CreateDirectoryW`
+/// created a directory whose *name* literally contained `\`, and
+/// `PathIsDirectoryW` then failed to find it. Normalise once, everywhere.
+fn to_unix_path(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
 win32_api! {
     /// BOOL DeleteFileW(LPCWSTR);
     unsafe extern "win64" fn DeleteFileW(name: LPCWSTR) -> BOOL { unsafe {
-        let path = String::from_utf16_lossy(&read_wide(name));
+        let path = to_unix_path(&String::from_utf16_lossy(&read_wide(name)));
         let c = std::ffi::CString::new(path).unwrap_or_default();
         if libc::unlink(c.as_ptr()) == 0 {
             TRUE
@@ -285,7 +294,7 @@ win32_api! {
         name: LPCWSTR,
         _sa: *const SECURITY_ATTRIBUTES,
     ) -> BOOL { unsafe {
-        let path = String::from_utf16_lossy(&read_wide(name));
+        let path = to_unix_path(&String::from_utf16_lossy(&read_wide(name)));
         let c = std::ffi::CString::new(path).unwrap_or_default();
         if libc::mkdir(c.as_ptr(), 0o755) == 0 {
             TRUE
@@ -319,7 +328,7 @@ pub const INVALID_FILE_ATTRIBUTES: DWORD = 0xFFFF_FFFF;
 win32_api! {
     /// DWORD GetFileAttributesW(LPCWSTR);
     unsafe extern "win64" fn GetFileAttributesW(name: LPCWSTR) -> DWORD { unsafe {
-        let path = String::from_utf16_lossy(&read_wide(name));
+        let path = to_unix_path(&String::from_utf16_lossy(&read_wide(name)));
         let attrs = attributes_for_path(path.as_bytes());
         if std::env::var("PERUN_TRACE").is_ok() {
             eprintln!("[perun] GetFileAttributesW({path:?}) -> {attrs:#x}");
