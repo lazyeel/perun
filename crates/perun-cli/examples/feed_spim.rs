@@ -66,6 +66,84 @@ fn probe_fault_install() {
     }
 }
 
+// ── RIP sampler: where is a hanging guest actually spending its time? ──
+static mut SAMP: [u64; 4096] = [0; 4096];
+static mut SAMP_N: usize = 0;
+
+unsafe extern "C" fn samp_alarm(_sig: i32, _i: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
+    unsafe {
+        let uc = ctx.cast::<libc::ucontext_t>();
+        let rip = *(*uc).uc_mcontext.gregs.as_ptr().add(libc::REG_RIP as usize) as u64;
+        let n = &raw mut SAMP_N;
+        if *n < 4096 {
+            SAMP[*n] = rip;
+            *n += 1;
+        }
+        // Print from the handler itself: if these lines do not appear, SIGALRM
+        // is not being delivered and nothing downstream is worth reading.
+        if (*n).is_multiple_of(25) {
+            let mut m: Vec<u8> = b"[samp] sample ".to_vec();
+            m.push(b'0' + ((*n / 25) % 10) as u8);
+            m.extend_from_slice(b" rip=");
+            libc::write(2, m.as_ptr().cast(), m.len());
+            let mut hex = [0u8; 16];
+            for (i, slot) in hex.iter_mut().enumerate() {
+                let d = ((rip >> (60 - 4 * i)) & 0xF) as u8;
+                *slot = if d < 10 { b'0' + d } else { b'a' + d - 10 };
+            }
+            libc::write(2, hex.as_ptr().cast(), 16);
+            libc::write(2, b"\n".as_ptr().cast(), 1);
+        }
+    }
+}
+
+fn sampler_start(base: u64) {
+    unsafe {
+        static mut ALT: [u8; 64 * 1024] = [0; 64 * 1024];
+        let mut ss: libc::stack_t = std::mem::zeroed();
+        ss.ss_sp = std::ptr::addr_of_mut!(ALT).cast();
+        ss.ss_size = 64 * 1024;
+        libc::sigaltstack(&raw const ss, std::ptr::null_mut());
+        let mut act: libc::sigaction = std::mem::zeroed();
+        act.sa_sigaction = samp_alarm as *const () as usize;
+        act.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK | libc::SA_RESTART;
+        libc::sigemptyset(&raw mut act.sa_mask);
+        libc::sigaction(libc::SIGALRM, &raw const act, std::ptr::null_mut());
+        let it = libc::itimerval {
+            it_interval: libc::timeval {
+                tv_sec: 0,
+                tv_usec: 20_000,
+            },
+            it_value: libc::timeval {
+                tv_sec: 0,
+                tv_usec: 20_000,
+            },
+        };
+        libc::setitimer(libc::ITIMER_REAL, &raw const it, std::ptr::null_mut());
+    }
+    // Watchdog: the guest hangs, so nothing else will ever print.
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(5000));
+        let n = unsafe { SAMP_N };
+        let mut hist: Vec<(u64, usize)> = Vec::new();
+        let sbuf = std::ptr::addr_of!(SAMP);
+        for i in 0..n {
+            let rip = unsafe { std::ptr::read_volatile(sbuf.cast::<u64>().add(i)) };
+            match hist.iter_mut().find(|(r, _)| *r == rip) {
+                Some(e) => e.1 += 1,
+                None => hist.push((rip, 1)),
+            }
+        }
+        hist.sort_by_key(|a| std::cmp::Reverse(a.1));
+        eprintln!("[samp] {n} samples, top RIPs (RVA, count, in-image?):");
+        for (rip, c) in hist.iter().take(12) {
+            let rva = rip.wrapping_sub(base);
+            eprintln!("[samp]   {rip:#x}  rva={rva:#x}  n={c}");
+        }
+        unsafe { libc::_exit(9) };
+    });
+}
+
 fn w64(mem: &mut [u8], off: usize, v: u64) {
     mem[off..off + 8].copy_from_slice(&v.to_le_bytes());
 }
@@ -742,6 +820,9 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
         unsafe { std::ptr::write_volatile(g, obj as u64) };
         let v = unsafe { std::ptr::read_volatile(g) };
         eprintln!("[feed] EGATE gate@0x19dda0 = {v:#x} (obj {obj:p})");
+    }
+    if std::env::var_os("FEED_SAMPLE").is_some() {
+        sampler_start(image.base() as u64);
     }
     let r = match split {
         Some((a0, a1)) => unsafe { op(a0, a1, 0, 0) },
