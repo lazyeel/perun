@@ -693,7 +693,7 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
             layout_b(rpacket as u64, 0)
         }
         "ENV" | "ENVL" | "ENVO" | "ENVF" | "ENVI" | "ENVH" | "ENVS" | "ECM" | "EGATE"
-        | "EGATE2" | "EGATE3" | "EGATE5" | "EGATE6" | "EGATE7" | "EGATE8" => {
+        | "EGATE2" | "EGATE3" | "EGATE5" | "EGATE6" | "EGATE7" | "EGATE8" | "TWOSTEP" => {
             // Honest ADI envelope (the "Common ADI Header" of ionescu007):
             // {buffer_ptr@+0, u32 len@+8, u32 cursor@+0xC, out_ptr@+0x10,
             //  u32 out_len@+0x18, u32 flags@+0x1C}. Independent knobs:
@@ -960,6 +960,102 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
     }
     if std::env::var_os("FEED_SAMPLE").is_some() {
         sampler_start(image.base() as u64);
+    }
+    if model == "TWOSTEP" {
+        // Two calls in ONE process, in the order that actually tests anything.
+        //
+        // Step 1 must NOT be an empty envelope: input_len < 4 makes the
+        // dispatcher bail with -45034 in the prolog, before 0x19dda0 is ever
+        // read, so a "first call" like that never populates the slot. Step 1
+        // therefore passes the same valid 347-byte packet as step 2 -- the
+        // point is only that the FIRST call is the one that creates the
+        // object, and step 2 is the one that runs against it.
+        //
+        // Step 2 then re-calls with a freshly written envelope (cursor reset to
+        // 0) so the second call sees the object the first one left behind.
+        let gate = unsafe { image.base().add(0x19dda0) as *mut u64 };
+
+        let dump_object = |tag: &str| {
+            unsafe {
+                let p = std::ptr::read_volatile(gate);
+                eprintln!("[twostep] {tag}: 0x19dda0 = {p:#x}");
+                if p == 0 {
+                    eprintln!("[twostep] {tag}: slot is NULL -- no object");
+                    return;
+                }
+                let o = p as *const u64;
+                for k in 0..5 {
+                    let v = std::ptr::read_volatile(o.add(k));
+                    eprintln!("[twostep] {tag}: obj[{k}] (+0x{:02x}) = {v:#018x}", k * 8);
+                }
+                // What lives behind +0x10 and +0x20 -- if they are host
+                // pointers into shim allocations, say so and show the bytes.
+                for (name, idx) in [("ptrA+0x10", 2usize), ("ptrC+0x20", 4usize)] {
+                    let v = std::ptr::read_volatile(o.add(idx));
+                    eprintln!("[twostep] {tag}: {name} = {v:#x}");
+                    if v == 0 {
+                        continue;
+                    }
+                    // Which shim created it? A bare hexdump cannot tell "our
+                    // allocation" from "the guest's", and guessing here is how
+                    // the last conclusions went wrong. Ask the process maps.
+                    let maps = std::fs::read_to_string("/proc/self/maps").unwrap_or_default();
+                    let mut owner = "UNMAPPED".to_string();
+                    for line in maps.lines() {
+                        let Some((range, perms)) = line.split_once(' ') else {
+                            continue;
+                        };
+                        let Some(path) = line.rsplit_once(' ').map(|(_, p)| p.trim()) else {
+                            continue;
+                        };
+                        let Some((lo_s, hi_s)) = range.split_once('-') else {
+                            continue;
+                        };
+                        let (Ok(lo), Ok(hi)) =
+                            (u64::from_str_radix(lo_s, 16), u64::from_str_radix(hi_s, 16))
+                        else {
+                            continue;
+                        };
+                        if v >= lo && v < hi {
+                            owner = format!("{path} {perms} +{:#x} of {:#x}", v - lo, hi - lo);
+                            break;
+                        }
+                    }
+                    eprintln!("[twostep] {tag}: {name} owner: {owner}");
+                    let b = v as *const u8;
+                    eprintln!(
+                        "[twostep] {tag}: {name}[0..32] = {}",
+                        hex(std::slice::from_raw_parts(b, 32))
+                    );
+                }
+            }
+        };
+
+        // ── step 1: valid packet, slot untouched by us ──
+        unsafe { std::ptr::copy_nonoverlapping(blob.as_ptr(), rstruct, blob.len()) };
+        eprintln!(
+            "[twostep] step 1: valid envelope (blob {} bytes, input_len={})",
+            blob.len(),
+            spim.len()
+        );
+        let r1 = unsafe { op(rstruct as u64, rstruct as u64, 0, 0) };
+        eprintln!("[twostep] step 1 returned {r1:#x} ({})", (r1 as i32));
+        dump_object("after step 1");
+
+        // ── step 2: same shape, cursor back to 0 ──
+        let mut env2 = blob.clone();
+        env2[0x0C..0x10].copy_from_slice(&0u32.to_le_bytes());
+        unsafe { std::ptr::copy_nonoverlapping(env2.as_ptr(), rstruct, env2.len()) };
+        eprintln!("[twostep] step 2: same envelope, cursor reset to 0");
+        let r2 = unsafe { op(rstruct as u64, rstruct as u64, 0, 0) };
+        eprintln!("[twostep] step 2 returned {r2:#x} ({})", (r2 as i32));
+        dump_object("after step 2");
+        println!(
+            "TWOSTEP step1={r1:#x} step2={r2:#x} same={} delta={}",
+            r1 == r2,
+            (r2 as i64).wrapping_sub(r1 as i64)
+        );
+        return 0;
     }
     let r = match split {
         Some((a0, a1)) => unsafe { op(a0, a1, 0, 0) },
