@@ -762,10 +762,15 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
     unsafe {
         std::ptr::copy_nonoverlapping(blob.as_ptr(), rstruct, blob.len());
     }
-    if model == "EGATE2" || model == "EGATE3" {
+    if model == "EGATE2" || model == "EGATE3" || model == "EVAL" || model == "EGATE5" {
         // A dedicated page, mapped PROT_NONE, so the guest's first read out of
         // the gate object faults and hands us (offset, RIP) of the instruction
         // that did it. 0x28 = 40 bytes = 5 qwords.
+        //
+        // Every write into the object happens BEFORE the mprotect. Writing
+        // after it faults in the HOST, probe_fault catches that, unprotects and
+        // retries -- a self-inflicted loop that is indistinguishable from a
+        // hung guest. That was the previous EGATE3 "hang"; it was ours.
         probe_fault_install();
         let page = unsafe {
             libc::mmap(
@@ -784,12 +789,19 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
             FAULT_N = 0;
             FAULT_OFF = u64::MAX;
             std::ptr::write_bytes(page, 0, 0x28);
-            libc::mprotect(page, 0x1000, libc::PROT_NONE);
         }
-        if model == "EGATE3" {
-            // Second stage: put a real, readable pointer at [+0x10] and see
-            // whether the fault leaves the object entirely. It should, if the
-            // field is a HANDLE consumed by WaitForSingleObject.
+        // What to put at [+0x10], chosen by the lane.
+        if model == "EVAL" {
+            // [+0x10] is the first field the guest reads and it is handed
+            // straight to WaitForSingleObject, so sweep the word itself. opv
+            // carries the candidate, sign-extended from 32 bits.
+            let v = opv as i64 as u64;
+            unsafe { std::ptr::write_unaligned(page.add(0x10).cast::<u64>(), v) };
+            eprintln!("[feed] EVAL [+0x10] = {v:#018x}");
+        }
+        if model == "EGATE3" || model == "EGATE5" {
+            // A real, plain-readable page. No PROT_NONE here on purpose: a
+            // second PROT_NONE is what produced the phantom hang.
             let m2 = unsafe {
                 libc::mmap(
                     std::ptr::null_mut(),
@@ -801,15 +813,22 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
                 )
             };
             assert_ne!(m2, libc::MAP_FAILED, "second mmap failed");
-            // Point [+0x10] at a SECOND PROT_NONE page: if the guest dereferences
-            // [+0x10] as a pointer after the wait, this faults and names the offset.
-            unsafe {
-                PROBE2_BASE = m2 as u64;
-                libc::mprotect(m2, 0x1000, libc::PROT_NONE);
-                std::ptr::write_unaligned(page.add(0x10).cast::<u64>(), m2 as u64);
-                eprintln!("[feed] EGATE3 [+0x10] -> {m2:p} (PROT_NONE)");
+            if model == "EGATE5" {
+                // The object's own write happens before its mprotect, so a fault
+                // here can only come from the guest dereferencing [+0x10].
+                unsafe {
+                    PROBE2_BASE = m2 as u64;
+                    libc::mprotect(m2, 0x1000, libc::PROT_NONE);
+                    std::ptr::write_unaligned(page.add(0x10).cast::<u64>(), m2 as u64);
+                }
+                eprintln!("[feed] EGATE5 [+0x10] -> {m2:p} (PROT_NONE, written before protect)");
+            } else {
+                unsafe { std::ptr::write_unaligned(page.add(0x10).cast::<u64>(), m2 as u64) };
+                eprintln!("[feed] EGATE3 [+0x10] -> {m2:p} (readable)");
             }
         }
+        // Now protect, and only now.
+        unsafe { libc::mprotect(page, 0x1000, libc::PROT_NONE) };
         let g = unsafe { image.base().add(0x19dda0) as *mut u64 };
         unsafe { std::ptr::write_volatile(g, page as u64) };
         eprintln!(
@@ -864,7 +883,7 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
             );
         }
     }
-    if model == "EGATE2" || model == "EGATE3" {
+    if model == "EGATE2" || model == "EGATE3" || model == "EVAL" {
         let (n, off, rip, base, rsi, rdi) = unsafe {
             (
                 FAULT_N, FAULT_OFF, FAULT_RIP, PROBE_BASE, FAULT_RSI, FAULT_RDI,
