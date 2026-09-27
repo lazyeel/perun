@@ -363,6 +363,11 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
     let mut watches: Vec<(*const u8, usize)> = Vec::new();
     // Split-arg override: some models pass different structs in rcx vs rdx.
     let mut split: Option<(u64, u64)> = None;
+    // Post-call report for the ENV family: host-captured pointers so we
+    // read the buffers even if the guest rewrites the envelope fields.
+    let mut env_out_ptr: u64 = 0;
+    let mut env_in_ptr: u64 = 0;
+    let mut env_len: u32 = 0;
     let blob = match model {
         "A1" => layout_a1(dsid, opv, rsp as u64, spim.len() as u64, rcp as u64),
         "A2" => layout_a2(dsid, opv, rsp as u64, spim.len() as u64, rcp as u64),
@@ -475,6 +480,93 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
             watches.push((rotpn.cast_const(), 8));
             layout_b(rpacket as u64, 0)
         }
+        "ENV" | "ENVL" | "ENVO" | "ENVF" | "ENVI" | "ENVH" | "ENVS" => {
+            // Honest ADI envelope (the "Common ADI Header" of ionescu007):
+            // {buffer_ptr@+0, u32 len@+8, u32 cursor@+0xC, out_ptr@+0x10,
+            //  u32 out_len@+0x18, u32 flags@+0x1C}. Independent knobs:
+            // ENV=first_uint, ENVL=len, ENVO=out_len, ENVF=flags,
+            // ENVI/ENVH=header init (library / by hand). Output is 64 KiB so a
+            // real CPIM (~400-600 B) can never run off the end.
+            let rbuf = unsafe { region(0x400) }; // 32-byte header + 347 body
+            let rmid = unsafe { region(256) };
+            let rmidn = unsafe { region(8) };
+            let rotp = unsafe { region(65536) };
+            let rotpn = unsafe { region(8) };
+            let first = if model == "ENV" { opv } else { 0 };
+            fill_packet(
+                rbuf,
+                first,
+                [
+                    0xFFFFFFFFFFFFFFFF,
+                    rmid as u64,
+                    rmidn as u64,
+                    rotp as u64,
+                    rotpn as u64,
+                ],
+            );
+            // ENVS: the faithful ADIProvisioningStart shape — the arguments
+            // buffer IS the raw 347-byte spim, no synthetic header, no pointer
+            // table. The real signature is
+            //   ADIProvisioningStart(dsId, spim_ptr, spim_len, &cpim, &cpim_len, &session)
+            // so the dispatcher sees the exact bytes Apple produced. fill_packet
+            // is NOT used here: it would overwrite the spim with a magic+ptrs
+            // blob, which is what made the earlier "real spim" run vacuous.
+            if model == "ENVS" {
+                unsafe {
+                    std::ptr::write_bytes(rbuf, 0, 0x400);
+                }
+                unsafe { std::ptr::copy_nonoverlapping(spim.as_ptr(), rbuf, spim.len()) };
+                let h = unsafe { std::slice::from_raw_parts(rbuf, 8) };
+                eprintln!(
+                    "[feed] ENVS spim[0..8]={:02x?} (first uint32 LE=0x{:08x})",
+                    h,
+                    u32::from_le_bytes(h[..4].try_into().unwrap())
+                );
+            }
+            // ENVI: let the library's own cvu8io98wun lay down the version and
+            // protocol header. ENVH: the same two dwords by hand (dword0=version
+            // 1, dword1=0x20 = 32-byte header size), then the 347-byte spim body
+            // at +32. Both prove whether a correct header clears -45018.
+            if model == "ENVI" || model == "ENVH" {
+                unsafe {
+                    std::ptr::write_bytes(rbuf, 0, 0x400);
+                }
+                if model == "ENVI" {
+                    let rc = unsafe { init(rbuf as u64, rbuf as u64, 0, 0) };
+                    eprintln!("[feed] ENVI cvu rc={rc:#x}");
+                } else {
+                    let rb = unsafe { std::slice::from_raw_parts_mut(rbuf, 0x400) };
+                    w32(rb, 0x00, 0x00000001); // version
+                    w32(rb, 0x04, 0x00000020); // 32-byte header size
+                }
+                unsafe { std::ptr::copy_nonoverlapping(spim.as_ptr(), rbuf.add(32), spim.len()) };
+                let head = unsafe { std::slice::from_raw_parts(rbuf, 40) };
+                eprintln!("[feed] {model} head: {:02x?}", head);
+            }
+            let len = match model {
+                "ENVL" => opv as u32,
+                _ => spim.len() as u32,
+            };
+            let out_len = match model {
+                "ENVO" => opv as u32,
+                _ => 4096,
+            };
+            let flags = if model == "ENVF" { opv as u32 } else { 0 };
+            let mut env = vec![0u8; 0x20];
+            w64(&mut env, 0x00, rbuf as u64); // buffer_ptr
+            w32(&mut env, 0x08, len); // input_len (real u32)
+            w32(&mut env, 0x0C, 0); // cursor, strictly 0 at entry
+            w64(&mut env, 0x10, rotp as u64); // out_ptr
+            w32(&mut env, 0x18, out_len); // out_len
+            w32(&mut env, 0x1C, flags); // flags
+            watches.push((rmid.cast_const(), 256));
+            watches.push((rmidn.cast_const(), 8));
+            watches.push((rotpn.cast_const(), 8));
+            env_out_ptr = rotp as u64;
+            env_in_ptr = rbuf as u64;
+            env_len = len;
+            env
+        }
         "FLAT" => {
             // Flat 6-qword block straight into the call args.
             let rmid = unsafe { region(256) };
@@ -528,6 +620,27 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
         Some((a0, a1)) => unsafe { op(a0, a1, 0, 0) },
         None => unsafe { op(rstruct as u64, rstruct as u64, 0, 0) },
     };
+    if model.starts_with("ENV") {
+        // Read the envelope fields and the output buffer via the HOST-captured
+        // pointers: the guest mutates env+0x0C, so a field read after the call
+        // can be a wild pointer. out buffer count is over 64 KiB.
+        unsafe {
+            let e = std::slice::from_raw_parts(rstruct as *const u8, 0x20);
+            let rd32 = |off: usize| u32::from_le_bytes(e[off..off + 4].try_into().unwrap());
+            let buf = std::slice::from_raw_parts(env_in_ptr as *const u8, 4);
+            let first_after = u32::from_le_bytes(buf.try_into().unwrap());
+            let outb = std::slice::from_raw_parts(env_out_ptr as *const u8, 65536);
+            let nonzero = outb.iter().filter(|&&b| b != 0).count();
+            let lead = outb.iter().take_while(|&&b| b == 0).count();
+            let cursor_after = rd32(0x0C);
+            let out_len_after = rd32(0x18);
+            println!(
+                "ENVREPORT {model} op={opv} first_after={first_after:#x} len={env_len} \
+                 cursor={cursor_after} out_len_field={out_len_after} \
+                 OUT_nonzero={nonzero} OUT_lead_zeros={lead} rc={r:#x}"
+            );
+        }
+    }
     let scpim = unsafe { std::slice::from_raw_parts(rcp.cast_const(), CPIM_CAP) };
     let sslots = unsafe { std::slice::from_raw_parts(rslots.cast_const(), 16) };
     let wrote = scpim.iter().any(|&b| b != 0)
