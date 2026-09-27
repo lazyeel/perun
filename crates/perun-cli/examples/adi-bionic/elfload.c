@@ -1,4 +1,5 @@
 // Minimal aarch64 ELF dynamic loader for the Apple CoreADI libraries.
+
 //
 // WHY THIS EXISTS. The libraries are Bionic-linked. On a Termux device the
 // device's own Bionic runtime provides the LIBC version node and the ~118
@@ -39,6 +40,9 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <ucontext.h>
+static void *REAL_VDFUT, *REAL_CVU;
+static uint64_t tramp_vdfut(uint64_t,uint64_t,uint64_t,uint64_t);
+static uint64_t tramp_cvu(uint64_t,uint64_t,uint64_t,uint64_t);
 
 typedef struct {
     char name[96];
@@ -89,7 +93,19 @@ static void on_abort(int sig, siginfo_t *si, void *uc_) {
     ucontext_t *uc = (ucontext_t *)uc_;
     uint64_t pc = (uint64_t)uc->uc_mcontext.pc;
     uint64_t lr = (uint64_t)uc->uc_mcontext.regs[30];
-    say("[elfload] signal pc="); sayhex("", pc);
+    say("[elfload] signal pc="); sayhex("", pc); say("\n");
+    {
+        /* The CFF computes its dispatch index from w0 (the first argument):
+         *   eor w10, w0, w10 / and w9, w9, w0, lsl #1 / add w9, w10, w9
+         * then does ldrsw x10, [x25, w9, uxtw #2]. If w9 is out of range the
+         * table read is garbage and the computed jump lands nowhere. So the
+         * question is what the engine actually passed. */
+        uint64_t w0 = uc->uc_mcontext.regs[0] & 0xffffffffu;
+        say("[elfload] w0(first arg)="); sayhex("", w0);
+        say("  w1="); sayhex("", (uint64_t)uc->uc_mcontext.regs[1] & 0xffffffffu);
+        say("  x8="); sayhex("", (uint64_t)uc->uc_mcontext.regs[8]);
+        say("\n");
+    }
     say("[elfload]   si_addr="); sayhex("", (uint64_t)(uintptr_t)si->si_addr);
     for (int i = 0; i < g_nlibs; i++) {
         Lib *L = &g_libs[i];
@@ -209,6 +225,8 @@ static int   s_dlclose(void *h) { (void)h; return 0; }
 static void *s_dlsym(void *h, const char *n) {
     say("[dl] dlsym "); say(n); say("\n");
     void *e = find_export(n);
+    if (e && !strcmp(n, "vdfut768ig"))  { REAL_VDFUT = e; e = (void *)tramp_vdfut; }
+    if (e && !strcmp(n, "cvu8io98wun")) { REAL_CVU   = e; e = (void *)tramp_cvu;   }
     say("[dl] dlsym "); say(n); say(" -> ");
     if (e) { sayhex("", (uint64_t)(uintptr_t)e); }
     else   { say("NULL\n"); }
@@ -244,6 +262,33 @@ static void *stdio_stub(const char *n) {
 }
 
 
+
+// Entry-argument trampoline.
+//
+// The fault is reported deep inside the flattened body, long after the
+// dispatcher has clobbered every argument register, so the w0 read there is a
+// CFF intermediate and not the caller's argument. This logs the four
+// incoming registers and tail-calls the real entry, which is the only place
+// the caller's arguments still exist.
+static uint64_t tramp_vdfut(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
+    say("[entry] vdfut768ig  x0="); sayhex("", a0);
+    say("  x1="); sayhex("", a1);
+    say("  x2="); sayhex("", a2);
+    say("  x3="); sayhex("", a3);
+    say("  (real entry "); sayhex("", (uint64_t)(uintptr_t)REAL_VDFUT); say(")\n");
+    return ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t))REAL_VDFUT)(a0, a1, a2, a3);
+}
+static uint64_t tramp_cvu(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
+    say("[entry] cvu8io98wun x0="); sayhex("", a0);
+    say("  x1="); sayhex("", a1);
+    say("  x2="); sayhex("", a2);
+    say("  x3="); sayhex("", a3); say("\n");
+    return ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t))REAL_CVU)(a0, a1, a2, a3);
+}
+
+static void *REAL_VDFUT, *REAL_CVU;
+static uint64_t tramp_vdfut(uint64_t,uint64_t,uint64_t,uint64_t);
+static uint64_t tramp_cvu(uint64_t,uint64_t,uint64_t,uint64_t);
 static void *bionic_stub(const char *name) {
     { void *q = stdio_stub(name); if (q) return q; }
     if (!strcmp(name, "__sF")) return (void *)(uintptr_t)sF();
