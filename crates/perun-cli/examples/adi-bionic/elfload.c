@@ -125,7 +125,21 @@ static FILE *sF(void) { return *(FILE **)dlsym(RTLD_DEFAULT, "stdout"); }
 static int  stub_abort_msg(const char *m) { (void)m; return 0; }
 static void stub_assert2(const char *f, int l, const char *a) { (void)f;(void)l;(void)a; abort(); }
 static int  stub_errno(void) { return 0; }
-static int  stub_sysprop(const char *n, char *v, int m) { (void)n; if (v&&m>0) v[0]=0; return 0; }
+// Logged, and given real content: a property read back as an empty string is
+// indistinguishable from a missing one, and the ADI path asks for Android
+// identity properties during init.
+static int  stub_sysprop(const char *n, char *v, int m) {
+    say("[prop] get "); say(n);
+    const char *val = "0";
+    if (n && (!strcmp(n, "ro.build.version.sdk") || !strcmp(n, "ro.build.version.release"))) val = "29";
+    if (n && !strcmp(n, "ro.product.model")) val = "sdk_gphone64";
+    if (v && m > 0) {
+        size_t l = strlen(val);
+        if (l < (size_t)m) { memcpy(v, val, l + 1); return (int)l; }
+        if ((size_t)m > 0) { memcpy(v, val, (size_t)m - 1); v[m-1] = 0; return (int)m - 1; }
+    }
+    return 0;
+}
 
 // Bionic-only symbols, the residue glibc does not have. None of these is on a
 // hot path for provisioning: __sF is a CFI alias target that is never called
@@ -153,7 +167,49 @@ static int s_fputc(int c, FILE *f) { (void)c; (void)f; return 0; }
 static int s_fputs(const char *s, FILE *f) { (void)s; (void)f; return 0; }
 static int s_puts(const char *s) { (void)s; return 0; }
 
+// The engine's LoadLibraryWithPath almost certainly dlopen()s its own
+// CoreADI library rather than expecting the caller to have mapped it. There is
+// no dynamic loader in this process, so dlopen is intercepted here and
+// answered from the libraries already mapped. Logged, because "it dlopens
+// nothing" would close this and "it dlopens libCoreADI.so" explains -45075.
+static void say(const char *);
+static void *find_export(const char *name);
+static void *find_export(const char *);
+static void *find_export_in(Lib *L, const char *name) {
+    for (size_t i = 1; i < L->sym_n; i++) {
+        if (!L->syms[i].st_name || !L->syms[i].st_shndx) continue;
+        if (!strcmp(L->strs + L->syms[i].st_name, name))
+            return L->base + (L->syms[i].st_value - L->lo);
+    }
+    return NULL;
+}
+
+static void *s_dlopen(const char *f, int fl) {
+    (void)fl; say("[dl] dlopen "); say(f); say("\n");
+    if (f) for (int i = 0; i < g_nlibs; i++)
+        if (strstr(g_libs[i].name, f)) return g_libs[i].base;
+    void *r = dlsym(RTLD_NEXT, "dlopen");
+    return r ? ((void *(*)(const char *, int))r)(f, fl) : NULL;
+}
+static int   s_dlclose(void *h) { (void)h; return 0; }
+// Must resolve against the loader's own tables. Forwarding to glibc's dlsym
+// with a handle glibc never created returns NULL, and the engine then jumps
+// through a null vdfut768ig -- the si_addr=0x0 seen before this was fixed.
+static void *s_dlsym(void *h, const char *n) {
+    say("[dl] dlsym "); say(n); say("\n");
+    void *e = find_export(n);
+    if (e) return e;
+    for (int i = 0; i < g_nlibs; i++)
+        if (g_libs[i].base == h) return find_export_in(&g_libs[i], n);
+    return NULL;
+}
+static const char *s_dlerror(void) { return "elfload: dlopen intercepted"; }
+
 static void *stdio_stub(const char *n) {
+    if (!strcmp(n, "dlopen"))    return (void *)s_dlopen;
+    if (!strcmp(n, "dlclose"))   return (void *)s_dlclose;
+    if (!strcmp(n, "dlsym"))     return (void *)s_dlsym;
+    if (!strcmp(n, "dlerror"))   return (void *)s_dlerror;
     if (!strcmp(n, "fopen"))     return (void *)s_fopen;
     if (!strcmp(n, "fclose"))    return (void *)s_fclose;
     if (!strcmp(n, "fprintf"))   return (void *)s_fprintf;
@@ -172,6 +228,7 @@ static void *stdio_stub(const char *n) {
     if (!strcmp(n, "puts"))      return (void *)s_puts;
     return NULL;
 }
+
 
 static void *bionic_stub(const char *name) {
     { void *q = stdio_stub(name); if (q) return q; }
@@ -349,14 +406,15 @@ int main(int argc, char **argv) {
          * adi_test.c does on Termux. */
         const char *dir = argv[call_at + 2];
         int (*load)(const char *) = (int (*)(const char *))find_export("kq56gsgHG6");
-        int (*code)(int)       = (int (*)(int))find_export("aslgmuibau");
+        int (*code)(long)      = (int (*)(long))find_export("aslgmuibau");   /* int(ulong) */
         if (!load || !code) { printf("[call] missing ADI exports\n"); return 3; }
         int (*setpath)(const char *) = (int (*)(const char *))find_export("nf92ngaK92");
         int (*setid)(const char *, unsigned) =
             (int (*)(const char *, unsigned))find_export("Sph98paBcz");
         int rc = load(dir);
         printf("[call] ADILoadLibraryWithPath(\"%s\") = %d\n", dir, rc);
-        int c = code(-2);
+        long dsid = (long)-2;
+        int c = (int)code(dsid);
         printf("[call] ADIGetLoginCode(-2) = %d  %s\n", c,
                c == 0 ? "(provisioned)" : c == -45061 ? "(not provisioned)" : "");
         if (setpath) {
@@ -372,7 +430,7 @@ int main(int argc, char **argv) {
                 if (id == 0) break;
             }
         } else printf("[call] no SetAndroidID export\n");
-        int c2 = code(-2);
+        int c2 = (int)code(dsid);
         printf("[call] ADIGetLoginCode(-2) after config = %d  %s\n", c2,
                c2 == 0 ? "(PROVISIONED)" : c2 == -45061 ? "(not provisioned)" : "");
     }
