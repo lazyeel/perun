@@ -35,6 +35,8 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <signal.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <stdarg.h>
 #include <errno.h>
 #include <sys/stat.h>
@@ -89,6 +91,30 @@ static void on_abort(int sig, siginfo_t *si, void *uc_) {
     uint64_t pc = (uint64_t)uc->uc_mcontext.pc;
     uint64_t lr = (uint64_t)uc->uc_mcontext.regs[30];
     say("[elfload] signal pc="); sayhex("", pc);
+    {
+        /* Which kind of memory is the faulting pc in? Read the maps here: the
+         * whole question is whether it is code, heap, or a gap. */
+        char buf[8192];
+        int fd = open("/proc/self/maps", O_RDONLY);
+        if (fd >= 0) {
+            ssize_t n = read(fd, buf, sizeof buf - 1); close(fd);
+            if (n > 0) {
+                buf[n] = 0;
+                char *p2 = buf;
+                while (p2 && *p2) {
+                    char *nl = strchr(p2, '\n'); if (nl) *nl = 0;
+                    unsigned long lo, hi;
+                    if (sscanf(p2, "%lx-%lx", &lo, &hi) == 2 && pc >= lo && pc < hi) {
+                        char *sp = strchr(p2, ' ');
+                        if (sp) { char *q = sp; while (*q == ' ') q++; sp = strchr(q, ' '); if (sp) *sp = 0; }
+                        say("  pc is in: "); say(p2); say("\n");
+                        break;
+                    }
+                    p2 = nl ? nl + 1 : 0;
+                }
+            }
+        }
+    }
     say("[elfload]   si_addr="); sayhex("", (uint64_t)(uintptr_t)si->si_addr);
     for (int i = 0; i < g_nlibs; i++) {
         Lib *L = &g_libs[i];
@@ -198,6 +224,9 @@ static int   s_dlclose(void *h) { (void)h; return 0; }
 static void *s_dlsym(void *h, const char *n) {
     say("[dl] dlsym "); say(n); say("\n");
     void *e = find_export(n);
+    say("[dl] dlsym "); say(n); say(" -> ");
+    if (e) { sayhex("", (uint64_t)(uintptr_t)e); }
+    else   { say("NULL\n"); }
     if (e) return e;
     for (int i = 0; i < g_nlibs; i++)
         if (g_libs[i].base == h) return find_export_in(&g_libs[i], n);
