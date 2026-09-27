@@ -106,6 +106,15 @@ static void on_abort(int sig, siginfo_t *si, void *uc_) {
         say("  x8="); sayhex("", (uint64_t)uc->uc_mcontext.regs[8]);
         say("\n");
     }
+    {
+        char mb[16384]; int fd = open("/proc/self/maps", O_RDONLY);
+        if (fd >= 0) {
+            ssize_t n = read(fd, mb, sizeof mb - 1); close(fd);
+            if (n > 0) { mb[n] = 0; (void)!write(2, "--- GLIBC MAPS ---\n", 19);
+                          (void)!write(2, mb, (size_t)n);
+                          (void)!write(2, "--- END MAPS ---\n", 15); }
+        }
+    }
     say("[elfload]   si_addr="); sayhex("", (uint64_t)(uintptr_t)si->si_addr);
     for (int i = 0; i < g_nlibs; i++) {
         Lib *L = &g_libs[i];
@@ -271,18 +280,26 @@ static void *stdio_stub(const char *n) {
 // incoming registers and tail-calls the real entry, which is the only place
 // the caller's arguments still exist.
 static uint64_t tramp_vdfut(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
-    say("[entry] vdfut768ig  x0="); sayhex("", a0);
-    say("  x1="); sayhex("", a1);
-    say("  x2="); sayhex("", a2);
-    say("  x3="); sayhex("", a3);
-    say("  (real entry "); sayhex("", (uint64_t)(uintptr_t)REAL_VDFUT); say(")\n");
+    {
+        char b[256]; size_t n = 0;
+        n += (size_t)snprintf(b + n, sizeof b - n,
+                              "[entry] vdfut768ig  x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx  real=0x%llx\n",
+                              (unsigned long long)a0, (unsigned long long)a1,
+                              (unsigned long long)a2, (unsigned long long)a3,
+                              (unsigned long long)(uintptr_t)REAL_VDFUT);
+        (void)!write(2, b, n);
+    }
     return ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t))REAL_VDFUT)(a0, a1, a2, a3);
 }
 static uint64_t tramp_cvu(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
-    say("[entry] cvu8io98wun x0="); sayhex("", a0);
-    say("  x1="); sayhex("", a1);
-    say("  x2="); sayhex("", a2);
-    say("  x3="); sayhex("", a3); say("\n");
+    {
+        char b[256]; size_t n = 0;
+        n += (size_t)snprintf(b + n, sizeof b - n,
+                              "[entry] cvu8io98wun x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx\n",
+                              (unsigned long long)a0, (unsigned long long)a1,
+                              (unsigned long long)a2, (unsigned long long)a3);
+        (void)!write(2, b, n);
+    }
     return ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t))REAL_CVU)(a0, a1, a2, a3);
 }
 
