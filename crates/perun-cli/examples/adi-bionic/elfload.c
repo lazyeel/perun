@@ -81,7 +81,6 @@ static void sayhex(const char *tag, uint64_t v) {
         int d = (int)((v >> (i * 4)) & 0xF);
         if (d || started || i == 0) { b[n++] = (char)(d < 10 ? '0' + d : 'a' + d - 10); started = 1; }
     }
-    b[n++] = '\n';
     (void)!write(2, b, n);
 }
 
@@ -90,7 +89,25 @@ static void on_abort(int sig, siginfo_t *si, void *uc_) {
     ucontext_t *uc = (ucontext_t *)uc_;
     uint64_t pc = (uint64_t)uc->uc_mcontext.pc;
     uint64_t lr = (uint64_t)uc->uc_mcontext.regs[30];
-    say("[elfload] signal pc="); sayhex("", pc);
+    say("[elfload] signal pc="); sayhex("", pc); say("\n");
+    {
+        /* Hypothesis: the CFF read a function pointer out of thread-local
+         * storage at a Bionic offset, which under glibc's TCB layout lands
+         * outside every mapping. If the fault address is near the thread
+         * pointer, that is exactly what happened. */
+        uint64_t tp; __asm__ volatile("mrs %0, tpidr_el0" : "=r"(tp));
+        say("[elfload] TPIDR_EL0="); sayhex("", tp); say("\n");
+        say("  delta(pc-tp)="); sayhex("", (uint64_t)(pc - tp)); say("\n");
+        say("  regs:");
+        for (int i = 0; i < 31; i++) {
+            say(" x"); sayhex("", (uint64_t)i); say("=");
+            sayhex("", (uint64_t)uc->uc_mcontext.regs[i]);
+            if (i < 31) say(",");
+        }
+        say("\n  sp="); sayhex("", (uint64_t)uc->uc_mcontext.sp);
+        say("  lr(x30)="); sayhex("", (uint64_t)uc->uc_mcontext.regs[30]);
+        say("  fp(x29)="); sayhex("", (uint64_t)uc->uc_mcontext.regs[29]); say("\n");
+    }
     {
         /* Which kind of memory is the faulting pc in? Read the maps here: the
          * whole question is whether it is code, heap, or a gap. */
