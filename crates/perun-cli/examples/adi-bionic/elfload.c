@@ -35,6 +35,9 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <signal.h>
+#include <stdarg.h>
+#include <errno.h>
+#include <sys/stat.h>
 #include <ucontext.h>
 
 typedef struct {
@@ -81,11 +84,12 @@ static void sayhex(const char *tag, uint64_t v) {
 }
 
 static void on_abort(int sig, siginfo_t *si, void *uc_) {
-    (void)sig; (void)si;
+    (void)sig;
     ucontext_t *uc = (ucontext_t *)uc_;
     uint64_t pc = (uint64_t)uc->uc_mcontext.pc;
     uint64_t lr = (uint64_t)uc->uc_mcontext.regs[30];
-    say("[elfload] SIGABRT pc="); sayhex("", pc);
+    say("[elfload] signal pc="); sayhex("", pc);
+    say("[elfload]   si_addr="); sayhex("", (uint64_t)(uintptr_t)si->si_addr);
     for (int i = 0; i < g_nlibs; i++) {
         Lib *L = &g_libs[i];
         if (pc >= (uint64_t)L->base && pc < (uint64_t)L->base + L->span) {
@@ -113,7 +117,11 @@ static void die(const char *m, const char *d) {
 // correct shape; a threaded run would need a TLS slot.
 static int g_errno_slot;
 static void *stub_errno_addr(void) { return &g_errno_slot; }
-static void stub_sF(void) {}
+// __sF is NOT a function. In legacy Bionic it is a DATA symbol holding the
+// FILE* of the standard stream, and the Apple libraries hand it straight to
+// fprintf/fwrite. A no-op function pointer here is what glibc rejects with
+// "invalid stdio handle" and then aborts on -- so it has to be a real FILE*.
+static FILE *sF(void) { return *(FILE **)dlsym(RTLD_DEFAULT, "stdout"); }
 static int  stub_abort_msg(const char *m) { (void)m; return 0; }
 static void stub_assert2(const char *f, int l, const char *a) { (void)f;(void)l;(void)a; abort(); }
 static int  stub_errno(void) { return 0; }
@@ -122,8 +130,52 @@ static int  stub_sysprop(const char *n, char *v, int m) { (void)n; if (v&&m>0) v
 // Bionic-only symbols, the residue glibc does not have. None of these is on a
 // hot path for provisioning: __sF is a CFI alias target that is never called
 // through, and the errno accessors abort rather than return.
+// ── stdio interception ────────────────────────────────────────────────────
+// Bionic and glibc disagree about FILE, so handing Apple's streams to glibc's
+// stdio walks a structure that is not a glibc FILE: the fault is a small
+// offset into a garbage pointer, which is exactly the si_addr=0x8 signature
+// seen in libstoreservicescore's constructor. The ADI path has no reason to
+// print, so every entry point here is inert. fopen is the exception: it must
+// hand back a real glibc FILE* or the caller's NULL check fails and the code
+// takes a different, more interesting path than the one we want to measure.
+static FILE *s_fopen(const char *a, const char *b) { (void)b; return fopen(a ? a : "/dev/null", "r"); }
+static int s_fclose(FILE *f) { (void)f; return 0; }
+static int s_fprintf(FILE *f, const char *fmt, ...) { (void)f; (void)fmt; return 0; }
+static int s_vfprintf(FILE *f, const char *fmt, va_list a) { (void)f; (void)fmt; (void)a; return 0; }
+static int s_fflush(FILE *f) { (void)f; return 0; }
+static int s_ferror(FILE *f) { (void)f; return 0; }
+static int s_fileno(FILE *f) { (void)f; return -1; }
+static int s_fseek(FILE *f, long o, int w) { (void)f; (void)o; (void)w; return 0; }
+static long s_ftell(FILE *f) { (void)f; return -1; }
+static size_t s_fread(void *p, size_t z, size_t n, FILE *f) { (void)p; (void)z; (void)n; (void)f; return 0; }
+static size_t s_fwrite(const void *p, size_t z, size_t n, FILE *f) { (void)p; (void)f; return z * n; }
+static int s_fputc(int c, FILE *f) { (void)c; (void)f; return 0; }
+static int s_fputs(const char *s, FILE *f) { (void)s; (void)f; return 0; }
+static int s_puts(const char *s) { (void)s; return 0; }
+
+static void *stdio_stub(const char *n) {
+    if (!strcmp(n, "fopen"))     return (void *)s_fopen;
+    if (!strcmp(n, "fclose"))    return (void *)s_fclose;
+    if (!strcmp(n, "fprintf"))   return (void *)s_fprintf;
+    if (!strcmp(n, "vfprintf"))  return (void *)s_vfprintf;
+    if (!strcmp(n, "fflush"))    return (void *)s_fflush;
+    if (!strcmp(n, "ferror"))    return (void *)s_ferror;
+    if (!strcmp(n, "fileno"))    return (void *)s_fileno;
+    if (!strcmp(n, "fseek"))     return (void *)s_fseek;
+    if (!strcmp(n, "fseeko"))    return (void *)s_fseek;
+    if (!strcmp(n, "ftell"))     return (void *)s_ftell;
+    if (!strcmp(n, "ftello"))    return (void *)s_ftell;
+    if (!strcmp(n, "fread"))     return (void *)s_fread;
+    if (!strcmp(n, "fwrite"))    return (void *)s_fwrite;
+    if (!strcmp(n, "fputc"))     return (void *)s_fputc;
+    if (!strcmp(n, "fputs"))     return (void *)s_fputs;
+    if (!strcmp(n, "puts"))      return (void *)s_puts;
+    return NULL;
+}
+
 static void *bionic_stub(const char *name) {
-    if (!strcmp(name, "__sF")) return (void *)(uintptr_t)stub_sF;
+    { void *q = stdio_stub(name); if (q) return q; }
+    if (!strcmp(name, "__sF")) return (void *)(uintptr_t)sF();
     if (!strcmp(name, "android_set_abort_message")) return (void *)(uintptr_t)stub_abort_msg;
     if (!strcmp(name, "__assert2")) return (void *)(uintptr_t)stub_assert2;
     if (!strcmp(name, "__get_h_errno")) return (void *)(uintptr_t)stub_errno;
@@ -265,14 +317,64 @@ static void run_init(Lib *L) {
     }
 }
 
+// Resolve an exported symbol by name across the loaded Apple libraries.
+static void *find_export(const char *name) {
+    for (int i = 0; i < g_nlibs; i++) {
+        Lib *L = &g_libs[i];
+        for (size_t idx = 1; idx < L->sym_n; idx++) {
+            if (!L->syms[idx].st_name || !L->syms[idx].st_shndx) continue;
+            if (!strcmp(L->strs + L->syms[idx].st_name, name))
+                return L->base + (L->syms[idx].st_value - L->lo);
+        }
+    }
+    return NULL;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: elfload <so>...\n"); return 2; }
     struct sigaction sa; memset(&sa,0,sizeof sa);
     sa.sa_sigaction = on_abort; sa.sa_flags = SA_SIGINFO;
     sigaction(SIGABRT, &sa, NULL);
-    for (int i = 1; i < argc; i++) map_lib(argv[i]);
+    sigaction(SIGSEGV, &sa, NULL);
+    int call_at = -1;
+    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--call")) { call_at = i; break; }
+    int nlibs_arg = (call_at > 0) ? call_at : argc;
+    for (int i = 1; i < nlibs_arg; i++) map_lib(argv[i]);
     for (int i = 0; i < g_nlibs; i++) relocate(&g_libs[i]);
     for (int i = 0; i < g_nlibs; i++) run_init(&g_libs[i]);
     printf("[elfload] done, %d libs\n", g_nlibs);
+
+    if (call_at > 0 && call_at + 2 < argc) {
+        /* "--call NAME DIR": after loading, drive the engine the way
+         * adi_test.c does on Termux. */
+        const char *dir = argv[call_at + 2];
+        int (*load)(const char *) = (int (*)(const char *))find_export("kq56gsgHG6");
+        int (*code)(int)       = (int (*)(int))find_export("aslgmuibau");
+        if (!load || !code) { printf("[call] missing ADI exports\n"); return 3; }
+        int (*setpath)(const char *) = (int (*)(const char *))find_export("nf92ngaK92");
+        int (*setid)(const char *, unsigned) =
+            (int (*)(const char *, unsigned))find_export("Sph98paBcz");
+        int rc = load(dir);
+        printf("[call] ADILoadLibraryWithPath(\"%s\") = %d\n", dir, rc);
+        int c = code(-2);
+        printf("[call] ADIGetLoginCode(-2) = %d  %s\n", c,
+               c == 0 ? "(provisioned)" : c == -45061 ? "(not provisioned)" : "");
+        if (setpath) {
+            if (mkdir("/opt/data/adi-aarch64/adi-data", 0755) != 0 && errno != EEXIST) { /* ok */ }
+            int p1 = setpath("/opt/data/adi-aarch64/adi-data");
+            printf("[call] ADISetProvisioningPath = %d\n", p1);
+        } else printf("[call] no SetProvisioningPath export\n");
+        if (setid) {
+            const char *cands[] = { "1a2b", "1a2b3c4d5e6f7081", NULL };
+            for (int k = 0; cands[k]; k++) {
+                int id = setid(cands[k], (unsigned)strlen(cands[k]));
+                printf("[call] ADISetAndroidID(\"%s\") = %d\n", cands[k], id);
+                if (id == 0) break;
+            }
+        } else printf("[call] no SetAndroidID export\n");
+        int c2 = code(-2);
+        printf("[call] ADIGetLoginCode(-2) after config = %d  %s\n", c2,
+               c2 == 0 ? "(PROVISIONED)" : c2 == -45061 ? "(not provisioned)" : "");
+    }
     return 0;
 }
