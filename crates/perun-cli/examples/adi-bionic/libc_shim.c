@@ -196,3 +196,9 @@ int *__errno(void) {
     if (!f) { f = next("__errno_location"); }
     return f();
 }
+
+// Bionic-only symbols that libc++_shared.so needs and glibc does not have.
+// __sF is a CFI alias target (never actually called through); the abort
+// hook is only reached on an assert failure.
+void __sF(void) {}
+int android_set_abort_message(const char *msg) { (void)msg; return 0; }
