@@ -35,8 +35,6 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <signal.h>
-#include <fcntl.h>
-#include <unistd.h>
 #include <stdarg.h>
 #include <errno.h>
 #include <sys/stat.h>
@@ -55,6 +53,7 @@ typedef struct {
     Elf64_Rela *jmprel;
     size_t jmprel_n;
     const Elf64_Dyn *dyn;
+    const uint32_t *gnuhash;
 } Lib;
 
 static Lib g_libs[32];
@@ -81,6 +80,7 @@ static void sayhex(const char *tag, uint64_t v) {
         int d = (int)((v >> (i * 4)) & 0xF);
         if (d || started || i == 0) { b[n++] = (char)(d < 10 ? '0' + d : 'a' + d - 10); started = 1; }
     }
+    b[n++] = '\n';
     (void)!write(2, b, n);
 }
 
@@ -89,49 +89,7 @@ static void on_abort(int sig, siginfo_t *si, void *uc_) {
     ucontext_t *uc = (ucontext_t *)uc_;
     uint64_t pc = (uint64_t)uc->uc_mcontext.pc;
     uint64_t lr = (uint64_t)uc->uc_mcontext.regs[30];
-    say("[elfload] signal pc="); sayhex("", pc); say("\n");
-    {
-        /* Hypothesis: the CFF read a function pointer out of thread-local
-         * storage at a Bionic offset, which under glibc's TCB layout lands
-         * outside every mapping. If the fault address is near the thread
-         * pointer, that is exactly what happened. */
-        uint64_t tp; __asm__ volatile("mrs %0, tpidr_el0" : "=r"(tp));
-        say("[elfload] TPIDR_EL0="); sayhex("", tp); say("\n");
-        say("  delta(pc-tp)="); sayhex("", (uint64_t)(pc - tp)); say("\n");
-        say("  regs:");
-        for (int i = 0; i < 31; i++) {
-            say(" x"); sayhex("", (uint64_t)i); say("=");
-            sayhex("", (uint64_t)uc->uc_mcontext.regs[i]);
-            if (i < 31) say(",");
-        }
-        say("\n  sp="); sayhex("", (uint64_t)uc->uc_mcontext.sp);
-        say("  lr(x30)="); sayhex("", (uint64_t)uc->uc_mcontext.regs[30]);
-        say("  fp(x29)="); sayhex("", (uint64_t)uc->uc_mcontext.regs[29]); say("\n");
-    }
-    {
-        /* Which kind of memory is the faulting pc in? Read the maps here: the
-         * whole question is whether it is code, heap, or a gap. */
-        char buf[8192];
-        int fd = open("/proc/self/maps", O_RDONLY);
-        if (fd >= 0) {
-            ssize_t n = read(fd, buf, sizeof buf - 1); close(fd);
-            if (n > 0) {
-                buf[n] = 0;
-                char *p2 = buf;
-                while (p2 && *p2) {
-                    char *nl = strchr(p2, '\n'); if (nl) *nl = 0;
-                    unsigned long lo, hi;
-                    if (sscanf(p2, "%lx-%lx", &lo, &hi) == 2 && pc >= lo && pc < hi) {
-                        char *sp = strchr(p2, ' ');
-                        if (sp) { char *q = sp; while (*q == ' ') q++; sp = strchr(q, ' '); if (sp) *sp = 0; }
-                        say("  pc is in: "); say(p2); say("\n");
-                        break;
-                    }
-                    p2 = nl ? nl + 1 : 0;
-                }
-            }
-        }
-    }
+    say("[elfload] signal pc="); sayhex("", pc);
     say("[elfload]   si_addr="); sayhex("", (uint64_t)(uintptr_t)si->si_addr);
     for (int i = 0; i < g_nlibs; i++) {
         Lib *L = &g_libs[i];
@@ -168,21 +126,30 @@ static FILE *sF(void) { return *(FILE **)dlsym(RTLD_DEFAULT, "stdout"); }
 static int  stub_abort_msg(const char *m) { (void)m; return 0; }
 static void stub_assert2(const char *f, int l, const char *a) { (void)f;(void)l;(void)a; abort(); }
 static int  stub_errno(void) { return 0; }
-// Logged, and given real content: a property read back as an empty string is
-// indistinguishable from a missing one, and the ADI path asks for Android
-// identity properties during init.
-static int  stub_sysprop(const char *n, char *v, int m) {
-    say("[prop] get "); say(n);
-    const char *val = "0";
-    if (n && (!strcmp(n, "ro.build.version.sdk") || !strcmp(n, "ro.build.version.release"))) val = "29";
-    if (n && !strcmp(n, "ro.product.model")) val = "sdk_gphone64";
-    if (v && m > 0) {
-        size_t l = strlen(val);
-        if (l < (size_t)m) { memcpy(v, val, l + 1); return (int)l; }
-        if ((size_t)m > 0) { memcpy(v, val, (size_t)m - 1); v[m-1] = 0; return (int)m - 1; }
-    }
-    return 0;
+// The last nine. All are Android-platform or fortify-surface symbols, and
+// none is on the provisioning path: logging, the program name, the
+// atfork hook list, and the __FD_*_chk wrappers glibc no longer exports
+// under those names (its own are __fd_chk and friends).
+static int  s_log_print(int prio, const char *tag, const char *fmt, ...) {
+    (void)prio; (void)tag; (void)fmt; return 0;
 }
+static int  s_log_write(int prio, const char *tag, const char *msg) {
+    (void)prio; (void)tag; (void)msg; return 0;
+}
+static const char *s_progname(void) { return "perun"; }
+static int  s_atfork(void (*f)(void), void *a, void *d) { (void)f;(void)a;(void)d; return 0; }
+static void s_fd_chk(int fd, int flags) { (void)fd; (void)flags; }
+static void *bionic_stub2(const char *n) {
+    if (!strcmp(n, "__android_log_print")) return (void *)s_log_print;
+    if (!strcmp(n, "__android_log_write")) return (void *)s_log_write;
+    if (!strcmp(n, "getprogname"))       return (void *)s_progname;
+    if (!strcmp(n, "pthread_atfork"))     return (void *)s_atfork;
+    if (!strcmp(n, "__FD_SET_chk"))      return (void *)s_fd_chk;
+    if (!strcmp(n, "__FD_CLR_chk"))      return (void *)s_fd_chk;
+    if (!strcmp(n, "__FD_ISSET_chk"))    return (void *)s_fd_chk;
+    return NULL;
+}
+static int  stub_sysprop(const char *n, char *v, int m) { (void)n; if (v&&m>0) v[0]=0; return 0; }
 
 // Bionic-only symbols, the residue glibc does not have. None of these is on a
 // hot path for provisioning: __sF is a CFI alias target that is never called
@@ -209,6 +176,7 @@ static size_t s_fwrite(const void *p, size_t z, size_t n, FILE *f) { (void)p; (v
 static int s_fputc(int c, FILE *f) { (void)c; (void)f; return 0; }
 static int s_fputs(const char *s, FILE *f) { (void)s; (void)f; return 0; }
 static int s_puts(const char *s) { (void)s; return 0; }
+
 
 // The engine's LoadLibraryWithPath almost certainly dlopen()s its own
 // CoreADI library rather than expecting the caller to have mapped it. There is
@@ -286,6 +254,64 @@ static void *bionic_stub(const char *name) {
     if (!strcmp(name, "__system_property_get")) return (void *)(uintptr_t)stub_sysprop;
     return NULL;
 }
+// A library built with .gnu.hash and no .hash has no DT_HASH, and nchain --
+// the symbol count -- is derived from the hash table itself. Taking the count
+// from DT_HASH alone silently yields zero, and the library then exports
+// nothing. Every NDK system library is built this way, so libz/libm/... were
+// invisible to symbol resolution.
+static size_t gnu_hash_nchain(const uint32_t *h) {
+    if (!h) return 0;
+    uint32_t nbuckets   = h[0];
+    uint32_t symoffset  = h[1];
+    uint32_t bloom_size = h[2];
+    if (!nbuckets || !bloom_size) return 0;
+    /* header: nbuckets, symoffset, bloom_size, bloom_shift; then the bloom
+       filter (bloom_size words), then nbuckets bucket words, then the chain. */
+    const uint32_t *buckets = h + 4 + bloom_size;
+    const uint32_t *chain   = buckets + nbuckets;
+    uint32_t last = symoffset;
+    for (uint32_t i = 0; i < nbuckets; i++)
+        if (buckets[i] > last) last = buckets[i];
+    if (last < symoffset) return symoffset;
+    // The chain terminates at the first entry with bit0 set (HASH_VALUE).
+    for (uint32_t j = last;; j++) {
+        if (chain[j - symoffset] & 1u) return (size_t)j + 1;
+    }
+}
+
+static size_t gnu_hash_nchain(const uint32_t *h);
+
+// Symbol count from the section header table, not from DT_HASH.
+//
+// DT_HASH is absent from a GNU-hash-only build and DT_GNU_HASH makes the count
+// depend on walking buckets and a hash chain, which is fragile. Every one of
+// these libraries has a .dynsym section whose sh_size/sh_entsize is exact and
+// needs no interpretation. Getting this wrong is silent: the loader maps the
+// library, resolves nothing, and reports zero unresolved symbols because it
+// never looked.
+static void symtab_from_sections(Lib *L, const unsigned char *img, size_t img_sz) {
+    if (img_sz < 64) return;
+    uint64_t sh_off; memcpy(&sh_off, img + 0x28, 8);
+    uint16_t sh_ent, sh_num;
+    memcpy(&sh_ent, img + 0x3a, 2);
+    memcpy(&sh_num, img + 0x3c, 2);
+    if (!sh_off || !sh_num || sh_ent < 64) return;
+    for (uint16_t i = 0; i < sh_num; i++) {
+        uint64_t o = sh_off + (uint64_t)i * sh_ent;
+        if (o + 64 > img_sz) return;
+        uint32_t type;  memcpy(&type, img + o + 4, 4);
+        if (type != 11) continue;                 /* SHT_DYNSYM */
+        uint64_t off, size, ent;
+        memcpy(&off,  img + o + 24, 8);
+        memcpy(&size, img + o + 32, 8);
+        memcpy(&ent,  img + o + 56, 8);
+        if (!ent) return;
+        L->sym_n = (size_t)(size / ent);
+        if (!L->syms) L->syms = (Elf64_Sym *)(L->base + off);
+        return;
+    }
+}
+
 static void *find_in_loaded(const char *name) {
     for (int i = 0; i < g_nlibs; i++) {
         Lib *L = &g_libs[i];
@@ -300,6 +326,7 @@ static void *find_in_loaded(const char *name) {
 
 static void *resolve(const char *name) {
     void *p = bionic_stub(name);
+    if (!p) p = bionic_stub2(name);
     if (p) return p;
     p = dlsym(RTLD_DEFAULT, name);
     if (p) return p;
@@ -351,6 +378,7 @@ static void map_lib(const char *path) {
     snprintf(L->name, sizeof L->name, "%s", path);
     g_nlibs++;
     L->base = base; L->lo = lo; L->span = span; L->dyn = dyn;
+    symtab_from_sections(L, img, (size_t)sz);
     for (Elf64_Dyn *d = dyn; d->d_tag; d++) {
         switch (d->d_tag) {
         case DT_SYMTAB: L->syms = (Elf64_Sym *)(base + (d->d_un.d_ptr - lo)); break;
@@ -360,6 +388,10 @@ static void map_lib(const char *path) {
                new/delete and the whole libc++abi surface went unresolved. */
             unsigned int *h = (unsigned int *)(base + (d->d_un.d_ptr - lo));
             L->sym_n = h[1];
+            break;
+        case DT_GNU_HASH:
+            /* No .hash at all in a GNU-hash-only library: fall back to it. */
+            if (!L->sym_n) L->sym_n = gnu_hash_nchain((const uint32_t *)(base + (d->d_un.d_ptr - lo)));
             break;
         }
         case DT_STRTAB: L->strs = (const char *)(base + (d->d_un.d_ptr - lo)); break;
@@ -452,15 +484,14 @@ int main(int argc, char **argv) {
          * adi_test.c does on Termux. */
         const char *dir = argv[call_at + 2];
         int (*load)(const char *) = (int (*)(const char *))find_export("kq56gsgHG6");
-        int (*code)(long)      = (int (*)(long))find_export("aslgmuibau");   /* int(ulong) */
+        int (*code)(int)       = (int (*)(int))find_export("aslgmuibau");
         if (!load || !code) { printf("[call] missing ADI exports\n"); return 3; }
         int (*setpath)(const char *) = (int (*)(const char *))find_export("nf92ngaK92");
         int (*setid)(const char *, unsigned) =
             (int (*)(const char *, unsigned))find_export("Sph98paBcz");
         int rc = load(dir);
         printf("[call] ADILoadLibraryWithPath(\"%s\") = %d\n", dir, rc);
-        long dsid = (long)-2;
-        int c = (int)code(dsid);
+        int c = code(-2);
         printf("[call] ADIGetLoginCode(-2) = %d  %s\n", c,
                c == 0 ? "(provisioned)" : c == -45061 ? "(not provisioned)" : "");
         if (setpath) {
@@ -476,7 +507,7 @@ int main(int argc, char **argv) {
                 if (id == 0) break;
             }
         } else printf("[call] no SetAndroidID export\n");
-        int c2 = (int)code(dsid);
+        int c2 = code(-2);
         printf("[call] ADIGetLoginCode(-2) after config = %d  %s\n", c2,
                c2 == 0 ? "(PROVISIONED)" : c2 == -45061 ? "(not provisioned)" : "");
     }
