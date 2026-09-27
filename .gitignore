@@ -28,3 +28,9 @@ CommerceKit
 CommerceCore
 setup.crt
 .*.part
+
+# Cross-compiled aarch64 harness artifacts (the Apple .so is never vendored either).
+/crates/perun-cli/examples/adi-bionic/adi_run
+/crates/perun-cli/examples/adi-bionic/libc.so
+/crates/perun-cli/examples/adi-bionic/liblog.so
+/crates/perun-cli/examples/adi-bionic/libdl.so
