@@ -19,6 +19,8 @@ const CPIM_CAP: usize = 4096;
 
 // ── PROT_NONE probe: the first field the guest reads out of the gate object ──
 static mut FAULT_RIP: u64 = 0;
+static mut FAULT_RSI: u64 = 0;
+static mut FAULT_RDI: u64 = 0;
 static mut FAULT_OFF: u64 = u64::MAX;
 static mut FAULT_N: usize = 0;
 static mut PROBE_BASE: u64 = 0;
@@ -30,8 +32,11 @@ unsafe extern "C" fn probe_fault(_sig: i32, info: *mut libc::siginfo_t, ctx: *mu
         let uc = ctx.cast::<libc::ucontext_t>();
         let rip = *(*uc).uc_mcontext.gregs.as_ptr().add(libc::REG_RIP as usize) as u64;
         if FAULT_N == 0 {
+            let g = (*uc).uc_mcontext.gregs.as_ptr();
             FAULT_OFF = addr.wrapping_sub(PROBE_BASE);
             FAULT_RIP = rip;
+            FAULT_RSI = *g.add(libc::REG_RSI as usize) as u64;
+            FAULT_RDI = *g.add(libc::REG_RDI as usize) as u64;
         }
         FAULT_N += 1;
         // Let the faulting instruction retry: the page becomes readable.
@@ -562,7 +567,12 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
                 // Common ADI Header is the second. opv carries the magic.
                 split = Some((opv, rstruct as u64));
             }
-            if model == "ENVS" || model == "ECM" || model == "EGATE" || model == "EGATE2" {
+            if model == "ENVS"
+                || model == "ECM"
+                || model == "EGATE"
+                || model == "EGATE2"
+                || model == "EGATE3"
+            {
                 unsafe {
                     std::ptr::write_bytes(rbuf, 0, 0x400);
                 }
@@ -667,7 +677,7 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
     unsafe {
         std::ptr::copy_nonoverlapping(blob.as_ptr(), rstruct, blob.len());
     }
-    if model == "EGATE2" {
+    if model == "EGATE2" || model == "EGATE3" {
         // A dedicated page, mapped PROT_NONE, so the guest's first read out of
         // the gate object faults and hands us (offset, RIP) of the instruction
         // that did it. 0x28 = 40 bytes = 5 qwords.
@@ -691,10 +701,31 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
             std::ptr::write_bytes(page, 0, 0x28);
             libc::mprotect(page, 0x1000, libc::PROT_NONE);
         }
+        if model == "EGATE3" {
+            // Second stage: put a real, readable pointer at [+0x10] and see
+            // whether the fault leaves the object entirely. It should, if the
+            // field is a HANDLE consumed by WaitForSingleObject.
+            let m2 = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    0x1000,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            assert_ne!(m2, libc::MAP_FAILED, "second mmap failed");
+            unsafe {
+                std::ptr::write_bytes(m2, 0, 0x100);
+                std::ptr::write_unaligned(page.add(0x10).cast::<u64>(), m2 as u64);
+                eprintln!("[feed] EGATE3 [+0x10] -> {m2:p} (valid, readable)");
+            }
+        }
         let g = unsafe { image.base().add(0x19dda0) as *mut u64 };
         unsafe { std::ptr::write_volatile(g, page as u64) };
         eprintln!(
-            "[feed] EGATE2 object at {page:p}, page PROT_NONE, gate -> {:#x}",
+            "[feed] {model} object at {page:p}, page PROT_NONE, gate -> {:#x}",
             page as u64
         );
     }
@@ -716,7 +747,12 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
         Some((a0, a1)) => unsafe { op(a0, a1, 0, 0) },
         None => unsafe { op(rstruct as u64, rstruct as u64, 0, 0) },
     };
-    if model.starts_with("ENV") || model == "ECM" || model == "EGATE" || model == "EGATE2" {
+    if model.starts_with("ENV")
+        || model == "ECM"
+        || model == "EGATE"
+        || model == "EGATE2"
+        || model == "EGATE3"
+    {
         // Read the envelope fields and the output buffer via the HOST-captured
         // pointers: the guest mutates env+0x0C, so a field read after the call
         // can be a wild pointer. out buffer count is over 64 KiB.
@@ -737,9 +773,15 @@ fn single_case(dll: &str, spim_path: &str, dsid: u64, model: &str, opv: u64) -> 
             );
         }
     }
-    if model == "EGATE2" {
-        let (n, off, rip, base) = unsafe { (FAULT_N, FAULT_OFF, FAULT_RIP, PROBE_BASE) };
-        eprintln!("[feed] EGATE2 faults={n} first_off={off:#x} rip={rip:#x} (base={base:#x})");
+    if model == "EGATE2" || model == "EGATE3" {
+        let (n, off, rip, base, rsi, rdi) = unsafe {
+            (
+                FAULT_N, FAULT_OFF, FAULT_RIP, PROBE_BASE, FAULT_RSI, FAULT_RDI,
+            )
+        };
+        eprintln!(
+            "[feed] EGATE2 faults={n} off={off:#x} rip={rip:#x} rsi={rsi:#x} rdi={rdi:#x} (base={base:#x})"
+        );
     }
     let scpim = unsafe { std::slice::from_raw_parts(rcp.cast_const(), CPIM_CAP) };
     let sslots = unsafe { std::slice::from_raw_parts(rslots.cast_const(), 16) };
