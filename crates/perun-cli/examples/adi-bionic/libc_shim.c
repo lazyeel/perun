@@ -24,9 +24,33 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <stdlib.h>
 #include <time.h>
 
 static void *next(const char *n) { return dlsym(RTLD_NEXT, n); }
+
+// Liveness marker: proves at run time that the guest resolves these symbols
+// through THIS shim, so a trace showing no calls means "no file access
+// happened", not "the shim was bypassed".
+__attribute__((constructor)) static void shim_alive(void) {
+    fprintf(stderr, "[adi-fs] SHIM_ALIVE pid=%d\n", (int)getpid());
+    fflush(stderr);
+}
+
+// Path tracing. strace is unusable in this container -- ptrace(PTRACE_TRACEME)
+// is denied, so a syscall trace comes back empty and reads as "the guest
+// touched no files", which would be a false negative. Wrapping the libc
+// entry points libCoreADI.so actually imports shows the provisioning walk from
+// inside the emulated process instead, with no privileges needed.
+static int trace_fs = -1;
+static void note(const char *fn, const char *path) {
+    if (trace_fs < 0) { trace_fs = getenv("ADI_FS_TRACE") ? 1 : 0; }
+    if (!trace_fs) { return; }
+    fprintf(stderr, "[adi-fs] %s(%s)\n", fn, path ? path : "(null)");
+    fflush(stderr);
+}
 
 void *malloc(size_t n) {
     static void *(*f)(size_t);
@@ -44,6 +68,7 @@ int open(const char *p, int fl, ...) {
     static int (*f)(const char *, int, mode_t);
     va_list ap;
     if (!f) { f = next("open"); }
+    note("open", p);
     mode_t m = 0;
     if (fl & O_CREAT) { va_start(ap, fl); m = va_arg(ap, int); va_end(ap); }
     return f(p, fl, m);
@@ -76,18 +101,21 @@ int fstat(int fd, struct stat *st) {
 int lstat(const char *p, struct stat *st) {
     static int (*f)(const char *, struct stat *);
     if (!f) { f = next("lstat"); }
+    note("lstat", p);
     return f(p, st);
 }
 
 int chmod(const char *p, mode_t m) {
     static int (*f)(const char *, mode_t);
     if (!f) { f = next("chmod"); }
+    note("chmod", p);
     return f(p, m);
 }
 
 int mkdir(const char *p, mode_t m) {
     static int (*f)(const char *, mode_t);
     if (!f) { f = next("mkdir"); }
+    note("mkdir", p);
     return f(p, m);
 }
 
