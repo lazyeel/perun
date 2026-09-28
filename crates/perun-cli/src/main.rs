@@ -56,6 +56,9 @@ const STEP_RING: usize = 160_000;
 static mut STEP_RIP: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_EDX: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_RDX: [u64; STEP_RING] = [0; STEP_RING];
+static mut STEP_RCX: [u64; STEP_RING] = [0; STEP_RING];
+static mut STEP_R10: [u64; STEP_RING] = [0; STEP_RING];
+static mut STEP_R12: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_IDX: usize = 0;
 const EFLAGS_TF: u64 = 0x100;
 /// -45018, the code the library is about to publish when the header check fails.
@@ -184,6 +187,9 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             STEP_RIP[slot] = rip;
             STEP_EDX[slot] = rdx as u32 as u64;
             STEP_RDX[slot] = rdx;
+            STEP_RCX[slot] = *regs.add(libc::REG_RCX as usize) as u64;
+            STEP_R10[slot] = *regs.add(libc::REG_R10 as usize) as u64;
+            STEP_R12[slot] = *regs.add(libc::REG_R12 as usize) as u64;
             STEP_IDX = STEP_IDX.wrapping_add(1);
             STEP_COUNT += 1;
 
