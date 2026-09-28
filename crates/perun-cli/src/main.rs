@@ -91,7 +91,8 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
     println!("[perun] last {STEP_RING} guest instructions, oldest first:");
     let n = unsafe { STEP_IDX }.min(STEP_RING);
     let idx = unsafe { STEP_IDX };
-    for k in 0..n {
+    let from = n.saturating_sub(2048);
+    for k in from..n {
         let slot = (idx + k) % STEP_RING;
         let rp = unsafe { STEP_RIP[slot] };
         let ed = unsafe { STEP_EDX[slot] };
