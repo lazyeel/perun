@@ -55,6 +55,7 @@ static mut STEP_STOP_CODE: u32 = ERRNO_45018;
 const STEP_RING: usize = 160_000;
 static mut STEP_RIP: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_EDX: [u64; STEP_RING] = [0; STEP_RING];
+static mut STEP_RDX: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_IDX: usize = 0;
 const EFLAGS_TF: u64 = 0x100;
 /// -45018, the code the library is about to publish when the header check fails.
@@ -90,7 +91,8 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
         let slot = (idx + k) % STEP_RING;
         let rp = unsafe { STEP_RIP[slot] };
         let ed = unsafe { STEP_EDX[slot] };
-        println!("  [{k:4}] rip={rp:#018x} edx={ed:#010x}");
+        let dx = unsafe { STEP_RDX[slot] };
+        println!("  [{k:4}] rip={rp:#018x} edx={ed:#010x} rdx={dx:#018x}");
     }
 }
 
@@ -178,8 +180,10 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             }
 
             STEP_ENTERED = true;
-            STEP_RIP[STEP_IDX & (STEP_RING - 1)] = rip;
-            STEP_EDX[STEP_IDX & (STEP_RING - 1)] = rdx as u32 as u64;
+            let slot = STEP_IDX & (STEP_RING - 1);
+            STEP_RIP[slot] = rip;
+            STEP_EDX[slot] = rdx as u32 as u64;
+            STEP_RDX[slot] = rdx;
             STEP_IDX = STEP_IDX.wrapping_add(1);
             STEP_COUNT += 1;
 
