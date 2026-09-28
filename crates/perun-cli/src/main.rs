@@ -195,7 +195,12 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
                     && (g(libc::REG_RDI) == STEP_STOP_CODE
                         || g(libc::REG_RAX) == STEP_STOP_CODE
                         || g(libc::REG_RCX) == STEP_STOP_CODE
-                        || g(libc::REG_RDX) == STEP_STOP_CODE);
+                        || g(libc::REG_RDX) == STEP_STOP_CODE
+                        || g(libc::REG_R8) == STEP_STOP_CODE
+                        || g(libc::REG_R9) == STEP_STOP_CODE
+                        || g(libc::REG_R10) == STEP_STOP_CODE
+                        || g(libc::REG_R11) == STEP_STOP_CODE
+                        || g(libc::REG_RSI) == STEP_STOP_CODE);
             if wants_stop || STEP_COUNT >= STEP_MAX {
                 *regs.add(libc::REG_EFL as usize) = (flags & !EFLAGS_TF) as i64;
                 STEP_ARMED = false;
