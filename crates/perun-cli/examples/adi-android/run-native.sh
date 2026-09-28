@@ -9,13 +9,13 @@
 # kernel then loads that linker as the interpreter -- the normal mechanism
 # that starts every Bionic process on a device, used here for the same job.
 set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Inputs (not vendored): an Apple Music APK carrying the x86_64 libs, and an
 # Android x86_64 system image for the Bionic runtime. See README.md.
-# Default: pull the x86_64 libraries straight from Apple's Apple Music APK
-# (4.9.6) via fetch_libs496.py. Set APK_X86 to a config split .apk instead
-# (e.g. the 3.9.0-beta arm64+x86_64 variant) to use that kit.
-APK_X86="${APK_X86:-}"
+# The x86_64 libraries come straight from Apple's Apple Music APK (4.9.6)
+# via fetch_libs496.py; that is the single engine source for the project.
+FETCH="${FETCH:-$HERE/fetch_libs496.py}"
 SYS_IMG="${SYS_IMG:?set SYS_IMG to the x86_64 android-21 system.img}"
 LIBS="${LIBS:-$PWD/libs}"
 SYSROOT="${SYSROOT:-$PWD/sysroot}"
@@ -24,20 +24,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 say() { printf '== %s\n' "$*"; }
 
 if [ ! -d "$LIBS" ] || [ -z "$(ls -A "$LIBS" 2>/dev/null)" ]; then
-  if [ -n "$APK_X86" ]; then
-    say "extracting the x86_64 libraries from the APK split"
-    mkdir -p "$LIBS"
-    python3 - "$APK_X86" "$LIBS" <<'PY'
-import sys, zipfile
-z = zipfile.ZipFile(sys.argv[1])
-for n in z.namelist():
-    if n.startswith("lib/x86_64/"):
-        open(f"{sys.argv[2]}/{n.rsplit('/',1)[-1]}", "wb").write(z.read(n))
-PY
-  else
-    say "fetching the x86_64 libraries from Apple (fetch_libs496.py)"
-    python3 "$HERE/fetch_libs496.py" "$LIBS"
-  fi
+  say "fetching the x86_64 libraries from Apple (fetch_libs496.py)"
+  python3 "$FETCH" "$LIBS" --abi x86_64
 fi
 # Android's NDK calls the C++ runtime libstdc++.so; Apple ships it as
 # libc++_shared.so. The alias is what makes the stack resolve at all.
