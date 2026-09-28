@@ -32,13 +32,13 @@ win32_api! {
         // The operation export allocates a 0x28-byte block and then zeroes its
         // own first qword, which is the gate flag -- so a seed on field 0 is
         // erased before the check. Seed any of the seven other qwords instead.
-        if let Ok(spec) = std::env::var("PERUN_GATE_SEED") {
-            if size == 0x28 && let Some((f, v)) = spec.split_once(':')
-                && let (Ok(fi), Ok(val)) = (f.parse::<usize>(), v.parse::<u64>())
-                && fi < 4
-            {
-                (ptr as *mut u64).add(fi + 1).write_volatile(val);
-            }
+        if let Ok(spec) = std::env::var("PERUN_GATE_SEED")
+            && size == 0x28
+            && let Some((f, v)) = spec.split_once(':')
+            && let (Ok(fi), Ok(val)) = (f.parse::<usize>(), v.parse::<u64>())
+            && fi < 4
+        {
+            (ptr as *mut u64).add(fi + 1).write_volatile(val);
         }
         ptr as LPVOID
     }}
