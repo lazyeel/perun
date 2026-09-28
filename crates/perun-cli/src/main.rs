@@ -76,6 +76,55 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             push(&hex16(rip), &mut out, &mut n);
             push(b"\n", &mut out, &mut n);
             libc::write(2, out.as_ptr().cast(), n);
+            // The state at the trap is what a flattened dispatcher gives up
+            // last, so report it: the flattened jump table is not recoverable
+            // statically and ptrace is refused by the sandbox, which leaves the
+            // probe as the only instrument that reaches these sites at all.
+            if std::env::var_os("PERUN_TRAP_REGS").is_some() {
+                let g = |r: libc::c_int| *regs.add(r as usize) as u64;
+                let mut o2: [u8; 1024] = [0; 1024];
+                let mut m = 0usize;
+                let put = |s: &[u8], o: &mut [u8], n: &mut usize| {
+                    for &b in s {
+                        if *n < o.len() {
+                            o[*n] = b;
+                            *n += 1;
+                        }
+                    }
+                };
+                for (nm, r) in [
+                    ("rax", libc::REG_RAX),
+                    ("rbx", libc::REG_RBX),
+                    ("rcx", libc::REG_RCX),
+                    ("rdx", libc::REG_RDX),
+                    ("rsi", libc::REG_RSI),
+                    ("rdi", libc::REG_RDI),
+                    ("rbp", libc::REG_RBP),
+                    ("rsp", libc::REG_RSP),
+                    ("r8", libc::REG_R8),
+                    ("r9", libc::REG_R9),
+                    ("r10", libc::REG_R10),
+                    ("r11", libc::REG_R11),
+                    ("r12", libc::REG_R12),
+                    ("r13", libc::REG_R13),
+                    ("r14", libc::REG_R14),
+                    ("r15", libc::REG_R15),
+                ] {
+                    put(nm.as_bytes(), &mut o2, &mut m);
+                    put(b"=", &mut o2, &mut m);
+                    put(&hex16(g(r)), &mut o2, &mut m);
+                    put(b" ", &mut o2, &mut m);
+                }
+                put(b"\n[trap] stack:", &mut o2, &mut m);
+                let sp = g(libc::REG_RSP);
+                for i in 0..8u64 {
+                    let word = std::ptr::read_volatile((sp + i * 8) as *const u64);
+                    put(b" ", &mut o2, &mut m);
+                    put(&hex16(word), &mut o2, &mut m);
+                }
+                put(b"\n", &mut o2, &mut m);
+                libc::write(2, o2.as_ptr().cast(), m);
+            }
             libc::_exit(128 + sig);
         }
 
