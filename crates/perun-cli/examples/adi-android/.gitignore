@@ -1,5 +1,7 @@
 # Inputs and build products of run-native.sh; none of it is vendored.
 libs/
+libs496/
+libs_test/
 sysroot/
 apple_chain.pem
 adi_native
