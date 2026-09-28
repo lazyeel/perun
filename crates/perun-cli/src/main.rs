@@ -1070,8 +1070,34 @@ fn cmd_call(args: &[String]) -> i32 {
             }
             eprintln!("[perun] walking the export, up to {steps} instructions");
         }
+        // PERUN_DIFF: report what the call changed inside the image. The
+        // -45020 decision is made from something the library produces itself,
+        // so snapshot before and diff after instead of guessing at the input.
+        let diff_on = std::env::var_os("PERUN_DIFF").is_some();
+        let mut before: Vec<u64> = Vec::new();
+        let mut img_base = 0u64;
+        if diff_on {
+            img_base = image.base() as u64;
+            before = unsafe {
+                std::slice::from_raw_parts(img_base as *const u64, 0x1A_5000 / 8).to_vec()
+            };
+        }
         let r = unsafe { f(argv[0], argv[1], argv[2], argv[3]) };
         println!("[perun] call#{iter} {export_name} returned {r:#x} ({r})");
+        if diff_on {
+            let after =
+                unsafe { std::slice::from_raw_parts(img_base as *const u64, 0x1A_5000 / 8) };
+            let mut n = 0;
+            for (i, (a, b)) in before.iter().zip(after.iter()).enumerate() {
+                if a != b {
+                    n += 1;
+                    if n <= 64 {
+                        println!("[diff] RVA {:#x}: {:#018x} -> {:#018x}", i * 8, a, b);
+                    }
+                }
+            }
+            println!("[diff] {n} qword(s) changed in the image");
+        }
         // When the guest returns before the budget the walk ends without ever
         // reaching a stop condition, and the handler prints nothing. The ring
         // is full at that point, so report it here: an absent report reads as
