@@ -1066,6 +1066,15 @@ fn cmd_call(args: &[String]) -> i32 {
         }
         let r = unsafe { f(argv[0], argv[1], argv[2], argv[3]) };
         println!("[perun] call#{iter} {export_name} returned {r:#x} ({r})");
+        // When the guest returns before the budget the walk ends without ever
+        // reaching a stop condition, and the handler prints nothing. The ring
+        // is full at that point, so report it here: an absent report reads as
+        // an empty ring, which is how a completed walk was mistaken for a
+        // walk that never happened.
+        if steps > 0 && unsafe { STEP_COUNT } > 0 && unsafe { STEP_ARMED } {
+            report_stop("the call returned", 0, 0, 0, 0, 0, 0);
+            unsafe { STEP_ARMED = false };
+        }
     }
 
     // --peek=RVA[,RVA...]: read qwords from guest memory after the call so the
