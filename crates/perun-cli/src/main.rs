@@ -1110,6 +1110,34 @@ fn cmd_seq(args: &[String]) -> i32 {
                 unsafe { std::ptr::write(dst as *mut u64, val) };
                 println!("[seq] step {step}: poke {label} = {val:#x}");
             }
+            // Write a qword THROUGH the pointer stored at a guest RVA. `poke`
+            // writes to guest memory directly, which cannot reach the
+            // provisioning-gate object: that object is a HOST allocation the
+            // guest makes during the call, so its pointer only exists after
+            // call#0 and the value has to be written between two calls. That is
+            // the whole reason this verb exists and `call --poke-ptr` does not
+            // cover it -- there, every poke runs before the call loop.
+            "poke-ptr" => {
+                if toks.len() < 3 {
+                    eprintln!("[seq] step {step}: poke-ptr RVA VALUE");
+                    return 2;
+                }
+                let rva = parse_num(toks[1]).unwrap_or_else(|| {
+                    eprintln!("[seq] step {step}: bad poke-ptr rva {:?}", toks[1]);
+                    std::process::exit(2);
+                });
+                let val =
+                    if let Some(v) = resolve_token(toks[2], scratch as u64, ctx as u64, &loads) {
+                        v
+                    } else {
+                        eprintln!("[seq] step {step}: bad poke-ptr value {:?}", toks[2]);
+                        return 2;
+                    };
+                let slot = (image.base() as u64).wrapping_add(rva) as *const u64;
+                let target = unsafe { std::ptr::read(slot) };
+                unsafe { std::ptr::write(target as *mut u64, val) };
+                println!("[seq] step {step}: poke-ptr [RVA {rva:#x}] -> {target:#x} = {val:#x}");
+            }
             "zero" => {
                 if toks.len() < 2 {
                     eprintln!("[seq] step {step}: zero scratch|ctx");
