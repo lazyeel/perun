@@ -34,11 +34,17 @@ it in, which is a fact rather than an opinion.
 """
 import ast
 import json
+import pathlib
 import re
 import subprocess
 import sys
 
-REPO = "/opt/data/perun"
+# The repository root, derived from this file's own location so the tool works
+# from any checkout rather than one hard-coded path.
+REPO = pathlib.Path(__file__).resolve().parent.parent
+# Used in the generated banner comments: a repo-relative path, so the emitted
+# text reads the same in every checkout.
+REPO_REL = "perun"
 TARGET = "x86_64-unknown-linux-gnu"
 
 # Prose that cannot be derived from metadata. Everything not listed here gets a
@@ -457,8 +463,8 @@ def main():
 
     ok = True
     for path, name, block in (
-        (f"{REPO}/RESEARCH.md", "license-tables", research),
-        (f"{REPO}/NOTICE", "license-notice", notice),
+        (str(REPO / "RESEARCH.md"), "license-tables", research),
+        (str(REPO / "NOTICE"), "license-notice", notice),
     ):
         new, unchanged = splice(path, name, block)
         if check:

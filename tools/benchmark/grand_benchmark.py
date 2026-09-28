@@ -52,11 +52,13 @@ BENCH = TMP / "bench"
 # login driver provisions it, and the store lane is then fully headless.
 MAJD_KEYCHAIN = os.environ.get("MAJD_KEYCHAIN", "bench-keyring-2026")
 
-# The fetcher's cache is under XDG, not in the repo; the first run printed
-# "[fetcher] assets cached at /opt/data/home/.cache/perun/sap", and measuring
-# "cold" against a path that does not exist silently measures warm twice.
-SAP_CACHE = pathlib.Path(os.environ.get("XDG_CACHE_HOME",
-                                         "/opt/data/home/.cache")) / "perun" / "sap"
+# The fetcher's cache is under XDG, not in the repo. It has to be the same
+# directory the fetcher itself resolves, or "cold" measures against a path that
+# does not exist and silently reports a warm run twice. XDG_CACHE_HOME wins if
+# it is set; otherwise the XDG default, which is $HOME/.cache.
+SAP_CACHE = pathlib.Path(
+    os.environ.get("XDG_CACHE_HOME") or pathlib.Path.home() / ".cache"
+) / "perun" / "sap"
 
 # Both signers must be given the same bytes, and perun's built-in payload is
 # exactly this string, so neither side gets an input the other cannot produce.
