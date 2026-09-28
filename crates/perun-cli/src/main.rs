@@ -156,15 +156,31 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
                             }
                         }
                         libc::write(2, h.as_ptr().cast(), hn);
+                        // Only the tail is printed: formatting and writing every
+                        // step from inside the handler dominated the walk and
+                        // made a long traversal impractical.
                         if !log.is_null() {
                             let n = STEP_COUNT.min(STEP_MAX) as usize;
-                            for i in 0..n {
+                            let from = n.saturating_sub(200_000);
+                            let mut h2: [u8; 64] = [0; 64];
+                            let mut h2n = 0usize;
+                            for b in b"[perun] ... tail of the walk:\n" {
+                                if std::env::var_os("PERUN_STEP_DUMP").is_none() {
+                                    break;
+                                }
+                                if h2n < h2.len() {
+                                    h2[h2n] = *b;
+                                    h2n += 1;
+                                }
+                            }
+                            libc::write(2, h2.as_ptr().cast(), h2n);
+                            for i in from..n {
                                 let rp = *log.add(i * 4);
                                 let fl2 = *log.add(i * 4 + 1);
                                 let ax = *log.add(i * 4 + 2);
                                 let di = *log.add(i * 4 + 3);
                                 let bytes = format!(
-                                    "[step {i:6}] rip={rp:#018x} rax={ax:#018x} rdi={di:#018x} fl={fl2:#x}\n"
+                                    "[step {i:8}] rip={rp:#018x} rax={ax:#018x} rdi={di:#018x} fl={fl2:#x}\n"
                                 );
                                 let nb = bytes.len().min(95);
                                 let mut l: [u8; 96] = [0; 96];
@@ -211,16 +227,17 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
                         libc::write(2, hdr.as_ptr().cast(), hn);
                         if !log.is_null() {
                             let n = STEP_COUNT.min(STEP_MAX) as usize;
-                            for i in 0..n {
+                            let from = n.saturating_sub(200_000);
+                            for i in from..n {
                                 let rip = *log.add(i * 4);
                                 let fl = *log.add(i * 4 + 1);
                                 let rax = *log.add(i * 4 + 2);
                                 let rdi = *log.add(i * 4 + 3);
-                                let mut l: [u8; 96] = [0; 96];
                                 let bytes = format!(
-                                    "[step {i:6}] rip={rip:#018x} rax={rax:#018x} rdi={rdi:#018x} fl={fl:#x}\n"
+                                    "[step {i:8}] rip={rip:#018x} rax={rax:#018x} rdi={rdi:#018x} fl={fl:#x}\n"
                                 );
                                 let nb = bytes.len().min(95);
+                                let mut l: [u8; 96] = [0; 96];
                                 l[..nb].copy_from_slice(&bytes.as_bytes()[..nb]);
                                 libc::write(2, l.as_ptr().cast(), nb);
                             }
