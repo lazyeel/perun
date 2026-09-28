@@ -6,7 +6,7 @@
 //! Entries are `(offset from __TEXT,__text, type)`, type selecting the idiom:
 //! 0 = A (9 bytes), 1 = B (12), 2 = C (10).
 //!
-//! GENERATED, do not hand-edit. `/opt/data/perun-workspace/gen_rdtsc_sites.py` writes
+//! GENERATED, do not hand-edit. `gen_rdtsc_sites.py` writes
 //! the full scan; `tmp/fuzz_rdtsc_census.py` on branch `census/rdtsc` measured which of
 //! those sites a SAP session actually reaches, over 100 scenarios (20 MACs x 50 payloads).
 //! The shipped tables hold only that union, so the loader never touches dead code.

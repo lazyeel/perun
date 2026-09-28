@@ -436,6 +436,15 @@ int main(int argc, char **argv) {
     void *h = dlopen(so, RTLD_NOW | RTLD_LOCAL);
     if (!h) die("dlopen libstoreservicescore.so: %s", dlerror());
 
+#ifdef DUMP_ADI
+    /* Install the argument dumper after both libraries are mapped and before
+     * any entry point is called. The hooks are inline patches, so they take
+     * effect regardless of which pointer the caller holds. */
+    extern int dump_init(const char *);
+    if (dump_init(libdir) == 0)
+        die("dump_init(%s) failed", libdir);
+#endif
+
     /* Classic stable obfuscated exports (byte-verified in this exact .so):
      * kq56gsgHG6=LoadLibraryWithPath Sph98paBcz=SetAndroidID
      * nf92ngaK92=SetProvisioningPath aslgmuibau=GetLoginCode
