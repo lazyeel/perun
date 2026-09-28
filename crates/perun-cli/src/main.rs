@@ -58,6 +58,7 @@ static mut STEP_EDX: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_RDX: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_RCX: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_R10: [u64; STEP_RING] = [0; STEP_RING];
+static mut STEP_EDI: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_R12: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_IDX: usize = 0;
 const EFLAGS_TF: u64 = 0x100;
@@ -95,7 +96,13 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
         let rp = unsafe { STEP_RIP[slot] };
         let ed = unsafe { STEP_EDX[slot] };
         let dx = unsafe { STEP_RDX[slot] };
-        println!("  [{k:4}] rip={rp:#018x} edx={ed:#010x} rdx={dx:#018x}");
+        let cx = unsafe { STEP_RCX[slot] };
+        let edi = unsafe { STEP_EDI[slot] };
+        let r10 = unsafe { STEP_R10[slot] };
+        let r12 = unsafe { STEP_R12[slot] };
+        println!(
+            "  [{k:4}] rip={rp:#018x} edx={ed:#010x} rdx={dx:#018x} edi={edi:#010x} r10={r10:#018x} rcx={cx:#x} r12={r12:#018x}"
+        );
     }
 }
 
@@ -189,6 +196,7 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             STEP_RDX[slot] = rdx;
             STEP_RCX[slot] = *regs.add(libc::REG_RCX as usize) as u64;
             STEP_R10[slot] = *regs.add(libc::REG_R10 as usize) as u64;
+            STEP_EDI[slot] = rdi;
             STEP_R12[slot] = *regs.add(libc::REG_R12 as usize) as u64;
             STEP_IDX = STEP_IDX.wrapping_add(1);
             STEP_COUNT += 1;
