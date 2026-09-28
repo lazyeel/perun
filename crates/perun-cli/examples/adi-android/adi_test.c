@@ -436,15 +436,6 @@ int main(int argc, char **argv) {
     void *h = dlopen(so, RTLD_NOW | RTLD_LOCAL);
     if (!h) die("dlopen libstoreservicescore.so: %s", dlerror());
 
-#ifdef DUMP_ADI
-    /* Install the argument dumper after both libraries are mapped and before
-     * any entry point is called. The hooks are inline patches, so they take
-     * effect regardless of which pointer the caller holds. */
-    extern int dump_init(const char *);
-    if (dump_init(libdir) == 0)
-        die("dump_init(%s) failed", libdir);
-#endif
-
     /* Classic stable obfuscated exports (byte-verified in this exact .so):
      * kq56gsgHG6=LoadLibraryWithPath Sph98paBcz=SetAndroidID
      * nf92ngaK92=SetProvisioningPath aslgmuibau=GetLoginCode
@@ -470,6 +461,15 @@ int main(int argc, char **argv) {
     int rc = pLoad(absdir);
     if (rc != 0) die("ADILoadLibraryWithPath(%s)=%d", absdir, rc);
     info("adi", "library loaded (%s)", absdir);
+
+#ifdef DUMP_ADI
+    /* The dumper swaps the function pointers the library has just stored, so it
+     * has to run after the load that fills them in, and before the first
+     * provisioning call. */
+    extern int dump_init(const char *);
+    if (dump_init(libdir) == 0)
+        die("dump_init(%s) failed", libdir);
+#endif
 
     /* probe: is the engine responsive at all before any configuration? */
     int code = pCode(DS_ID);
