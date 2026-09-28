@@ -50,6 +50,7 @@ static mut STEP_ENTERED: bool = false;
 static mut STEP_COUNT: u64 = 0;
 static mut STEP_MAX: u64 = 0;
 static mut STEP_STOP_RVA: u64 = 0;
+static mut STEP_STOP_ON_CODE: bool = true;
 const STEP_RING: usize = 160_000;
 static mut STEP_RIP: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_EDX: [u64; STEP_RING] = [0; STEP_RING];
@@ -185,8 +186,7 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             // flattened body arrives at that value. Catching it here rather than
             // at a fixed address is what makes this independent of the build.
             let wants_stop = STEP_STOP_RVA != 0 && rip == STEP_STOP_RVA
-                || rdi as u32 == ERRNO_45018
-                || rax as u32 == ERRNO_45018;
+                || STEP_STOP_ON_CODE && (rdi as u32 == ERRNO_45018 || rax as u32 == ERRNO_45018);
             if wants_stop || STEP_COUNT >= STEP_MAX {
                 *regs.add(libc::REG_EFL as usize) = (flags & !EFLAGS_TF) as i64;
                 STEP_ARMED = false;
