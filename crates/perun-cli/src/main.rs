@@ -19,6 +19,57 @@ fn main() {
     unsafe { libc::_exit(code) }
 }
 
+// ── single-stepping the flattened dispatcher ─────────────────────────────────
+//
+// ptrace is refused by the sandbox and Ghidra will not recover the flattened jump
+// table, so the body of `vdfut768ig` is reachable only from inside. The x86 trap
+// flag needs no ptrace: with TF set in EFLAGS the CPU raises SIGTRAP after the
+// next instruction, and the handler is handed the ucontext either way. Leaving TF
+// set on every return makes the trace self-sustaining, which is what it takes to
+// reach the branch that chooses the return code inside a flattened body.
+//
+// PERUN_STEPS=N arms it. The trace is a fixed ring filled from the handler with
+// plain stores, so it stays async-signal-safe: no allocation, no formatting.
+static mut STEP_ARMED: bool = false;
+static mut STEP_PRIMED: bool = false;
+static mut STEP_COUNT: u64 = 0;
+static mut STEP_MAX: u64 = 0;
+static mut STEP_LOG: *mut u64 = std::ptr::null_mut();
+const STEP_CAP_ENTRIES: usize = 400_000;
+const EFLAGS_TF: u64 = 0x100;
+static mut STEP_IMAGE_LO: u64 = 0;
+static mut STEP_IMAGE_HI: u64 = 0;
+static mut STEP_FN_LO: u64 = 0;
+static mut STEP_FN_HI: u64 = 0;
+static mut STEP_STOP_RVA: u64 = 0;
+
+/// Arm single-stepping over the next `n` instructions, logging rip/flags/regs.
+unsafe fn arm_steps(n: u64, entries: usize) {
+    unsafe {
+        let n = n.clamp(1, 1 << 22);
+        let cap = entries.clamp(1, STEP_CAP_ENTRIES);
+        let bytes = cap * std::mem::size_of::<u64>() * 4;
+        let buf = libc::malloc(bytes);
+        if buf.is_null() {
+            return;
+        }
+        STEP_LOG = buf.cast::<u64>();
+        // 0x7c800000 is this image's preferred base; keep a wide window so the
+        // walk also covers anything the loader places alongside it.
+        STEP_IMAGE_LO = 0x7C00_0000;
+        STEP_IMAGE_HI = 0x7D00_0000;
+        // The walk is bounded by the image, not by the one function: the
+        // flattened dispatcher calls helpers elsewhere in the same mapping, and
+        // 0x7c931764 is one such site (RVA 0x131764).
+        STEP_FN_LO = 0x7C80_0000;
+        STEP_FN_HI = 0x7C80_0000 + 0x1A_5000;
+        STEP_MAX = n;
+        STEP_COUNT = 0;
+        STEP_PRIMED = false;
+        STEP_ARMED = true;
+    }
+}
+
 /// POSIX signal handler: print guest-crash context (RIP, RSP, fault address)
 /// straight to stderr, without unwinding.
 ///
@@ -51,6 +102,137 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             // entered as if reached by `ret` from the thunk — rsp already sits
             // at the guest stack top edge.
             *regs.add(libc::REG_RIP as usize) = sap::guest_landing_for_signal() as i64;
+            return;
+        }
+
+        // Single-stepping. The first SIGTRAP is the one raised by hand to install
+        // TF, because the thread has to be resuming with the flag already set for
+        // the CPU to trap after the first guest instruction. Every SIGTRAP after
+        // that is the CPU stepping, and each one leaves TF set so the next traps
+        // too.
+        if sig == libc::SIGTRAP && STEP_ARMED {
+            let rip = *regs.add(libc::REG_RIP as usize) as u64;
+            let rflags = *regs.add(libc::REG_EFL as usize) as u64;
+            let rax = *regs.add(libc::REG_RAX as usize) as u64;
+            let rdi = *regs.add(libc::REG_RDI as usize) as u64;
+            // The trace begins at the raise(), so the first steps are the
+            // kernel's sigreturn trampoline and libc, which are host code. Only
+            // instructions inside the mapped image count toward the budget;
+            // TF stays set across the host code so the walk survives it.
+            if STEP_PRIMED {
+                // Stop when the walk leaves the function it was tracing, or when
+                // it wanders into a different mapping: either way the budget
+                // should not keep climbing.
+                // Entering and leaving: while the walk is outside the image it
+                // is in the signal-return trampoline and must not be counted,
+                // but it also must not disarm. Once inside, leaving the
+                // function ends the walk.
+                if rip >= STEP_IMAGE_LO && rip < STEP_IMAGE_HI {
+                    if rip < STEP_FN_LO || rip >= STEP_FN_HI {
+                        STEP_ARMED = false;
+                        return;
+                    }
+                    STEP_COUNT += 1;
+                    let idx = ((STEP_COUNT as usize).saturating_sub(1)) * 4;
+                    if !STEP_LOG.is_null() && idx + 4 <= STEP_CAP_ENTRIES * 4 {
+                        let log = STEP_LOG;
+                        *log.add(idx) = rip;
+                        *log.add(idx + 1) = rflags;
+                        *log.add(idx + 2) = rax;
+                        *log.add(idx + 3) = rdi;
+                    }
+                    if STEP_STOP_RVA != 0 && rip == STEP_STOP_RVA {
+                        // A full traversal of the flattened body runs to millions
+                        // of instructions at roughly ten thousand a second, so the
+                        // walk is stopped at the address of interest instead.
+                        STEP_ARMED = false;
+                        let log = STEP_LOG;
+                        let mut h: [u8; 48] = [0; 48];
+                        let mut hn = 0usize;
+                        for b in b"[perun] reached the stop address\n" {
+                            if hn < h.len() {
+                                h[hn] = *b;
+                                hn += 1;
+                            }
+                        }
+                        libc::write(2, h.as_ptr().cast(), hn);
+                        if !log.is_null() {
+                            let n = STEP_COUNT.min(STEP_MAX) as usize;
+                            for i in 0..n {
+                                let rp = *log.add(i * 4);
+                                let fl2 = *log.add(i * 4 + 1);
+                                let ax = *log.add(i * 4 + 2);
+                                let di = *log.add(i * 4 + 3);
+                                let bytes = format!(
+                                    "[step {i:6}] rip={rp:#018x} rax={ax:#018x} rdi={di:#018x} fl={fl2:#x}\n"
+                                );
+                                let nb = bytes.len().min(95);
+                                let mut l: [u8; 96] = [0; 96];
+                                l[..nb].copy_from_slice(&bytes.as_bytes()[..nb]);
+                                libc::write(2, l.as_ptr().cast(), nb);
+                            }
+                        }
+                        return;
+                    }
+                    if STEP_COUNT >= STEP_MAX {
+                        STEP_ARMED = false;
+                        // Report from here: the guest is about to run to its
+                        // normal end, but the caller only prints the trace after
+                        // the call returns, and a trap later in the process
+                        // would take _exit before that.
+                        let log = STEP_LOG;
+                        let mut hdr: [u8; 64] = [0; 64];
+                        let mut hn = 0usize;
+                        for b in b"[perun] trace complete, steps=" {
+                            if hn < hdr.len() {
+                                hdr[hn] = *b;
+                                hn += 1;
+                            }
+                        }
+                        let mut v = STEP_COUNT;
+                        let mut t: [u8; 20] = [0; 20];
+                        let mut k = 0usize;
+                        loop {
+                            t[k] = b'0' + (v % 10) as u8;
+                            k += 1;
+                            v /= 10;
+                            if v == 0 || k == t.len() {
+                                break;
+                            }
+                        }
+                        for j in (0..k).rev() {
+                            if hn < hdr.len() {
+                                hdr[hn] = t[j];
+                                hn += 1;
+                            }
+                        }
+                        hdr[hn.min(hdr.len() - 1)] = b'\n';
+                        hn = (hn + 1).min(hdr.len());
+                        libc::write(2, hdr.as_ptr().cast(), hn);
+                        if !log.is_null() {
+                            let n = STEP_COUNT.min(STEP_MAX) as usize;
+                            for i in 0..n {
+                                let rip = *log.add(i * 4);
+                                let fl = *log.add(i * 4 + 1);
+                                let rax = *log.add(i * 4 + 2);
+                                let rdi = *log.add(i * 4 + 3);
+                                let mut l: [u8; 96] = [0; 96];
+                                let bytes = format!(
+                                    "[step {i:6}] rip={rip:#018x} rax={rax:#018x} rdi={rdi:#018x} fl={fl:#x}\n"
+                                );
+                                let nb = bytes.len().min(95);
+                                l[..nb].copy_from_slice(&bytes.as_bytes()[..nb]);
+                                libc::write(2, l.as_ptr().cast(), nb);
+                            }
+                        }
+                        return;
+                    }
+                }
+            } else {
+                STEP_PRIMED = true;
+            }
+            // Keep TF set: this is what makes the trace self-sustaining.
+            *regs.add(libc::REG_EFL as usize) = (rflags | EFLAGS_TF) as i64;
             return;
         }
 
@@ -847,13 +1029,51 @@ fn cmd_call(args: &[String]) -> i32 {
         .and_then(|v| v.parse().ok())
         .unwrap_or(1);
 
+    // PERUN_STEPS=N single-steps the call, for a body whose control flow is
+    // flattened and therefore invisible to a static decompiler.
+    let steps: u64 = std::env::var("PERUN_STEPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     for iter in 0..seq_n {
         println!(
             "[perun] call#{iter} {export_name}({:#x}, {:#x}, {:#x}, {:#x})...",
             argv[0], argv[1], argv[2], argv[3]
         );
+        // Arm here, not before the loop: DllMain runs guest code too, and its
+        // instructions would otherwise consume the whole budget before the
+        // export is ever entered.
+        if steps > 0 && iter == 0 {
+            unsafe {
+                arm_steps(steps, 400_000);
+                STEP_STOP_RVA = std::env::var("PERUN_STEP_UNTIL")
+                    .ok()
+                    .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+                    .map(|rva| 0x7C80_0000u64 + rva)
+                    .unwrap_or(0);
+                // Enter the handler once so it can install TF in the context the
+                // thread resumes from; after that the CPU drives itself.
+                libc::raise(libc::SIGTRAP);
+            }
+            eprintln!("[perun] single-stepping {steps} instructions");
+        }
         let r = unsafe { f(argv[0], argv[1], argv[2], argv[3]) };
         println!("[perun] call#{iter} {export_name} returned {r:#x} ({r})");
+    }
+
+    if steps > 0 {
+        unsafe {
+            let log = STEP_LOG;
+            let n = (STEP_COUNT.min(STEP_MAX)) as usize;
+            println!("[perun] trace: {n} instructions");
+            for i in 0..n {
+                let rip = *log.add(i * 4);
+                let fl = *log.add(i * 4 + 1);
+                let rax = *log.add(i * 4 + 2);
+                let rdi = *log.add(i * 4 + 3);
+                println!("[step {i:6}] rip={rip:#018x} rax={rax:#018x} rdi={rdi:#018x} fl={fl:#x}");
+            }
+        }
     }
 
     // --peek=RVA[,RVA...]: read qwords from guest memory after the call so the
