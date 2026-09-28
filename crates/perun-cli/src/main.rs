@@ -52,7 +52,7 @@ static mut STEP_MAX: u64 = 0;
 static mut STEP_STOP_RVA: u64 = 0;
 const STEP_RING: usize = 256;
 static mut STEP_RIP: [u64; STEP_RING] = [0; STEP_RING];
-static mut STEP_EDI: [u64; STEP_RING] = [0; STEP_RING];
+static mut STEP_EDX: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_IDX: usize = 0;
 const EFLAGS_TF: u64 = 0x100;
 /// -45018, the code the library is about to publish when the header check fails.
@@ -87,8 +87,8 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
     for k in 0..n {
         let slot = (idx + k) % STEP_RING;
         let rp = unsafe { STEP_RIP[slot] };
-        let ed = unsafe { STEP_EDI[slot] };
-        println!("  [{k:4}] rip={rp:#018x} edi={ed:#x}");
+        let ed = unsafe { STEP_EDX[slot] };
+        println!("  [{k:4}] rip={rp:#018x} edx={ed:#010x}");
     }
 }
 
@@ -140,6 +140,7 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             let flags = *regs.add(libc::REG_EFL as usize) as u64;
             let rax = *regs.add(libc::REG_RAX as usize) as u64;
             let rdi = *regs.add(libc::REG_RDI as usize) as u64;
+            let rdx = *regs.add(libc::REG_RDX as usize) as u64;
             let rbx = *regs.add(libc::REG_RBX as usize) as u64;
             let rcx = *regs.add(libc::REG_RCX as usize) as u64;
             let rsp = *regs.add(libc::REG_RSP as usize) as u64;
@@ -176,7 +177,7 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
 
             STEP_ENTERED = true;
             STEP_RIP[STEP_IDX & (STEP_RING - 1)] = rip;
-            STEP_EDI[STEP_IDX & (STEP_RING - 1)] = rdi;
+            STEP_EDX[STEP_IDX & (STEP_RING - 1)] = rdx as u32 as u64;
             STEP_IDX = STEP_IDX.wrapping_add(1);
             STEP_COUNT += 1;
 
