@@ -15,7 +15,7 @@ Needs `ANDROID_NDK`, `ANDROID_NDK` pointing at an NDK root, `ADI_APK` at an
 Apple Music APK, and `ADI_RESOLVE` set, e.g.
 
     export ADI_RESOLVE="gsa.apple.com:443:17.179.252.2,buy.itunes.apple.com:443:17.8.136.39"
-    ANDROID_NDK=/opt/data/ndk/android-ndk-r27c ./run.sh
+    ANDROID_NDK=$HOME/ndk/android-ndk-r27c ./run.sh
 
 The first run builds an Android sysroot from the `sys-img` repository: a 211 MB
 `android-21` arm64 image, extracted with `debugfs` (the image is plain ext4, so

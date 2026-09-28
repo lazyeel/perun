@@ -557,8 +557,10 @@ int main(int argc, char **argv) {
         printf("[call] ADIGetLoginCode(-2) = %d  %s\n", c,
                c == 0 ? "(provisioned)" : c == -45061 ? "(not provisioned)" : "");
         if (setpath) {
-            if (mkdir("/opt/data/adi-aarch64/adi-data", 0755) != 0 && errno != EEXIST) { /* ok */ }
-            int p1 = setpath("/opt/data/adi-aarch64/adi-data");
+            const char *adir = getenv("ADI_DATA_DIR");
+            if (!adir) adir = "adi-data";
+            if (mkdir(adir, 0755) != 0 && errno != EEXIST) { /* ok */ }
+            int p1 = setpath(adir);
             printf("[call] ADISetProvisioningPath = %d\n", p1);
         } else printf("[call] no SetProvisioningPath export\n");
         if (setid) {

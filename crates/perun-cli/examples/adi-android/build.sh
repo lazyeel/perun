@@ -18,7 +18,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-QEMU="${QEMU:-/opt/data/home/.local/bin/qemu-aarch64-static}"
+QEMU="${QEMU:-$(command -v qemu-aarch64-static || true)}"
 SYSROOT="${SYSROOT:-/usr/aarch64-linux-gnu}"
 CC="${CC:-aarch64-linux-gnu-gcc}"
 SO="${SO:-$HERE/libCoreADI.so}"
@@ -26,8 +26,8 @@ SO="${SO:-$HERE/libCoreADI.so}"
 # The Android library. It is NOT vendored: fetch it from a local extraction of
 # an official APK, or point SO at a copy you already have.
 if [ ! -f "$SO" ]; then
-    for cand in /opt/data/apk/ex/lib/arm64-v8a/libCoreADI.so \
-                /opt/data/ipatool-workflow-run/repo/libs-classic/libCoreADI.so; do
+    for cand in "$HERE/libs-classic/libCoreADI.so" \
+                "$HERE/lib/x86_64/libCoreADI.so"; do
         if [ -f "$cand" ]; then
             echo "using $cand"
             cp "$cand" "$SO"

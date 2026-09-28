@@ -29,13 +29,10 @@ die() { printf '[run] FATAL %s\n' "$*" >&2; exit 1; }
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORK="${ADI_WORK:-/opt/data/adi-aarch64}"
-SYSROOT="${ADI_SYSROOT:-/opt/data/android-sysroot}"
+WORK="${ADI_WORK:-$HERE/work}"
+SYSROOT="${ADI_SYSROOT:-$WORK/android-sysroot}"
 LIBS="${1:-$WORK/run}"
 QEMU="${QEMU:-$(command -v qemu-aarch64-static || true)}"
-if [ -z "$QEMU" ] && [ -x /opt/data/home/.local/bin/qemu-aarch64-static ]; then
-  QEMU=/opt/data/home/.local/bin/qemu-aarch64-static
-fi
 [ -n "$QEMU" ] || die "qemu-aarch64-static not found (set QEMU=/path/to/it)"
 NPROC="$(nproc)"
 
@@ -94,7 +91,8 @@ build() {
 
 main() {
 if [ -z "${ANDROID_NDK:-}" ]; then
-  ANDROID_NDK="$(ls -d /opt/data/ndk/android-ndk-* 2>/dev/null | head -1 || true)"
+  ANDROID_NDK="$(ls -d "${ANDROID_NDK_ROOT:-$HOME/ndk}"/* 2>/dev/null | head -1 || true)"
+  [ -n "$ANDROID_NDK" ] || ANDROID_NDK="$(ls -d "${ANDROID_NDK_ROOT:-$HOME/ndk}"/ndk/android-ndk-* 2>/dev/null | head -1 || true)"
   export ANDROID_NDK
 fi
   : "${ANDROID_NDK:?set ANDROID_NDK to the NDK root}"

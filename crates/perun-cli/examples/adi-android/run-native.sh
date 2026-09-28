@@ -47,8 +47,10 @@ if [ ! -x "$SYSROOT/bin/linker64" ]; then
   done
 fi
 
-CC="${CC:-$(ls /opt/data/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang 2>/dev/null | head -1)}"
-[ -n "$CC" ] || { echo "x86_64-linux-android21-clang not found" >&2; exit 1; }
+# CC comes first; otherwise an NDK under $HOME/ndk, or one named by
+# ANDROID_NDK / ANDROID_NDK_ROOT, is picked up.
+CC="${CC:-$(ls "${ANDROID_NDK:-${ANDROID_NDK_ROOT:-$HOME/ndk}}"/android-ndk-*/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang 2>/dev/null | head -1)}"
+[ -n "$CC" ] || { echo "x86_64-linux-android21-clang not found (set CC, or ANDROID_NDK)" >&2; exit 1; }
 
 say "building the engine for x86_64"
 "$CC" -O2 -Wall -I"$HERE/curl_inc" -I"$HERE/openssl_inc" \
