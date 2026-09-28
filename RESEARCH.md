@@ -10,7 +10,7 @@ This document is a technical specification and research report for **Perun**, a 
 
 - the 2013-vintage x86_64 **Mach-O** commerce images (CoreFP, CommerceCore, CommerceKit) that run the StoreKit client-attestation handshake (FairPlay **SAP**) end-to-end against Apple's live storefront endpoints;
 - the Windows **PE32+** image `CoreADI64.dll` (iTunes for Windows, x86_64), whose ADI v3 attestation dispatcher runs end-to-end up to its provisioning gate (§ 5.8, open);
-- the Android **aarch64** engine from Apple Music (`libstoreservicescore.so` + `libCoreADI.so`), which generates Anisette v3 headers locally on this host, no Wine and no remote re-signing server (§ 5.8a, closed 2026-09-27).
+- the **x86_64** engine from Apple Music (`libstoreservicescore.so` + `libCoreADI.so`, taken from Apple's universal 4.9.6 APK), which generates Anisette v3 headers natively on this host — no Wine, no QEMU, no remote re-signing server (§ 5.8a, closed 2026-09-27). An arm64 copy of the same engine also runs, under `qemu-aarch64-static`, as a fallback.
 
 It documents the binary maps, calling interfaces, memory invariants, network protocols, and measured performance of both lanes, and the verification commands that reproduce every claim with the shipped binary and stock tools.
 
