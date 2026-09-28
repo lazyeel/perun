@@ -51,6 +51,7 @@ static mut STEP_COUNT: u64 = 0;
 static mut STEP_MAX: u64 = 0;
 static mut STEP_STOP_RVA: u64 = 0;
 static mut STEP_STOP_ON_CODE: bool = true;
+static mut STEP_STOP_CODE: u32 = ERRNO_45018;
 const STEP_RING: usize = 160_000;
 static mut STEP_RIP: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_EDX: [u64; STEP_RING] = [0; STEP_RING];
@@ -185,8 +186,16 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             // The stop is the library about to publish -45018, wherever the
             // flattened body arrives at that value. Catching it here rather than
             // at a fixed address is what makes this independent of the build.
+            let g = |r: libc::c_int| *regs.add(r as usize) as u32;
+            // The value is published in different registers on different routes
+            // -- edi before the epilogue moves it, eax after -- so sample the
+            // argument and result registers rather than assuming one.
             let wants_stop = STEP_STOP_RVA != 0 && rip == STEP_STOP_RVA
-                || STEP_STOP_ON_CODE && (rdi as u32 == ERRNO_45018 || rax as u32 == ERRNO_45018);
+                || STEP_STOP_ON_CODE
+                    && (g(libc::REG_RDI) == STEP_STOP_CODE
+                        || g(libc::REG_RAX) == STEP_STOP_CODE
+                        || g(libc::REG_RCX) == STEP_STOP_CODE
+                        || g(libc::REG_RDX) == STEP_STOP_CODE);
             if wants_stop || STEP_COUNT >= STEP_MAX {
                 *regs.add(libc::REG_EFL as usize) = (flags & !EFLAGS_TF) as i64;
                 STEP_ARMED = false;
