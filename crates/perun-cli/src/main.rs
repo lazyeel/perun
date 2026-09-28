@@ -1114,13 +1114,22 @@ fn cmd_call(args: &[String]) -> i32 {
         if p.is_null() {
             continue;
         }
-        // Probe readability with a 64-byte read; skip on fault.
-        let readable = unsafe { probe_read(p, 64) };
-        if readable {
-            let bytes = unsafe { std::slice::from_raw_parts(p, 64) };
-            if bytes.iter().any(|&b| b != 0) {
-                println!("[perun] arg{i} [{a:#x}] -> {}", hexdump(bytes));
-            }
+        // An argument does not have to be a pointer. A command selector such as
+        // 0x632b8d6e is a small integer, and reading through it faults: the
+        // probe cannot make an arbitrary integer safe, because the kernel
+        // returns EFAULT for the read but the value may still be inside a
+        // mapping the guest owns, or not. So restrict the dump to the ranges
+        // this command actually handed out, and report a literal as a literal.
+        let in_scratch = (scratch as u64..scratch as u64 + 0x1000).contains(a);
+        let in_ctx = (ctx as u64..ctx as u64 + ctx_size as u64).contains(a);
+        let in_image = (image.base() as u64..image.base() as u64 + 0x400000).contains(a);
+        if !(in_scratch || in_ctx || in_image) {
+            println!("[perun] arg{i} [{a:#x}] — not a pointer (literal or out of range)");
+            continue;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(p, 64) };
+        if bytes.iter().any(|&b| b != 0) {
+            println!("[perun] arg{i} [{a:#x}] -> {}", hexdump(bytes));
         }
     }
     0
@@ -1439,25 +1448,6 @@ fn cmd_seq(args: &[String]) -> i32 {
     }
     println!("[seq] done ({step} steps)");
     0
-}
-
-/// Return true if `len` bytes at `p` are readable without faulting.
-/// Uses a mincore-style probe via msync on a copy; simplest portable check is
-/// to attempt the read under a SIGSEGV guard. Here we use a process_vm-style
-/// self-read via a pipe: write the memory to a pipe and see if it succeeds.
-unsafe fn probe_read(p: *const u8, len: usize) -> bool {
-    unsafe {
-        // mincore requires page-aligned addr; instead do a bounded read via
-        // /dev/null write using write(2) on the pointer directly.
-        let fd = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY);
-        if fd < 0 {
-            return false;
-        }
-        // write(2) will return EFAULT instead of crashing if the range is bad.
-        let n = libc::write(fd, p.cast::<core::ffi::c_void>(), len);
-        libc::close(fd);
-        n == len as isize
-    }
 }
 
 fn parse_num(s: &str) -> Option<u64> {
