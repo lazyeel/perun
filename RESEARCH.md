@@ -414,13 +414,32 @@ A 40-byte block is five qwords, `+0x00`…`+0x20`: **there is no qword at `+0x28
 
 | field | size | contents |
 |---|---|---|
-| `+0x10` | **88 bytes** | `0x8000000000000002`, three zero qwords, then a **UTF-16 command line of the host process** — `8=0x10 --poke=ctx+0x0=scratch --a…=0x19db9`, i.e. the argv of perun itself, our own `--poke` arguments included |
-| `+0x18` | **104 bytes** | `0x8000000000000001`, zeros, the caller's `scratch` (`0x7ffff7fb6000`), the lengths `0x8`/`0x10`/`0xc`, and at `+0x70` the ASCII **`vdut768ig`** |
-| `+0x20` | **120 bytes** | header, `0x0000010000000000`, zeros, then an extract of **`/proc/self/maps`** — `0000000 00:00`, a run of spaces, `\n[vdso]\n`, `lock]\n`, `-linux-gnu/libgcc_s.so.1` |
+| `+0x10` | **88 bytes** | `0x8000000000000002`, three zero qwords, then a UTF-16 string reading `8=0x10 --poke=ctx+0x0=scratch --a…=0x19db9` |
+| `+0x18` | **104 bytes** | `0x8000000000000001`, zeros, the caller's `scratch` (`0x7ffff7fb6000`), the lengths `0x8`/`0x10`/`0xc`, and at `+0x70` the ASCII **`vdfut768ig`** |
+| `+0x20` | **120 bytes** | header, `0x0000010000000000`, zeros, then `0000000 00:00`, a run of spaces, `\n[vdso]\n`, `lock]\n`, `n/libgcc_s.so.1` |
 
-None of the three is a direct `HeapAlloc` return — 28 allocations are logged and none lands on these addresses, which fits the earlier finding that the static CRT reaches the allocator without going through the IAT. They are arena blocks of its own.
+**None of this is Apple's, and the reason is not the one it first looked like.** An earlier note in this file read the `+0x10` string as a search path and the `+0x20` block as a device-fingerprint record; both are withdrawn, and the second was the more damaging of the two. A native Windows PE cannot know about Linux `/proc`, about `--poke`, or about any of this harness's flags, and the text is unmistakably ours — `8=0x10 --poke=ctx+0x0=scratch` is perun's own argv, and `[vdso]` with `libgcc_s.so.1` is perun's own process map.
 
-**Two things in there matter beyond the enumeration.** `vdut768ig` is a *mutated* copy of the export name `vdfut768ig`, with `f` and `u` collapsed into one — a derived identifier, not a reference. And the library is collecting **host context: the command line and the process memory map**, which is the device-fingerprint material this whole phase was looking for — read out of its own already-materialised process data rather than through any Windows API, consistent with there being no such call on this path. The earlier reading of `+0x10` as a search path was this same UTF-16 buffer misread from the middle.
+The obvious explanation is that `HeapAlloc` takes `malloc`, glibc hands back a recycled chunk, and the host's freed CLI buffers show through. **That explanation was tested and is false.** Rebuilding with `HeapAlloc` forced to `calloc` — every block zeroed at allocation, nothing stale to inherit — leaves all three strings exactly where they were, byte for byte, and `vdfut768ig` becomes correctly spelled rather than the `vdut768ig` that a recycled chunk happened to produce. So the text is written into these blocks *after* they are allocated. By what, this section does not answer: the guest reaches no file or registry API on this path, so whatever supplies it is not going through the shim table, and the two obvious candidates — stale allocator memory, and the library fingerprinting the host — are both excluded. **Treat the contents as unidentified host-side data until that is settled, not as a result.**
+
+None of the three is a direct `HeapAlloc` return either: 28 allocations are logged in a run and none lands on these addresses, which fits the earlier finding that the static CRT reaches the allocator without going through the IAT. They are arena blocks of its own.
+
+**The first 57 instructions, and why that reframes everything (2026-09-29).** `PERUN_STEPS=60` prints the whole opening, because the ring window covers a walk that short. It is a straight line with **no conditional branch anywhere in it**:
+
+| steps | RVA | what |
+|---|---|---|
+| 0–9 | `0x5afc0`–`0x5afd1` | prologue, `mov eax,0x16a8` |
+| 10–23 | `0x131760`–`0x1317af` | stack-probe thunk |
+| 24–30 | `0x5afd6`–`0x5b001` | `movaps` saves |
+| 31–55 | `0x5b00b`–`0x5b0a9` | dense block, then `lea ebp,[rax+4]`, `lea rbx,[0x15fc90]`, `movsxd rbp,[rbx+rbp*4]`, `lea rbx,[0x5b07c]`, `add rbx,rbp` |
+| 56 | `0x5b0ae` | `jmp rbx` — and `edi` has just become `0xffff5036` |
+| 57 | `0x5b11f` | next block, still `edi = 0xffff5036` |
+
+**So `-45002` is not selected by a test — it falls into place.** There is no `cmp`/`test`/`jcc` on the segment that decides it, which is stronger than "the decision is early": there is no decision there at all. The remaining 80 400 instructions are the flattened body's unwinding, and the `test edi,edi` at `0x66bb8` near the end is only asking whether a result was staged, not which one.
+
+**The incoming `rax` is not the selector either.** The dispatch index is `eax+4`, so the obvious lever is the register `rax` on entry — and sweeping it over `0, 1, 2, 3, 4, 5, 8, 0x10, 0x40, 0xa3, 0xfffffffe` under a hardware breakpoint at `0x5afc0` returns `0xffff5036` for every one of them. `rax` is overwritten before the index is formed, so this measurement says nothing about the gate and is recorded as a negative result rather than a lead.
+
+**What is left is narrow and stated as such:** the first block is reached by an index computed in the prologue's own arithmetic, and the thing that decides which block that is has not been located. The walk to the epilogue and the ring around it are now trustworthy, so the search can start from instruction 0 with 57 steps of context rather than from a guessed address.
 
 **The exit, and the branch that chose it (2026-09-29).** The epilogue is the only frame restore in the image: `add rsp,0x16a8` at `0x5b10b`, unique in the whole of `.text`, reached after 80 457 instructions — the `.pdata` end at `0xb5c98` is not the path taken. The last 128 instructions before it are visible once the ring folds correctly, and they read:
 
