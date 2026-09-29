@@ -40,6 +40,19 @@ win32_api! {
             );
             libc::write(2, m.as_ptr().cast(), m.len());
         }
+        // PERUN_HEAP_TRAP=<size> was tried here and is deliberately absent.
+        // The idea was to raise a trap on that one allocation so a debugger
+        // could arm write watchpoints on the block before the guest filled
+        // it, which is the only moment the address is known. It does not work
+        // and it is recorded rather than left in place: the pointer cannot be
+        // carried across the trap in a register, because the compiler clobbers
+        // rax setting up the call to raise() itself, and a trap that reports
+        // rax = 0 looks exactly like an allocator that returned nothing.
+        // A facility that silently reports the wrong thing is worse than no
+        // facility, which is why the heap handle and the cmpxchg are
+        // established by correlation in a run instead: both of those readings
+        // come from values that are actually true when they are taken.
+
         // PERUN_GATE_SEED=<field>:<value> seeds the provisioning state object.
         // The operation export allocates a 0x28-byte block and then zeroes its
         // own first qword, which is the gate flag -- so a seed on field 0 is
