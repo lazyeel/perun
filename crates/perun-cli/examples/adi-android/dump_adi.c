@@ -258,6 +258,55 @@ static void report(const char *what, uint64_t a0, uint64_t a1, uint64_t a2,
 typedef int (*adi4_fn)(uint64_t, uint64_t, uint64_t, uint64_t);
 
 static adi4_fn real_vdfut;
+static adi4_fn real_cvu;
+
+// cvu8io98wun takes one output buffer, not a frame. The Windows build returns
+// 0 for it and that changes nothing downstream, which is measured; what was
+// never established is what a working caller puts in that buffer, or whether
+// the buffer it hands in is the one the dispatcher later reads. So the dump
+// brackets the call: the 64 bytes at *arg0 before, the same 64 after, and the
+// return value, which is the whole question in one place.
+static int wrap_cvu(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
+    const char *prev = phase;
+    phase = "cvu8io98wun";
+    report("cvu8io98wun", a0, a1, a2, a3);
+
+    uint64_t buf = (a0 >= 0x1000) ? *(uint64_t *)a0 : 0;
+    unsigned char before[64], after[64];
+    int got = 0;
+    if (buf && readable((void *)buf)) {
+        memcpy(before, (const void *)buf, sizeof before);
+        got = 1;
+    }
+    printf("    *arg0 = %#018lx  %s\n", (unsigned long)buf,
+           got ? "(snapshotted 64 bytes before)" : "(not a readable pointer)");
+
+    int rc = real_cvu ? real_cvu(a0, a1, a2, a3) : -1;
+
+    printf("    --- what cvu8io98wun wrote to *arg0 ---\n");
+    if (got && readable((void *)buf)) {
+        memcpy(after, (const void *)buf, sizeof after);
+        if (memcmp(before, after, sizeof before) == 0) {
+            printf("    unchanged: the 64 bytes at *arg0 are identical after the call\n");
+        } else {
+            printf("    before:");
+            for (int i = 0; i < 64; i++) printf(" %02x", before[i]);
+            printf("\n    after :");
+            for (int i = 0; i < 64; i++) printf(" %02x", after[i]);
+            printf("\n    changed bytes: %d\n", ({
+                int n = 0;
+                for (int i = 0; i < 64; i++) if (before[i] != after[i]) n++;
+                n;
+            }));
+        }
+    } else {
+        printf("    not sampled\n");
+    }
+    printf("    -> rc=%d\n", rc);
+    fflush(stdout);
+    phase = prev;
+    return rc;
+}
 
 // ── post-call diff ──────────────────────────────────────────────────────────
 //
@@ -405,9 +454,20 @@ int dump_init(const char *libdir) {
 
     int ok = 1;
     ok &= swap(base, VDFUT_PTR_VADDR, (void *)wrap_vdfut, "vdfut768ig");
-    // cvu8io98wun is the initialiser; left alone deliberately -- it runs before
-    // provisioning and corrupting it is not worth the risk for a dump.
-    (void)CVU_PTR_VADDR;
+
+    // cvu8io98wun used to be left alone on the grounds that it runs before
+    // provisioning and that corrupting it was not worth the risk. That is a
+    // risk note, not a measurement, and it left the one entry whose Windows
+    // behaviour was unknown undumped. The swap is the same one the
+    // vdfut768ig slot already takes -- a single store into a writable GOT
+    // slot, no symbol resolution anywhere -- so the risk it was avoiding was
+    // never the real one.
+    uint64_t *cslot = (uint64_t *)(base + CVU_PTR_VADDR);
+    real_cvu = (adi4_fn)(void *)*cslot;
+    printf("[dump] cvu8io98wun slot %p currently holds %p\n", (void *)cslot,
+           (void *)real_cvu);
+    ok &= swap(base, CVU_PTR_VADDR, (void *)wrap_cvu, "cvu8io98wun");
+
     (void)VDFUT_NAME_VADDR;
     printf("[dump] init %s\n", ok ? "complete" : "INCOMPLETE");
     fflush(stdout);

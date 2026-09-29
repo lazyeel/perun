@@ -6,6 +6,7 @@ sysroot/
 apple_chain.pem
 adi_native
 adi_native.raw
+adi_dump
 adi-data/
 # per-machine provisioning state
 adi_identifier
