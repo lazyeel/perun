@@ -19,8 +19,8 @@ use crate::util::{
 };
 use crate::win32::{
     BOOL, BYTE, DWORD, ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, FALSE, FILETIME, HANDLE, LONG,
-    LPCSTR, LPCWSTR, STARTUPINFOW, SYSTEMTIME, TIME_ZONE_ID_UNKNOWN, TIME_ZONE_INFORMATION, TRUE,
-    UINT, WORD,
+    LPCSTR, LPCWSTR, LPWSTR, STARTUPINFOW, SYSTEMTIME, TIME_ZONE_ID_UNKNOWN, TIME_ZONE_INFORMATION,
+    TRUE, UINT, WORD,
 };
 use crate::win32_api;
 
@@ -346,5 +346,37 @@ win32_api! {
     unsafe extern "win64" fn GetACP() -> UINT {
         // 65001 = UTF-8. Matches the shim layer's string handling.
         65001
+    }
+}
+
+win32_api! {
+    /// DWORD GetModuleFileNameW(HMODULE, LPWSTR, DWORD);
+    /// The path of a loaded module. CoreFP.dll asks for its own at DllMain.
+    unsafe extern "win64" fn GetModuleFileNameW(
+        module: HANDLE,
+        buf: LPWSTR,
+        size: DWORD,
+    ) -> DWORD {
+        unsafe {
+            let _ = module;
+            // An empty string is a truthful answer: this runtime maps images
+            // without a backing file path, and the caller is told the truth
+            // rather than given a name that does not exist.
+            if buf.is_null() || size == 0 {
+                return 0;
+            }
+            std::ptr::write_bytes(buf.cast::<u8>(), 0, (size as usize) * 2);
+            0
+        }
+    }
+}
+
+win32_api! {
+    /// BOOL IsValidCodePage(UINT);
+    /// CoreFP.dll probes the OEM code page during DllMain. Every code page the
+    /// runtime can serve is valid, so the probe answers true.
+    unsafe extern "win64" fn IsValidCodePage(cp: UINT) -> i32 {
+        let _ = cp;
+        1
     }
 }
