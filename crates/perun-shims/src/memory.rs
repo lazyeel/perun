@@ -28,6 +28,18 @@ win32_api! {
         } else {
             libc::malloc(size)
         };
+        // The memory shims are not covered by the other traced shims, so a
+        // run could not previously say whether a block came from here at all.
+        // That mattered: the gate object is installed by a `lock cmpxchg` from
+        // a block this library allocated itself, and nothing below the
+        // allocator said how big it was or who asked for it.
+        if std::env::var_os("PERUN_TRACE").is_some() {
+            let m = format!(
+                "[perun] HeapAlloc(flags={flags:#x}, size={size:#x}) = {:p}\n",
+                ptr
+            );
+            libc::write(2, m.as_ptr().cast(), m.len());
+        }
         // PERUN_GATE_SEED=<field>:<value> seeds the provisioning state object.
         // The operation export allocates a 0x28-byte block and then zeroes its
         // own first qword, which is the gate flag -- so a seed on field 0 is
