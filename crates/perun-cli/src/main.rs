@@ -61,7 +61,14 @@ static mut STEP_STOP_ON_CODE: bool = true;
 /// and the publisher of -45002 is not where -45018's is: hard-coding one of
 /// them made the search for the other impossible.
 static mut STEP_STOP_CODE: u32 = ERRNO_45018;
-const STEP_RING: usize = 160_000;
+/// Power of two, and it must be one: the slot index is a bitmask
+/// (`STEP_IDX & (STEP_RING - 1)`) while the reader used to fold with
+/// `% STEP_RING`, and at 160 000 the two disagree. 160000-1 is 0x270FF, whose
+/// bits 8..11 are clear, so every index with any of those bits set folded onto
+/// a small slot while the slots the reader looked at stayed empty -- which is
+/// why a walk of 80 457 instructions reported 128 zero entries, and why
+/// shortening the walk did not help either.
+const STEP_RING: usize = 1 << 17;
 static mut STEP_RIP: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_EDX: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_RDX: [u64; STEP_RING] = [0; STEP_RING];
@@ -108,9 +115,12 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
     // oldest when the walk is shorter than the window.
     let idx = unsafe { STEP_IDX };
     let count = n.min(128);
-    let first = idx - count;
+    // The reader folds the same way the writer does. A power-of-two ring makes
+    // the mask and a modulo agree; at 160 000 they did not, and that mismatch
+    // is what emptied this window.
+    let first = idx.wrapping_sub(count);
     for k in 0..count {
-        let slot = (first + k) % STEP_RING;
+        let slot = (first + k) & (STEP_RING - 1);
         let rp = unsafe { STEP_RIP[slot] };
         let ed = unsafe { STEP_EDX[slot] };
         let dx = unsafe { STEP_RDX[slot] };
