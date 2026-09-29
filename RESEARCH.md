@@ -391,7 +391,62 @@ Straight-line, no dispatch, nothing conditional. **An earlier note in this secti
 A 40-byte block is five qwords, `+0x00`…`+0x20`: **there is no qword at `+0x28`**, and any reading that names one is reading past the allocation. Two later writes touch the object, at `0x5b951` and `0x8cb1e`; the `+0x10`/`+0x18`/`+0x20` pointers visible at publication are the ones from the initialiser, and the second pointer is revised once after it.
 
 
-**Nothing writes it after the install.** Four hardware write watchpoints on the first four qwords, armed at `0x5b51c`, are live to the end of the call and none fires. The scheme is build-then-publish, and the fields are final when the `cmpxchg` retires — so the object does not need filling, it needs *assembling correctly* before publication.
+**The caller cluster, corrected (2026-09-29).** The range the log gives as `CoreFP.dll` RVA `0x1b5da30`–`0x1b67b3d` **is not code**: `.text` ends at `0x196aa10` and that range is inside `.rdata`. The logged address is a VA with the base not subtracted; RVA `0x155da30` is code, and it holds a dense run of exactly eight `call rsi` at `0x155e592, 0x155e5b5, 0x155e5dd, 0x155e600, 0x155e628, 0x155e653, 0x155e676, 0x155e69e`.
+
+**The two claims the log makes about it are both inverted.** `rcx` is *not* varying — `mov rcx,r12` precedes every one of the eight, and `r12` is `lea r12,[rsp+0xd8]` at `0x155e539`, a stack address. What varies is the first qword of the struct that `rcx` points at, and those eight values are **pointers to eight different sources, not opcodes**:
+
+| # | call | written to `[rsp+0xd8]` by | source |
+|---|---|---|---|
+| 1 | `0x155e592` | `mov [rsp+0xd8],r8` | `r8` |
+| 2 | `0x155e5b5` | `mov [rsp+0xd8],r15` | `r15` = the **incoming rdx** (`mov r15,rdx`, `0x155e529`) |
+| 3 | `0x155e5dd` | `mov rax,[rsp+0x28]` | parent slot `+0x28` |
+| 4 | `0x155e600` | `mov [rsp+0xd8],r14` | `r14` = the **incoming rdi** (`mov r14,rdi`, `0x155e54e`) |
+| 5 | `0x155e628` | `mov rax,[rsp+0x68]` | parent slot `+0x68` |
+| 6 | `0x155e653` | `mov rcx,[rsp+0xf0]` | parent slot `+0xf0` |
+| 7 | `0x155e676` | `mov [rsp+0xd8],r13` | `r13` |
+| 8 | `0x155e69e` | `mov rax,[rsp+0x30]` | parent slot `+0x30` |
+
+**The parent frame is 20 bytes at `rsp+0xd8`, with three fields**: `+0x00` the pointer above, `+0x08` a dword computed as `[rbp-0x42ae2992] - edi`, `+0x0c` a dword `ebx = r13d - edi + 7`. The four parent slots the calls read are filled immediately before, at `0x155e4db`–`0x155e509`, and all four come from just two registers — `mov [rsp+0x28],rbp`, `mov [rsp+0x30],rbp`, `mov [rsp+0xf0],r14`, and `mov [rsp+0x68],rax` where `rax` was just read back from `[rsp+0x68]`. `r14` itself was loaded from `[rsp+0xf0]` much earlier at `0x155e380`, so these are the flattened dispatcher's own state being shuffled, not a caller's arguments: iTunes never writes this frame.
+
+**And the eight opcodes are not recoverable from here.** The call target itself is computed, not stored — `rsi = 0xffffffffd1fb9bc9 + [0x1fe4270 + r13*8]` — and the table at `0x1fe4270` holds high-entropy values rather than code addresses in the file, so it is not a function-pointer table as it stands on disk.
+
+ **What the object's three pointers hold, and how big they are (2026-09-29).** Read at the initialiser, sizes from `malloc_usable_size`:
+
+| field | size | contents |
+|---|---|---|
+| `+0x10` | **88 bytes** | `0x8000000000000002`, three zero qwords, then a **UTF-16 command line of the host process** — `8=0x10 --poke=ctx+0x0=scratch --a…=0x19db9`, i.e. the argv of perun itself, our own `--poke` arguments included |
+| `+0x18` | **104 bytes** | `0x8000000000000001`, zeros, the caller's `scratch` (`0x7ffff7fb6000`), the lengths `0x8`/`0x10`/`0xc`, and at `+0x70` the ASCII **`vdut768ig`** |
+| `+0x20` | **120 bytes** | header, `0x0000010000000000`, zeros, then an extract of **`/proc/self/maps`** — `0000000 00:00`, a run of spaces, `\n[vdso]\n`, `lock]\n`, `-linux-gnu/libgcc_s.so.1` |
+
+None of the three is a direct `HeapAlloc` return — 28 allocations are logged and none lands on these addresses, which fits the earlier finding that the static CRT reaches the allocator without going through the IAT. They are arena blocks of its own.
+
+**Two things in there matter beyond the enumeration.** `vdut768ig` is a *mutated* copy of the export name `vdfut768ig`, with `f` and `u` collapsed into one — a derived identifier, not a reference. And the library is collecting **host context: the command line and the process memory map**, which is the device-fingerprint material this whole phase was looking for — read out of its own already-materialised process data rather than through any Windows API, consistent with there being no such call on this path. The earlier reading of `+0x10` as a search path was this same UTF-16 buffer misread from the middle.
+
+**The exit, and the branch that chose it (2026-09-29).** The epilogue is the only frame restore in the image: `add rsp,0x16a8` at `0x5b10b`, unique in the whole of `.text`, reached after 80 457 instructions — the `.pdata` end at `0xb5c98` is not the path taken. The last 128 instructions before it are visible once the ring folds correctly, and they read:
+
+    0x66bb8  test   edi,edi                 ; <- the decision
+    0x66bba  sete   al
+    0x66bbd  lea    ecx,[rax+0xa8b]         ; index 0xa8b if edi!=0, 0xa8c if edi==0
+    0x66bc3  lea    rdx,[rip+0xf90c6]       # 0x15fc90, the CFF block table
+    0x66bca  movsxd rcx,[rdx+rcx*4]
+    0x66bce  lea    rdx,[rip-0x1f]          # per-site base 0x66bb6
+    0x66bd5  add    rdx,rcx
+    0x66bd8  jmp    rdx
+
+    0x5b0a9  mov    edi,0xffff5036         ; unconditional, on the other path
+    0x5b0ae  jmp    rbx
+    0x5b0b0  mov    eax,edi                 ; the path actually taken
+    0x5b0b3..0x5b109  movaps xmm6..xmm15
+    0x5b10b  add    rsp,0x16a8
+    0x5b112..0x5b11e  pop×7 ; ret
+
+**So the answer to "which branch returned the error instead of zero" is `test edi,edi` at `0x66bb8`, and the operand is the register `edi` — not a memory operand and not the input frame.** What that makes `edi` is more useful than the name: **the pending result code.** The walker's ring has `edi = 0xffff5036` already at the test, and the dispatch then reads index `0xa8b`, fetches `table[0xa8b] = 0xffffffffffff44fb` (a negative, sign-extended offset), adds the site base `0x66bb6`, and jumps to `0x5b0b1` — straight into the frame teardown, *skipping* the `mov edi,0xffff5036` at `0x5b0a9`, because the code was already in hand.
+
+The flattened dispatcher therefore branches on **whether a result has been staged**, not on which result it is; the materialising store at `0x5b0a9` is the path taken when nothing is staged yet, and `mov eax,edi` at `0x5b0b0` is what turns the staged register into the return value. This also settles why hunting for a `cmp`/`jne` at the exit finds nothing: the exit is unconditional, and the decision is one CFF-table index earlier.
+
+**The ring had to be fixed before any of this was visible, and the fix is one line of arithmetic.** The slot index is a bitmask and the reader folded with a modulo, and at 160 000 the two disagree — `160000-1` is `0x270FF`, bits 8..11 clear — so every index with any of those bits set landed on a small slot while the slots being read stayed empty. It reported 128 zero entries after 80 457 instructions, and shortening the walk changed nothing, which is what a systematic fold mismatch looks like and not what a too-small window looks like. The ring is a power of two now. Two wrong diagnoses were made before that, both from reasoning and neither tested; the arithmetic was the thing that settled it.
+
+ Four hardware write watchpoints on the first four qwords, armed at `0x5b51c`, are live to the end of the call and none fires. The scheme is build-then-publish, and the fields are final when the `cmpxchg` retires — so the object does not need filling, it needs *assembling correctly* before publication.
 
 **`0x19e9c8` is the heap handle, not a CFF table.** gdb's decoder — not objdump's linear sweep, which is not instruction-aligned in this body and whose operand annotations have already produced one wrong conclusion this phase — reads it directly:
 
