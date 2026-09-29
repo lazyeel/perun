@@ -1070,6 +1070,15 @@ fn cmd_call(args: &[String]) -> i32 {
             }
             eprintln!("[perun] walking the export, up to {steps} instructions");
         }
+        // PERUN_MEM: snapshot the caller's scratch and the context before the
+        // call. The -45020 subject is in no register and not in the frame, so
+        // the next place it can be is memory the call itself writes.
+        let mem_on = std::env::var_os("PERUN_MEM").is_some();
+        let mut mem_pre: Vec<u64> = Vec::new();
+        if mem_on {
+            mem_pre =
+                unsafe { std::slice::from_raw_parts(scratch as *const u64, 0x1000 / 8) }.to_vec();
+        }
         // PERUN_DIFF: report what the call changed inside the image. The
         // -45020 decision is made from something the library produces itself,
         // so snapshot before and diff after instead of guessing at the input.
@@ -1084,6 +1093,20 @@ fn cmd_call(args: &[String]) -> i32 {
         }
         let r = unsafe { f(argv[0], argv[1], argv[2], argv[3]) };
         println!("[perun] call#{iter} {export_name} returned {r:#x} ({r})");
+        if mem_on {
+            let after_mem =
+                unsafe { std::slice::from_raw_parts(scratch as *const u64, 0x1000 / 8) };
+            let mut n = 0;
+            for (i, (a, b)) in mem_pre.iter().zip(after_mem.iter()).enumerate() {
+                if a != b {
+                    n += 1;
+                    if n <= 32 {
+                        println!("[mem] scratch[0x{:x}]: {:#018x} -> {:#018x}", i * 8, a, b);
+                    }
+                }
+            }
+            println!("[mem] {n} qword(s) changed in the caller's scratch");
+        }
         if diff_on {
             let after =
                 unsafe { std::slice::from_raw_parts(img_base as *const u64, 0x1A_5000 / 8) };
