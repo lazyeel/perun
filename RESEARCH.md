@@ -298,6 +298,55 @@ The gate is three checks in sequence. Two are now passed and one is not, and the
 **Method note, from this round's mistakes.** Every conclusion above comes from a sweep with a control, and that is the reason the record is trustworthy — three consecutive theories attributed `-45002` to something the guest demonstrably never touched, and a single run reads as a fact long before it is one. The companion requirement is on the instrument side: a site that does not trap is evidence of nothing until a control site that must trap does trap in the same run, which is how the earlier negative results about the `mov edi, 0xffff5024` publishers had to be established after two rounds of wrong ones.
 
 
+### 5.8a Anisette v3 runs locally (2026-09-27) — and what the `-45075` wall actually was
+
+**Anisette v3 client headers are generated natively on this x86_64 host: no Wine, no QEMU, no emulation layer of any kind, and no remote re-signing server.** The engine is an x86_64 Android binary and the host is x86_64, so the Apple libraries execute directly. Artefact `run-native.sh` (`crates/perun-cli/examples/adi-android/`, commit `43f16eb`), two consecutive clean runs:
+
+    [prov] PROVISIONING COMPLETE
+    [adi]  re-check ADIGetLoginCode=0
+    === SUCCESS ===
+    X-Apple-I-MD:   AAAABQAAABCD2VMydR0aP5z/n/T6xDdcAAAABA==
+    X-Apple-I-MD-M: PoaEPJnI5dOPGux58kIVfjvsa+ppLP8d13CEX4aNygVT+mTT1sA6n21nZrHHaFxYfa7q0E3CekDOWAGJ
+
+Acceptance, checked rather than asserted: `<key>ec</key><integer>0</integer>` in Apple's `startMachineProvisioning` response with `ed` and `em` both empty, all three hops HTTP 200, reproduced 3/3 runs. `X-Apple-I-MD-M` is stable across runs and `X-Apple-I-MD` rotates per token pair, which is the pair's intended behaviour. The earlier qemu-aarch64 route (`run.sh`) reached the same result and is kept for the arm64 kit; it is not what the end state depends on. This is a separate lane from the SAP/FairPlay work above and shares no code with it.
+
+**The engine is the Android `libstoreservicescore.so`, not the PE above.** The harness is `adi_test.c` from ipatool's `adi-engine` branch, driving the classic obfuscated exports of Apple Music 4.9.6 (§ 5.8a source note): `kq56gsgHG6` = LoadLibraryWithPath, `Sph98paBcz` = SetAndroidID, `nf92ngaK92` = SetProvisioningPath, `aslgmuibau` = GetLoginCode, `rsegvyrt87` = ProvisioningStart, `uv5t6nhkui` = ProvisioningEnd.
+
+**The cause of `-45075`, and why it is not the `-45018` wall.** `libstoreservicescore.so` builds its provisioning state out of the libc underneath it and passes a pointer to that state as the flattened dispatcher's second argument. Under glibc that state is a few KB while the index derived from the call seed is ~168 MB, so the table read leaves the process and the library returns `-45075`. Under Bionic the index lands in range:
+
+| | glibc host | Bionic host |
+|---|---|---|
+| `ADILoadLibraryWithPath` | `-45075` | `0` |
+| `ADISetAndroidID("4C4848FC386C00D6")` | `-45075` | `0` |
+| `ADIGetLoginCode` | never reached | `0` |
+
+No Apple code is patched. The same `.so` files behave differently only because the libc under them differs. Provision's `adi.d` names the code `libraryLoadingFailed`, which is exactly what it is; it was mistaken for a state gate for several turns, and a stub `dlopen` returning success is what let the engine run on into data built for a libc that was not there.
+
+**Obtaining the runtime.** A real Bionic is not in the AOSP source mirrors, which are unreachable from here in any case. It is in the `sys-img` repository: `dl.google.com/android/repository/sys-img/android/sys-img2-1.xml` lists `system-images;android-21;default;arm64-v8a` as a 211 MB zip. Its `system.img` is plain ext4, so `debugfs` extracts a real `linker64` and the real Bionic `.so` set from it with no mount and no privileges. A trivial Bionic binary built with the NDK clang runs under the result, and then so does the engine. Two traps cost time: Bionic does not propagate `$ORIGIN`-rpath to a dependency's own `DT_NEEDED`, so the Apple library directory must also be on `LD_LIBRARY_PATH`; and `libstdc++.so` does not exist in the Apple Music APK, being the NDK's alias for `libc++_shared.so`, which a symlink satisfies.
+
+**Deviations from the stock `adi_test.c`, both recorded inline in the committed source.** `CURLOPT_RESOLVE`, driven by an `ADI_RESOLVE` environment variable, because Bionic does not read `resolv.conf` on this path — `android_getaddrinfo` goes to netd over the `dnsproxyd` socket and there is no netd under qemu-user — so resolving inside curl leaves the TLS path and the Host header untouched. And `ADI_DUMP_LOOKUP` / `ADI_DUMP_START`, which write the raw GrandSlam response bodies so `ec` can be read rather than trusted. Worth reporting upstream separately: `adi_test.c` reads `r2` after `free(r2)` in the `finishMachineProvisioning` branch; error path only, so it did not bite, but it is a use-after-free.
+
+**Not vendored.** The Apple libraries, the extracted sysroot and the system image are inputs, not sources; `.gitignore` in that directory enforces it. The Apple certificate chain is `apple_chain.pem` from the same repository, since the Apple root is absent from the Mozilla bundles.
+
+**Open.** The tokens are generated and the provisioning round trip completes, but an authenticated Store request carrying them has not been made — that needs credentials. `ADI_RESOLVE` with pinned addresses is a patch, not a design: the durable fix is a `dnsproxyd` resolver shim, or reading the server name from the TLS `CERT_COMMON_NAME`, which removes the address dependency entirely. The Windows `CoreADI64.dll` `-45018` wall in § 5.8 is untouched by all of this: a different library, a different gate, still open.
+
+**How the native x86_64 run works, since it contains no emulator at all.** The engine is an x86_64 Android ELF and the host is x86_64, so the Apple libraries execute directly; there is nothing to translate. The one Linux-specific step is that an Android binary names its interpreter `/system/bin/linker64`, which does not exist on this host. `run-native.sh` repoints `PT_INTERP` at a real `linker64` extracted from an Android system image with `debugfs`, and the kernel loads that as the interpreter — the ordinary mechanism, used for its ordinary purpose, not an emulation layer. The arm64 kit still goes through `run.sh` and `qemu-aarch64-static` and reaches the same result; it is not what the end state depends on.
+
+**Resolved 2026-09-28: the calling convention is measured, and the dumper works.** Both of the open threads in the original version of this section are closed.
+
+*The convention.* `vdfut768ig` takes its selector in `rdi` and the frame in `rsi` — the ordinary SysV pair, read directly off the caller rather than inferred. `libstoreservicescore.so` is not flattened, so the three instructions before the call are plain MSVC output:
+
+    1dbd23: mov  %r15d,%edi
+    1dbd26: mov  -0x220(%rbp),%rsi
+    1dbd2d: call *0x79aed(%rip)        # 0x255820
+
+*The dumper.* It interposed `dlsym` and could not work: the caller resolves the entry with `dlsym(handle, …)`, and a handle-scoped lookup never consults an `LD_PRELOAD` export, so the library's own definition always wins. That is structural, not a bootstrap bug, and the three failures recorded in the ADI call-site log outside this repository (`RTLD_NEXT` not skipping the preload, no `__loader_dlsym` at API 21, a null `st_name` ending the hand-parsed walk) are all real but beside the point. What replaced it is a **single store into the GOT slot the caller calls through**: writing a wrapper address at RVA `0x255820` captures every invocation with no symbol resolution anywhere. It runs, the engine provisions, and sixteen dumps are captured in one run.
+
+*What the dumps settled.* Eight calls per session. `rdi` carries a 32-bit value that changes per phase and is compared by equality — the ADI selectors, five of nine recognised, four not. `rsi` is a caller stack address, so the frame is the caller's own stack, not an output buffer. The library writes **one 32-bit field** into that frame, at `+0x0c`, overwriting the caller's value `4` with `16` on the call that produces a token — the length of the body it wrote. Nothing else in the frame is touched: a 24-byte identifier elsewhere in the frame is identical before and after.
+
+*What it did not settle.* The Android opcode `0xc774292`, which the phase dump attributed to `SetAndroidID`, is not in the Windows selector set at all (§5.8, row 24). The two builds dispatch on different tables. The success path is `0xcfe0b46a`; `0x3e58e7f9` runs after the success banner, and most of the Windows campaign was spent on it before the ordered dump was read closely.
+
+
 ### 5.9 The StoreKit client lane (production use of this runtime)
 
 The store lane turns the session above into a working App Store client (`perun store`, or the `ipatool` persona's strict grammar). Endpoint discovery is bag-driven: each session fetches `init.itunes.apple.com/bag.xml?guid=…` and reads `authenticateAccount`, `sign-sap-setup`, `sign-sap-setup-cert`, and `sign-sap-version` (the string `"200"`) from the `urlBag` sub-dict — hardcoded fallback defaults exist, but no request proceeds on a missing key. The signer runs the § 5.1 guest contract against the bag URLs and emits `X-Apple-ActionSignature` per signed body; login and the DAAP history call are the two signed call sites (§ 5.6).
