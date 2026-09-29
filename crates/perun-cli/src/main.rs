@@ -94,9 +94,14 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
     // STEP_IDX is the index AFTER the last store, so the oldest entry of a
     // window ending there is at STEP_IDX - n. Adding k to STEP_IDX instead
     // walks forward off the end and prints whatever the ring has not written.
-    let idx = unsafe { STEP_IDX } - n;
-    for k in 0..n.min(128) {
-        let slot = (idx + k) % STEP_RING;
+    // STEP_IDX is the index AFTER the last store, so the newest entry is at
+    // STEP_IDX - 1. Walk BACKWARDS from there to get the tail, and start at the
+    // oldest when the walk is shorter than the window.
+    let idx = unsafe { STEP_IDX };
+    let count = n.min(128);
+    let first = idx - count;
+    for k in 0..count {
+        let slot = (first + k) % STEP_RING;
         let rp = unsafe { STEP_RIP[slot] };
         let ed = unsafe { STEP_EDX[slot] };
         let dx = unsafe { STEP_RDX[slot] };
