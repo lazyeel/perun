@@ -490,6 +490,24 @@ static int wrap_vdfut(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
     }
 
     int rc = real_vdfut ? real_vdfut(a0, a1, a2, a3) : -1;
+    // Post-transform reading of the packet. The pre-call dump is what the
+    // caller handed over; whether the engine rewrites it in place is a
+    // separate question, and answering it is the only way to compare the two
+    // builds byte for byte.
+    {
+        uint64_t *p = (uint64_t *)a1;
+        if (a1 && readable((void *)a1)) {
+            uint64_t buf = p[0];
+            int len = (int)(p[1] & 0xffffffffu);
+            printf("    POST-TRANSFORM: rc=%d, len=%d\n", rc, len);
+            if (buf && len > 0 && len < 4096 && readable((void *)buf)) {
+                unsigned char *b = (unsigned char *)buf;
+                for (int o = 0; o + 8 <= len; o += 8)
+                    printf("      [%02d] %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                           o, b[o], b[o+1], b[o+2], b[o+3], b[o+4], b[o+5], b[o+6], b[o+7]);
+            }
+        }
+    }
 
     for (int i = 0; i < NREGION; i++)
         if (r[i].ok) memcpy(r[i].after, (const void *)r[i].addr, r[i].len);
