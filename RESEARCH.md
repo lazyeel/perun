@@ -273,30 +273,47 @@ In sum: the August-2026 gate is a login-shape gate on the two identity/ownership
 
 Live testing surfaced one more operational fact worth recording for anyone reproducing this path. A freshly created Apple ID that has never completed first-login terms acceptance can pass 2FA (correct code, server-accepted) and still be refused a `passwordToken` with `failureType 5005` — the endpoint's answer for "2FA invalid **or** account not yet provisioned for storefront use." The account-state cause dominates: completing ToS acceptance once (any Apple web property, e.g. music.apple.com) immediately turns the same credentials+code flow into a working login. The failure code maps to two distinct conditions; do not debug the protocol when the account is simply unprovisioned.
 
-### 5.8 ADI provisioning gate — three gates, two passed, the third is the barrier (2026-09-28)
+### 5.8 ADI provisioning gate — the barrier map (2026-09-28)
 
-**This section replaces everything below it that describes the gate as a single in-memory flag, and several rows in §9 are retained only as the record of what was believed and then refuted. Do not re-derive any of it.**
+**This is the canonical statement. Everything else in this file that describes the Windows gate is either superseded by it or is the dated log in §9.**
 
-The gate is three checks in sequence. Two are now passed and one is not, and the shape of the input changed twice during the work.
+The gate is a chain of four checks, not one. Three are passed; the fourth is the current front.
 
-**Convention, measured rather than assumed.** `rcx` carries the command selector, `rdx` the frame. It is consumed arithmetically, which is why every small value there crashes and every value at or above `2^31` is masked and survives. `r8`/`r9` are read but inert: 8 combinations over `{0, 1, scratch, ctx}` each give identical results. The claim once carried into this file — that `rcx` is dereferenced and therefore cannot be an opcode — was wrong; a masked index is not a pointer, and both readings were checked. Five selectors are recognised (`0xb0eda7af`, `0xcfe0b46a`, `0x3e58e7f9`, `0x632b8d6e`, `0x85fe63b0`); four are not (`0xb23c691e`, `0xc774d292`, `0x4069d332`, `0x4069d333`, and zero).
+| # | Code | Name | Status | Rule |
+|---|---|---|---|---|
+| 1 | `-45034` | `unknownAdiCallFlags` | **PASSED** | localized at RVA `0x66c2d`: `input_len >= cursor + 4` and `flags >= 8` |
+| 2 | `-45018` | `invalidInputDataParamHeader` | **PASSED** | 4-byte big-endian packet header `00 00 00 01` or `00 00 00 02` — bytes 0..2 zero, byte 3 in {1, 2} |
+| 3 | `-45019` | `unknownAdiFunction` | **PASSED** | the operation opcode is passed in `RCX`; five recognised magics below |
+| 4 | `-45020` → `-45002` | `invalidInputDataParamBody` → `invalidParams2` | gate passed, barrier reached | NULL check at RVA `0x19db98`, requires `!= NULL` |
+| — | current front | — | **OPEN** | RVA `0xd6560`: `mov 0x8(%r11),%rcx ; mov 0x10(%r11),%rdi ; cmp %rdi,%rcx ; setne %cl` — an emptiness test on `obj[+0x08] == obj[+0x10]` |
 
-**Gate 1, `unknownAdiCallFlags` (-45034), PASSED.** The canonical enum names this code, which corrected a reading this file carried for the whole campaign. The instruction at RVA `0x66bfc` was decoded as `struct[+0x08] >= struct[+0x0c] + 4` and called a caller-argument size check; it is flag arithmetic. Bit by bit, with `+0x0c` at zero: bits 0, 1 and 2 each return `-45034` alone, and every value with bit 3 set passes. The threshold that read as "cursor + 4" is `struct[+0x08] >= 8`. The field is a flag word, not a size — which also explains why it was insensitive to the 16 and 4 the earlier brief placed there.
+**Recognised opcodes (five of nine tested).** `0x632b8d6e`, `0x85fe63b0`, `0x3e58e7f9`, `0xcfe0b46a`, `0xb0eda7af`. **Not recognised (→ `-45019`):** `0xb23c691e`, `0xc774d292`, `0x4069d332`, `0x4069d333`, `0`. The match is exact and by equality: `0x632b8d6e − 1` and `+ 1` both fail.
 
-**Gate 2, the NULL check at RVA `0x19db98`, PASSED.** Any non-NULL value advances the call from `-45020` to `-45002`. This is caller-reachable and was missed for a long stretch because the sweep covered the 0x28-byte state object and not the surrounding data section; a sweep of all of `.data` (`0x19d000`–`0x19f0a0`) found it, together with `0x19d088` (selects the opposite branch) and `0x19dda0` (faults when non-NULL). Its negative value is not overridable by a caller.
+**The success opcode is `0xcfe0b46a`.** The ordered Android phase dump puts the `SUCCESS` banner after call 6, which carries `0xcfe0b46a` and a 48-byte payload; calls 7 and 8 are `0x3e58e7f9` and run *after* the success. Most of this phase was spent on the wrong opcode, and that is why the convention question took as long as it did.
 
-**Gate 3, `invalidParams2` (-45002), THE BARRIER.** The block at RVA `0xd6560` loads `obj[+0x08]` and `obj[+0x10]` through `r11` and compares them with `setne`, which is the shape of an MSVC vector's `begin` against `end` — the check is plausibly "are the provisioning keys non-empty". That is an interpretation, not a decode: nothing in this project has shown what fills the vector. `PERUN_SEAL_DATA=1` seals `.data` and names every global the body reads; over the whole call it consults exactly two, `0x19dda0` and `0x19e9c8`, and neither is the caller's packet. So the object is built by the library, before the check, and the check is not over caller-supplied data.
+**The packet is four bytes.** Nothing past byte 3 is read: a big-endian body length in bytes 4..7, the `OtpPayload` struct, a 48-byte payload, 28 bytes of padding and a real 347-byte SPIM all produce the identical result, as does setting any single byte from `+0x04` to `+0x2c`. `frame[+0x00]` is a **pointer to the packet** and `frame[+0x08]` is its length; the earlier reading of those as an output buffer and a capacity is retired.
 
-**The packet is four bytes.** The Android caller stamps a version byte and advances a cursor; it assembles no body. Bytes 0..2 must be zero and byte 3 must be 1 or 2; everything past byte 3 is ignored. A big-endian body length in bytes 4..7, the `OtpPayload` layout, a 48-byte structure, 28 bytes of padding, and a real 347-byte SPIM from the Android run all give the identical result, and a sweep of every byte from `+0x04` to `+0x2c` moves nothing. `frame[+0x00]` is a **pointer to the payload** and `frame[+0x08]` is its length — the earlier reading of those as an output buffer and a capacity is retired. `qi864985u0` is a five-line wrapper and the packer at `0x1dbfd0` reads five frame slots at `+0x20`..`+0x40`, which are the five register arguments.
+**`r8`/`r9` are read but inert** — eight combinations over `{0, 1, scratch, ctx}` each give identical results.
 
-**The success opcode is `0xcfe0b46a`.** The Android dump is ordered and the success banner follows call 6; calls 7 and 8 (`0x3e58e7f9`) run after it, so the campaign's priority was inverted for most of its length. All five recognised opcodes behave identically at every gate, so there is no special status for any of them — confirmed rather than corrected.
+**What the body actually reads.** `PERUN_SEAL_DATA=1` seals the image's `.data` pages and reports each read as it faults: over the whole call the body consults **exactly two globals**, `0x19dda0` and `0x19e9c8`, in that order. Neither is the caller's packet, which is why no packet shape moves the result.
 
-**What the guest never does, measured.** The only shim reached is `LoadLibraryExW`, and only in the loader's static phase; the guest makes no dynamic `LoadLibrary` and no `GetProcAddress` call for either export name. There is no filesystem activity at all: no `CreateFileW`, `ReadFile`, `PathAppend`, `GetFileAttributesW`, or `SHGetFolderPathW`. Consequently every `adi.pb` theory — Android-generated versus Windows-generated, encrypted with the wrong key — is unmeasurable here, since each predicts a decrypt failure at a point the call never reaches. The hardware APIs *are* statically imported, and the ANSI forms are the ones present (`RegOpenKeyExA`, `RegQueryValueExA`, `RegCloseKey`, `GetVolumeInformationW`; `GetAdaptersAddresses` is not in the image at all), but with `PERUN_TRACE=1` none of them is called either. The vector is not a shim failure; the collection is not on this path. Recorded for later: the registry shims answer only for preseeded keys, so the vector would be empty even if the code arrived.
+**The caller.** In `libstoreservicescore.so` — which is not flattened — the region `0x1dbbf3`–`0x1dbd2d` stamps the version-2 header (`00 00 00 02`), advances the cursor at `0xc(%r9)` by 4, and calls through the GOT slot at `0x255820`:
 
-**The caller.** No PE in the tree imports `CoreADI64.dll`. `iTunes.exe` and `CoreFP.dll` both contain the two export names; in `iTunes.exe` the name is obfuscated and no `lea` or table entry reaches it. `CoreFP.dll` runs here — it needed `GetModuleFileNameW` and `IsValidCodePage`, now shimmed — loading at `0x7c800000` with `DllMain` TRUE and 113 shims resolved. Its six obfuscated exports return `-42023` and `-42408` uniformly, a shared argument guard, and none reaches `GetProcAddress`. So the caller is loaded and callable but not driven; its first-argument shape is obfuscated FairPlay code, which is the same class of obstacle as the flattened body in a second module.
+    1dbbf3: mov  (%r9),%rdx
+    1dbbf6: movw $0x0,(%rdx)
+    1dbbfb: movb $0x0,0x2(%rdx)
+    1dbbff: mov  %r8b,0x3(%rdx)
+    1dbc03: addl $0x4,0xc(%r9)
+    ...
+    1dbd23: mov  %r15d,%edi
+    1dbd26: mov  -0x220(%rbp),%rsi
+    1dbd2d: call *0x79aed(%rip)      # 0x255820
 
-**Method note, from this round's mistakes.** Every conclusion above comes from a sweep with a control, and that is the reason the record is trustworthy — three consecutive theories attributed `-45002` to something the guest demonstrably never touched, and a single run reads as a fact long before it is one. The companion requirement is on the instrument side: a site that does not trap is evidence of nothing until a control site that must trap does trap in the same run, which is how the earlier negative results about the `mov edi, 0xffff5024` publishers had to be established after two rounds of wrong ones.
+The strings `vdfut768ig` and `cvu8io98wun` are present in both `iTunes.exe` (38 MB) and `CoreFP.dll` (33 MB). `CoreFP.dll` runs under this runtime — it needed `GetModuleFileNameW` and `IsValidCodePage`, both since shimmed — loading at `0x7c800000` with `DllMain` TRUE and 113 shims resolved. Its six obfuscated exports return `-42023` and `-42408` uniformly, a shared argument guard, and none reaches `GetProcAddress` for either export name.
 
+**Three doors, closed by measurement rather than by argument.** The guest makes no filesystem call, no dynamic load and no hardware query on this path, so: an `adi.pb` from the Android run cannot be decrypted here and every theory that depends on its key predicts a failure at a point the call never reaches; and a hardware-identifier vector cannot be built because the collection never happens. The `ADIErrorCode` enum names every code, and the check at `0x66bfc` is flag arithmetic rather than the size test it was read as for most of the phase.
+
+**Two methods, both paid for.** A sweep is a measurement and a single run is a hypothesis — three consecutive theories were refuted by a sweep that took seconds and would have killed each at formulation. And on the instrument side, a site that does not trap is evidence of nothing until a control site that must trap does trap in the same run: four instrument defects each produced a confident false result first (a window printing the oldest ring entries, a re-arm setting `RIP` to the faulting address, a trigger sampling registers before the instruction ran, and `--patch` needing its `0x` prefix).
 
 ### 5.8a Anisette v3 runs locally (2026-09-27) — and what the `-45075` wall actually was
 
