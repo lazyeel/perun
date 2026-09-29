@@ -48,10 +48,26 @@ win32_api! {
     /// SIZE_T HeapSize(HANDLE, DWORD, LPCVOID);
     unsafe extern "win64" fn HeapSize(heap: HANDLE, flags: DWORD, ptr: LPCVOID) -> SIZE_T {
         let _ = (heap, flags);
-        // glibc malloc_size equivalents are not portable; the validated
-        // prototype returned a small constant and its guest tolerated it.
-        let _ = ptr;
-        16
+        if ptr.is_null() {
+            // Win32 reports failure as (SIZE_T)-1 with ERROR_INVALID_PARAMETER
+            // set, and a guest that checks the error and ignores the size will
+            // survive a constant here, which a wrong-but-plausible size would not.
+            set_last_error(ERROR_INVALID_PARAMETER);
+            return !0;
+        }
+        // The honest size. This used to return the constant 16 on the grounds
+        // that "its guest tolerated it", and that is precisely the kind of
+        // measurement that means nothing: nothing had established how often it
+        // was called, and PERUN_TRACE does not cover the memory shims, so a
+        // call count was never available. glibc's allocator is what HeapAlloc
+        // and HeapReAlloc hand back, so its own usable-size is the same answer
+        // the real API would give for these blocks.
+        let n = libc::malloc_usable_size(ptr as *mut libc::c_void) as SIZE_T;
+        if std::env::var_os("PERUN_TRACE").is_some() {
+            let m = format!("[perun] HeapSize({ptr:p}) = {n}\n");
+            libc::write(2, m.as_ptr().cast(), m.len());
+        }
+        n
     }
 }
 
