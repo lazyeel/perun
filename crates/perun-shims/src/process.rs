@@ -359,14 +359,31 @@ win32_api! {
     ) -> DWORD {
         unsafe {
             let _ = module;
-            // An empty string is a truthful answer: this runtime maps images
-            // without a backing file path, and the caller is told the truth
-            // rather than given a name that does not exist.
+            // The path of the image as the guest would see it on its own
+            // platform. This runtime exists to present that platform, not to
+            // report the host's: an empty string is truthful about Linux and
+            // useless to a Windows DLL, which reads it as "running somewhere
+            // strange" and takes a different path. Note the earlier version of
+            // this comment argued the opposite and was wrong on the axis --
+            // fidelity is owed to the guest's platform, not to the container.
+            static PATH: &[u8] = b"C:\\Program Files\\iTunes\\iTunes.exe\0";
+            let wide_len = PATH.len() - 1;              // characters, no NUL
             if buf.is_null() || size == 0 {
                 return 0;
             }
-            std::ptr::write_bytes(buf.cast::<u8>(), 0, (size as usize) * 2);
-            0
+            // Win32 truncates and reports the stored length, not the source
+            // length; the caller sizes the buffer from the return value.
+            let n = (wide_len).min(size as usize);
+            for (i, &b) in PATH.iter().take(n).enumerate() {
+                *buf.add(i) = b as u16;
+            }
+            if (size as usize) <= wide_len {
+                // No room for the terminator: the API still returns the full
+                // length it tried to store.
+                return wide_len as DWORD;
+            }
+            *buf.add(n) = 0;
+            wide_len as DWORD
         }
     }
 }

@@ -217,10 +217,18 @@ win32_api! {
 win32_api! {
     /// LPCWSTR GetCommandLineW(VOID);
     unsafe extern "win64" fn GetCommandLineW() -> LPCWSTR {
-        static WIDE: [u16; 6] = [
-            b'p' as u16, b'e' as u16, b'r' as u16, b'u' as u16, b'n' as u16, 0,
-        ];
-        WIDE.as_ptr()
+        // The command line as the guest's own host would present it, and
+        // nothing else. The previous value was the literal "perun", which
+        // leaked this runtime's identity; a Windows DLL that parses argv will
+        // take a different branch on it.
+        static WIDE: &[u8] = b"\"C:\\Program Files\\iTunes\\iTunes.exe\"\0";
+        static ONCE: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
+        let buf = ONCE.get_or_init(|| {
+            WIDE.iter()
+                .map(|&b| if b == 0 { 0u16 } else { b as u16 })
+                .collect()
+        });
+        buf.as_ptr() as LPCWSTR
     }
 }
 
