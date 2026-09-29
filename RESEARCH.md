@@ -195,7 +195,7 @@ The PE32+ lane runs the same native-execution doctrine with Win64 semantics:
 
 - **FakeTEB behind `GS_BASE`.** A per-thread fake TEB/PEB pair is installed via `arch_prctl(ARCH_SET_GS)`; `FS` is left untouched because glibc owns it. FLS slots are backed by the TEB inline TLS slots.
 - **Real stack bounds.** Stack limits are derived from pthread so MSVC `__chkstk` probes the real stack rather than a fiction.
-- **111 Win32 APIs** implemented as shims — plain Rust functions compiled as `extern "win64"`, so a resolved import is a direct `call` with no per-call trampoline. `DllMain(DLL_PROCESS_ATTACH)` returns TRUE on `CoreADI64.dll` with zero unresolved-import traps.
+- **113 Win32 APIs** implemented as shims — plain Rust functions compiled as `extern "win64"`, so a resolved import is a direct `call` with no per-call trampoline. `DllMain(DLL_PROCESS_ATTACH)` returns TRUE on `CoreADI64.dll` with zero unresolved-import traps.
 - **Trap micro-stubs are absolute `jmp [rip+0]`** with an embedded 64-bit target, never `jmp rel32`: the RWX stub page and the guest image can be terabytes apart under ASLR, and rel32 only reaches ±2 GB. An unresolved import lands on such a stub, which reports the missing symbol with its arguments instead of crashing (fail-closed design).
 - Base relocations are applied when the load address slides (DIR64 and HIGHLOW types; ordinal imports trap, forwarded exports are unsupported); headers and sections map with `mmap(MAP_FIXED_NOREPLACE)` at the preferred base, falling back to any address, with per-section `mprotect` after binding.
 - No Wine, no QEMU, no instruction emulation anywhere; overhead exists only at each Win32 boundary crossing.
@@ -390,6 +390,47 @@ The first perun command without an assets directory fetches the images itself (~
 
 ### 6.7 ADI lane: reproduction and the verification log (2026-09-03, tree at the then-HEAD)
 
+### 6.7 ADI lane: reproduction and the verification log (2026-09-03; current commands 2026-09-28)
+
+**Current reproduction, replacing the ones below where they disagree.** These produce every result in §5.8; `D` is the `CoreADI64.dll` path and `L` its `libs` directory.
+
+```bash
+cargo build --release -p perun-cli
+
+# stage 1 and 2, and the barrier: the shape that reaches invalidParams2.
+#   flags >= 8, a non-NULL pointer at 0x19db98, and a 4-byte version header.
+./target/release/perun call "$D" vdfut768ig 0xcfe0b46a ctx 0 0 \
+    --poke=scratch+0x3=0x2 --poke=ctx+0x8=0x10 --poke=ctx+0xc=0x0 \
+    --poke=ctx+0x0=scratch --poke=0x19db98=scratch
+
+# the three recognised selectors differ from the four unrecognised ones, and the
+# comparison is exact: only 0x632b8d6e passes, its neighbours do not.
+./target/release/perun call "$D" vdfut768ig 0x632b8d6e ctx 0 0 \
+    --poke=ctx+0x0=scratch --poke=ctx+0x8=0x10 --poke=ctx+0xc=0x0 \
+    --poke=scratch+0x3=0x2 --poke=0x19db98=scratch
+
+# what the flattened body reads: two globals, named in the order it reads them.
+PERUN_SEAL_DATA=1 ./target/release/perun call "$D" vdfut768ig 0xcfe0b46a ctx 0 0 \
+    --poke=ctx+0x0=scratch --poke=ctx+0x8=0x10 --poke=ctx+0xc=0x0 \
+    --poke=scratch+0x3=0x2 --poke=0x19db98=scratch
+
+# the register-triggered walk: 1.2 s, stops where -45018 was being published.
+PERUN_STEPS=2000000 ./target/release/perun call "$D" vdfut768ig 0xcfe0b46a ctx 0 0 \
+    --poke=ctx+0x0=scratch --poke=ctx+0x8=0x10 --poke=ctx+0xc=0x0 \
+    --poke=scratch+0x3=0x2 --poke=0x19db98=scratch
+
+# proof that a code site executes at all -- 0x6602d is the control that traps,
+# 0x8f69d is the -45020 publisher that does not.
+./target/release/perun call "$D" vdfut768ig 0xcfe0b46a ctx 0 0 \
+    --poke=ctx+0x0=scratch --poke=ctx+0x8=0x10 --poke=ctx+0xc=0x0 \
+    --poke=scratch+0x3=0x2 --poke=0x19db98=scratch --patch=0x6602d=cc90909090
+
+# the caller, which now loads and runs here.
+./target/release/perun run /path/to/iTunes/CoreFP.dll
+```
+
+Two properties of this harness that cost real time and will do so again: **`--patch` needs its `0x` prefix** (`--patch=6602d=…` exits 2 with "bad --patch rva"), and **`perun seq` ignores `--patch` entirely**, so an `int3` probe run through `seq` reports a site as not executing when the patch was never applied.
+
 Every Phase-1 claim reproduces with the shipped binary or a stock tool; the method column names it. No source modification, no one-off instrumentation.
 
 ```bash
@@ -414,10 +455,11 @@ cargo build --release -p perun-cli
 
 | # | Assertion | Method (command family) | Result |
 |---|---|---|---|
+| 1–20 | **2026-09-03, against the earlier single-gate model. Rows 6, 8–13 are superseded: the gate is three stages, not one (§5.8, rows 21–27). Kept because the byte-level facts they record still hold — the disassembly, the import census and the sweep methodology were not invalidated, only the conclusion drawn from them.** | | |
 | 1 | PE32+ x86_64, 7 sections, base 0x7c800000 | `perun info` / `perun call --verbose` | Confirmed (entry 0x131b00, sections .text .rdata .data .pdata .gfids .rsrc .reloc) |
 | 2 | Statically linked MSVC CRT, no network imports | `objdump -x` import tables | Confirmed (kernel32 93 / advapi32 7 / shlwapi 2 / shell32 1; zero network names; zero CRT DLLs) |
 | 3 | Exports: vdfut768ig + cvu8io98wun | `perun call` on both names resolves | Confirmed (2 exports) |
-| 4 | DllMain TRUE, 0 traps, 111 APIs | `perun run --verbose` | Confirmed ("DllMain returned TRUE", no trap lines, "shim table 111 APIs") |
+| 4 | DllMain TRUE, 0 traps, 113 APIs | `perun run --verbose` | Confirmed ("DllMain returned TRUE", no trap lines, "shim table 113 APIs") |
 | 5 | cargo test 11/11, clippy clean, fmt clean | `cargo test/clippy/fmt` | Confirmed |
 | 6 | cmd 0..255 → 0xffff5016, uniform; no file/registry/mutex/enum API in the trace | 256 × `perun call <cmd> scratch`, trace scan | Confirmed (256/256 uniform; all forbidden families absent) |
 | 7 | NULL param → 0xffff5036 | `perun call` without scratch | Confirmed |
@@ -433,7 +475,21 @@ cargo build --release -p perun-cli
 | 17 | −45034 = 0xffff5016 (signed); −45061 = kADINotProvisioned per prior ADI research | arithmetic + project's Android-ADI research notes | Confirmed |
 | 18 | Only "adi" string in image: `Global\adi-pb-unique` | `strings`/binary scan | Confirmed |
 | 19 | Trap stubs absolute `jmp [rip+0]`; FakeTEB via ARCH_SET_GS, FS untouched | source inspection (stub.rs, teb.rs) | Confirmed |
-| 20 | Multi-call session driver: one image load, one `DllMain`, scripted calls in one process; `--load` buffer usable as a token in any option order; `PERUN_SEQ=N` repeats one call in-process | `perun seq … --script=FILE`, `perun call … --load=NAME=FILE`, `PERUN_SEQ=3 perun call …` | Confirmed (DllMain TRUE, 111 shim APIs, spim-first block reaches the header validator at `0xffff5026`; three repeats execute in one process) |
+| 20 | Multi-call session driver: one image load, one `DllMain`, scripted calls in one process; `--load` buffer usable as a token in any option order; `PERUN_SEQ=N` repeats one call in-process | `perun seq … --script=FILE`, `perun call … --load=NAME=FILE`, `PERUN_SEQ=3 perun call …` | Confirmed (DllMain TRUE, 113 shim APIs, spim-first block reaches the header validator at `0xffff5026`; three repeats execute in one process) |
+
+| 21 | Gate is three stages: `unknownAdiCallFlags` → NULL check at `0x19db98` → `invalidParams2` | sweep each field with a control | Confirmed (`+0x08` ≥ 8 passes stage 1; any non-NULL at `0x19db98` passes stage 2; stage 3 returns `0xffff5036` regardless of packet) |
+| 22 | `-45034` is `unknownAdiCallFlags`; `struct[+0x08]` is a flag word, not a size | `AdiErrorCode` enum, then bit-by-bit sweep of `+0x08` with `+0x0c`=0 | Confirmed (bits 0/1/2 each return `-45034` alone; every value with bit 3 set passes) |
+| 23 | The packet is four bytes: `+0x00..+0x02` zero, `+0x03` = 1 or 2 | single-byte sweep over `+0x04`..`+0x2c` and over `+0x00`..`+0x03` | Confirmed (no byte past the header changes the result; a BE length in `+0x04`..`+0x07`, a 48-byte struct, 28 bytes of padding and a real 347-byte SPIM all give `0xffff5024`) |
+| 24 | Five selectors recognised, matched by equality | 9 candidates × one call each | Confirmed (`0xb0eda7af`, `0xcfe0b46a`, `0x3e58e7f9`, `0x632b8d6e`, `0x85fe63b0` → `-45020`; `0xb23c691e`, `0xc774d292`, `0x4069d332`, `0x4069d333`, `0` → `-45019`). `0x632b8d6e−1`, `+1` → `-45019` |
+| 25 | The success opcode is `0xcfe0b46a`; `0x3e58e7f9` runs after success | the ordered Android dump: the `SUCCESS` banner follows call 6 | Confirmed (call 6 is `0xcfe0b46a` with a 48-byte payload; calls 7–8 are `0x3e58e7f9`) |
+| 26 | The body consults exactly two globals: `0x19dda0` and `0x19e9c8` | `PERUN_SEAL_DATA=1` — seal `.data`, report and unprotect each faulting read | Confirmed (2 reads over the whole call, in that order; `0x19e9c8` holds an arithmetic sequence, the second-level indirection) |
+| 27 | `0x19db98` opens the path; `0x19d088` selects the other branch; `0x19dda0` faults when non-NULL | sweep of `.data` `0x19d000`–`0x19f0a0`, one qword at a time | Confirmed (3 of 85 qwords change the result) |
+| 28 | No filesystem, dynamic-load or hardware call on the Windows path | `PERUN_TRACE=1` over `DllMain` and every call shape | Confirmed (only `LoadLibraryExW`, loader static phase; no `CreateFileW`/`ReadFile`/`PathAppend`/`GetFileAttributesW`/`SHGetFolderPathW`; no `GetProcAddress`) |
+| 29 | Hardware APIs are statically imported but never called; note the ANSI forms | import table scan of `CoreADI64.dll` + `PERUN_TRACE=1` | Confirmed (`RegOpenKeyExA`, `RegQueryValueExA`, `RegCloseKey`, `GetVolumeInformationW` imported; `GetAdaptersAddresses` absent from the image; none called) |
+| 30 | `CoreADI64.dll` loads `DllMain` TRUE, 113 shims, no unresolved import | `perun run` | Confirmed (two shims added this round: `GetModuleFileNameW`, `IsValidCodePage`) |
+| 31 | The Android convention transfers: `rcx` selector, `rdx` frame | unobfuscated caller `libstoreservicescore.so` at RVA `0x1dbd23`–`0x1dbd2d`, plus the GOT-slot dumper | Confirmed (`mov %r15d,%edi ; mov -0x220(%rbp),%rsi ; call *0x255820`; 16 dumps in one run) |
+| 32 | `dlsym` interposition cannot work on this caller | the caller resolves with `dlsym(handle, …)` | Confirmed by construction: a handle-scoped lookup never consults an `LD_PRELOAD` export. The GOT-slot swap at `0x255820` is the working mechanism |
+| 33 | `r8`/`r9` are read but inert | 8 combinations over `{0, 1, scratch, ctx}` each | Confirmed (all identical) |
 
 Artifacts from the sweep (the 256-command histogram and the objdump-based verifiers) are diagnostic and untracked; none ships with the repository.
 
@@ -543,7 +599,7 @@ Neither requires perun to disclose its own source or to relicence its code, and 
 | 2026-09-02 | Optimization pass + zero-config fetcher. Streaming image loader (full image bytes never materialized; peak RSS 26.8 MiB), storeagent dropped from the mapped set (bind-graph cross-reference, live-verified), speculative certificate fetch with a 24 h on-disk cache, and a first-run asset fetcher that range-reads ~32 MB of the public 1.28 GB update package (8.4 s cold start, all digests pinned). |
 | 2026-09-03 | Benchmark hardening. Both sides re-benched against their public, unmodified artifacts: the oracle re-cloned from GitHub (commit 883ede5) and built with its own upstream Makefile (vendored Unicorn 2.1.1), perun as the shipped release binary. Per-round exchange rows retired — the stock oracle prints no phase timers and perun's release carries none for the split, so the public table now reports SAPExchange as the single combined Round 1 + Round 2 window and compares the oracle at the process level only (wall / CPU / peak RSS, N=3 per side, kernel rusage). Superseded instrumented figures (per-phase oracle timings, per-round exchange splits) removed; § 6.6 reproduces every number with one command per side. Third-party credits trimmed to what the law and the analysis actually require: NOTICE and § 8.1 now list only code compiled into the binary (runtime vs compile-time split, with unicode-ident's dual license kept distinct), and § 8 keeps the projects the work measured against or built on. Release profile hardened: no DWARF, stripped binaries, no build-host paths in distributed artifacts. |
 | 2026-09-07 | Storefront-path additions from the live StoreKit client lane (built on this runtime, E2E the same day: login+2FA → search → purchase → download). New § 5.6 maps which requests the action signature actually gates (login body and the DAAP history body — and nothing else on the storefront surface; purchase/download ride the session cookies+token). New § 5.7 records the 5005 account-state lesson: the code covers both invalid-2FA and unprovisioned-account, and ToS acceptance on any Apple web property flips the same flow to a working login. § 7 gains the 2026-09 Rust-rewrite family (ipatool-rs) and this work's StoreKit client status. |
-| 2026-09-07 | Unified specification: the Phase-1 document (STATUS.md) merged into this file and retired. The ADI/PE32+ lane is now first-class here — § 2.2 (CoreADI64.dll ground truth), § 4.7 (Win32 runtime invariants: FakeTEB/ARCH_SET_GS, 111 shims, absolute-jmp trap stubs), § 5.8 (the provisioning-gate analysis: status 0xffff5016, the RVA chain 0x19dda0/0x17eca0/0x5b20f with key 0x4f7e9322, the circular fpdi dependency, the two-trampoline experiment, ways forward), and § 6.7 (the 19-row verification log with reproduction commands). All facts, addresses, and measurements carried over verbatim; nothing dropped. |
+| 2026-09-07 | Unified specification: the Phase-1 document (STATUS.md) merged into this file and retired. The ADI/PE32+ lane is now first-class here — § 2.2 (CoreADI64.dll ground truth), § 4.7 (Win32 runtime invariants: FakeTEB/ARCH_SET_GS, 113 shims, absolute-jmp trap stubs), § 5.8 (the provisioning-gate analysis: status 0xffff5016, the RVA chain 0x19dda0/0x17eca0/0x5b20f with key 0x4f7e9322, the circular fpdi dependency, the two-trampoline experiment, ways forward), and § 6.7 (the 19-row verification log with reproduction commands). All facts, addresses, and measurements carried over verbatim; nothing dropped. |
 | 2026-09-19 | Store-lane specification and factual corrections. New § 5.9 specifies the production StoreKit client (bag-driven signer, MZFinance auth with 2FA and machine-bound vault, search scopes, free-license purchase, three-stage download fallback with per-platform version resolution, DAAP history, OTA restreaming with sinf injection); § 5.1 now distinguishes the bare `perun sap` legacy path from the bag-driven store path. Corrections against the implementation: guest-heap size prefix is 16 bytes (aligned `size_t`), not 8 (§ 4.1); `sysctl` returns −1 while only `sysctlbyname` zeroes `*oldlenp` (§ 4.5); the trampoline zeroes RBX/RBP/R10–R15 (§ 4.6); PE mapping is `MAP_FIXED_NOREPLACE` with fallback, relocations cover DIR64 and HIGHLOW (§ 4.7); the `scaffold` hint names a command that does not exist (§ 5.8). Dependency table: tinyvec 1.13.2, new memmap2 row, pinned proc-macro2/quote/syn versions (§ 8.1). |
 | 2026-09-28 | **Read this before the dated rows below.** They are a working log for one day, written in the order the work happened, and several of them are superseded by later ones in the same block. Where a row is wrong, a later row in this block says so and says why; the state that is actually current is §5.8, not any single row here. What the block establishes, in the order the corrections landed: the `dlsym`-interposition dumper is dead, replaced by a pointer swap on the GOT slot at RVA `0x255820`; the Android call convention was read wrongly and then re-read correctly, with `rcx` a masked selector; `-45034` is a flag word, not a size; the packet is four bytes; the gate has three stages and two are passed; the diff group is teardown, not state; the callers are `iTunes.exe` and `CoreFP.dll`, and `CoreFP.dll` runs here. Four instrument defects were found in the walker's own reporting along the way — a window that showed the oldest entries instead of the newest, a re-arm that set `RIP` to the faulting address, a trigger that sampled registers before the instruction ran, and a `--patch` that needs a `0x` prefix — each of which had produced a confident false result first. The rows that survive as current findings are the ones backed by a sweep with a control; treat any row that rests on a single run as a hypothesis. |
 | 2026-09-28 | **The `0xd731c` jump is a compiler switch, not an import call, and the -45020 envelope hypothesis is refuted (2026-09-28).** A brief asserted the sequence `movslq (%r10,%rcx,4),%rdx ; add %r12,%rdx ; jmp *%rdx` at RVA `0xd731c` is a tail call into an import, with the nearby constants `0x102` and `0x103` being `WAIT_TIMEOUT` and `ERROR_NO_MORE_ITEMS` so a shim's return value would decide the branch. Both parts are wrong. The table is indexed by a 32-bit sign-extended entry and combined with a 32-bit displacement, which is the shape of an MSVC switch jump table, and the target it reaches is RVA `0xe4c1b` -- inside the library, not a host shim. A shim call would leave the image, and it does not: the guest continues in the library. The two constants are range bounds on a value the flattened code carries between blocks (`sil = rdx > 0x102`, `dil = rdx < 0x103`), folded into the next block's selector; there is no preceding call whose return they could be reading. **The envelope hypothesis is also refuted.** The brief predicted `-45020` would clear once Output Size at `+0x0c` were set to 8, on the reasoning that the routing result needs somewhere to go. Measured: with the command recognised, `+0x0c` swept over 0, 1, 4, 8, 12, 16, 32, 64, 256 and 4096 with `+0x08` fixed at 16 returns `-45020` in every case, and so does a block holding only the version field. The input/output pair is the check already decoded at `0x66bfc` and it is passed; `-45020` is decided elsewhere, and the live publisher for it is the single site at `0x8f69d`. Two of my own readings are corrected here as well. The guest does not leave the image at `0xd731c`; what ended was the walker's ring window, and I attributed the walk's end to a host transition. And the block after a call on this path is the library's own scratch rather than the caller's argument block -- `scratch[0x0]` reads `0xfffffffe01000000` because the environment id and the version were written adjacently, not because the header was rewritten.
