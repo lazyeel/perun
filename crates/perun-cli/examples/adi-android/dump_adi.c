@@ -452,6 +452,30 @@ static int wrap_vdfut(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
     // worth answering with data is what the working engine actually passes.
     save_payload(a0, a1);
 
+    // Deep dump of the caller's ctx. The frame is 96 bytes and eight of its
+    // slots are host pointers; whether they are buffers, strings or numbers is
+    // not visible from the frame alone, and guessing has cost this project
+    // more than one round.
+    {
+        uint64_t *p = (uint64_t *)a1;
+        if (a1 && readable((void *)a1)) {
+            printf("    === DEEP DUMP CTX (%s) ===\n", phase);
+            for (int i = 0; i < 12; i++) {
+                uint64_t v = p[i];
+                printf("    ctx[+0x%02x] = 0x%016lx\n", i * 8, (unsigned long)v);
+                if (v > 0x10000 && v < 0x800000000000 && readable((void *)v)) {
+                    unsigned char *t = (unsigned char *)v;
+                    printf("      -> ");
+                    for (int k = 0; k < 16; k++) printf("%02x ", t[k]);
+                    printf(" |");
+                    for (int k = 0; k < 16; k++)
+                        putchar(t[k] >= 0x20 && t[k] < 0x7f ? t[k] : '.');
+                    printf("|\n");
+                }
+            }
+        }
+    }
+
     struct region r[NREGION];
     memset(r, 0, sizeof r);
     r[0].name = "arg1";     r[0].addr = a1;                    r[0].len = SNAP_N;
