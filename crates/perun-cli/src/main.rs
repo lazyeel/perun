@@ -56,6 +56,11 @@ static mut STEP_COUNT: u64 = 0;
 static mut STEP_MAX: u64 = 0;
 static mut STEP_STOP_RVA: u64 = 0;
 static mut STEP_STOP_ON_CODE: bool = true;
+/// PERUN_STOP_EDI_ZERO: halt the walk the first time edi is zero inside the
+/// window PERUN_STOP_EDI_ZERO_LO..HI. Both bounds are absolute.
+static mut STEP_STOP_EDI_ZERO: bool = false;
+static mut STEP_STOP_EDI_LO: u64 = 0;
+static mut STEP_STOP_EDI_HI: u64 = u64::MAX;
 /// The ADI code the walk stops on. Overridable with PERUN_STOP_CODE, because
 /// the code that publishes one error is not the code that publishes the next,
 /// and the publisher of -45002 is not where -45018's is: hard-coding one of
@@ -250,7 +255,18 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
                         || g(libc::REG_R9) == STEP_STOP_CODE
                         || g(libc::REG_R10) == STEP_STOP_CODE
                         || g(libc::REG_R11) == STEP_STOP_CODE
-                        || g(libc::REG_RSI) == STEP_STOP_CODE);
+                        || g(libc::REG_RSI) == STEP_STOP_CODE)
+                // PERUN_STOP_EDI_ZERO: stop the first time edi is zero, within
+                // the address window named by PERUN_STOP_EDI_ZERO_LO/HI. The
+                // flattened body holds 137 `xor edi,edi` sites, so a static
+                // scan cannot say which of them is "status = 0" as opposed to
+                // dispatch arithmetic; only the run can. The window matters --
+                // without it the condition fires in unrelated code below the
+                // export and answers nothing.
+                || (STEP_STOP_EDI_ZERO
+                    && g(libc::REG_RDI) == 0
+                    && rip >= STEP_STOP_EDI_LO
+                    && rip < STEP_STOP_EDI_HI);
             if wants_stop || STEP_COUNT >= STEP_MAX {
                 *regs.add(libc::REG_EFL as usize) = (flags & !EFLAGS_TF) as i64;
                 STEP_ARMED = false;
@@ -1116,6 +1132,16 @@ fn cmd_call(args: &[String]) -> i32 {
     // PERUN_STOP_CODE: which ADI code the walk stops on. Defaults to -45018,
     // but the publisher of -45002 lives elsewhere and pinning the old default
     // is what made it unfindable. Accepts the decimal or the 0x form.
+    unsafe {
+        STEP_STOP_EDI_ZERO = std::env::var_os("PERUN_STOP_EDI_ZERO").is_some();
+        let rd = |k: &str| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+        };
+        STEP_STOP_EDI_LO = rd("PERUN_STOP_EDI_ZERO_LO").unwrap_or(0);
+        STEP_STOP_EDI_HI = rd("PERUN_STOP_EDI_ZERO_HI").unwrap_or(u64::MAX);
+    };
     if let Ok(v) = std::env::var("PERUN_STOP_CODE") {
         let parsed = if let Some(hex) = v.trim().strip_prefix("0x") {
             u32::from_str_radix(hex, 16).ok()
