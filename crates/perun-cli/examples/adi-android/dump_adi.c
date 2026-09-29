@@ -379,10 +379,78 @@ static void hunt_token(struct region *r) {
     }
 }
 
+// ── payload capture ─────────────────────────────────────────────────────────
+//
+// The Windows-side work has run on a synthetic frame with a synthetic header
+// since the start, and every hypothesis about -45020 rests on that. These three
+// calls are the ones that carry a real payload from the working engine, so the
+// bytes are worth keeping exactly rather than as a hex line in a log.
+//
+// The length is arg1[+8] and the buffer is *arg1, which is the shape the
+// ordered dump shows; the header is the first four bytes and is the part most
+// likely to be wrong in a reconstruction.
+
+#define PAYLOAD_DIR "/opt/data/apk/x86"
+static int payload_len(uint64_t frame) {
+    if (!frame) return 0;
+    return (int)*(uint32_t *)(frame + 8);
+}
+
+static const char *payload_path(uint64_t op) {
+    if (op == 0xb0eda7afULL) return PAYLOAD_DIR "/payload_init.bin";
+    if (op == 0xcfe0b46aULL) return PAYLOAD_DIR "/payload_prov.bin";
+    return NULL;
+}
+
+// Call 1 and call 5 share an opcode, so the path carries the call number and
+// the caller passes it; otherwise one would overwrite the other. Built by
+// splitting at the last '/' rather than by scanning for '.', because the
+// directory names here contain no dot but the base does and the earlier
+// version conflated the two.
+static int save_payload_n(uint64_t op, uint64_t frame, int callno) {
+    const char *base = payload_path(op);
+    if (!base || !frame) return 0;
+    int len = payload_len(frame);
+    if (len <= 0 || len > (1 << 20)) return 0;
+    uint64_t buf = *(uint64_t *)frame;
+    if (!buf) return 0;
+    char path[256];
+    if (callno > 0) {
+        const char *dot = strrchr(base, '.');
+        int stem = dot ? (int)(dot - base) : (int)strlen(base);
+        snprintf(path, sizeof path, "%.*s_%d%s", stem, base, callno, dot ? dot : "");
+    } else {
+        snprintf(path, sizeof path, "%s", base);
+    }
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        printf("    [payload] cannot write %s: %s\n", path, strerror(errno));
+        return 0;
+    }
+    size_t n = fwrite((const void *)buf, 1, (size_t)len, f);
+    fclose(f);
+    printf("    [payload] wrote %s (%zu bytes)\n", path, n);
+    return n == (size_t)len;
+}
+
+static int payload_seen;
+
+static int save_payload(uint64_t op, uint64_t frame) {
+    if (!payload_path(op)) return 0;
+    int n = ++payload_seen;
+    return save_payload_n(op, frame, payload_path(op) && op == 0xb0eda7afULL ? n : 0);
+}
+
 static int wrap_vdfut(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
     const char *prev = phase;
     phase = "vdfut768ig";
     report("vdfut768ig", a0, a1, a2, a3);
+
+    // Keep the exact bytes of the caller's payload for the three calls that
+    // carry real ones. A synthetic frame with a synthetic header has been the
+    // basis of every Windows-side hypothesis so far, and the first question
+    // worth answering with data is what the working engine actually passes.
+    save_payload(a0, a1);
 
     struct region r[NREGION];
     memset(r, 0, sizeof r);
