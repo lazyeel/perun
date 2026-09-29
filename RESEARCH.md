@@ -317,7 +317,7 @@ Written for a session that starts with no memory of this work. The barrier map a
 - The library allocates the gate object itself, at `0x5b517`, with `lock cmpxchg` from null into a host heap block. It is not a host-supplied object and no host is expected to supply one.
 - So the question is **what the freshly allocated object must contain for the prologue to accept the call**, and the whole caller-supplied input space is now measured inert: opcode, frame, payload, `r8`/`r9`, call order, the state slot and the version export.
 
-**Next steps, in order of value.** (1) **The one link still unmeasured: what assembles the object before `0x5b517` publishes it.** Every caller-supplied input is inert, the object is built-then-published, and its three host pointers at `+0x10`/`+0x18`/`+0x20` are the only thing in it that the library had to compute. The static CRT does not reach the IAT for most allocations, so this needs a trace rather than a scan: catch the `HeapAlloc` that returns the 40-byte block and take a write watchpoint on it at that moment, which is the only way to catch a write into a block whose address is not known until the allocation happens. (2) The 256-byte block at `0x19dba0` is copied in one instruction from a **563-entry table of 8-byte records at `.rdata 0x17eca0`** — a static template in the image, not something derived from the call; whether that copy is a decode step decides whether the object is data or code. (3) The six obfuscated `CoreFP.dll` exports return `-42023` and `-42408` uniformly behind an argument guard; that guard is the nearest thing to a real caller this runtime has, and it has never been reversed. (4) The reference caller in `iTunes.exe` is **not** reachable by string search: that binary is a .NET ReadyToRun image, so its ADI call site is in managed code and a native rip-relative xref returns zero structurally. Look in the managed metadata, not in `.text`.
+**Next steps, in order of value.** (1) **The initialiser is now known, so the question moves one level up: what are `r12`, `r15` and `rax` at `0x5b321`, and where do they come from?** The five stores at `0x5b321`–`0x5b32f` are unconditional, which means the object's three pointers are whatever the CFF computed before them, and those are the only values in the whole investigation that have not been traced to a source. Watching the registers at that block, or reading them in the same run that watches the block, turns "the object holds host pointers" into "the object holds *these* pointers, computed *there*". (2) The 256-byte block at `0x19dba0` is copied in one instruction from a **563-entry table of 8-byte records at `.rdata 0x17eca0`** — a static template in the image, not something derived from the call; whether that copy is a decode step decides whether the object is data or code. (3) The six obfuscated `CoreFP.dll` exports return `-42023` and `-42408` uniformly behind an argument guard; that guard is the nearest thing to a real caller this runtime has, and it has never been reversed. (4) The reference caller in `iTunes.exe` is **not** reachable by string search: that binary is a .NET ReadyToRun image, so its ADI call site is in managed code and a native rip-relative xref returns zero structurally. Look in the managed metadata, not in `.text`.
 
 **Two shim blind spots, both now closed, both of which had been read as knowledge.** `PERUN_TRACE` did not cover the memory shims, so the earlier statements that `HeapAlloc`/`HeapSize` were "tolerated" rested on an instrument that could not see them. With `HeapSize` and `HeapAlloc` traced: **`HeapSize` is never called on this path at all** — zero times, and the return code is unchanged, so the constant 16 it used to return was load-bearing for nothing this project ever measured. `HeapAlloc` is called dozens of times, which is what sized the gate object. And `HeapSize` used to be described as returning 16 as a tolerated prototype; it now returns the real usable size, and a NULL pointer returns `(SIZE_T)-1` with `ERROR_INVALID_PARAMETER` as the real API does.
 
@@ -371,18 +371,25 @@ So the body does consult far more than two globals, the NULL slot the project ha
 
 **The library allocates the gate object itself, during the call, and installs it with an atomic compare-and-swap from null.** The stored value is a host heap address, so this is the library's own allocation rather than anything a host supplied. Two consequences. The earlier statement in `FINDINGS.md` that `0x19dda0` holds a host-provided pointer that perun never supplies is **withdrawn** — the library supplies it from its own heap, 104 instructions into the call. And the address is not a literal anywhere in the binary: it is computed into a stack slot, which is why a rip-relative search for the global finds nothing and why the static scanners in the log read as "no writer". The remaining problem is therefore not a missing object but the contents of a freshly allocated one.
 
-**The object is `HeapAlloc(flags=0, size=0x28)`, and it is not zeroed.** With `HeapAlloc` in the trace, the address the `cmpxchg` publishes matches one line of the allocation log exactly, in the same process — the correlation is by address, not by inference:
+**The object is `HeapAlloc(flags=0, size=0x28)`, and the library initialises it itself.** With `HeapAlloc` in the trace, the address the `cmpxchg` publishes matches one line of the allocation log exactly, in the same process — the correlation is by address, not by inference:
 
     [perun] HeapAlloc(flags=0x0, size=0x28) = 0x555556201f70
     singleton 0x7c99dda0 -> 0x555556201f70
 
-`flags=0x0` is not `HEAP_ZERO_MEMORY`, so the shim takes `malloc` and the two zero qwords the object is observed to hold are what a fresh glibc arena returns, not something the library wrote. Those are the same two qwords an emptiness test would compare, so on this host their value can be an artefact of the allocator rather than the guest's intent, and a recycled chunk would change it. A 40-byte block is five qwords, `+0x00`…`+0x20`: **there is no qword at `+0x28`**, and any reading that names one is reading past the allocation. At the moment of publication the object is:
+`flags=0x0` is not `HEAP_ZERO_MEMORY`, so the block arrives with whatever the allocator had in it — a recycled chunk, not a clean one. That matters only for how the readings below were obtained, and it is why the block has to be watched at the allocation rather than after: the address is fixed by gdb's ASLR being off, which makes a second run reproducible, and the writing is caught by a hardware watchpoint filtered to guest addresses.
 
-    +0x00  0x0000000000000000
-    +0x08  0x0000000000000000
-    +0x10  0x00005555562026e0     host pointer
-    +0x18  0x00005555561fa200     host pointer
-    +0x20  0x00005555561f9480     host pointer
+**All five fields are written by five consecutive instructions at `0x5b321`–`0x5b32f`**, with the object in `r13`:
+
+    0x5b321  pxor   %xmm0,%xmm0
+    0x5b321  movdqu %xmm0,0x00(%r13)    ; +0x00 and +0x08 in one 16-byte store
+    0x5b327  mov    %r12,0x10(%r13)     ; first host pointer
+    0x5b32b  mov    %r15,0x18(%r13)     ; second
+    0x5b32f  mov    %rax,0x20(%r13)     ; third
+
+Straight-line, no dispatch, nothing conditional. **An earlier note in this section said the two zero qwords were what a fresh glibc arena returned and not something the library wrote. That is withdrawn: the `pxor`/`movdqu` pair zeroes them deliberately, and the emptiness an emptiness test would read here is the library's own act rather than an artefact of the host allocator.** That correction matters, because the other reading would have made the host's allocator part of the explanation of a guest's decision.
+
+A 40-byte block is five qwords, `+0x00`…`+0x20`: **there is no qword at `+0x28`**, and any reading that names one is reading past the allocation. Two later writes touch the object, at `0x5b951` and `0x8cb1e`; the `+0x10`/`+0x18`/`+0x20` pointers visible at publication are the ones from the initialiser, and the second pointer is revised once after it.
+
 
 **Nothing writes it after the install.** Four hardware write watchpoints on the first four qwords, armed at `0x5b51c`, are live to the end of the call and none fires. The scheme is build-then-publish, and the fields are final when the `cmpxchg` retires — so the object does not need filling, it needs *assembling correctly* before publication.
 
@@ -683,6 +690,7 @@ cargo build --release -p perun-cli
 | 41 | `0x19e9c8` is the heap handle, not a CFF offsets table | gdb decode at `0x1353ae`, with the observed `rbx` matched against the allocation log | Confirmed (`mov rcx, [0x19e9c8]` then `call HeapAlloc`; `rbx=0x228` matches `HeapAlloc(flags=0x0, size=0x228)`) |
 | 42 | `cvu8io98wun` is not part of the provisioning path | GOT hook on `0x255818` over a complete successful Android run | Confirmed (slot swapped, hook armed, **zero calls**: eight `vdfut768ig` calls, `SUCCESS`, both headers) |
 | 43 | `HeapSize` is never called on this path | `HeapSize` in the trace, the shim-side count | Confirmed (0 calls, return code unchanged — the old constant 16 was load-bearing for nothing measured) |
+| 44 | The gate object is initialised by the library, at `0x5b321`–`0x5b32f` | hardware write watchpoints on the block, armed before `run` at the address ASLR fixes, filtered to guest addresses | Confirmed (`pxor`/`movdqu` zeroes `+0x00`/`+0x08` in one store, then three register moves fill `+0x10`/`+0x18`/`+0x20`; straight-line, unconditional) |
 
 Artifacts from the sweep (the 256-command histogram and the objdump-based verifiers) are diagnostic and untracked; none ships with the repository.
 
