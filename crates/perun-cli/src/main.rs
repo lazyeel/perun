@@ -1246,7 +1246,34 @@ fn cmd_call(args: &[String]) -> i32 {
                 std::ptr::write_bytes(lo as *mut u8, 0, here - lo);
             }
         }
-        let r = unsafe { f(argv[0], argv[1], argv[2], argv[3]) };
+        // The isolated stack, when asked for. A separate mapping is the real
+        // fix; the memset above is the diagnostic that showed the problem, and
+        // it leaves Win64's 16-byte call alignment broken, which is why it
+        // faults rather than merely changing the answer.
+        let pe_stack = if std::env::var_os("PERUN_PE_STACK").is_some() {
+            match unsafe { perun_core::teb::alloc_pe_stack(perun_core::teb::PE_STACK_SIZE) } {
+                Some((limit, base)) => {
+                    unsafe { perun_core::teb::set_pe_stack_bounds(limit, base) };
+                    eprintln!(
+                        "[perun] guest stack 0x{limit:x}..0x{base:x} ({} MiB, zeroed)",
+                        perun_core::teb::PE_STACK_SIZE >> 20
+                    );
+                    Some(base)
+                }
+                None => {
+                    eprintln!("[perun] could not map a guest stack; staying on this one");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let r = match pe_stack {
+            Some(top) => unsafe {
+                perun_core::teb::call_on_stack(f, top, [argv[0], argv[1], argv[2], argv[3]])
+            },
+            None => unsafe { f(argv[0], argv[1], argv[2], argv[3]) },
+        };
         println!("[perun] call#{iter} {export_name} returned {r:#x} ({r})");
         if mem_on {
             let after_mem =

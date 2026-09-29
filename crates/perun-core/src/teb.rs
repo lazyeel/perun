@@ -156,3 +156,111 @@ pub unsafe fn get_tls_slot_ptr(index: usize) -> *mut u64 {
 
 /// Number of inline TLS slots available for FLS backing.
 pub const TLS_SLOT_COUNT: usize = 64;
+
+// ── an isolated stack for the PE lane ────────────────────────────────────────
+//
+// The PE lane used to run the guest on the host thread's stack, so the frame
+// the export builds with `sub rsp,0x16a8` landed on whatever perun's own Rust
+// execution had left there. Two places in the guest read uninitialised memory
+// as a result, and both matter: RVA 0xb15c8 is `movzx eax,byte [rcx+rax]`,
+// whose byte forms the CFF dispatch index, and RVA 0x6783f reads the caller's
+// packet byte by byte. Zeroing the host stack is not a fix -- it is a 1 MiB
+// `memset` that does not restore the 16-byte alignment Win64 requires at the
+// call, which is what turned into SIGSEGV.
+//
+// So: give the guest its own mapping. The kernel hands out zeroed pages, so
+// the "uninitialised" read becomes a deterministic zero, and the bounds the
+// guest's own stack probe consults through gs:[0x08] and gs:[0x10] are the
+// real bounds of the mapping rather than of the thread it left.
+
+/// Default guest stack size for the PE lane.
+pub const PE_STACK_SIZE: usize = 8 << 20;
+
+/// Map `size` bytes for the guest and return `(limit, base)`.
+///
+/// The base is a fixed hint so runs are reproducible; `MAP_FIXED_NOREPLACE`
+/// keeps it from clobbering anything if the hint happens to be taken.
+pub unsafe fn alloc_pe_stack(size: usize) -> Option<(u64, u64)> {
+    unsafe {
+        let want = 0x7FF7_CF80_0000u64;
+        let p = libc::mmap(
+            want as *mut libc::c_void,
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED_NOREPLACE,
+            -1,
+            0,
+        );
+        if p as isize == -1 {
+            return None;
+        }
+        let base = p as u64 + size as u64;
+        // The kernel already zeroed it; make that a property rather than a
+        // hope, since everything above depends on it.
+        std::ptr::write_bytes(p, 0, size);
+        Some((p as u64, base))
+    }
+}
+
+/// Point the TEB's stack bounds at the guest's own mapping.
+///
+/// `gs:[0x10]` is what MSVC's `__chkstk` probes downward toward, so leaving
+/// the host thread's limits in place while the guest runs on another stack
+/// makes the probe walk off the mapping.
+pub unsafe fn set_pe_stack_bounds(limit: u64, base: u64) {
+    CURRENT_TEB.with(|slot| {
+        if let Some(b) = slot.borrow_mut().as_mut() {
+            b.stack_limit = limit;
+            b.stack_base = base;
+        }
+    });
+}
+
+core::arch::global_asm!(
+    ".text",
+    ".globl pe_call_on_stack",
+    ".hidden pe_call_on_stack",
+    ".type pe_call_on_stack, @function",
+    "pe_call_on_stack:",
+    // Six registers carry the whole contract: rdi target, rsi new stack top,
+    // rdx/rcx/r8/r9 the four arguments. Nothing else is live.
+    "  push rbp",
+    "  mov  rbp, rsp",
+    "  push rbx",
+    "  push r12",
+    "  push r13",
+    "  push r14",
+    "  push r15",
+    "  sub  rsp, 8",   // keep the frame 16-aligned
+    "  mov  r12, rsp", // host stack, callee-saved so it survives
+    "  mov  r13, rdi", // target, also callee-saved
+    "  mov  r10, rsi", // new stack top
+    "  and  r10, -16",
+    "  sub  r10, 32",  // Win64 shadow space
+    "  mov  rsp, r10", // rsp % 16 == 0 here, as a call requires
+    "  mov  rdi, rdx",
+    "  mov  rsi, rcx",
+    "  call r13",
+    "  mov  rsp, r12",
+    "  lea  rsp, [rsp+8]",
+    "  pop  r15",
+    "  pop  r14",
+    "  pop  r13",
+    "  pop  r12",
+    "  pop  rbx",
+    "  pop  rbp",
+    "  ret",
+);
+
+unsafe extern "C" {
+    fn pe_call_on_stack(target: usize, stack_top: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64;
+}
+
+/// Call `f` on the stack whose top is `stack_top`, and come back to ours.
+pub unsafe fn call_on_stack(
+    f: unsafe extern "win64" fn(u64, u64, u64, u64) -> u64,
+    stack_top: u64,
+    args: [u64; 4],
+) -> u64 {
+    unsafe { pe_call_on_stack(f as usize, stack_top, args[0], args[1], args[2], args[3]) }
+}
