@@ -45,6 +45,8 @@ fn main() {
 // seen in a register, which catches the decision wherever the flattened body
 // computes it rather than only where this particular build stores it.
 static mut STEP_ARMED: bool = false;
+static mut STEP_SEALS: u64 = 0;
+static mut SEAL_PAGES: u64 = 0;
 static mut STEP_PRIMED: bool = false;
 static mut STEP_ENTERED: bool = false;
 static mut STEP_COUNT: u64 = 0;
@@ -246,6 +248,27 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             // Keep TF set: this is what makes the walk self-sustaining.
             *regs.add(libc::REG_EFL as usize) = (flags | EFLAGS_TF) as i64;
             return;
+        }
+
+        // PERUN_SEAL_DATA: a read of a sealed .data page faults. Record the
+        // address, unprotect the page, and retry, so the walk continues and
+        // every global the body consults is named in order.
+        if sig == libc::SIGSEGV && SEAL_PAGES > 0 {
+            let a = si_addr as usize;
+            let page = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+            let base = a & !(page - 1);
+            let n = STEP_SEALS;
+            if SEAL_PAGES > 0 {
+                let m = format!("[seal {n}] read at {a:x}\n");
+                libc::write(2, m.as_ptr().cast(), m.len());
+                STEP_SEALS = n + 1;
+                libc::mprotect(
+                    base as *mut libc::c_void,
+                    page,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                );
+                return;
+            }
         }
 
         // SIGTRAP in production means an unexpected int3/ICEBP in the guest
@@ -1051,6 +1074,32 @@ fn cmd_call(args: &[String]) -> i32 {
         .ok()
         .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
         .unwrap_or(0);
+    // PERUN_SEAL_DATA=1: mark the image's .data pages PROT_NONE before the call.
+    // Any read of a global then faults, and the crash handler prints the
+    // address, which names the global the body is consulting without decoding
+    // the flattened body.
+    let sealed: Vec<usize> = if std::env::var_os("PERUN_SEAL_DATA").is_some() {
+        let lo = image.base();
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let mut v = Vec::new();
+        // .data: RVA 0x19d000 .. 0x19f0a8 per the section table
+        for rva in (0x19d000..0x19f0a8).step_by(page) {
+            let p = unsafe { lo.add(rva) };
+            let aligned = unsafe { p.cast::<u8>().offset(-((rva % page) as isize)) };
+            if unsafe { libc::mprotect(aligned.cast(), page, libc::PROT_NONE) } == 0 {
+                v.push(rva / page);
+            }
+        }
+        eprintln!("[perun] sealed {} data pages", v.len());
+        v
+    } else {
+        Vec::new()
+    };
+    let _ = &sealed;
+    unsafe {
+        SEAL_PAGES = sealed.len() as u64;
+    }
+
     for iter in 0..seq_n {
         println!(
             "[perun] call#{iter} {export_name}({:#x}, {:#x}, {:#x}, {:#x})...",
