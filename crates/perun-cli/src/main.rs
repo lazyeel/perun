@@ -1226,6 +1226,26 @@ fn cmd_call(args: &[String]) -> i32 {
                 std::slice::from_raw_parts(img_base as *const u64, 0x1A_5000 / 8).to_vec()
             };
         }
+        // The PE lane runs the guest on *this* thread's stack, so the frame
+        // the export builds with `sub rsp,0x16a8` lands on whatever the host
+        // left there. The flattened body reads a byte out of that region to
+        // form its dispatch index (RVA 0xb15c8, `movzx eax,byte [rcx+rax]`),
+        // and at RVA 0x6783f it reads our parameter packet byte by byte. Both
+        // are uninitialised-memory reads from the guest's point of view, and
+        // the first was observed returning leftover x86 code from perun's own
+        // execution -- a dispatch decision that depended on the host.
+        //
+        // Zeroing *below* the current stack pointer is what is needed: the
+        // guest pushes eight registers and then subtracts, so its frame is
+        // under this frame, not in it. An array allocated as a local would
+        // land above, in the wrong place entirely.
+        if std::env::var_os("PERUN_ZERO_GUEST_STACK").is_some() {
+            unsafe {
+                let here = &0u8 as *const u8 as usize; // any local: gives the frame address
+                let lo = here.saturating_sub(1 << 20);
+                std::ptr::write_bytes(lo as *mut u8, 0, here - lo);
+            }
+        }
         let r = unsafe { f(argv[0], argv[1], argv[2], argv[3]) };
         println!("[perun] call#{iter} {export_name} returned {r:#x} ({r})");
         if mem_on {
