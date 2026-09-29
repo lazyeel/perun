@@ -46,6 +46,9 @@ fn main() {
 // computes it rather than only where this particular build stores it.
 static mut STEP_ARMED: bool = false;
 static mut STEP_SEALS: u64 = 0;
+/// The .data page to put back under PROT_NONE, set by a seal fault and
+/// consumed by the next single-step trap. Zero means nothing to re-seal.
+static mut STEP_RESEAL: usize = 0;
 static mut SEAL_PAGES: u64 = 0;
 static mut STEP_PRIMED: bool = false;
 static mut STEP_ENTERED: bool = false;
@@ -53,6 +56,10 @@ static mut STEP_COUNT: u64 = 0;
 static mut STEP_MAX: u64 = 0;
 static mut STEP_STOP_RVA: u64 = 0;
 static mut STEP_STOP_ON_CODE: bool = true;
+/// The ADI code the walk stops on. Overridable with PERUN_STOP_CODE, because
+/// the code that publishes one error is not the code that publishes the next,
+/// and the publisher of -45002 is not where -45018's is: hard-coding one of
+/// them made the search for the other impossible.
 static mut STEP_STOP_CODE: u32 = ERRNO_45018;
 const STEP_RING: usize = 160_000;
 static mut STEP_RIP: [u64; STEP_RING] = [0; STEP_RING];
@@ -171,19 +178,21 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             let rcx = *regs.add(libc::REG_RCX as usize) as u64;
             let rsp = *regs.add(libc::REG_RSP as usize) as u64;
 
-            if !STEP_PRIMED {
-                // The trap raised by hand, before the guest was entered. Its only
-                // job is to install TF in the context the thread resumes from;
-                // the CPU then traps after the first guest instruction.
-                STEP_PRIMED = true;
-                *regs.add(libc::REG_EFL as usize) = (flags | EFLAGS_TF) as i64;
-                return;
+            // Re-seal a .data page a moment after a seal fault opened it. The
+            // trap that brings us here is the one raised after the retried
+            // instruction retired, so closing the page here catches the *next*
+            // access instead of losing every access after the first.
+            if STEP_RESEAL != 0 {
+                let page = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+                let target = STEP_RESEAL;
+                STEP_RESEAL = 0;
+                libc::mprotect(target as *mut libc::c_void, page, libc::PROT_NONE);
             }
 
             if !STEP_PRIMED {
                 // The trap raised by hand, before the guest was entered. Its only
                 // job is to install TF in the context the thread resumes from;
-                // the CPU then traps after the first instruction.
+                // the CPU then traps after the first guest instruction.
                 STEP_PRIMED = true;
                 *regs.add(libc::REG_EFL as usize) = (flags | EFLAGS_TF) as i64;
                 return;
@@ -250,25 +259,45 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             return;
         }
 
-        // PERUN_SEAL_DATA: a read of a sealed .data page faults. Record the
-        // address, unprotect the page, and retry, so the walk continues and
-        // every global the body consults is named in order.
+        // PERUN_SEAL_DATA: a touch of a sealed .data page faults. Record the
+        // address and the faulting instruction, unprotect the page so the
+        // retried instruction completes, and re-seal it on the trap that
+        // follows.
+        //
+        // The re-seal is the whole point. Leaving the page open reported one
+        // access per 4 KiB and nothing more, and because 0x19dba0, 0x19dda0
+        // and 0x19db98 all sit on the page at 0x19d000, a log of "the body
+        // reads two globals" was really a log of "the body opens two pages".
+        // With the walk armed the retried instruction raises SIGTRAP, and
+        // that trap is where the page goes back to PROT_NONE, so every
+        // access is seen rather than the first one.
+        //
+        // The message says "touch" and not "read": mprotect cannot tell a load
+        // from a store or a read-modify-write, and printing RIP lets the
+        // instruction decide that, instead of the log asserting something the
+        // instrument does not know.
         if sig == libc::SIGSEGV && SEAL_PAGES > 0 {
             let a = si_addr as usize;
             let page = libc::sysconf(libc::_SC_PAGESIZE) as usize;
             let base = a & !(page - 1);
             let n = STEP_SEALS;
-            if SEAL_PAGES > 0 {
-                let m = format!("[seal {n}] read at {a:x}\n");
-                libc::write(2, m.as_ptr().cast(), m.len());
-                STEP_SEALS = n + 1;
-                libc::mprotect(
-                    base as *mut libc::c_void,
-                    page,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                );
-                return;
+            let mut m = format!("[seal {n}] touch at {a:x} rip {rip:x}\n");
+            // Longest plausible: "[seal 4294967295] touch at ffffffffffff rip ffffffffffffffff"
+            if m.len() > 96 {
+                m.truncate(96);
             }
+            libc::write(2, m.as_ptr().cast(), m.len());
+            STEP_SEALS = n + 1;
+            if STEP_ARMED {
+                // Re-seal on the next trap, i.e. once this instruction retires.
+                STEP_RESEAL = base;
+            }
+            libc::mprotect(
+                base as *mut libc::c_void,
+                page,
+                libc::PROT_READ | libc::PROT_WRITE,
+            );
+            return;
         }
 
         // SIGTRAP in production means an unexpected int3/ICEBP in the guest
@@ -1074,6 +1103,22 @@ fn cmd_call(args: &[String]) -> i32 {
         .ok()
         .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
         .unwrap_or(0);
+    // PERUN_STOP_CODE: which ADI code the walk stops on. Defaults to -45018,
+    // but the publisher of -45002 lives elsewhere and pinning the old default
+    // is what made it unfindable. Accepts the decimal or the 0x form.
+    if let Ok(v) = std::env::var("PERUN_STOP_CODE") {
+        let parsed = if let Some(hex) = v.trim().strip_prefix("0x") {
+            u32::from_str_radix(hex, 16).ok()
+        } else {
+            v.trim().parse::<u32>().ok()
+        };
+        match parsed {
+            Some(code) => unsafe { STEP_STOP_CODE = code },
+            None => eprintln!("[perun] ignoring unparsable PERUN_STOP_CODE {v:?}"),
+        }
+    }
+    // No need for a sign-extended variant: the comparison below truncates each
+    // register to u32, so a code held in a 64-bit register matches too.
     // PERUN_SEAL_DATA=1: mark the image's .data pages PROT_NONE before the call.
     // Any read of a global then faults, and the crash handler prints the
     // address, which names the global the body is consulting without decoding
@@ -1304,9 +1349,19 @@ fn resolve_token(tok: &str, scratch: u64, ctx: u64, loads: &[(String, u64, usize
 /// Script lines (whitespace-separated, `#` starts a comment):
 ///   load NAME FILE          read FILE into a named guest buffer
 ///   poke TARGET VALUE       write a qword; TARGET = scratch+OFF | ctx+OFF | RVA
-///   call A0 A1 A2 A3        call the export; args are tokens (see `resolve_token`)
+///   poke-ptr RVA VALUE      write VALUE through the pointer stored at RVA
+///   call EXPORT A0 A1 A2 A3 call the named export; EXPORT defaults to the
+///                           binary's own, and naming it is what lets one
+///                           session drive cvu8io98wun and vdfut768ig in the
+///                           order the real host uses
 ///   zero scratch|ctx        clear the region
 ///   dump                    print non-zero qwords of scratch and ctx
+///
+/// Note the difference between `poke` and `poke-ptr`, because getting it
+/// backwards faults in the host and looks like a guest crash: `poke 0x19db98 X`
+/// writes X at that RVA, while `poke-ptr 0x19db98 X` dereferences the qword
+/// stored there and writes through it. Before any call the qword is zero, so
+/// `poke-ptr` on a not-yet-created object is a null dereference.
 fn cmd_seq(args: &[String]) -> i32 {
     if args.len() < 3 {
         eprintln!("usage: perun seq <image.dll> <export> --script=FILE");
