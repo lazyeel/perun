@@ -273,6 +273,31 @@ In sum: the August-2026 gate is a login-shape gate on the two identity/ownership
 
 Live testing surfaced one more operational fact worth recording for anyone reproducing this path. A freshly created Apple ID that has never completed first-login terms acceptance can pass 2FA (correct code, server-accepted) and still be refused a `passwordToken` with `failureType 5005` — the endpoint's answer for "2FA invalid **or** account not yet provisioned for storefront use." The account-state cause dominates: completing ToS acceptance once (any Apple web property, e.g. music.apple.com) immediately turns the same credentials+code flow into a working login. The failure code maps to two distinct conditions; do not debug the protocol when the account is simply unprovisioned.
 
+### 5.8b Resuming after a context reset (2026-09-28)
+
+Written for a session that starts with no memory of this work. The barrier map above is the state; this is how to confirm it still holds and what to do next. `HANDOVER.md` §10a carries the same and more, but it is gitignored and does not ship — **this section is the part that travels with the repository**, along with `FINDINGS.md`, which lives outside it.
+
+**Verify before trusting.** Both of these were re-run from a cold build immediately before the reset and both reproduce. A fresh session should run them before acting on anything in §5.8:
+
+    D="$ITUNES_TREE"        # the extracted iTunes tree holding CoreADI64.dll
+    ./target/release/perun call $D/CoreADI64.dll vdfut768ig 0xcfe0b46a ctx 0 0 \
+        --poke=scratch+0x3=0x2 --poke=ctx+0x0=scratch --poke=ctx+0x8=0x10 \
+        --poke=ctx+0xc=0x0 --poke=0x19db98=scratch
+    # -> 0xffff5036 (-45002), the barrier
+
+    PERUN_SEAL_DATA=1 ./target/release/perun call $D/CoreADI64.dll vdfut768ig 0xcfe0b46a ctx 0 0 \
+        --poke=scratch+0x3=0x2 --poke=ctx+0x0=scratch --poke=ctx+0x8=0x10 \
+        --poke=ctx+0xc=0x0 --poke=0x19db98=scratch
+    # -> reads at 0x7c99dda0, then 0x7c99e9c8 — the only two globals consulted
+
+**Inputs, all present on disk and none of them shipped.** The working Android dumper and its naked stubs sit beside the eight-call capture it produced, in the Android working directory used for this phase. The x86_64 `libstoreservicescore.so` and `libCoreADI.so` are in `crates/perun-cli/examples/adi-android/libs/`, with the Bionic `linker64` under `sysroot/bin/` and the system image it was extracted from alongside. The three Windows binaries — `CoreADI64.dll`, `CoreFP.dll`, `iTunes.exe` — are in the extracted iTunes tree this project has been running against. The day-by-day log, including the reproduction commands, is `FINDINGS.md`.
+
+**The open question, stated so it can be closed or replaced.** RVA `0xd6560` compares `obj[+0x08]` against `obj[+0x10]` and rejects the call when they are equal. The object is not the caller's packet — the seal experiment proves the body reads only `0x19dda0` and `0x19e9c8` — and no input the caller controls reaches it: the packet is four bytes, `r8` and `r9` are inert across eight combinations, and the guest makes no filesystem, dynamic-load or hardware call on this path. So the state is built inside the library before the check runs, and what fills it is unknown.
+
+**Three next steps, in order of value.** (1) Find the *pointer* to `"vdfut768ig"` in `CoreFP.dll`'s `.rdata`/`.data` — in `iTunes.exe` the string is obfuscated and a `lea` and table-entry search both come back empty, so what is wanted is the reference, not the string; `CoreFP.dll` already runs here and its argument shape is what would unblock the caller. (2) Disassemble `0xd6500`–`0xd6560` in `CoreADI64.dll` for the origin of `%r11`, which is the shortest route to what fills the object. (3) Dump the `cvu8io98wun` call, GOT slot `0x255818`, on the working native Android stand.
+
+**Before trusting any single run.** Four instrument defects each produced a confident false result before being caught, and three theories in a row were refuted by a sweep that took seconds. Every claim in §5.8 has a control; a site that does not trap is evidence of nothing until a control that must trap does trap in the same run, and `--patch` values need their `0x` prefix or the run exits 2 and a live site reads as dead.
+
 ### 5.8 ADI provisioning gate — the barrier map (2026-09-28)
 
 **This is the canonical statement. Everything else in this file that describes the Windows gate is either superseded by it or is the dated log in §9.**
