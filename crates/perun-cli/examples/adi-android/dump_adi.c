@@ -47,6 +47,7 @@
 #include <elf.h>
 #include <errno.h>
 #include <link.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -546,6 +547,10 @@ static int swap(uint64_t base, uint64_t vaddr, void *wrapper, const char *what) 
 
 // Called by the harness after ADILoadLibraryWithPath has run and populated the
 // globals, and before any provisioning entry point is called.
+int dump_init(const char *libdir);
+
+static int arm_salt_watch(uint64_t base);
+
 int dump_init(const char *libdir) {
     g_libdir = libdir;
     uint64_t base = base_of("libstoreservicescore.so");
@@ -578,10 +583,105 @@ int dump_init(const char *libdir) {
            (void *)real_cvu);
     ok &= swap(base, CVU_PTR_VADDR, (void *)wrap_cvu, "cvu8io98wun");
 
+    // Armed before the first provisioning call, so a writer that runs during
+    // setup is caught too. A miss here is informative: it means the value the
+    // dispatcher reads is the one the file shipped.
+    arm_salt_watch(base);
+
     (void)VDFUT_NAME_VADDR;
     printf("[dump] init %s\n", ok ? "complete" : "INCOMPLETE");
     fflush(stdout);
     return ok;
+}
+
+// ── who writes the CFF salt table ────────────────────────────────────────────
+//
+// 0x2442a4 is read once, by kq56gsgHG6 at 0x1de23e, and that read is the only
+// rip-relative reference to it in .text (xref_global.py, full linear sweep with
+// resync). On disk it holds 0x848, which is a .rodata offset -- the string
+// "DatabaseConnection {0:x}] update SQL: \"{" -- sitting in a table of twelve
+// more such offsets, and no relocation covers it. So it does not look like
+// anything a writer maintains, and a static sweep cannot see a write through a
+// computed pointer or a constructor anyway.
+//
+// This is the runtime answer instead: mprotect the page down to PROT_NONE, and
+// on SIGSEGV report the faulting RIP inside libstoreservicescore, the value, and
+// whether the access was a write. A read fault on this page is impossible in
+// the steady state, so a trap here is a write.
+//
+// The page is re-armed after each report rather than left open, because the
+// SEAL_DATA defect this project already paid for was exactly a guard that
+// un-protects and never restores: a page left open reports one access per page
+// and not one per address.
+#define SALT_VADDR 0x2442a4ULL
+
+static volatile sig_atomic_t salt_traps;
+static uint64_t salt_page;
+
+static void salt_handler(int sig, siginfo_t *si, void *uc) {
+    (void)sig;
+    // Bionic's siginfo_t has no ucontext member -- glibc's does, and the code
+    // is compiled by the NDK for an Android target. The ucontext arrives as the
+    // third argument of a SA_SIGINFO handler, which is where the register file
+    // is read from.
+    uint64_t rip = 0;
+    if (uc) {
+        ucontext_t *u = uc;
+        rip = (uint64_t)u->uc_mcontext.gregs[REG_RIP];
+    }
+    uint64_t addr = (uint64_t)si->si_addr;
+    int is_write = (si->si_code == SEGV_ACCERR);
+    salt_traps++;
+    static const char hex[] = "0123456789abcdef";
+    char buf[128];
+    size_t n = 0;
+    uint64_t v = *(volatile uint32_t *)SALT_VADDR;
+    for (int i = 0; i < 8; i++)
+        buf[n++] = hex[(v >> ((7 - i) * 4)) & 0xf];
+    buf[n] = 0;
+    dprintf(2, "[salt] trap #%d %s addr=%p rip=%p slot=%p now=0x%s\n",
+            (int)salt_traps, is_write ? "WRITE" : "read", (void *)addr, (void *)rip,
+            (void *)(uintptr_t)SALT_VADDR, buf);
+    // Restore and re-arm, so the next writer is also caught. ucontext is left
+    // untouched: the faulting instruction is re-executed against a writable
+    // page and completes normally.
+    if (mprotect((void *)salt_page, (size_t)sysconf(_SC_PAGESIZE),
+                 PROT_READ | PROT_WRITE))
+        dprintf(2, "[salt] re-arm failed: %s\n", strerror(errno));
+    else if (mprotect((void *)salt_page, (size_t)sysconf(_SC_PAGESIZE), PROT_NONE))
+        dprintf(2, "[salt] re-trap failed: %s\n", strerror(errno));
+}
+
+static int arm_salt_watch(uint64_t base) {
+    uint64_t slot = base + SALT_VADDR;
+    long page = sysconf(_SC_PAGESIZE);
+    salt_page = (uint64_t)((uintptr_t)slot & ~(uintptr_t)(page - 1));
+    dprintf(2, "[salt] 0x%llx slot=%p page=%p initial=0x%08x\n",
+            (unsigned long long)SALT_VADDR, (void *)slot,
+            (void *)(uintptr_t)salt_page, *(volatile uint32_t *)slot);
+
+    // The handler must be able to write the value it just reported, and the
+    // trap must fire for writes only, so a separate stack for it.
+    static char altstack[SIGSTKSZ * 4];
+    stack_t ss = {.ss_sp = altstack, .ss_size = sizeof altstack, .ss_flags = 0};
+    if (sigaltstack(&ss, NULL))
+        dprintf(2, "[salt] sigaltstack: %s\n", strerror(errno));
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = salt_handler;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGSEGV, &sa, NULL)) {
+        dprintf(2, "[salt] sigaction: %s\n", strerror(errno));
+        return 0;
+    }
+    if (mprotect((void *)(uintptr_t)salt_page, (size_t)page, PROT_NONE)) {
+        dprintf(2, "[salt] mprotect: %s\n", strerror(errno));
+        return 0;
+    }
+    dprintf(2, "[salt] armed\n");
+    return 1;
 }
 
 // Resolves a symbol the same way, for a follow-up probe.

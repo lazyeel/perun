@@ -73,7 +73,16 @@ static mut STEP_STOP_CODE: u32 = ERRNO_45018;
 /// a small slot while the slots the reader looked at stayed empty -- which is
 /// why a walk of 80 457 instructions reported 128 zero entries, and why
 /// shortening the walk did not help either.
-const STEP_RING: usize = 1 << 17;
+///
+/// 2^18, raised from 2^17 on 2026-09-30: a complete walk of the clean path is
+/// 222 935 instructions, and at 2^17 the ring kept only the **last** 131 072
+/// of them. The dump then silently omitted the whole early region -- which is
+/// where the transform loop lives, at step ~17 600 -- while still writing a
+/// full-looking file of 131 072 rows. Reading that file, the loop looked
+/// absent. It was the same failure as the truncated 128-entry window, one
+/// magnitude up: a ring that is too small does not look empty, it looks
+/// complete.
+const STEP_RING: usize = 1 << 18;
 static mut STEP_RIP: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_EDX: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_RDX: [u64; STEP_RING] = [0; STEP_RING];
@@ -82,6 +91,27 @@ static mut STEP_R10: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_EDI: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_RAX: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_R12: [u64; STEP_RING] = [0; STEP_RING];
+/// RSP alongside every RIP. A write-watchpoint cannot be built from RIPs
+/// alone: `[rsp+0x50]` names a different address on every instruction, because
+/// the frame is built by `sub rsp,0x16a8` and then walked. Carrying the stack
+/// pointer with each step is what turns "who wrote this slot" into a question
+/// the recorded trace can answer offline, by decoding each instruction and
+/// asking whether its destination operand is `[rsp+0x50]`.
+static mut STEP_RSP: [u64; STEP_RING] = [0; STEP_RING];
+/// The rest of the register file, for the same reason. The transform loop at
+/// RVA `0x6783f` reads `rax` as its base, `r10` as its limit and `edi` as the
+/// byte, and derives `eax` from `r14d` -- and none of the four is initialised
+/// anywhere in the 60 bytes before it, because that window is an indirect jump
+/// (`jmp *%rdx`) into a control-flow-flattened body. Static disassembly cannot
+/// answer where a register came from when the writes live in other basic
+/// blocks; the recorded value can, and that is the difference between reading
+/// the seed and guessing it.
+static mut STEP_R9: [u64; STEP_RING] = [0; STEP_RING];
+static mut STEP_R11: [u64; STEP_RING] = [0; STEP_RING];
+static mut STEP_R14: [u64; STEP_RING] = [0; STEP_RING];
+static mut STEP_R8: [u64; STEP_RING] = [0; STEP_RING];
+static mut STEP_RSI: [u64; STEP_RING] = [0; STEP_RING];
+static mut STEP_RDI: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_IDX: usize = 0;
 const EFLAGS_TF: u64 = 0x100;
 /// -45018, the code the library is about to publish when the header check fails.
@@ -134,10 +164,61 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
         let rax = unsafe { STEP_RAX[slot] };
         let r10 = unsafe { STEP_R10[slot] };
         let r12 = unsafe { STEP_R12[slot] };
+        let sp = unsafe { STEP_RSP[slot] };
         println!(
-            "  [{k:4}] rip={rp:#018x} edx={ed:#010x} rdx={dx:#018x} edi={edi:#010x} rax={rax:#010x} r10={r10:#018x} rcx={cx:#x} r12={r12:#018x}"
+            "  [{k:4}] rip={rp:#018x} edx={ed:#010x} rdx={dx:#018x} edi={edi:#010x} rax={rax:#010x} r10={r10:#018x} rcx={cx:#x} r12={r12:#018x} rsp={sp:#018x}"
         );
     }
+}
+
+/// Dump the whole ring as `index rip rsp`, oldest first, for offline analysis.
+///
+/// The 128-entry window above is a reading convenience and cannot answer a
+/// question about a slot, because the writer of `[rsp+0x50]` may be thousands
+/// of instructions earlier. PERUN_TRACE_FILE names the output.
+///
+/// One line per instruction, hex only, no formatting that could fail: this
+/// runs after the walk, but it still runs on a thread whose guest frames are
+/// still on the stack, and an allocation here would be an allocation on top of
+/// a frame the library is holding.
+fn dump_ring(path: &str) {
+    use std::io::Write as _;
+    let Ok(mut f) = std::fs::File::create(path) else {
+        eprintln!("[perun] trace file {path}: cannot create");
+        return;
+    };
+    let idx = unsafe { STEP_IDX };
+    let n = idx.min(STEP_RING);
+    let first = idx.wrapping_sub(n);
+    let mut line = String::with_capacity(48);
+    for k in 0..n {
+        let slot = (first + k) & (STEP_RING - 1);
+        let rp = unsafe { STEP_RIP[slot] };
+        let sp = unsafe { STEP_RSP[slot] };
+        line.clear();
+        use std::fmt::Write as _;
+        // edi is carried because the slot's writer is `mov [rsp+0x50], edi`:
+        // without the register the trace says who wrote and not what.
+        let ed = unsafe { STEP_EDI[slot] };
+        let r9 = unsafe { STEP_R9[slot] };
+        let r11 = unsafe { STEP_R11[slot] };
+        let r14 = unsafe { STEP_R14[slot] };
+        let r8 = unsafe { STEP_R8[slot] };
+        let rsi = unsafe { STEP_RSI[slot] };
+        let rdi = unsafe { STEP_RDI[slot] };
+        let r12 = unsafe { STEP_R12[slot] };
+        let r10 = unsafe { STEP_R10[slot] };
+        let rcx = unsafe { STEP_RCX[slot] };
+        let rdx = unsafe { STEP_RDX[slot] };
+        let rax = unsafe { STEP_RAX[slot] };
+        let _ = writeln!(
+            line,
+            "{k} {rp:x} {sp:x} {ed:x} {rax:x} {rdx:x} {rcx:x} {r10:x} {r9:x} {r11:x} {r14:x} {r8:x} {rsi:x} {rdi:x} {r12:x}"
+        );
+        let _ = f.write_all(line.as_bytes());
+    }
+    let _ = f.flush();
+    eprintln!("[perun] wrote {n} steps to {path}");
 }
 
 /// POSIX signal handler: print guest-crash context (RIP, RSP, fault address)
@@ -235,6 +316,16 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             STEP_EDI[slot] = rdi;
             STEP_RAX[slot] = *regs.add(libc::REG_RAX as usize) as u64;
             STEP_R12[slot] = *regs.add(libc::REG_R12 as usize) as u64;
+            // One more store, for the same reason as the rest: the trap runs
+            // per instruction and nothing here may allocate. RSP is what makes
+            // a stack slot addressable from the recorded trace.
+            STEP_RSP[slot] = rsp;
+            STEP_R9[slot] = *regs.add(libc::REG_R9 as usize) as u64;
+            STEP_R11[slot] = *regs.add(libc::REG_R11 as usize) as u64;
+            STEP_R14[slot] = *regs.add(libc::REG_R14 as usize) as u64;
+            STEP_R8[slot] = *regs.add(libc::REG_R8 as usize) as u64;
+            STEP_RSI[slot] = *regs.add(libc::REG_RSI as usize) as u64;
+            STEP_RDI[slot] = rdi;
             STEP_IDX = STEP_IDX.wrapping_add(1);
             STEP_COUNT += 1;
 
@@ -277,6 +368,10 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
                 };
                 let (w, ri, ed, ax, bx, cx, sp) = (why, rip, rdi, rax, rbx, rcx, rsp);
                 report_stop(w, ri, ed, ax, bx, cx, sp);
+                if let Some(p) = std::env::var_os("PERUN_TRACE_FILE") {
+                    let p = p.to_string_lossy().into_owned();
+                    dump_ring(&p);
+                }
                 libc::_exit(0);
             }
 
@@ -1310,6 +1405,16 @@ fn cmd_call(args: &[String]) -> i32 {
         // walk that never happened.
         if steps > 0 && unsafe { STEP_COUNT } > 0 && unsafe { STEP_ARMED } {
             report_stop("the call returned", 0, 0, 0, 0, 0, 0);
+            // The ring dump belongs here too, not only beside the stop
+            // condition. A walk that ends because the guest returned is the
+            // common case -- and that is the case where the file was silently
+            // not written, which is how a 222 687-instruction walk came to look
+            // like a walk that never happened. The comment above already
+            // names this failure mode for the report; the dump had it too.
+            if let Some(p) = std::env::var_os("PERUN_TRACE_FILE") {
+                let p = p.to_string_lossy().into_owned();
+                dump_ring(&p);
+            }
             unsafe { STEP_ARMED = false };
         }
     }
