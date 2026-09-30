@@ -559,74 +559,75 @@ The strings `vdfut768ig` and `cvu8io98wun` are present in both `iTunes.exe` (38 
 
 **Two methods, both paid for.** A sweep is a measurement and a single run is a hypothesis — three consecutive theories were refuted by a sweep that took seconds and would have killed each at formulation. And on the instrument side, a site that does not trap is evidence of nothing until a control site that must trap does trap in the same run: four instrument defects each produced a confident false result first (a window printing the oldest ring entries, a re-arm setting `RIP` to the faulting address, a trigger sampling registers before the instruction ran, and `--patch` needing its `0x` prefix).
 
-### 5.8c The transform is additive, and it is not the barrier (2026-09-30)
+### 5.8c The transform exists and is state-dependent; it is not the barrier (2026-09-30)
 
-**The key question was answered by measurement, and the answer is negative.**
+**Corrected later the same day: the closed form below was measured under one
+configuration and does not hold in general. Read the correction before the
+result.**
+
 The flattened body at RVA `0x6783f` runs a byte loop over the caller's packet.
-Its transform is exactly:
+The loop is real: 16 iterations, cursor `r9 = 0x0 .. 0xf`, source `[rsp+0x40]`,
+destination reloaded at `0x67888c` from `[rsp+0x48]`, store at `0x67891`. The
+body is MBA-obfuscated — `add dl,0x3e` and `xor dl,0x3e` annihilate, and `r11` and
+`esi` are computed on `0x67886b`–`0x678883` and never read.
+
+Under an armed walk, where `rax` at `0x6785c` measured `0xe827d80b`, the output
+was exactly
 
 ```
 out[i] = ( in[i] + 0x63 + 0xe7*i ) mod 256
 ```
 
-with `i` the loop cursor, which addresses buffer byte `4 + i` — the source is
-`rdx = [rsp+0x40]`, and on the clean path that resolves to `scratch + 4`. `0xe7`
-is the same immediate as the `imul $0xe7,%r14d,%eax` at `0x6782c`; `0x63` is the
-value produced for a zero input.
-There is **no key**: the operation is additive
-and trivially invertible, `in[i] = out[i] - 0x63 - 0xe7*i`.
+verified on three runs of 16 bytes each: an all-zero input, the payload the
+Android engine hands the init call, and an input derived from the formula. By the
+disassembly the only inputs to the stored byte are `rax` and the source byte, and
+`0xe7` is the immediate of the `imul` at `0x6782c` — so for a **fixed** `rax` the
+formula is right.
 
-Verified on three independent runs, all 16 bytes each: an all-zero input, the real
-Android payload, and a reverse-engineered input. The loop executes **16 times**,
-once per byte, with the cursor running `r9 = 0x0 .. 0xf`, writing to a single
-destination.
-The body is MBA-obfuscated: `add dl,0x3e` and `xor dl,0x3e` annihilate,
-and `r11` and `esi` are computed on `0x67886b`–`0x678883` and never read.
-`rax` at `0x6785c` is not the output pointer — `0x67888c` reloads it from
-`[rsp+0x48]`, and that is the destination.
+**The same input with the walk disarmed gives a different answer.** Input
+`9d b6 cf e9` at buffer bytes 4..7, four consecutive runs at different ASLR
+bases:
 
-**Feeding the transform the input that produces the Android marker does not move
-the barrier.**
-To emit `00 00 00 01` at buffer bytes 4..7 the input must be `9d b6 cf e9`.
-With that input the store at `0x67891` writes `00`,
-the buffer holds exactly `00 00 00 01`,
-and the call still returns `0xffff5024`:
+| configuration | bytes 4..7 after the call |
+|---|---|
+| walk armed | `00 00 00 01` |
+| walk disarmed | `cc 3a 2e dd` (identical in all four runs) |
 
-| input at bytes 4..7 | transform output at 4..7 | return |
-|---|---|---|
-| `9d b6 cf e9` | `00 00 00 01` | `0xffff5024` |
-| `01 1a 33 4c` | `64 64 64 64` | `0xffff5024` |
-| zeros | `00 00 00 00` | `0xffff5024` |
+and in the disarmed configuration the output is **not** affine in the input
+byte: `in=0x01 → 0x74` implies a constant term of `0x73`, while `in=0x9d → 0xcc`
+implies `0x2f`. Since `rax` and the source byte are the only inputs the
+disassembly admits, the source byte at cursor 0 in that configuration is not the
+byte that was supplied, and that is unresolved.
 
-So **the transform is not the cause of `-45020`**, and the marker is not
-validated on this path.
-This is consistent with three independent measurements:
-the publisher `0x8ff0a` (`mov edi,0xffff5024`) never executes,
-the nearest conditional `0x8ff25` never executes,
-and `00 00 00 01` appears in **every**
-Android call including the one returning `-45001` — so it is the transform's
-output, not a success flag.
+So the closed form is a property of one guest state, not of the code, and the
+constant `0x63` is not established as a constant. The output is nonetheless
+deterministic within a configuration.
+
+**What holds regardless: feeding the transform does not move the barrier.** With
+the walk disarmed, three inputs — `9d b6 cf e9`, `01 1a 33 4c`, and zeros at
+bytes 4..7 — all return `0xffff5024`. The marker is not what is being rejected,
+which is consistent with three further measurements: the publisher `0x8ff0a`
+(`mov edi,0xffff5024`) never executes, the nearest conditional `0x8ff25` never
+executes, and `00 00 00 01` appears in **every** Android call including the one
+returning `-45001`.
 
 **The 12 bytes `c9 34 19 2e 14 f2 ae 3f 98 49 66 ca` are `payload_init_1.bin[4:16]`** —
-the packet tail past the 4-byte header. The block is absent from
-`libstoreservicescore.so` as bytes, and is absent from the analysis artifacts;
-the earlier reading of it as "origin unknown" was wrong
-because the search looked in `.rodata` for something that lives in our own
-Android dump. `kq56gsgHG6` computes
-a *different* 12 bytes on its own stack, from the address of its own local, with
-`0x2442a4` = `0x848` as the salt that cancels the address mixing — the consumer
-at `0x1d09f0` subtracts the same 32 bits, so the jump target is `0x1d0a3b` for
-every stack address. It is not `ADILoadLibraryWithPath`, and it is not this
-project's caller.
+the packet tail past the 4-byte header, captured by the dumper in this tree. The
+block is absent from `libstoreservicescore.so` as bytes; the earlier reading of it
+as "origin unknown" was wrong because the search looked in `.rodata` for
+something that lives in our own Android dump. `kq56gsgHG6` computes a *different*
+12 bytes on its own stack, from the address of its own local, with `0x2442a4` =
+`0x848` as the salt that cancels the address mixing — the consumer at `0x1d09f0`
+subtracts the same 32 bits, so the jump target is `0x1d0a3b` for every stack
+address. It is not `ADILoadLibraryWithPath`, and it is not this project's caller.
 
-**Where `-45020` actually comes from is still open, and it is not the stack
-seed.** The code that publishes it is never reached in this configuration,
-which means the value is set where the walk does not attribute it.
-The next question is that one;
-`CoreFP.dll` is the only remaining candidate for a real caller.
+**Where `-45020` comes from is still open.** The publisher never executes, so the
+value is set where the walk does not attribute it, and the transform's
+state-dependence says the seeded state is the live variable rather than the
+packet. `CoreFP.dll` is the only remaining candidate for a real caller.
 
-Full report, with the two disassemblies and the reproduction commands:
-`REPORT-0x6783f-kq56gsgHG6.md` in the analyst's own tree.
+Full report, with the two disassemblies, the four repeated runs and the
+reproduction commands: `REPORT-0x6783f-kq56gsgHG6.md` in the analyst's tree.
 
 ### 5.8a Anisette v3 runs locally (2026-09-27) — and what the `-45075` wall actually was
 
