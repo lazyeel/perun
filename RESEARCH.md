@@ -742,6 +742,16 @@ agent, as it is throughout this runtime), and under `sudo` the trace fails at
 `strace` -- reading `/proc/<pid>/stack` and `/proc/<pid>/syscall`, or running
 the engine under `gdb`, which this runtime does support with `sudo`.
 
+**The block is before the network, not in it.** Listing `/proc/<pid>/fd` for the
+live engine: four descriptors -- `/dev/null`, the log twice, and **`/proc/stat`**,
+which it opened and read. There is **no socket open at all**. It never reached
+provisioning and never dialled GSA, so the silence has nothing to do with
+reachability. `entropy_avail` is 256 and `/dev/urandom` reads, so it is not
+entropy starvation either. It opens `/proc/stat`, then blocks on a futex in a
+single thread: a **lock**, not a syscall wait, inside the Apple crypto seeding
+path. That is the last barrier in front of step 1, and it is now specific
+enough to name a frame at with `sudo gdb` and a hardware breakpoint.
+
 ### 5.8d The buffer has two writers, and the marker is overwritten (2026-09-30)
 
 **The packet buffer is written twice, by two unrelated code regions, and only
