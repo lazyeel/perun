@@ -721,6 +721,17 @@ script exits before it builds or runs anything -- silently, with no output. The 
 is at `/opt/data/ndk/android-ndk-r27c`. This is the lane where the real caller
 executes, so it is where step 1 has to be answered.
 
+**The engine runs again, and hangs on the network.** Two things blocked it and
+both are now pinned. `run-native.sh` globs `$ANDROID_NDK/android-ndk-*/...`, so
+`ANDROID_NDK` must be the **parent** -- `/opt/data/ndk`, not
+`/opt/data/ndk/android-ndk-r27c`; with the wrong value `CC` is empty and the script
+exits before building, printing nothing at all. With
+`ANDROID_NDK=/opt/data/ndk SYS_IMG=/opt/data/x86sys/system.img` the engine
+**builds, repoints `PT_INTERP` at the Bionic loader and starts** -- and then emits
+no output and does not exit. It reaches provisioning, which is a network round
+trip to Apple; in this sandbox that call does not return. So the lane for step 1
+is restored, and its remaining obstacle is reachability, not tooling.
+
 ### 5.8d The buffer has two writers, and the marker is overwritten (2026-09-30)
 
 **The packet buffer is written twice, by two unrelated code regions, and only
