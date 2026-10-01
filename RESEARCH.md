@@ -668,6 +668,23 @@ own stack local, mixed with a table load at `rip+0x72832`, 12 bytes stored, then
 call to `0x1ddeb0`. Whatever packs the SPIM is below that call, so the plan that
 read the contract out of `aslgmuibau` has to follow `0x1ddeb0` instead.
 
+**How the header and the cursor are packed** (RVA `0x1dbbf3` in
+`libstoreservicescore.so`):
+
+```
+1dbbf3  mov   rdx, qword ptr [r9]      ; r9 = the output cursor block
+1dbbf6  mov   word  ptr [rdx], 0         ; bytes 0..1 = 0
+1dbbfb  mov   byte  ptr [rdx + 2], 0     ; byte 2 = 0
+1dbbff  mov   byte  ptr [rdx + 3], r8b   ; byte 3 = version, 1 or 2
+1dbc03  add   dword ptr [r9 + 0xc], 4    ; advance the cursor by 4
+```
+
+So the header is exactly `00 00 00 <version>`, which is the four-byte header
+measured on our own runs, and the cursor block carries an **output pointer at
+`+0x00`** and a **byte offset at `+0x0c`**. Where the SPIM body and its length
+enter this block is not yet located; `aslgmuibau` and `0x1ddeb0` are both CFF
+trampolines and neither packs anything.
+
 ### 5.8d The buffer has two writers, and the marker is overwritten (2026-09-30)
 
 **The packet buffer is written twice, by two unrelated code regions, and only
