@@ -792,15 +792,31 @@ already measured: the dispatcher at `0xb15c8` reads buffer byte `+3` and folds
 `ebp` and `r9`, and the publisher it lands on is visible as the block entered a
 few hundred steps later.
 
-**What follows.** Layer 2 enters through the same machinery as the dispatcher
- as the dispatcher --
-`mov rbp,[rsp+0x70]`, `lea edi,[rbp-0x517]`, `mov r14,[r11+rdi*8]` -- a table
-index computed from a stack word. So the way to `-45020` is to supply a frame
-whose residue produces a key that steers the dispatch to a block other than
-`0x905c2`. That is either a real caller (`CoreFP.dll`, which now runs under this
-runtime) or a caller-shaped frame constructed deliberately -- `PERUN_PE_STACK`
-gives an isolated 8 MiB stack whose contents we can seed, and unlike the host
-thread it does not change under the walk, gdb or an oracle's own code.
+**The key word is located, and it steers the path but not the result.** Layer 2
+enters with `mov rbp, qword ptr [rsp + 0x70]`, then `lea edi,[rbp-0x517]` and
+`mov r14, q14 [r11 + rdi*8]`. On the isolated stack that word is at
+`0x7ff7cfffe960` (guest top `0x7ff7d0000000`, frame `0x1710`), i.e.
+`PERUN_PE_STACK_SEED_AT=0x16a0`, and **no instruction in the walk ever writes
+it** -- it is whatever the stack held. Seeding it does change the path taken:
+
+```
+seed 0x00*16   221,367 instructions
+seed 0x01      219,351
+seed 0x02      221,367
+seed 0xff*16   221,615
+seed 01..10    221,367
+```
+
+but layer 2's sixteen output bytes are **identical in all five**. So that word
+selects a branch inside the region, not the value the region produces.
+
+**What that leaves, stated exactly.** With ASLR off and the stack isolated, a
+walk is bit-reproducible; the output varies with the packet (three inputs, three
+outputs, verified) and is now independent of everything else that was varying
+before. `-45020` is a pure function of the 16 packet bytes in this configuration.
+The remaining question is therefore not "what else feeds the decision" but
+"which packet, if any, steers the dispatcher off `0x905c2`" -- and the
+dispatcher reads buffer byte `+3`, whose value the region computes.
 
 ### 5.8a Anisette v3 runs locally (2026-09-27) — and what the `-45075` wall actually was
 
