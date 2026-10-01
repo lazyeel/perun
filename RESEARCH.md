@@ -715,6 +715,12 @@ its call into `vdfut768ig` yields the SPIM pointer, its length and the output
 buffer **from the real caller**, which is precisely what step 2 needs and what no
 amount of decoding of this region can supply.
 
+**To run the engine again, `ANDROID_NDK` must point at `/opt/data/ndk`.**
+`run-native.sh` looks under `$HOME/ndk/android-ndk-*`, `CC` resolves empty, and the
+script exits before it builds or runs anything -- silently, with no output. The NDK
+is at `/opt/data/ndk/android-ndk-r27c`. This is the lane where the real caller
+executes, so it is where step 1 has to be answered.
+
 ### 5.8d The buffer has two writers, and the marker is overwritten (2026-09-30)
 
 **The packet buffer is written twice, by two unrelated code regions, and only
