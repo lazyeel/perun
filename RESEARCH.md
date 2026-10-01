@@ -1427,13 +1427,24 @@ created the directory one call earlier.
 `SHLWAPI` and `SHELL32` -- no `winhttp`, `wininet` or `ws2_32`. Anisette is
 generated locally, so the failure is a local computation.
 
-**And a real shim defect sits in the fingerprint path.** The device fingerprint
-is an MD5 over seven components, of which the volume serial is one. This
-runtime's `GetVolumeInformationW` takes the serial as `_serial: *mut DWORD` and
-**never writes to it** -- the function returns TRUE having filled the label, the
-filesystem name, the component length and the flags, and left the serial as
-whatever was in the caller's stack. The guest gets a garbage fingerprint input,
-which is exactly the kind of defect that produces a plausible-looking failure
-this late in a call.
+**And a real shim defect sat in the fingerprint path -- and fixing it did not
+move the barrier.** The device fingerprint is an MD5 over seven components, one
+of them the volume serial. This runtime's `GetVolumeInformationW` took the
+serial as `_serial: *mut DWORD` and never wrote to it, so the guest received
+whatever was on its own stack. The parameter is now `serial` and is filled with
+a stable non-zero value derived from the volume label the shim already
+reports.
+
+With that fixed, the call still returns `-45020`, and the guest still creates
+the provisioning directory and still writes no file. **So the dropped serial
+was a genuine fidelity bug but it is not the barrier**, and the record says so
+rather than leaving the fix looking like progress towards the goal.
+
+That also means the remaining fingerprint components deserve the same
+treatment rather than this one being special: the registry values read through
+`ADVAPI32` (`RegQueryValueExA` on `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion`
+for `ProductId` and `ProcessorNameString`, `SystemBiosVersion`), the machine name
+and the hardware profile GUID. `Blackwood-4NT` documents all seven and how they
+are combined, which is the specification to work from.
 
 

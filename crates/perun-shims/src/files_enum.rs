@@ -186,7 +186,7 @@ win32_api! {
         root: LPCWSTR,
         volume_name: LPWSTR,
         volume_name_size: DWORD,
-        _serial: *mut DWORD,
+        serial: *mut DWORD,
         max_component_len: *mut DWORD,
         fs_flags: *mut DWORD,
         fs_name: LPWSTR,
@@ -206,6 +206,21 @@ win32_api! {
         }
         if !fs_flags.is_null() {
             *fs_flags = 0;
+        }
+        if !serial.is_null() {
+            // Derived from the label this shim reports, so it is stable across
+            // runs and never zero, which is what a fingerprint expects. A
+            // Windows volume always has a serial; leaving the caller's pointer
+            // untouched hands the guest whatever was on its stack.
+            let mut h: u64 = 0x9e37_79b9_7f4a_7c15;
+            for b in label.iter() {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            h ^= h >> 31;
+            // Windows serials are 32-bit; the high bit must stay clear or the
+            // guest reads it as a negative value.
+            *serial = (h as u32) & 0x7fff_ffff | 0x1000_0000;
         }
         TRUE
     }
