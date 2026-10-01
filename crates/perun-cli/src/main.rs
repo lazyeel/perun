@@ -119,6 +119,17 @@ static mut STEP_RDI: [u64; STEP_RING] = [0; STEP_RING];
 /// derived from RAX in the dump itself, so no new array is needed for the
 /// common case; RBX is here because `mov ..., bl` appears in the same family.
 static mut STEP_RBX: [u64; STEP_RING] = [0; STEP_RING];
+/// R13, R15 and RBP, for one measured reason. The dispatcher at RVA 0xb15c8
+/// reads the byte that steers the choice between the 113 publisher blocks, and
+/// in that region the guest addresses memory through `[r12 + r15]` -- an index
+/// the trace did not carry. A writer of that byte between the two buffer layers
+/// and the decision was therefore invisible, and the dispatcher read a value
+/// that no recorded instruction explained. These three close that gap: RBP is
+/// also what `0xb15e0` folds into the index, so a frame change was equally
+/// unobservable.
+static mut STEP_R13: [u64; STEP_RING] = [0; STEP_RING];
+static mut STEP_R15: [u64; STEP_RING] = [0; STEP_RING];
+static mut STEP_RBP: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_IDX: usize = 0;
 const EFLAGS_TF: u64 = 0x100;
 /// -45018, the code the library is about to publish when the header check fails.
@@ -228,9 +239,12 @@ fn dump_ring(path: &str) {
         let bl = rbx & 0xff;
         let cl = rcx & 0xff;
         let dl = rdx & 0xff;
+        let r13 = unsafe { STEP_R13[slot] };
+        let r15 = unsafe { STEP_R15[slot] };
+        let rbp = unsafe { STEP_RBP[slot] };
         let _ = writeln!(
             line,
-            "{k} {rp:x} {sp:x} {ed:x} {rax:x} {rdx:x} {rcx:x} {r10:x} {r9:x} {r11:x} {r14:x} {r8:x} {rsi:x} {rdi:x} {r12:x} {al:x} {bl:x} {cl:x} {dl:x}"
+            "{k} {rp:x} {sp:x} {ed:x} {rax:x} {rdx:x} {rcx:x} {r10:x} {r9:x} {r11:x} {r14:x} {r8:x} {rsi:x} {rdi:x} {r12:x} {al:x} {bl:x} {cl:x} {dl:x} {r13:x} {r15:x} {rbp:x}"
         );
         let _ = f.write_all(line.as_bytes());
     }
@@ -344,6 +358,9 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             STEP_RSI[slot] = *regs.add(libc::REG_RSI as usize) as u64;
             STEP_RDI[slot] = rdi;
             STEP_RBX[slot] = *regs.add(libc::REG_RBX as usize) as u64;
+            STEP_R13[slot] = *regs.add(libc::REG_R13 as usize) as u64;
+            STEP_R15[slot] = *regs.add(libc::REG_R15 as usize) as u64;
+            STEP_RBP[slot] = *regs.add(libc::REG_RBP as usize) as u64;
             STEP_IDX = STEP_IDX.wrapping_add(1);
             STEP_COUNT += 1;
 
