@@ -693,6 +693,15 @@ the block that carries the body are different, and the cursor is passed on
 through another register rather than `r9`. The four points in that window that
 touch `r9` are the header write and the offset bump; nothing else does.
 
+**The search for 347 was itself invalid.** Disassembling the six sites the byte
+search returned shows every one of them is a false positive: at `0x1c0867` and
+`0x1403c6` the bytes `5b 01 00 00` are the *displacement* of a `jne`/`je`, not a
+length constant. So the SPIM length is **not a literal in the code** -- it is
+computed, or passed in, and cannot be found by scanning for 347. This is the
+fourth time this round a byte pattern was promoted to a finding without
+disassembling around it; the rule that finally holds is: read the instruction, not
+the bytes.
+
 ### 5.8d The buffer has two writers, and the marker is overwritten (2026-09-30)
 
 **The packet buffer is written twice, by two unrelated code regions, and only
