@@ -1513,6 +1513,21 @@ The last two are the ones the packet cannot reach directly: `edi` is produced by
 from state the caller has not been shown to supply. That is the next thing to
 attack, and it is finally observable.
 
+**The three remaining exports fault whatever they are given.** `WIn9UJ86JKdV4dM`,
+`YlCJ3lg` and `dku592fbFAj` were tried with `arg0` as the buffer, as the context,
+both in each order, and the same pointer twice. All six combinations fault in all
+three. They need a caller's frame, not an argument we can synthesise, so the
+caller side is exhausted from this side too.
+
+**Where that leaves the goal, stated plainly.** Every input reachable from a
+caller has been varied and measured: the packet, the opcode, every context field,
+the stack word, the filesystem, the volume serial, both `CoreADI64` exports, and
+all six `CoreFP` exports run first in the same process. None moves `-45020`.
+What is left is state the library expects to already hold -- set by a real Windows
+process before the first call, or by host state this runtime does not reproduce.
+That is a larger piece of work than anything attempted here, and it is where the
+next round should start.
+
 **A real caller, run first, does not move it either.** `PERUN_AUX_IMAGE` loads a
 second image into the same process, so a `CoreFP.dll` export can be executed and
 then `CoreADI64.dll`'s `vdfut768ig` in one process -- the experiment that had been
