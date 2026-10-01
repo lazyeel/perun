@@ -783,6 +783,17 @@ So the lane is not "running and silent" -- it never ran. The observable
 `wrap_vdfut` will not fire on this lane until the loader finishes, and the
 loader is where the work has to start.
 
+**Attaching works; launching under the debugger does not.** Two mechanisms, one
+usable. `sudo gdb -p <pid>` reaches the running engine and the unwind names the
+block. Launching the same binary *under* gdb does not: without privilege gdb needs
+ptrace for the child and the runtime denies it, and under `sudo` the exec of the
+repointed binary fails `EACCES` although the file is 0755, `linker64` is 0777,
+`/tmp/pa.so` resolves and sudo works. The same `EACCES` under `strace` is what
+finally showed the earlier refusal had nothing to do with the tracer.
+
+So breaking on `__futex_wait_ex` *before* the wait is unavailable, and the lock
+holder must be read out of the already-blocked process instead. The futex
+address is the syscall's `rdi`: `0x75683cdabd18`, inside libc.so's data.
 ### 5.8d The buffer has two writers, and the marker is overwritten (2026-09-30)
 
 **The packet buffer is written twice, by two unrelated code regions, and only
