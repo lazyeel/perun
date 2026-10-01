@@ -1889,3 +1889,64 @@ index that selects the success block is built from a packet byte that does chang
 and two components that do not, and the result is `-45020` for every packet tried.
 Searching the packet space is therefore not merely unproductive, it is provably
 so.
+
+### The engine lane, and the block that stops it (2026-10-01)
+
+The Android engine is the only place the real caller executes, so the SPIM
+packing can only be read from the code that actually does it. Four separate
+things had the lane blocked, all now pinned, all of them mine:
+
+1. `ANDROID_NDK` must be the **parent** (`/opt/data/ndk`), because
+   `run-native.sh` globs `$ANDROID_NDK/android-ndk-*/…`. Pointing it at the NDK
+   itself leaves `CC` empty and the script exits before building, silently.
+2. A stale `adi_native` must be killed first: the repoint fails with
+   `Text file busy`, the binary then runs on its original
+   `/system/bin/linker64`, and it hangs with no diagnostic at all.
+3. With both fixed the engine builds, repoints `PT_INTERP -> /tmp/pa.so` and
+   starts, and then **emits nothing and never exits**.
+4. `LD_PRELOAD` is not an alternative: `libc.so` carries 67 Bionic markers and
+   `linker64` 8, and `LD_PRELOAD` is read only by glibc.
+
+**The block, established and then narrowed three times.** Attaching
+`sudo gdb -p` to the live engine and unwinding gives frame 0 in `syscall` and
+frame 1 in `__futex_wait_ex`, both in `libc.so`. `libc.so` carries 2 666 FUNC
+symbols, so the rest was decided statically: only two direct calls to
+`__futex_wait_ex` (`0x282e0`) exist in the whole image, at `0x28563` inside
+`pthread_mutex_lock` and `0x289a8` inside `pthread_mutex_timedlock`. So it is a
+mutex, not a condition variable and not a barrier.
+
+And the wait is **unsatisfiable by construction**:
+
+    rdi = uaddr   0x70d29f3bdd18
+    rsi = op      0x80            128 = FUTEX_WAIT_PRIVATE
+    rdx = val     0xd93f4002
+    *uaddr        0xd93f4002      <- already equal to val
+    *(uaddr+4)    0               owner
+    *(uaddr+8)    0               queued
+
+`FUTEX_WAIT` blocks until the word differs from `val`. It already equals
+`val`, so nothing can ever wake it. The low 16 bits are `0x4002` in every
+process measured (`0xd1274002`, then `0xd93f4002`) while the upper half varies
+per run: a non-zero `__lock` with `__owner == 0`, which is not a state a
+correct `pthread_mutex_init` produces. The Apple code is waiting on a mutex
+nobody initialised.
+
+Three earlier diagnoses were wrong and are withdrawn: crypto seeding, the
+Bionic loader, and "waiting on the network" — `gsa.apple.com:443` is reachable,
+and no socket is ever opened. Two of the three came from reading `wchan` and an
+fd list as if they identified the block; only the unwind did.
+
+**What remains.** The block is a `pthread_mutex_lock` stub at `0x154e0` with
+265 callers, so which one is on this path cannot be answered by picking. It
+needs the executed path, and this lane does not record one. Root cannot exec
+these binaries at all — a byte-identical copy at `/tmp` with mode 0755 fails
+under `sudo` while `hermes` runs the original — so launching under a debugger,
+which would settle it, is unavailable. Attaching works precisely because it
+needs no new exec.
+
+**What step 1 did yield.** At RVA `0x1dbbf3` the caller writes
+`00 00 00 <version>` into the output pointer at `+0x00` of a cursor block, then
+adds 4 to the offset at `+0x0c` — the header our own runs measure. The SPIM
+body and its length are not there: only two instructions in
+`0x1db800..0x1dd000` touch `r9`, and that window does not linear-disassemble
+at all. `aslgmuibau` and `0x1ddeb0` are CFF trampolines and pack nothing.
