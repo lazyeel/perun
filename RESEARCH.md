@@ -640,6 +640,21 @@ headline result on the strength of a byte pattern nobody checked against the fil
 The address is corrected everywhere; the finding stands only as "the CFF contains a
 `mov edi,0` at 0x140f44", which is not yet shown to be on this path.
 
+
+**And it is not on our path either.** Counting executed RVAs over the whole
+recorded walk: `0x905c2` appears **once**, the epilogue `0x5b0b1` once, and both
+`0x8f064` and the real `mov edi, 0` at `0x140f44` appear **zero** times. So there
+is no known success site on this path at all — not at the address that was
+claimed, and not at the real one. Any statement that a success block has been
+"located" is wrong; what exists is that the CFF region we execute publishes error
+codes and we have not found where it would publish zero.
+
+**Both candidates are data, not code.** Disassembling `0x140f44` yields
+`add byte ptr [rax], al` repeated -- a run of zero bytes in a data region -- so the
+`bf 00 00 00 00` there is a byte-pattern coincidence, not a publisher. And
+`0x8f050..0x8f078` decodes to overlapping MBA garbage. Neither address is code,
+neither has a `jmp` to answer for, and neither is reached on this path.
+
 ### 5.8d The buffer has two writers, and the marker is overwritten (2026-09-30)
 
 **The packet buffer is written twice, by two unrelated code regions, and only
