@@ -1513,6 +1513,31 @@ The last two are the ones the packet cannot reach directly: `edi` is produced by
 from state the caller has not been shown to supply. That is the next thing to
 attack, and it is finally observable.
 
+**A `CoreFP.dll` export succeeds, and the guard was ours.** Six obfuscated exports
+return `-42023` uniformly when called with a literal argument -- which is how they
+were always called. Given a real guest pointer they behave differently:
+
+```
+WIn9UJ86JKdV4dM   crash
+X46O5IeS          0xffff5bd9
+YlCJ3lg           crash
+dku592fbFAj       crash
+fdjkDSAFjklaf2s   0x0      <- success, reproducible over three runs
+lxpgvVMLd0S7uRl   0xffff5bd9
+```
+
+With `arg0` a literal `0` the same export returns `0xffff5bd9`, so the guard is
+on the argument being a real pointer, and **the earlier statement that all six
+return `-42023` is withdrawn: it described the arguments we passed, not the
+functions.** This is the only execution of the real caller we have that does not
+fault.
+
+It cannot yet be used, because `perun call` and `perun seq` each load exactly one
+image, so there is no way to run a `CoreFP.dll` export and then call
+`CoreADI64.dll`'s `vdfut768ig` in the same process. Until that exists, the
+experiment that matters -- does a successful caller export move `-45020` -- cannot
+be run.
+
 **The dispatch state is not caller-seeded at all, and there is no entry we missed.**
 
 Probing `0xb15b3` again with the context filled the way the Android engine fills
