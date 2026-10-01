@@ -849,6 +849,28 @@ initialisation callback or a second participant this build never reaches, and
 with the fact that it never loads `libCoreADI.so` at all. This is as far as
 the process can be interrogated; naming the caller of `pthread_mutex_lock` is
 the next step and needs no new privilege.
+**The wait is unsatisfiable by construction.** Read from the blocked process --
+the same registers the kernel had:
+
+    rdi = uaddr   0x70d29f3bdd18
+    rsi = op      0x80            128 = FUTEX_WAIT_PRIVATE
+    rdx = val     0xd93f4002
+    *uaddr        0xd93f4002      <- already equal to val
+    *(uaddr+4)    0               owner
+    *(uaddr+8)    0               queued
+
+`FUTEX_WAIT` blocks until the word differs from `val`. It already equals `val`,
+so no wake can satisfy it and the wait cannot end. That is the whole block: not
+contention, not a lost signal, not entropy, not the loader.
+
+The low 16 bits are `0x4002` in every process measured -- `0xd1274002` in one,
+`0xd93f4002` in the next -- while the upper half varies per run. So the upper
+half carries per-run state and the low half is a constant this build writes
+into a mutex nobody initialised: a non-zero `__lock` with `__owner == 0`, which
+is not what a correct `pthread_mutex_init` produces.
+
+The remaining question is which of the 265 callers of the `pthread_mutex_lock`
+stub at `0x154e0` is on this path, and it is not answerable by choosing one.
 ### 5.8d The buffer has two writers, and the marker is overwritten (2026-09-30)
 
 **The packet buffer is written twice, by two unrelated code regions, and only
