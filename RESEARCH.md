@@ -826,6 +826,29 @@ precisely because that needs no new exec.
 `LD_PRELOAD` is not an alternative either: `libc.so` carries 67 Bionic markers
 and `linker64` 8, and `LD_PRELOAD` is read only by glibc. `/etc/ld.so.preload`
 does not exist.
+**The wait is `pthread_mutex_lock`, on a mutex that was never initialised.**
+`libc.so` carries 2 666 FUNC symbols, so this was decided statically, with no
+exec and no privilege. Only two direct calls to `__futex_wait_ex` (`0x282e0`)
+exist in the whole image:
+
+    call at 0x28563  ->  pthread_mutex_lock     + 0x103
+    call at 0x289a8  ->  pthread_mutex_timedlock + 0x1b8
+
+So it is not a condition variable and not a barrier -- it is a mutex lock. And
+the mutex does not look initialised:
+
+    futex word   0xd1274002   (neither unlocked=0 nor a Bionic owner value)
+    owner  (+4)  0
+    queued       none
+    threads      1
+
+A mutex with no owner, nothing queued, and a `__lock` word that is not a valid
+lock value is a struct nobody initialised. The thread sleeps on a lock that
+cannot be signalled -- consistent with the Apple stack waiting on an
+initialisation callback or a second participant this build never reaches, and
+with the fact that it never loads `libCoreADI.so` at all. This is as far as
+the process can be interrogated; naming the caller of `pthread_mutex_lock` is
+the next step and needs no new privilege.
 ### 5.8d The buffer has two writers, and the marker is overwritten (2026-09-30)
 
 **The packet buffer is written twice, by two unrelated code regions, and only
