@@ -1335,10 +1335,27 @@ de ad be ef 01 23 45 67 89 ab cd fe 02  -45020
 three further random payloads          -45020
 ```
 
-**Bytes 4..15 have no influence on the return code at all.** The only thing the
-packet decides is whether the header check passes, and once it does the answer
-is `-45020` regardless. Nine months were spent shaping those twelve bytes, and
-the axis was wrong: the payload is not where the answer lives.
+**Bytes 4..15 did not influence the return code in any of the runs tried.**
+Stated precisely, because it was stated too strongly first: twelve packets
+proves those twelve fail, not that no packet can pass. The systematic part is
+that in the fmap runs each of bytes 4..15 was raised by one in turn and every
+one still ended at `-45020`, while raising any of bytes 0..3 changed only
+whether the `-45018` check passed. That makes the payload the wrong place to
+look -- but it does not make the barrier unreachable.
+
+**It is not unreachable. The library publishes success.** The earlier count of
+113 sites was for the `0xffff50xx` error codes only. Sweeping every
+`mov edi, IMM` in `.text` gives **3,099 publisher sites over 2,448 distinct
+codes**, and among them **99 sites publish `0x00000000`** -- success. The
+alphabet contains the answer; the barrier is a question of which of those
+blocks this opcode's path can be steered onto, not of whether a success code
+exists.
+
+The useful consequence is that the problem stops being a search over packets.
+It becomes: locate the zero-publishing block that belongs to this opcode's
+success path, and work backwards from it through the dispatcher to find what
+selects it. That is a graph question with a bounded answer, and the
+deterministic oracle makes each step of it exact.
 
 **What that leaves.** The barrier is not a packet check. The only caller-supplied
 value that moves the outcome is header byte 3, and only in the direction of
