@@ -655,6 +655,13 @@ codes and we have not found where it would publish zero.
 `0x8f050..0x8f078` decodes to overlapping MBA garbage. Neither address is code,
 neither has a `jmp` to answer for, and neither is reached on this path.
 
+**Across the whole walk, exactly one code is published.** The walk executes
+11 593 distinct RVAs, and of the blocks that publish a return value only one is
+reached: `0x905c2`, once. Nothing else in the error set is entered. So the graph
+does not "choose an error over a success" on this path -- it reaches one
+publisher and stops, and whether another block is reachable at all is not shown by
+this run.
+
 ### 5.8d The buffer has two writers, and the marker is overwritten (2026-09-30)
 
 **The packet buffer is written twice, by two unrelated code regions, and only
