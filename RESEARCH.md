@@ -685,6 +685,14 @@ measured on our own runs, and the cursor block carries an **output pointer at
 enter this block is not yet located; `aslgmuibau` and `0x1ddeb0` are both CFF
 trampolines and neither packs anything.
 
+**Still open in step 1: the SPIM body and its length.** Searching `.text` for the
+exact little-endian dword `0x15b` (347) gives six hits -- `0xdc411`, `0x126462`,
+`0x13255a`, `0x1403c8`, `0x1487b6`, `0x1c0869` -- and **none of them is near
+`0x1dbbf3`**, where the header is packed. So the block that writes the header and
+the block that carries the body are different, and the cursor is passed on
+through another register rather than `r9`. The four points in that window that
+touch `r9` are the header write and the offset bump; nothing else does.
+
 ### 5.8d The buffer has two writers, and the marker is overwritten (2026-09-30)
 
 **The packet buffer is written twice, by two unrelated code regions, and only
