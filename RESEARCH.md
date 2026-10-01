@@ -1370,4 +1370,37 @@ heap address of the buffer (pinned by ASLR, and it does change the result), and
 whatever a genuine caller puts in the frame. `CoreFP.dll` is the only candidate
 for the last, and it runs under this runtime.
 
+**The success block is located, and it is a single site.** Restricting the sweep
+to the region the walk actually runs through, `0x8e000..0x91000`, gives 71
+publishers over 33 codes:
+
+```
+-45034  0xffff5016   x14
+-45002  0xffff5036   x14
+-45020  0xffff5024   x13
+  0     0x00000000   x1   at RVA 0x8f064     <-- SUCCESS
+```
+
+Exactly one block in the whole flattened region publishes zero. It is a sibling
+of the `-45020` block we land on, in the same dispatcher, which is the
+strongest statement available about the shape of the problem: the success path
+is not elsewhere in the library, it is **the same CFF choosing differently**.
+
+**What the dispatch table does and does not give.** The table at `0x9055d` is
+256 signed dwords resolving to 196 distinct targets, and no first-stage entry
+lands on `0x8f064` or on `0x905c2` -- it leads to further dispatcher stages, so
+the chain is multi-stage and the index-to-code map cannot be read off one
+table. Index aliasing is heavy at the first stage: the most-referenced block
+takes 8 of the 256 indices, and 37 blocks take 2 each. So the index space is
+small and highly redundant, which is why so many different packets land on the
+same publisher.
+
+**What follows, concretely.** Follow the chain one stage at a time: for each
+first-stage target that is itself a dispatcher, read its table and ask whether
+`0x8f064` appears. That gives the stage and the index at which success is
+selected. With the deterministic oracle the value of that index can then be
+checked against the live register trace at the corresponding instruction, and
+the byte or word that would have to change identified. That is a bounded walk
+of a finite structure, not a search.
+
 
