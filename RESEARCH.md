@@ -1314,9 +1314,43 @@ those targets are *not* publisher blocks -- they are further dispatcher stages.
 The chain is multi-stage, so the index-to-code map cannot be resolved by
 decoding alone; it has to be observed.
 
-**That is the honest limit of the static route.** With the deterministic oracle
-the remaining work is empirical: sample packets, record the code each one
-publishes, and find whether the `-45020` region can be left at all. The
-dispatcher table is the map to search, and the oracle makes each sample exact.
+**The decisive negative result: the payload cannot move the barrier.** Twelve
+packets, deterministic configuration, only the supplied bytes differing:
+
+```
+header byte 3 = 0        -45018  (header check, ~107,000 instructions)
+header byte 3 = 3        -45018
+header byte 3 = 4        -45018
+header byte 3 = 1        -45020  (105,151 instructions, short path)
+header byte 3 = 2        -45020  (221,694 instructions, full path)
+```
+
+and with a valid header, eight payloads that share nothing:
+
+```
+9d b6 cf e9 14 f2 ae 3f 98 49 66 ca   -45020
+01 1a 33 4c 00 ... (zeros)             -45020
+ff ff ... ff (all ones)                -45020
+de ad be ef 01 23 45 67 89 ab cd fe 02  -45020
+three further random payloads          -45020
+```
+
+**Bytes 4..15 have no influence on the return code at all.** The only thing the
+packet decides is whether the header check passes, and once it does the answer
+is `-45020` regardless. Nine months were spent shaping those twelve bytes, and
+the axis was wrong: the payload is not where the answer lives.
+
+**What that leaves.** The barrier is not a packet check. The only caller-supplied
+value that moves the outcome is header byte 3, and only in the direction of
+passing or failing the `-45018` check. Everything after that -- the 400
+instruction region, the 16-byte avalanche, the byte the dispatcher reads -- is
+reached identically for every valid packet, and always lands on `0x905c2`.
+
+So the question is no longer "which packet". It is **what the dispatcher reads
+that we cannot supply**, and the candidates are now few and concrete: the
+`[rsp+0x70]` word (read, never written, and shown not to change the result), the
+heap address of the buffer (pinned by ASLR, and it does change the result), and
+whatever a genuine caller puts in the frame. `CoreFP.dll` is the only candidate
+for the last, and it runs under this runtime.
 
 
