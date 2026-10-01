@@ -1400,6 +1400,43 @@ fn cmd_call(args: &[String]) -> i32 {
                         "[perun] guest stack 0x{limit:x}..0x{base:x} ({} MiB, zeroed)",
                         perun_core::teb::PE_STACK_SIZE >> 20
                     );
+                    // PERUN_PE_STACK_SEED writes bytes into the guest stack
+                    // before the call. The guest builds its frame with
+                    // `sub rsp,0x16a8` and reads below that frame, so the
+                    // region under it is exactly the "stack residue" this
+                    // runtime cannot otherwise control -- and layer 2 keys off
+                    // it. Zeroing it changes the result (PERUN_ZERO_GUEST_STACK),
+                    // so setting it deliberately is the search knob.
+                    if let Ok(seed) = std::env::var("PERUN_PE_STACK_SEED") {
+                        let clean: String =
+                            seed.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+                        let mut bytes = Vec::with_capacity(clean.len() / 2);
+                        let raw = clean.as_bytes();
+                        let mut i = 0;
+                        while i + 1 < raw.len() {
+                            let hi = (raw[i] as char).to_digit(16).unwrap_or(0) as u8;
+                            let lo = (raw[i + 1] as char).to_digit(16).unwrap_or(0) as u8;
+                            bytes.push((hi << 4) | lo);
+                            i += 2;
+                        }
+                        if !bytes.is_empty() {
+                            // PERUN_PE_STACK_SEED_AT is the distance below the top
+                            // of the mapping where the bytes land; it defaults to
+                            // one MiB, well under the frame the guest will build.
+                            let at = std::env::var("PERUN_PE_STACK_SEED_AT")
+                                .ok()
+                                .and_then(|v| v.parse::<u64>().ok())
+                                .unwrap_or(1 << 20);
+                            let addr = base.wrapping_sub(at);
+                            let n = bytes.len().min(at as usize);
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(bytes.as_ptr(), addr as *mut u8, n);
+                            }
+                            eprintln!(
+                                "[perun] seeded guest stack: {n} byte(s) at 0x{addr:x} (top-0x{at:x})"
+                            );
+                        }
+                    }
                     Some(base)
                 }
                 None => {
