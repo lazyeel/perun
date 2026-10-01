@@ -631,6 +631,15 @@ packet. `CoreFP.dll` is the only remaining candidate for a real caller.
 Full report, with the two disassemblies, the four repeated runs and the
 reproduction commands: `REPORT-0x6783f-kq56gsgHG6.md` in the analyst's tree.
 
+
+**WITHDRAWN 2026-10-01 — the block at `0x8f064` was never there.** The only real
+`mov edi, 0` in the CFF region is at RVA **`0x140f44`**; the bytes at `0x8f064`
+are `9f c0 31 c9 81 ff 8b 1f`, i.e. mid-instruction. The earlier figure came from a
+linear sweep that matched an unaligned offset, and it was reported as the round's
+headline result on the strength of a byte pattern nobody checked against the file.
+The address is corrected everywhere; the finding stands only as "the CFF contains a
+`mov edi,0` at 0x140f44", which is not yet shown to be on this path.
+
 ### 5.8d The buffer has two writers, and the marker is overwritten (2026-09-30)
 
 **The packet buffer is written twice, by two unrelated code regions, and only
