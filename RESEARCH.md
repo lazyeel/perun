@@ -695,6 +695,53 @@ is the first place where a caller-supplied field and the transformed buffer are
 both read in the same stretch that ends in the publisher, and it is where to look
 next.
 
+### 5.8e How the publisher is chosen: a byte of the packet, at an intermediate (2026-10-01)
+
+**There is a single instruction that decides which of the 113 publisher blocks
+runs, and it reads one byte of the caller's buffer.** RVA `0xb15c8` executes
+three times in the recorded walk (steps 96 034, 108 763, 222 764); the third is
+the decision, 147 steps before `0x905c2`.
+
+```asm
+0b15c3  add    eax, 0xe9357510      ; eax becomes the offset
+0b15c8  movzx  eax, byte ptr [rcx + rax]
+0b15cc  mov    ecx, eax
+0b15ce  xor    ecx, 0x773bf45f
+0b15d4  and    eax, 0x5f
+0b15d7  lea    eax, [rcx + rax*2 - 0x773bf45f]
+0b15de  or     eax, edi
+0b15e0  or     eax, ebp              ; ebp = rbp + rbx*2 + 0x1600211
+0b15e2  mov    ecx, eax
+0b15e4  xor    ecx, 0x527df37e
+0b15ea  and    eax, 0x527df37e
+0b15ef  lea    r9d, [rcx + rax*2 - 0x1214204c]
+```
+
+At the decision, `rcx = 0x718c79a9e000` -- the caller's scratch base -- and
+`eax = 0x7`, so the byte read is `scratch[7]`, which is buffer byte `+3`. The
+loaded value was `0x55`.
+
+**Two things follow, and the second is the one that matters.**
+
+First, the index is not a raw byte: it is mixed with `edi` and with `ebp`, and
+`ebp` is derived from the guest frame pointer (`rbp + rbx*2 + 0x1600211`). So the
+dispatch is a function of the buffer byte **and** of frame state.
+
+Second, and this is the part that was missing all along: **the byte is read at an
+intermediate point, not from the finished buffer.** At step 222 764 the byte at
+`scratch[7]` is `0x55`, while the buffer as it stands after the call has `0xdd`
+there. Something between layer 2 (step 217 687) and the decision rewrote it, and
+it is that intermediate value which steers the dispatcher.
+
+That is why feeding different bytes 4..7 does not move `-45020`: the packet
+content reaches the dispatcher only after being folded through the region
+between the two layers, and three inputs we tried all failed to change the
+choice. **The question is no longer "what do we write in the packet" but "what
+is in the buffer at step 222 764, and what wrote it there".**
+
+The trace needed to answer that is a recording of the clean walk with the byte
+columns, which this tree can now produce (`PERUN_TRACE_FILE`).
+
 ### 5.8a Anisette v3 runs locally (2026-09-27) — and what the `-45075` wall actually was
 
 **Anisette v3 client headers are generated natively on this x86_64 host: no Wine, no QEMU, no emulation layer of any kind, and no remote re-signing server.** The engine is an x86_64 Android binary and the host is x86_64, so the Apple libraries execute directly. Artefact `run-native.sh` (`crates/perun-cli/examples/adi-android/`, commit `43f16eb`), two consecutive clean runs:
