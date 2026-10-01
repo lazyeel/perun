@@ -747,11 +747,34 @@ on layer 2 through two independent channels: the byte at `+3`, and `rbp`.
 Also in flight at the decision: `r9 = 0x4069d332`, one of the **rejected**
 opcodes from this file's own sweep, folded in a third time by `0xb15ef`.
 
-**The question is therefore concrete and answerable: what must layer 2 write at
-byte +3 (and into `rbp`) for the dispatcher to select a block other than
-`0x905c2`.** Layer 2 is the 400-instruction region at `0x6fa2c`--`0x6ffe3`, run
-once per call; it is the first thing that has to be understood rather than
-worked around.
+**Why no input can move it: layer 2 is keyed from the stack, not the packet.**
+Three runs, same binary, differing only in the 16 supplied bytes:
+
+```
+A  9d b6 cf e9 14 f2 ae 3f 98 49 66 ca  ->  0e ac 0f 9c 93 c1 88 41 82 ea 15 35 21 35 bc cc
+B  01 02 03 04 05 06 07 08 09 0a 0b 0c  ->  c2 ef 0f 20 9d e5 f4 48 37 42 8b 02 c9 f9 5c 49
+C  00 00 00 00 00 00 00 00 00 00 00 00  ->  b0 5c 02 55 f6 37 46 c9 88 49 9e 03 e8 a9 33 9b
+```
+
+All three return `0xffff5024`, but the sixteen bytes differ, so the packet
+**does** reach the output. The decisive observation is the other direction:
+**repeating the same input in a different invocation gives different output
+again.** Four consecutive runs within one shell were identical, and a fifth in a
+different shell was not. Layer 2 is therefore a keyed transform whose key comes
+from whatever lies below the guest frame -- the stack residue of the host --
+and the packet only perturbs it.
+
+That is the whole reason 9 months of packet-shaped attempts failed. The knob is
+not in the argument block.
+
+**What follows.** Layer 2 enters through the same machinery as the dispatcher --
+`mov rbp,[rsp+0x70]`, `lea edi,[rbp-0x517]`, `mov r14,[r11+rdi*8]` -- a table
+index computed from a stack word. So the way to `-45020` is to supply a frame
+whose residue produces a key that steers the dispatch to a block other than
+`0x905c2`. That is either a real caller (`CoreFP.dll`, which now runs under this
+runtime) or a caller-shaped frame constructed deliberately -- `PERUN_PE_STACK`
+gives an isolated 8 MiB stack whose contents we can seed, and unlike the host
+thread it does not change under the walk, gdb or an oracle's own code.
 
 ### 5.8a Anisette v3 runs locally (2026-09-27) — and what the `-45075` wall actually was
 
