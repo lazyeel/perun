@@ -1715,6 +1715,31 @@ fn cmd_seq(args: &[String]) -> i32 {
         None
     };
 
+    // PERUN_AUX_IMAGE loads a second image into the same process, sharing the
+    // shim table. Without it a sequence can only ever call one library, and the
+    // one experiment that matters -- a real caller export from CoreFP.dll, then
+    // vdfut768ig from CoreADI64.dll -- cannot be run at all.
+    let aux_image = std::env::var_os("PERUN_AUX_IMAGE").and_then(|p| {
+        let path = p.to_string_lossy().into_owned();
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| {
+            eprintln!("[perun] aux image {path:?}: {e}");
+            Vec::new()
+        });
+        if bytes.is_empty() {
+            return None;
+        }
+        match Image::load(&bytes, &mut table) {
+            Ok(img) => {
+                println!("[perun] aux image {path} loaded");
+                Some(img)
+            }
+            Err(e) => {
+                eprintln!("[perun] aux image {path:?}: {e}");
+                None
+            }
+        }
+    });
+
     let scratch = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
@@ -1901,8 +1926,13 @@ fn cmd_seq(args: &[String]) -> i32 {
             "call" => {
                 let export_name = toks.get(1).copied().unwrap_or("vdfut768ig");
                 let export_ptr = if let Some(p) = image.get_export_by_name(export_name) {
-                    p
+                    Some(p)
                 } else {
+                    aux_image
+                        .as_ref()
+                        .and_then(|a| a.get_export_by_name(export_name))
+                };
+                let Some(export_ptr) = export_ptr else {
                     eprintln!("[seq] step {step}: export {export_name:?} not found");
                     return 1;
                 };

@@ -1513,6 +1513,26 @@ The last two are the ones the packet cannot reach directly: `edi` is produced by
 from state the caller has not been shown to supply. That is the next thing to
 attack, and it is finally observable.
 
+**A real caller, run first, does not move it either.** `PERUN_AUX_IMAGE` loads a
+second image into the same process, so a `CoreFP.dll` export can be executed and
+then `CoreADI64.dll`'s `vdfut768ig` in one process -- the experiment that had been
+unrunnable because every command loaded exactly one image. All six exports, each
+followed by the real call:
+
+```
+caller export      result            then vdfut768ig
+WIn9UJ86JKdV4dM    crash              -
+X46O5IeS           0xffff5bd9        0xffff5024
+YlCJ3lg            crash              -
+dku592fbFAj        crash              -
+fdjkDSAFjklaf2s    0x0               0xffff5024
+lxpgvVMLd0S7uRl    0xffff5bd9        0xffff5024
+```
+
+So the one export that succeeds, and the two that run to a code, change nothing.
+Combined with the packet, the context, the stack word, the filesystem and both
+exports: **no caller-reachable input has been found that moves `-45020`.**
+
 **A `CoreFP.dll` export succeeds, and the guard was ours.** Six obfuscated exports
 return `-42023` uniformly when called with a literal argument -- which is how they
 were always called. Given a real guest pointer they behave differently:
