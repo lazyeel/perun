@@ -1513,6 +1513,31 @@ The last two are the ones the packet cannot reach directly: `edi` is produced by
 from state the caller has not been shown to supply. That is the next thing to
 attack, and it is finally observable.
 
+**The predicate steers the publisher, and it was forced.** `0x9059a`
+`cmp r9d, 0x4069d333` is executed once, at step 222 902, and the value in `r9d`
+there is **`0xf0c5d587`** -- not `0x4069d332`; that value belongs to a different
+site. Its ZF feeds `setne cl` and `sete bpl`, and `bpl` goes into
+`lea eax,[rdx + rbp]` at `0x905a8`, so this comparison does move the dispatch
+index.
+
+A hardware breakpoint that rewrites the register on the stop and continues
+(`/opt/data/adi-re/force_probe.py`) gives the result directly:
+
+```
+r9 at the predicate, measured            0xf0c5d587
+r9 forced to                             0x4069d333
+call returns                             0xffff5016   (-45034, not -45020)
+```
+
+**So the answer to the question that was put to this section is no.** The
+difference between `-45020` and success is not one bit at that comparison:
+flipping it moves the call to `unknownAdiCallFlags`, the *first* gate, which is
+earlier in the body than the publisher we were on. What the experiment does
+prove is more useful than what it refutes: **a register written at the predicate
+selects which publisher runs, and this runtime can now steer that choice.**
+Whether any value of `r9` reaches `0x8f064` is now a question with an instrument
+that can answer it.
+
 **`DllMain` really runs, so the library is initialised.** The obvious remaining
 explanation -- that the loader fakes `DLL_PROCESS_ATTACH` and the globals are
 never set -- is false: `cmd_call` resolves `entry_dll_main()` and calls it with the
