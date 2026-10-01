@@ -1513,6 +1513,31 @@ The last two are the ones the packet cannot reach directly: `edi` is produced by
 from state the caller has not been shown to supply. That is the next thing to
 attack, and it is finally observable.
 
+**The dispatch state is not caller-seeded at all, and there is no entry we missed.**
+
+Probing `0xb15b3` again with the context filled the way the Android engine fills
+it -- `+0x10`, `+0x18`, `+0x20`, `+0x28`, `+0x30`, `+0x40`, `+0x48` all set, and
+version 4 at `+0x0c` -- gives values identical to the plain context:
+
+```
+context      edi        rbp       rbx
+plain        0xff57eb   0x51cfdef 0x7a830000
+full         0xff57eb   0x51cfdef 0x7a830000
+```
+
+So the CFF state is invariant to the packet *and* to the context. And the export
+table has **exactly two entries**, `cvu8io98wun` and `vdfut768ig`, and both are
+called. There is no initialiser we skipped.
+
+**What that leaves.** Everything a caller can supply has been varied and measured:
+payload, opcode, every context field, the stack word, the filesystem, the volume
+serial, both exports. The dispatch index does not move. The success block
+`0x8f064` is real and is this same graph choosing differently, and nothing we can
+reach from outside the guest chooses it. The remaining candidates are a real
+caller's frame and host state this runtime does not reproduce -- `CoreFP.dll`
+runs here but its six obfuscated exports all return `-42023` -- and that is no
+longer a packet problem, which is the only thing that changed in eleven rounds.
+
 **And those inputs do not move with the packet either.** Probing `0xb15b3` on three
 radically different packets -- the Android one, all zeros, all `0xff` -- gives
 byte-identical values every time:
