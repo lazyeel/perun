@@ -1290,4 +1290,33 @@ Neither requires perun to disclose its own source or to relicence its code, and 
 
 | 2026-09-29 | **The gate object is `HeapAlloc(flags=0, size=0x28)`, unzeroed, and nothing writes it after publication (2026-09-29).** With `HeapAlloc` in the trace, the pointer the `lock cmpxchg` at `0x5b517` publishes matches one logged allocation by address in the same process: a 40-byte block. `flags=0x0` is not `HEAP_ZERO_MEMORY`, so the two zero qwords the object is seen holding are what a fresh glibc arena returns rather than something the library wrote — and they are the two an emptiness test would compare, so on this host that reading can be an artefact of the allocator. A 40-byte block is five qwords, so there is **no qword at `+0x28`**; an earlier note that named one had walked past the allocation. Four hardware write watchpoints on the first four qwords, armed at `0x5b51c`, stay live to the end of the call and never fire: the object is assembled before publication and its fields are final when the `cmpxchg` retires. The remaining question is what assembles it. |
 | 2026-09-29 | **`0x19e9c8` is the heap handle, `cvu8io98wun` is not on the path, and `HeapSize` is never called (2026-09-29).** gdb's own decoder at `0x1353ae` — not objdump's linear sweep, which is not instruction-aligned in this body and whose operand annotations had already produced one wrong conclusion this phase — shows `mov rcx, [0x19e9c8]` feeding `call HeapAlloc`, and the observed `rbx=0x228` matches the logged `HeapAlloc(flags=0x0, size=0x228)` exactly. The imports are reached by direct `call [rip+disp]`, not a thunk chain, and that route covers only a fraction of the allocations: the static CRT allocates largely without going through the IAT, so static IAT analysis does not find the site for a given allocation and a trace does. A GOT hook on the `cvu8io98wun` slot captured **zero calls** across a complete successful Android provisioning run — eight `vdfut768ig` calls, the `SUCCESS` banner, both headers — so the "missing initialisation step" account is refuted from both builds. And `HeapSize` turned out to be called zero times on this path, which means the constant 16 it returned for the length of this project was load-bearing for nothing that was ever measured. |
-*Apple, macOS, OS X, StoreKit, FairPlay, iTunes and related marks are trademarks of Apple Inc. This independent research project is not affiliated with, endorsed by, or sponsored by Apple Inc. All binary images referenced are obtained by users directly from Apple's public distribution servers and are never redistributed with this project.
+*Apple, macOS, OS X, StoreKit, FairPlay, iTunes and related marks are trademarks of Apple Inc. This independent research project is not affiliated with, endorsed by, or sponsored by Apple Inc. All binary images referenced are obtained by users directly from Apple's public distribution servers and are never redistributed with this project.**`f` is a full-avalanching block transform.** Sixteen runs, base packet from
+the Android engine, one input byte raised by one each time:
+
+```
+base  c1 1c 64 57 95 fd 65 59 17 c2 7f 21 e2 48 14 cd
++byte4   db 20 5d 0d dc 43 15 9e ee dd c7 a4 84 f9 35 81
++byte5   fe 56 a0 32 94 71 ea 0e 34 b4 65 9c fe 46 02 78
++byte6   8d 35 10 0c 9b b9 18 55 6d 78 cd 6b a0 d4 a2 49
++byte7   4c 4c 10 b3 0d d5 c7 16 be 12 ee d8 b5 3e a5 a3
++byte8   75 b0 8a 49 f5 36 ff 22 80 47 03 04 c8 5b 59 8a
+```
+
+One input byte moved, **all sixteen outputs changed.** So `f` avalanches in
+every byte and cannot be inverted per byte; the packet has to be searched as a
+whole. What does move independently is `out[+3]` -- the byte the dispatcher
+reads -- which took `57, 0d, 32, 0c, b3, 49` across these runs.
+
+**Every one of those still returned `-45020`,** which is itself the finding: a
+wildly varying dispatch input lands on the same publisher. The dispatcher's
+table at RVA `0x9055d` is 256 signed dwords with **196 distinct targets**, and
+those targets are *not* publisher blocks -- they are further dispatcher stages.
+The chain is multi-stage, so the index-to-code map cannot be resolved by
+decoding alone; it has to be observed.
+
+**That is the honest limit of the static route.** With the deterministic oracle
+the remaining work is empirical: sample packets, record the code each one
+publishes, and find whether the `-45020` region can be left at all. The
+dispatcher table is the map to search, and the oracle makes each sample exact.
+
+
