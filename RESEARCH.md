@@ -1401,40 +1401,39 @@ MBA-laden blocks (`sar edi,0xe1; sbb dword ptr [rax-0x75],ecx; ...`), not
 further dispatchers. So the CFF is one control-flow graph, and reading an
 index-to-code map out of it is not a bounded walk. It has to be observed.
 
-**The context axis is exhausted too, and the next lead is a filesystem probe.**
-Filling the context as the Android engine does -- the full provisioning path
-string and the full device UUID, NUL-terminated, at `+0x18` and `+0x48`, plus
-the five pointer fields at `+0x20..+0x40` and the version word -- did not move
-the result. Five runs (plain, path, uuid, pointers, all) every one `-45020`.
-
-**What the guest actually asks the host.** With `PERUN_TRACE=1` the walk makes
-exactly one external sequence, and it is a path probe:
+**The guest is provisioning, and the shim is dropping one of the seven
+ingredients.** With the provisioned directory absent, the guest's own sequence
+is:
 
 ```
-SHGetFolderPathW(0x8023)      -> ~/.perun/appdata/Common
-PathAppendW + "Apple Computer"
-PathIsDirectoryW(...)         -> true
-GetFileAttributesW(...)       -> 0x90
-PathAppendW + "iTunes"  ...  -> true / 0x90
-PathAppendW + "adi"     ...  -> true / 0x90
-call#0 vdfut768ig returned 0xffff5024
+PathIsDirectoryW(.../iTunes/adi)  -> false
+  ... it creates the directory itself ...
+GetFileAttributesW(.../iTunes/adi) -> 0x90
+returned 0xffff5024
 ```
 
-It is looking for **`~/…/Apple Computer/iTunes/adi`** -- the provisioned data
-directory -- and it stops there. Two things follow. First, that directory was
-**empty**, and the only provisioned blob in the tree,
-`crates/perun-cli/examples/adi-android/adi-data/adi.pb` (606 bytes), lives
-elsewhere; placing it there changed nothing. Second, and more important, **our
-shims always answer "yes"**: `PathIsDirectoryW` returns true and
-`GetFileAttributesW` returns `0x90` for paths that do not exist, so the guest
-is told the directory is there and never learns otherwise, and it opens no
-file inside it. The `-45020` decision is taken *after* this probe, with no
-filesystem activity after it.
+The directory appeared with mode `drwxr-xr-x` (0755), which is what this
+runtime's `CreateDirectoryW` shim passes to `mkdir`. So the guest **is** taking
+the provisioning path, creating where it expects data, and then stopping without
+writing anything. The two path APIs appeared to contradict each other; they did
+not -- the guest created the directory between the two calls.
 
-So the barrier is not the packet, not the opcode, not the context fields, and
-not the stack word. What remains is whatever the guest does between satisfying
-the probe and publishing the error -- and the honest next step is to see what
-lies between the last `GetFileAttributesW` and `0x905c2`, which is a stretch
-of the walk this runtime can now record exactly.
+**Correction to the previous entry: the shims do not lie.** `GetFileAttributesW`
+stats the path and returns `INVALID_FILE_ATTRIBUTES` on failure, as Windows does.
+What looked like a shim answering "yes" unconditionally was the guest having
+created the directory one call earlier.
+
+**No network is involved.** `CoreADI64.dll` imports only `KERNEL32`, `ADVAPI32`,
+`SHLWAPI` and `SHELL32` -- no `winhttp`, `wininet` or `ws2_32`. Anisette is
+generated locally, so the failure is a local computation.
+
+**And a real shim defect sits in the fingerprint path.** The device fingerprint
+is an MD5 over seven components, of which the volume serial is one. This
+runtime's `GetVolumeInformationW` takes the serial as `_serial: *mut DWORD` and
+**never writes to it** -- the function returns TRUE having filled the label, the
+filesystem name, the component length and the flags, and left the serial as
+whatever was in the caller's stack. The guest gets a garbage fingerprint input,
+which is exactly the kind of defect that produces a plausible-looking failure
+this late in a call.
 
 
