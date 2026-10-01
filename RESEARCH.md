@@ -1479,3 +1479,27 @@ narrows the field to the part of the body that runs from argument validation to
 the first filesystem probe.
 
 
+
+**A trace cannot be taken in the configuration that matters.** `PERUN_TRACE_FILE`
+writes the ring, but the ring is only filled by the walk and the dump sits inside
+the branch guarded by `STEP_ARMED` -- so with the walk off, which is exactly the
+configuration `perun call` runs in and the one that returns `-45020`, no trace file
+is produced at all. Every trace this project has examined was therefore taken with
+the walk armed, and the walk demonstrably changes the state: it alters the number of
+instructions to the return and, with it, the transform's own output. **There has
+never been an observation of the production path's register file.**
+
+Hardware breakpoints supply the missing one, because they do not single-step. Armed
+at `0xb15c8` through the `mprotect` hook, on the isolated stack and with the walk
+off, the three inputs to the dispatch index read:
+
+| input | value |
+|---|---|
+| `eax` before the load (the byte offset) | `0x3` -- buffer byte `+3`, as before |
+| `edi` | `0xbc00` |
+| `rbp` | `0xfb830000` |
+
+The last two are the ones the packet cannot reach directly: `edi` is produced by
+`shl edi,8; add edi,0xa8d100` and `rbp` by `lea ebp,[rbp+rbx*2+0x1600211]`, both
+from state the caller has not been shown to supply. That is the next thing to
+attack, and it is finally observable.
