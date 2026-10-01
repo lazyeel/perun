@@ -752,6 +752,21 @@ single thread: a **lock**, not a syscall wait, inside the Apple crypto seeding
 path. That is the last barrier in front of step 1, and it is now specific
 enough to name a frame at with `sudo gdb` and a hardware breakpoint.
 
+**Corrected: it is stuck in the loader, before any Apple code runs.** The
+previous entry blamed the crypto seeding path. `/proc/<pid>/maps` settles it:
+mapped are `adi_native`, `linker64`, `libc.so`, `libm.so`, `libz.so`,
+`libnetd_client.so`, `libc++_shared.so` and `libcurl.so` -- and **nothing else**.
+`libCoreADI.so`, `libCoreFP.so` and `libstoreservicescore.so` are never loaded,
+so the engine never reaches a single line of the code under study, never loads
+the ADI library at all, and the futex is the Bionic loader resolving or
+initialising its dependency list. `libnetd_client.so` being present is the tell:
+it is a late Bionic dependency, and the process is inside loader setup rather
+than inside anything Apple wrote.
+
+So the lane is not "running and silent" -- it never ran. The observable
+`wrap_vdfut` will not fire on this lane until the loader finishes, and the
+loader is where the work has to start.
+
 ### 5.8d The buffer has two writers, and the marker is overwritten (2026-09-30)
 
 **The packet buffer is written twice, by two unrelated code regions, and only
