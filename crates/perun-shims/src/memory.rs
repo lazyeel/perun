@@ -87,10 +87,10 @@ win32_api! {
         // call count was never available. glibc's allocator is what HeapAlloc
         // and HeapReAlloc hand back, so its own usable-size is the same answer
         // the real API would give for these blocks.
-        let n = libc::malloc_usable_size(ptr as *mut libc::c_void) as SIZE_T;
+        let n = unsafe { libc::malloc_usable_size(ptr as *mut libc::c_void) as SIZE_T };
         if std::env::var_os("PERUN_TRACE").is_some() {
             let m = format!("[perun] HeapSize({ptr:p}) = {n}\n");
-            libc::write(2, m.as_ptr().cast(), m.len());
+            unsafe { libc::write(2, m.as_ptr().cast(), m.len()) };
         }
         n
     }

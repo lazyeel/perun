@@ -180,6 +180,12 @@ pub const PE_STACK_SIZE: usize = 8 << 20;
 ///
 /// The base is a fixed hint so runs are reproducible; `MAP_FIXED_NOREPLACE`
 /// keeps it from clobbering anything if the hint happens to be taken.
+///
+/// # Safety
+///
+/// `size` must be non-zero and a sane stack size. The returned `base` must
+/// be handed to [`call_on_stack`] together with a mapping of at least that size,
+/// and the guest must not write outside it.
 pub unsafe fn alloc_pe_stack(size: usize) -> Option<(u64, u64)> {
     unsafe {
         let want = 0x7FF7_CF80_0000u64;
@@ -207,6 +213,11 @@ pub unsafe fn alloc_pe_stack(size: usize) -> Option<(u64, u64)> {
 /// `gs:[0x10]` is what MSVC's `__chkstk` probes downward toward, so leaving
 /// the host thread's limits in place while the guest runs on another stack
 /// makes the probe walk off the mapping.
+///
+/// # Safety
+///
+/// `base` and `limit` must come from a live [`alloc_pe_stack`] mapping, and
+/// must not be changed while the guest is running on that stack.
 pub unsafe fn set_pe_stack_bounds(limit: u64, base: u64) {
     CURRENT_TEB.with(|slot| {
         if let Some(b) = slot.borrow_mut().as_mut() {
@@ -257,6 +268,12 @@ unsafe extern "C" {
 }
 
 /// Call `f` on the stack whose top is `stack_top`, and come back to ours.
+///
+/// # Safety
+///
+/// `stack_top` must be the top of a live mapping sized for the callee, as
+/// returned by [`alloc_pe_stack`]. `f` must honour the win64 ABI and must not
+/// outlive anything it captures.
 pub unsafe fn call_on_stack(
     f: unsafe extern "win64" fn(u64, u64, u64, u64) -> u64,
     stack_top: u64,

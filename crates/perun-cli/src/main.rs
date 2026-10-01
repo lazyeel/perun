@@ -112,6 +112,13 @@ static mut STEP_R14: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_R8: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_RSI: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_RDI: [u64; STEP_RING] = [0; STEP_RING];
+/// RBX, for one reason: a writer of the second buffer layer is
+/// `mov byte ptr [r12 + rcx], al`, and its byte comes from `rax`. The trace had
+/// the 64-bit RAX but the analyzer could not read a byte out of it, so the
+/// column read `??` and the second layer's contents were unrecoverable. AL is
+/// derived from RAX in the dump itself, so no new array is needed for the
+/// common case; RBX is here because `mov ..., bl` appears in the same family.
+static mut STEP_RBX: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_IDX: usize = 0;
 const EFLAGS_TF: u64 = 0x100;
 /// -45018, the code the library is about to publish when the header check fails.
@@ -211,9 +218,19 @@ fn dump_ring(path: &str) {
         let rcx = unsafe { STEP_RCX[slot] };
         let rdx = unsafe { STEP_RDX[slot] };
         let rax = unsafe { STEP_RAX[slot] };
+        // RAX and RBX are the 32- and 16/8-bit views of what is already
+        // dumped as a 64-bit register, so EAX/AL/AX come from RAX for free and
+        // BL/CL/DL from RBX/RCX/RDX. A writer of `mov byte ptr [r12+rcx], al`
+        // is invisible in the value column without this: the byte it stores is
+        // AL, and only the 64-bit form was being printed.
+        let rbx = unsafe { STEP_RBX[slot] };
+        let al = rax & 0xff;
+        let bl = rbx & 0xff;
+        let cl = rcx & 0xff;
+        let dl = rdx & 0xff;
         let _ = writeln!(
             line,
-            "{k} {rp:x} {sp:x} {ed:x} {rax:x} {rdx:x} {rcx:x} {r10:x} {r9:x} {r11:x} {r14:x} {r8:x} {rsi:x} {rdi:x} {r12:x}"
+            "{k} {rp:x} {sp:x} {ed:x} {rax:x} {rdx:x} {rcx:x} {r10:x} {r9:x} {r11:x} {r14:x} {r8:x} {rsi:x} {rdi:x} {r12:x} {al:x} {bl:x} {cl:x} {dl:x}"
         );
         let _ = f.write_all(line.as_bytes());
     }
@@ -326,6 +343,7 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             STEP_R8[slot] = *regs.add(libc::REG_R8 as usize) as u64;
             STEP_RSI[slot] = *regs.add(libc::REG_RSI as usize) as u64;
             STEP_RDI[slot] = rdi;
+            STEP_RBX[slot] = *regs.add(libc::REG_RBX as usize) as u64;
             STEP_IDX = STEP_IDX.wrapping_add(1);
             STEP_COUNT += 1;
 
