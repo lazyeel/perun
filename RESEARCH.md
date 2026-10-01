@@ -1447,4 +1447,35 @@ for `ProductId` and `ProcessorNameString`, `SystemBiosVersion`), the machine nam
 and the hardware profile GUID. `Blackwood-4NT` documents all seven and how they
 are combined, which is the specification to work from.
 
+**A contract fact, verified twice: `cvu8io98wun` takes a buffer, not a magic.**
+It has been called with the opcode in `arg0` in the belief that it takes the
+same selector `vdfut768ig` does. It does not. Called that way it faults
+dereferencing the opcode itself (`addr=0xcfe0b46a`, `rip=0x8e4b4d`); called
+with a guest pointer in `arg0` it returns **0**. So its signature is a buffer to
+be filled with the initial version and protocol data, and the selector belongs
+elsewhere. This also means the init export has never actually been run
+successfully in this project, and every conclusion drawn from "init then
+provision" runs rests on a call that faulted.
+
+**Not established, and deliberately not written down as fact:** whether calling
+it properly changes the `-45020` outcome. The `perun seq` script grammar takes
+arguments in a different order from `perun call`, and the two orders were not
+reconciled before the context ran out, so a before/after could not be measured
+cleanly. What is solid is the ABI itself -- buffer in, 0 out -- and the fault
+on the old calling convention.
+
+**And the fingerprint question is answered, negatively.** `PERUN_TRACE=1` on
+this path shows the guest calls **no data-gathering API at all**: no
+`RegQueryValueExA`, no `GetVolumeInformationW`, no `GetComputerNameW`, no
+`GetCurrentHwProfileW`, no `GetAdaptersAddresses`, no `CreateFileW` or
+`WriteFile`. What it does call is TLS and FLS setup, a dozen `HeapAlloc`s, and
+the path probe. So the volume-serial fix was in a code path the guest never
+reaches, which is a second, independent reason it could not have moved the
+barrier -- and the earlier guess that the fingerprint was being assembled and
+came out wrong is **withdrawn**: no fingerprint is being assembled here.
+
+That places the `-45020` **before** any data collection, which is new and
+narrows the field to the part of the body that runs from argument validation to
+the first filesystem probe.
+
 
