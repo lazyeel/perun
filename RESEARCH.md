@@ -1480,6 +1480,15 @@ the first filesystem probe.
 
 
 
+**What `edi` is before the index folds it in.** Probed at `0xb15b3` with the walk
+off: `edi = 0xff57eb`, and `(edi << 8) + 0xa8d100 = 0xbc00`, exactly the value
+read at the dispatcher three instructions later -- so the two observations are
+consistent and the chain is confirmed rather than assumed. `edi` is a 20-bit
+value that is not packet-derived, and `rbp` at the same point is `0x51cfdef`,
+updated by `lea ebp,[rbp+rbx*2+0x1600211]`. Neither is a function of anything
+the caller has been shown to supply. Linear disassembly backwards through the
+body does not decode -- CFF has no instruction boundary there -- so this had to
+come from breakpoints rather than from the reader.
 **A trace cannot be taken in the configuration that matters.** `PERUN_TRACE_FILE`
 writes the ring, but the ring is only filled by the walk and the dump sits inside
 the branch guarded by `STEP_ARMED` -- so with the walk off, which is exactly the
