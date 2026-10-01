@@ -1395,12 +1395,22 @@ takes 8 of the 256 indices, and 37 blocks take 2 each. So the index space is
 small and highly redundant, which is why so many different packets land on the
 same publisher.
 
-**What follows, concretely.** Follow the chain one stage at a time: for each
-first-stage target that is itself a dispatcher, read its table and ask whether
-`0x8f064` appears. That gives the stage and the index at which success is
-selected. With the deterministic oracle the value of that index can then be
-checked against the live register trace at the corresponding instruction, and
-the byte or word that would have to change identified. That is a bounded walk
-of a finite structure, not a search.
+**The dispatch is a general CFG, not a chain of tables -- and that closes the
+static route.** Resolving the 196 first-stage targets shows they are ordinary
+MBA-laden blocks (`sar edi,0xe1; sbb dword ptr [rax-0x75],ecx; ...`), not
+further dispatchers. So the CFF is one control-flow graph, and reading an
+index-to-code map out of it is not a bounded walk. It has to be observed.
+
+**The one caller-supplied axis never tried is the context.** Every run so far
+set three fields: `ctx[+0x00]` the packet, `ctx[+0x08]` `0x10`, `ctx[+0x0c]` `0`.
+The Android engine's frame, as the dumper captured it, also carries
+`ctx[+0x18]` the provisioning path, `ctx[+0x48]` a device UUID, and
+`ctx[+0x20..0x40]` function pointers -- and `ctx[+0x18]` is read exactly once
+in the window between layer 2 and the publisher. Pointing `ctx[+0x18]` and
+`ctx[+0x48]` at bytes in the guest buffer did not move the result: all four
+runs returned `-45020`. **That test is weak and is recorded as such** -- only
+the first byte of each string was written, so it shows the *field* is not
+consulted in a way that changes the outcome, not that a well-formed path is
+consulted correctly. Writing the full strings is the obvious next run.
 
 
