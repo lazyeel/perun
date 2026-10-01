@@ -767,7 +767,33 @@ and the packet only perturbs it.
 That is the whole reason 9 months of packet-shaped attempts failed. The knob is
 not in the argument block.
 
-**What follows.** Layer 2 enters through the same machinery as the dispatcher --
+**A deterministic oracle exists, and this is what makes the barrier reachable.**
+Isolating the guest stack alone is not enough -- three runs gave 221 863, 221 367
+and 221 367 instructions. Adding `setarch -R` (ASLR off) makes the walk
+bit-reproducible: two consecutive runs both stop at **221 615**, and layer 2
+writes byte-for-byte identical output:
+
+```
+PERUN_PE_STACK=1 setarch $(uname -m) -R perun call ... 
+  layer 2 -> c1 1c 64 57 95 fd 65 59 17 c2 7f 21 e2 48 14 cd   (both runs)
+```
+
+So the variable was the host heap address of the buffer, not the stack alone:
+the buffer is heap-allocated and ASLR moved it, and the key mixed that address
+in. With both pinned, the run is reproducible.
+
+**That converts the problem from measurement into search.** Everything measured
+so far varied under us -- the dispatch byte, the publisher, the output -- and
+every conclusion drawn from one run had to be re-taken. Now the same command
+gives the same bytes, so the sixteen bytes of seeded guest stack can be varied
+deliberately and the effect on the publisher observed without guessing whether a
+difference came from the input or from the run. The gate to look for is the one
+already measured: the dispatcher at `0xb15c8` reads buffer byte `+3` and folds
+`ebp` and `r9`, and the publisher it lands on is visible as the block entered a
+few hundred steps later.
+
+**What follows.** Layer 2 enters through the same machinery as the dispatcher
+ as the dispatcher --
 `mov rbp,[rsp+0x70]`, `lea edi,[rbp-0x517]`, `mov r14,[r11+rdi*8]` -- a table
 index computed from a stack word. So the way to `-45020` is to supply a frame
 whose residue produces a key that steers the dispatch to a block other than
