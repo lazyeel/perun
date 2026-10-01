@@ -207,6 +207,18 @@ fn dump_ring(path: &str) {
     };
     let idx = unsafe { STEP_IDX };
     let n = idx.min(STEP_RING);
+    // PERUN_TRACE_TAIL=N dumps only the last N steps. The walk itself takes
+    // seconds; formatting 22 hex columns per row takes hours, and a full dump
+    // of a 218,000-step walk at ~30 rows/s is two hours for data most of
+    // which is not needed. The decision that selects the error code sits in the
+    // last few thousand steps, so the tail is the default way to ask.
+    let n = match std::env::var("PERUN_TRACE_TAIL")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        Some(k) if k > 0 => n.min(k),
+        _ => n,
+    };
     let first = idx.wrapping_sub(n);
     let mut line = String::with_capacity(48);
     for k in 0..n {

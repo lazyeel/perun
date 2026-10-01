@@ -727,20 +727,31 @@ First, the index is not a raw byte: it is mixed with `edi` and with `ebp`, and
 `ebp` is derived from the guest frame pointer (`rbp + rbx*2 + 0x1600211`). So the
 dispatch is a function of the buffer byte **and** of frame state.
 
-Second, and this is the part that was missing all along: **the byte is read at an
-intermediate point, not from the finished buffer.** At step 222 764 the byte at
-`scratch[7]` is `0x55`, while the buffer as it stands after the call has `0xdd`
-there. Something between layer 2 (step 217 687) and the decision rewrote it, and
-it is that intermediate value which steers the dispatcher.
+Second, and this corrects the previous reading: **the dispatcher reads the
+finished buffer.** The byte at `scratch[7]` is `0xdd` when `0xb15c8` runs, there
+are **zero** writes to it in the last 8,000 steps, and `0xdd` is exactly the
+byte layer 2 left there. An earlier reading of `0x55` at this point came from a
+mis-indexed trace column and is **withdrawn**.
 
-That is why feeding different bytes 4..7 does not move `-45020`: the packet
-content reaches the dispatcher only after being folded through the region
-between the two layers, and three inputs we tried all failed to change the
-choice. **The question is no longer "what do we write in the packet" but "what
-is in the buffer at step 222 764, and what wrote it there".**
+So the chain is: layer 1 writes the marker `00 00 00 01` at buffer bytes 0..3,
+layer 2 overwrites all sixteen, and the dispatcher reads the overwritten byte.
+The packet does reach the decision -- but only through layer 2's output. That is
+why feeding different bytes 4..7 does not move `-45020`: the input reaches the
+dispatcher transformed twice, and layer 2 is what arrives.
 
-The trace needed to answer that is a recording of the clean walk with the byte
-columns, which this tree can now produce (`PERUN_TRACE_FILE`).
+**`ebp` carries layer 2's bytes into the index as well.** At the decision
+`rbp = 0xcc3a0000`, built from buffer bytes 0 and 1 (`0xcc`, `0x3a`), which are
+layer 2's output too. `0xb15e0` does `or eax, ebp`, so the dispatch index depends
+on layer 2 through two independent channels: the byte at `+3`, and `rbp`.
+
+Also in flight at the decision: `r9 = 0x4069d332`, one of the **rejected**
+opcodes from this file's own sweep, folded in a third time by `0xb15ef`.
+
+**The question is therefore concrete and answerable: what must layer 2 write at
+byte +3 (and into `rbp`) for the dispatcher to select a block other than
+`0x905c2`.** Layer 2 is the 400-instruction region at `0x6fa2c`--`0x6ffe3`, run
+once per call; it is the first thing that has to be understood rather than
+worked around.
 
 ### 5.8a Anisette v3 runs locally (2026-09-27) — and what the `-45075` wall actually was
 
