@@ -814,6 +814,18 @@ That is the limit of interrogating the process from outside. Answering it
 properly needs the process started under a debugger, which this runtime
 refuses for the two measured reasons above. That boundary is now named
 rather than assumed.
+**Root cannot exec these binaries at all -- that is the launch boundary.**
+Measured four ways, the first that isolates it from my own errors:
+`sudo -n ./adi_native` fails, and so does a byte-identical copy at `/tmp` with
+mode 0755, while `hermes` runs the original without complaint. `sudo -n id` is
+uid=0 and the Bionic `linker64` in the same tree execs fine under root, so it
+is not the filesystem, not the interpreter and not sudo: a sandbox policy stops
+root from exec'ing these binaries. Attaching to a running engine works
+precisely because that needs no new exec.
+
+`LD_PRELOAD` is not an alternative either: `libc.so` carries 67 Bionic markers
+and `linker64` 8, and `LD_PRELOAD` is read only by glibc. `/etc/ld.so.preload`
+does not exist.
 ### 5.8d The buffer has two writers, and the marker is overwritten (2026-09-30)
 
 **The packet buffer is written twice, by two unrelated code regions, and only
