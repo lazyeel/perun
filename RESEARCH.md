@@ -702,6 +702,19 @@ fourth time this round a byte pattern was promoted to a finding without
 disassembling around it; the rule that finally holds is: read the instruction, not
 the bytes.
 
+**Linear disassembly of this region is not usable.** Sweeping
+`0x1db800..0x1dd000` decodes nothing at all -- not even the two instructions at
+`0x1dbbf3` that decode correctly when the sweep starts at `0x1dbbd0`. The flattened
+body has no instruction alignment a linear sweep can find, so the only two
+`r9` writes previously reported survived on a lucky start offset and nothing else
+in the region can be read this way.
+
+**So step 1 has to be answered dynamically, not statically.** The Android engine
+already runs natively in this tree and answers `ec: 0`; a breakpoint or a dump at
+its call into `vdfut768ig` yields the SPIM pointer, its length and the output
+buffer **from the real caller**, which is precisely what step 2 needs and what no
+amount of decoding of this region can supply.
+
 ### 5.8d The buffer has two writers, and the marker is overwritten (2026-09-30)
 
 **The packet buffer is written twice, by two unrelated code regions, and only
