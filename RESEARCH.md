@@ -1512,3 +1512,22 @@ The last two are the ones the packet cannot reach directly: `edi` is produced by
 `shl edi,8; add edi,0xa8d100` and `rbp` by `lea ebp,[rbp+rbx*2+0x1600211]`, both
 from state the caller has not been shown to supply. That is the next thing to
 attack, and it is finally observable.
+
+**And those inputs do not move with the packet either.** Probing `0xb15b3` on three
+radically different packets -- the Android one, all zeros, all `0xff` -- gives
+byte-identical values every time:
+
+```
+payload   edi        rbp       r9
+base      0xff57eb   0x51cfdef  0x1
+zeros     0xff57eb   0x51cfdef  0x1
+ones      0xff57eb   0x51cfdef  0x1
+```
+
+The literal `0xff57eb` does not occur anywhere in the image, so it is computed by
+the dispatcher's own mixing rather than loaded. And the computed value is the same
+for every packet. **Taken with the rest, this closes the packet direction:** the
+index that selects the success block is built from a packet byte that does change
+and two components that do not, and the result is `-45020` for every packet tried.
+Searching the packet space is therefore not merely unproductive, it is provably
+so.
