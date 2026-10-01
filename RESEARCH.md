@@ -606,10 +606,12 @@ deterministic within a configuration.
 **What holds regardless: feeding the transform does not move the barrier.** With
 the walk disarmed, three inputs — `9d b6 cf e9`, `01 1a 33 4c`, and zeros at
 bytes 4..7 — all return `0xffff5024`. The marker is not what is being rejected,
-which is consistent with three further measurements: the publisher `0x8ff0a`
-(`mov edi,0xffff5024`) never executes, the nearest conditional `0x8ff25` never
-executes, and `00 00 00 01` appears in **every** Android call including the one
-returning `-45001`.
+which is consistent with two further measurements: `00 00 00 01` appears in
+**every** Android call including the one returning `-45001`, so it is not a
+success flag; and the publisher of `-45020` is at RVA `0x905c2`, not `0x8ff0a`
+(see 5.8d -- `0x8ff0a` was an address that publishes no error code, and the
+claim that it "never executes" was drawn from traces that stop at step 109,205
+and never covered the step where any publisher runs).
 
 **The 12 bytes `c9 34 19 2e 14 f2 ae 3f 98 49 66 ca` are `payload_init_1.bin[4:16]`** —
 the packet tail past the 4-byte header, captured by the dumper in this tree. The
@@ -628,6 +630,70 @@ packet. `CoreFP.dll` is the only remaining candidate for a real caller.
 
 Full report, with the two disassemblies, the four repeated runs and the
 reproduction commands: `REPORT-0x6783f-kq56gsgHG6.md` in the analyst's tree.
+
+### 5.8d The buffer has two writers, and the marker is overwritten (2026-09-30)
+
+**The packet buffer is written twice, by two unrelated code regions, and only
+the second one's output survives.** This is the correction that matters: the
+marker `00 00 00 01` that the transform produces is not what ends up in the
+buffer, and reading the buffer after the call attributes the second writer's
+bytes to the first.
+
+| | writer | count | steps | result |
+|---|---|---|---|---|
+| layer 1 | RVA `0x67891` `mov byte ptr [rax + r9], dl` | 16 | 109 212+ | `00 00 00 01` — the marker |
+| layer 2 | RVA `0x6fa2c`…`0x6ffe3`, `mov byte ptr [r12 + reg], al/cl` | 16 | 217 409–217 687 | `cc 3a 2e dd 9f b0 4b 28 d8 d2 a5 65 19 c3 b7 ed` |
+
+All 16 sites of layer 2 were matched against the buffer as it stood after the
+call: **16 of 16, no mismatches.** The three sites addressing `[r12+rax]` were
+recovered from `CL`, and the other thirteen from `AL`. So the formula of 5.8c was
+not wrong about the transform — it was applied to a buffer the transform no
+longer owns.
+
+**Neither layer compares anything.** Both are unconditional stores. There is no
+marker check in either.
+
+**`-45020` is published at RVA `0x905c2`**, not `0x8ff0a`:
+
+```asm
+0905b8  lea    rsi, [rip - 0x29]
+0905bf  add    rsi, rax
+0905c2  mov    edi, 0xffff5024     ; the publisher
+0905c7  jmp    rsi
+```
+
+A sweep of `.text` finds **113** `mov edi/eax, 0xffff50xx` sites, densely packed
+in `0x8eb00…0x90800` with `-45002`, `-45034` and `-45020` interleaved. There is
+no single publisher: the flattened dispatcher picks which one runs. The index
+is chosen at
+
+```asm
+090584  movsxd rax, dword ptr [rcx + rax*4]
+090588  lea    rcx, [rip - 0x32]
+09058f  add    rcx, rax
+090592  jmp    rcx
+```
+
+Entry into `0x905c2` is at step **222 911**, by fall-through from `0x905bf`.
+Three instructions earlier sits `cmp r9d, 0x4069d333` — and `0x4069d333` is one of
+the **rejected** opcodes in this file's own sweep. A rejected opcode used as a
+branch condition near the publisher is the first such sighting in this project.
+
+**The window between layer 2 and the publisher is 5,236 instructions** (not the
+5,225 first estimated, and `0x905c2` is not its end -- execution continues into
+`0x5b0b1`…`0x5b0bb`, where the code is picked up into `rax` and travels on).
+Within it: 992 references below the packet, 374 other host references, **34 reads
+of the packet buffer itself**, and one read of the context.
+
+**The context base is `0x5a8dfe4b5840`** (read 28 times at `+0x00`). Fields read
+inside the window, once each: `+0x05`, `+0x0c`, `+0x18`, `+0x19`, `+0x2c`,
+`+0x2d`, `+0x39`, `+0x40`, `+0x4d`, `+0x54`.
+
+**`ctx[+0x18]` — the provisioning path — is read exactly once, inside the
+decision window.** `ctx[+0x48]`, the UUID slot, is not read at all there. This
+is the first place where a caller-supplied field and the transformed buffer are
+both read in the same stretch that ends in the publisher, and it is where to look
+next.
 
 ### 5.8a Anisette v3 runs locally (2026-09-27) — and what the `-45075` wall actually was
 
