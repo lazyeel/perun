@@ -732,6 +732,16 @@ no output and does not exit. It reaches provisioning, which is a network round
 trip to Apple; in this sandbox that call does not return. So the lane for step 1
 is restored, and its remaining obstacle is reachability, not tooling.
 
+**Where the engine stops, and why it is not yet diagnosed.** After
+`PT_INTERP -> /tmp/pa.so` the process starts and emits nothing, sitting in
+`futex_do_wait` with a single thread. Two diagnostics were tried and neither
+closed it: `strace` without privilege is refused (`ptrace` is unavailable to the
+agent, as it is throughout this runtime), and under `sudo` the trace fails at
+`execve` with `EACCES` on the repointed binary. So the block is located to
+"running, silent" and no further; the next probe has to be something other than
+`strace` -- reading `/proc/<pid>/stack` and `/proc/<pid>/syscall`, or running
+the engine under `gdb`, which this runtime does support with `sudo`.
+
 ### 5.8d The buffer has two writers, and the marker is overwritten (2026-09-30)
 
 **The packet buffer is written twice, by two unrelated code regions, and only
