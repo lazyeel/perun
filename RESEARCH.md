@@ -1401,16 +1401,40 @@ MBA-laden blocks (`sar edi,0xe1; sbb dword ptr [rax-0x75],ecx; ...`), not
 further dispatchers. So the CFF is one control-flow graph, and reading an
 index-to-code map out of it is not a bounded walk. It has to be observed.
 
-**The one caller-supplied axis never tried is the context.** Every run so far
-set three fields: `ctx[+0x00]` the packet, `ctx[+0x08]` `0x10`, `ctx[+0x0c]` `0`.
-The Android engine's frame, as the dumper captured it, also carries
-`ctx[+0x18]` the provisioning path, `ctx[+0x48]` a device UUID, and
-`ctx[+0x20..0x40]` function pointers -- and `ctx[+0x18]` is read exactly once
-in the window between layer 2 and the publisher. Pointing `ctx[+0x18]` and
-`ctx[+0x48]` at bytes in the guest buffer did not move the result: all four
-runs returned `-45020`. **That test is weak and is recorded as such** -- only
-the first byte of each string was written, so it shows the *field* is not
-consulted in a way that changes the outcome, not that a well-formed path is
-consulted correctly. Writing the full strings is the obvious next run.
+**The context axis is exhausted too, and the next lead is a filesystem probe.**
+Filling the context as the Android engine does -- the full provisioning path
+string and the full device UUID, NUL-terminated, at `+0x18` and `+0x48`, plus
+the five pointer fields at `+0x20..+0x40` and the version word -- did not move
+the result. Five runs (plain, path, uuid, pointers, all) every one `-45020`.
+
+**What the guest actually asks the host.** With `PERUN_TRACE=1` the walk makes
+exactly one external sequence, and it is a path probe:
+
+```
+SHGetFolderPathW(0x8023)      -> ~/.perun/appdata/Common
+PathAppendW + "Apple Computer"
+PathIsDirectoryW(...)         -> true
+GetFileAttributesW(...)       -> 0x90
+PathAppendW + "iTunes"  ...  -> true / 0x90
+PathAppendW + "adi"     ...  -> true / 0x90
+call#0 vdfut768ig returned 0xffff5024
+```
+
+It is looking for **`~/…/Apple Computer/iTunes/adi`** -- the provisioned data
+directory -- and it stops there. Two things follow. First, that directory was
+**empty**, and the only provisioned blob in the tree,
+`crates/perun-cli/examples/adi-android/adi-data/adi.pb` (606 bytes), lives
+elsewhere; placing it there changed nothing. Second, and more important, **our
+shims always answer "yes"**: `PathIsDirectoryW` returns true and
+`GetFileAttributesW` returns `0x90` for paths that do not exist, so the guest
+is told the directory is there and never learns otherwise, and it opens no
+file inside it. The `-45020` decision is taken *after* this probe, with no
+filesystem activity after it.
+
+So the barrier is not the packet, not the opcode, not the context fields, and
+not the stack word. What remains is whatever the guest does between satisfying
+the probe and publishing the error -- and the honest next step is to see what
+lies between the last `GetFileAttributesW` and `0x905c2`, which is a stretch
+of the walk this runtime can now record exactly.
 
 
