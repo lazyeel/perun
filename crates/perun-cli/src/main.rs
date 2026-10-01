@@ -1690,6 +1690,31 @@ fn cmd_seq(args: &[String]) -> i32 {
     };
     println!("[perun] export {export_name} @ {:#x}", export_ptr as usize);
 
+    // Same as `cmd_call`: when PERUN_PE_STACK is set the guest runs on a
+    // dedicated mapping, and every call in the sequence must be switched onto
+    // it. Without this the sequence runs on the host thread's stack, which is
+    // where the flattened body dereferences a masked index and faults, so a
+    // two-call sequence could not reproduce the single-call result at all and
+    // the init-then-provision experiment was unmeasurable rather than negative.
+    let pe_stack = if std::env::var_os("PERUN_PE_STACK").is_some() {
+        match unsafe { perun_core::teb::alloc_pe_stack(perun_core::teb::PE_STACK_SIZE) } {
+            Some((limit, base)) => {
+                unsafe { perun_core::teb::set_pe_stack_bounds(limit, base) };
+                eprintln!(
+                    "[perun] guest stack 0x{limit:x}..0x{base:x} ({} MiB, zeroed)",
+                    perun_core::teb::PE_STACK_SIZE >> 20
+                );
+                Some(base)
+            }
+            None => {
+                eprintln!("[perun] could not map a guest stack; staying on this one");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let scratch = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
@@ -1898,7 +1923,16 @@ fn cmd_seq(args: &[String]) -> i32 {
                     "[seq] step {step}: call {export_name}({:#x}, {:#x}, {:#x}, {:#x})...",
                     argv[0], argv[1], argv[2], argv[3]
                 );
-                let r = unsafe { f(argv[0], argv[1], argv[2], argv[3]) };
+                let r = unsafe {
+                    match pe_stack {
+                        Some(top) => perun_core::teb::call_on_stack(
+                            f,
+                            top,
+                            [argv[0], argv[1], argv[2], argv[3]],
+                        ),
+                        None => f(argv[0], argv[1], argv[2], argv[3]),
+                    }
+                };
                 println!("[seq] step {step}: returned {r:#x} ({r})");
                 // Show what the guest wrote into the scratch param block.
                 dump_region("scratch", scratch as u64, 0x1000 / 8);
