@@ -1513,6 +1513,14 @@ The last two are the ones the packet cannot reach directly: `edi` is produced by
 from state the caller has not been shown to supply. That is the next thing to
 attack, and it is finally observable.
 
+**`DllMain` really runs, so the library is initialised.** The obvious remaining
+explanation -- that the loader fakes `DLL_PROCESS_ATTACH` and the globals are
+never set -- is false: `cmd_call` resolves `entry_dll_main()` and calls it with the
+image base and `DLL_PROCESS_ATTACH`, and the returned value is checked. Both
+`perun call` and `perun seq` do this. So the state the CFF reads is post-init,
+and "the loader skipped initialisation" is withdrawn before anyone spends a
+round on it.
+
 **The three remaining exports fault whatever they are given.** `WIn9UJ86JKdV4dM`,
 `YlCJ3lg` and `dku592fbFAj` were tried with `arg0` as the buffer, as the context,
 both in each order, and the same pointer twice. All six combinations fault in all
