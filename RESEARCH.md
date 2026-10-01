@@ -794,6 +794,26 @@ finally showed the earlier refusal had nothing to do with the tracer.
 So breaking on `__futex_wait_ex` *before* the wait is unavailable, and the lock
 holder must be read out of the already-blocked process instead. The futex
 address is the syscall's `rdi`: `0x75683cdabd18`, inside libc.so's data.
+**The futex has no owner and no queued waiter.** Read out of the blocked
+process, since catching the wait would need a launch under gdb:
+
+    futex word   = 0xd1274002
+    owner  (+4)  = 0
+    neighbours   = all zero
+    rsi = 0x80   r8 = 0x30   threads = 1
+
+Nothing holds the lock and nobody is queued behind it. One thread, parked on
+a wake that was never sent -- not a contended mutex and not a lock held by a
+peer, because there is no peer. It is a one-shot synchronisation whose
+signaller never ran, which fits a library waiting on a callback or a second
+participant that this build never reaches. Above the wait the frames are
+unrecoverable (no Bionic symbols) and two values on the stack, `r9 =
+0x3770ac57` among them, are not mapped code.
+
+That is the limit of interrogating the process from outside. Answering it
+properly needs the process started under a debugger, which this runtime
+refuses for the two measured reasons above. That boundary is now named
+rather than assumed.
 ### 5.8d The buffer has two writers, and the marker is overwritten (2026-09-30)
 
 **The packet buffer is written twice, by two unrelated code regions, and only
