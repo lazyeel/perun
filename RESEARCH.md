@@ -752,6 +752,22 @@ single thread: a **lock**, not a syscall wait, inside the Apple crypto seeding
 path. That is the last barrier in front of step 1, and it is now specific
 enough to name a frame at with `sudo gdb` and a hardware breakpoint.
 
+**Corrected twice more. The block is a futex wait inside Bionic's libc.**
+Attaching `sudo gdb` to the live process and unwinding it gives frame 0 in
+`syscall` and frame 1 in `__futex_wait_ex` (`pthread_mutex.cpp`), both in
+`libc.so`. It is **not** the loader: the load was wrong twice, first to crypto
+seeding and then to the Bionic loader. What survives verification is narrow and
+worth stating as such: one thread, `wchan=futex_do_wait`, no socket, no
+entropy starvation, blocked inside the C library rather than inside anything
+Apple wrote. The frames above it are unrecoverable here -- Bionic carries no
+debug symbols and two return addresses are outside every mapping -- so **which
+lock is being waited on, and by whom, is not yet established.**
+
+Note the method note this round earned twice: `wchan` and a file-descriptor
+list narrow a hang but do not identify it. The unwind is what identified it, and
+only after attaching. `strace` was refused here for a reason that had nothing
+to do with `ptrace` -- the failure was `execve`, not the tracer -- and that was
+another conclusion reached before checking.
 **Corrected: it is stuck in the loader, before any Apple code runs.** The
 previous entry blamed the crypto seeding path. `/proc/<pid>/maps` settles it:
 mapped are `adi_native`, `linker64`, `libc.so`, `libm.so`, `libz.so`,
