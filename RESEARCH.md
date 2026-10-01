@@ -662,6 +662,12 @@ does not "choose an error over a success" on this path -- it reaches one
 publisher and stops, and whether another block is reachable at all is not shown by
 this run.
 
+**`aslgmuibau` is a dispatch stub, not the spim packer.** At RVA `0x1d1a70`, 77
+bytes, and the same shape as `kq56gsgHG6`: a value derived from the address of its
+own stack local, mixed with a table load at `rip+0x72832`, 12 bytes stored, then a
+call to `0x1ddeb0`. Whatever packs the SPIM is below that call, so the plan that
+read the contract out of `aslgmuibau` has to follow `0x1ddeb0` instead.
+
 ### 5.8d The buffer has two writers, and the marker is overwritten (2026-09-30)
 
 **The packet buffer is written twice, by two unrelated code regions, and only
