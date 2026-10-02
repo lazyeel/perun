@@ -1792,6 +1792,39 @@ from the ring because the operand columns were not confirmed against the
 instruction encoding, and a plausible-looking substitution is exactly the kind of
 wrong answer this series has produced before. It stays open rather than guessed.
 
+**The two masks are two different buffer bytes, and `edi` is the version byte.**
+The packing hypothesis holds: the three contributors do occupy disjoint bit
+fields, `lea` in bytes 0, `edi` in byte 1, `ebp` in bytes 2-3, and they are combined
+with `or` so the compare's `eax == 1` demands all three at once. The byte sources
+are now identified:
+
+    7c8b159b  lea    -0x16ca8af1(%rax),%edi
+    7c8b15a1  movzbl (%rcx,%rdi,1),%edi      <- edi comes from a buffer byte
+    ...
+    7c8b15c8  movzbl (%rcx,%rax,1),%eax      <- eax comes from a different byte
+
+`edi = 0x2` is the packet's version byte, the one written by `--poke=scratch+0x3=0x2`,
+and the chain from it is exact at every step:
+
+    byte 0x02                       (scratch[3])
+    and  $0x2f            -> 0x02
+    lea  (0x02^0xff572f)+4 -> 0xff5731        ring: 0xff5731
+    shl  $0x8             -> 0xff573100       ring: 0xff573100
+    add  $0xa8d100        -> 0x00000200       ring: 0x200
+
+Solving that fold over all 256 byte values, the single byte that makes `edi` zero is
+`0x00`. So the flag needs two different bytes of the same packet to hold `0x01` and
+`0x00` at two different indices, plus an `ebp` of zero. That is a concrete
+requirement rather than "the input is wrong", and it says the packet must be shaped,
+not merely non-null.
+
+One thing this does not resolve, and it cuts against the rest: the fold at
+`0x8b15de` lives in the dispatcher, and the dispatcher has never been observed
+executing on the clean path, while the fork at `0x89059a` there still sees
+`r9d = 0xf0c5d587`, the value the dispatcher fold produces. The same number therefore
+arises by two different routes, and which of them runs in production is still not
+established. Everything in this subsection describes the value, not the route.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
