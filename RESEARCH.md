@@ -1638,36 +1638,25 @@ because nothing tries to assemble one. The return is still `-45034`, so the
 initialiser is necessary and not sufficient: whatever the path was feeding is now
 present, and the next gate is downstream of it.
 
-**With the initialiser the walk leaves the image.** Tracking every write of `edi`
-from the export entry, with `PERUN_INIT=cvu8io98wun` having run, gives `-45002` and
-then execution outside the mapped guest:
+**Where the walk actually ends once the session is initialised.** An earlier
+reading of this said the walk leaves the image, and that was wrong. The jump after
+the `-45002` publish is inside it:
 
-    step  56  rip=0x7c85b0ae  edi -> 0xffff5036   (-45002)
-    step 196  rip=0x556cca27  edi -> 0x28         <- outside 0x7c800000..0x7c9a5000
-    step 227  rip=0xf7e35acd                       <- host libc
-    step 346  rip=0xf7e34603                       <- host libc
+    7c85b0a9  mov $0xffff5036,%edi
+    7c85b0ae  jmp *%rbx              -> 0x7c85b11f, stable across four runs, rbp = 0xa3
 
-The publish site is:
+`0x7c85b11f` is inside `0x7c800000..0x7c9a5000` and is the body that follows the
+epilogue, so `-45002` is armed and execution continues in the same module. The
+addresses that looked like an escape, `0x556cca27` and `0xf7e3xxxx`, are perun's
+own PIE image and the host libc: the tracker was still single-stepping after the
+guest call had already returned, at roughly step 141. The error was bounding the
+walk by instruction count instead of by the return, which is the same mistake as
+reading a call's stack after it has exited.
 
-    7c85b09b  movslq (%rbx,%rbp,4),%rbp
-    7c85b09f  lea    -0x2a(%rip),%rbx        # 0x7c85b07c
-    7c85b0a6  add    %rbp,%rbx
-    7c85b0a9  mov    $0xffff5036,%edi
-    7c85b0ae  jmp    *%rbx
-
-so `-45002` is published and then handed off by a computed jump whose target comes
-from a signed table read. This is the same shape as the `0x8905b4` dispatch of
-§5.8i, and here the computed target is not inside the image at all.
-
-That is a different failure from the one §5.8h measured, and it is not something the
-argument sweep could have found. The dispatcher's index is derived from state the
-guest builds, and with the session initialised the derived index points outside the
-module. Two readings are still open and this measurement does not choose between
-them: either the index is right and the image is mapped short of where it points,
-or the index is wrong because some input the guest expects is still absent. The
-second is the more likely of the two given that the initialiser restored the path
-and not the rest of the session, and it is testable by checking whether the
-computed target is a stable address across runs.
+What survives of the earlier reading is one measured fact: with the initialiser the
+walk stops publishing `-45034`, and `-45002` at `0x85b0a9` becomes the last value
+the guest arms. The index that selects this route is `rbp = 0xa3`, and it is stable,
+so it is systematic rather than derived from unseeded state.
 
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
