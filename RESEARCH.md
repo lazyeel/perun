@@ -1658,6 +1658,29 @@ walk stops publishing `-45034`, and `-45002` at `0x85b0a9` becomes the last valu
 the guest arms. The index that selects this route is `rbp = 0xa3`, and it is stable,
 so it is systematic rather than derived from unseeded state.
 
+**`0x4069d332` is the stored initial value, not a computed one.** The `.data` word at
+RVA `0x19d050` reads `0x4069d332` at the moment `vdfut768ig` is entered, and it reads
+the same with and without the initialiser:
+
+    rva 0x19d050 = 0x000000004069d332
+
+The constant the fork compares against is its successor, `0x4069d333`, and by the
+identity of §5.8k the compare passes iff `eax == 1`, that is iff this word ends up
+one higher than it starts. The dispatcher's fold produced `0xf0c5d587` from that
+starting value, which is the observed `r9`, so the stored word is the *base* the
+fold is computed against, not a result.
+
+That also fixes a boundary condition this series kept misstating. The fork at
+`0x89059a` is reached only when the caller declares `ctx[+8] = 0x40` or larger:
+
+    ctx[+8] = 0x10 -> no fork at all, the walk ends earlier
+    ctx[+8] = 0x40 -> fork reached, r9d = 0xf0c5d587, and the forced override works
+
+with `ctx[+8] = 0x10` the call returns `-45034` without ever reaching the decision
+this project has been analysing, and a forced `r9` there does nothing at all. Every
+forced-branch result in §5.8k and §5.8j therefore rests on the larger declared output
+buffer, which is also the configuration in which the guest goes looking for a file.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
