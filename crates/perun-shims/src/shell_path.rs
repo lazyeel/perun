@@ -117,6 +117,49 @@ fn wide_to_string(p: LPCWSTR) -> String {
 }
 
 win32_api! {
+    /// DWORD GetFullPathNameW(LPCWSTR, DWORD, LPWSTR, LPWSTR *);
+    pub unsafe extern "win64" fn GetFullPathNameW(
+        name: LPCWSTR,
+        buf_len: DWORD,
+        buf: LPWSTR,
+        file_part: *mut LPWSTR,
+    ) -> DWORD {
+        let raw = wide_to_string(name);
+        if raw.is_empty() {
+            return 0;
+        }
+        // Resolve through the host so the guest sees a real absolute path, the
+        // same canonical form Win32 would have returned. This is the first call
+        // on the -45034 continuation that reaches the filesystem, so the guest
+        // is resolving a real path rather than being handed a stub's absence.
+        let full = std::fs::canonicalize(&raw)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| {
+                if raw.starts_with('/') {
+                    raw.clone()
+                } else {
+                    std::env::current_dir()
+                        .map(|d| d.join(&raw).to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| raw.clone())
+                }
+            });
+        let wide: Vec<u16> = full.encode_utf16().chain(std::iter::once(0)).collect();
+        let need = wide.len() as DWORD;
+        if !buf.is_null() {
+            let room = (buf_len as usize).min(wide.len());
+            unsafe {
+                std::ptr::copy_nonoverlapping(wide.as_ptr(), buf, room);
+                if room == wide.len() && !file_part.is_null() {
+                    *file_part = buf;
+                }
+            }
+        }
+        eprintln!("[perun] GetFullPathNameW({raw:?}, {buf_len}) -> {full:?}");
+        need
+    }
+}
+
+win32_api! {
     /// BOOL PathAppendW(LPWSTR pszPath, LPCWSTR pMore);
     unsafe extern "win64" fn PathAppendW(path: LPWSTR, more: LPCWSTR) -> BOOL {
         if path.is_null() {

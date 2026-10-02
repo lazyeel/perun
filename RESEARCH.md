@@ -1547,6 +1547,44 @@ fire on this path: `0x8906a8` and `0x8b0cac`. The negative result was an artefac
 of the instrument, and the positive result it hid is the answer to the question
 it was meant to settle.
 
+**The `-45034` continuation reads the filesystem, and the first thing it wants is
+the provisioning blob.** Between the two publishes the guest computes a table index
+and asks for the caller's buffer size against its own expectation:
+
+    lea    0x8(%r8),%eax
+    mov    0x80(%rsp),%rcx
+    cmp    0x8(%rcx),%eax      ; ctx[+8] against r8+8
+    setbe  %dl
+    seta   %bl                 ; bl decides the index offset
+    ...
+    add    %r9d,%ebx           ; index = r9d + bl
+
+With `ctx[+8] = 0x10` and `r8 = 8` the comparison lands exactly on equality, `bl`
+is `0`, and the walk publishes `-45034` at `0x8906a8`. That is a caller-controlled
+field: `ctx[+8]` is the output size the frame declares, and §5.8d had already shown
+this whole shape to be immune to argument sweeps, which is consistent with this
+being the same check.
+
+Raising `ctx[+8]` to `0x40` and `0x100` does not return a success code. It moves
+the walk into code that touches the filesystem, and it stops there because
+`GetFullPathNameW` had no implementation:
+
+    [perun] TRAP: KERNEL32.DLL!GetFullPathNameW(...) — no implementation
+                (unresolved import; shim missing)
+
+That import was absent from the whole tree, so this is a genuine gap rather than a
+build artefact. With a shim added that resolves through the host, the guest asks
+for two files:
+
+    GetFullPathNameW("...\adi.pb", 260)
+    GetFullPathNameW("...\adi-843A713B.pb", 260)
+
+which is the first time this project has seen the Windows lane name a file at all,
+and it names the very blob §5.8b investigated. The prefix is garbage bytes rather
+than a directory, so it is not a path this runtime produced; the suffix is right.
+`adi.pb` exists on disk at 606 bytes, so the next question is which global holds the
+prefix and why it is not the provisioning path.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
