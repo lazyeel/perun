@@ -1364,6 +1364,76 @@ be the success half of it. The actual other half is `0x652 → 0x7c8905ca`.
 and the compare (`0xf0c5d587`): 147 steps, and `0x4069d332 → 0x4069d333` is a
 difference of one in the low byte of a value already in the selector family at the
 dispatcher boundary. That is where the next measurement belongs.
+### 5.8k Forcing the branch moves the error, and `r9` is computed, not read (2026-10-02)
+
+Three measurements on the §5.8j decision, all with the walk off.
+
+**Forcing `r9d = 0x4069d333` moves the return from `-45020` to `-45034`, 3/3 each.**
+
+| run | return |
+|---|---|
+| control, no override | `0xffff5024` (`-45020`), 3/3 |
+| `r9 = 0x4069d333` at the fork | `0xffff5016` (`-45034`), 3/3 |
+
+The fork itself executes on the clean path exactly once, with `r9d = 0xf0c5d587`
+and `rdx = 0x651` — the same values the walk-armed ring records at step 222903. So
+the decision site is live on the clean path and the compare is load-bearing.
+
+But **passing the compare is not success**. Reaching `0x652 → 0x7c8905ca` does not
+return `0`; it lands on `-45034`, one rung further along. The `mov $0xffff5024,%edi`
+at `0x905c2` still executes on the way, because it sits between the table load and the
+`jmp` and is not guarded by the branch. What the override actually changes is which
+block the chain enters, and the next block has its own failure.
+
+**`r9` is arithmetic, not a memory read.** Across the 147-step window `r9` changes
+exactly once, at step 222776, and the writer is a fold in the dispatcher body:
+
+    7c8b15d7  lea    -0x773bf45f(%rcx,%rax,2),%eax
+    7c8b15de  or     %edi,%eax
+    7c8b15e0  or     %ebp,%eax
+    7c8b15e2  mov    %eax,%ecx
+    7c8b15e4  xor    $0x527df37e,%ecx
+    7c8b15ea  and    $0x527df37e,%eax
+    7c8b15ef  lea    -0x1214204c(%rcx,%rax,2),%r9d
+
+so `r9d = (eax ^ 0x527df37e) + (eax & 0x527df37e)*2 - 0x1214204c` over the value
+already in `eax`. The classic xor-then-and obfuscation shape; no load, so nothing
+external is read to produce it. `r9` arrives at the dispatcher as `0x4069d332` and
+is destroyed before the compare that tests for `0x4069d333`.
+
+**What the `0x652` branch actually contains.** Disassembled from `0x7c8905ca`:
+
+    7c8905ca  mov    %cl,%bl
+    7c8905cc  imul   $0xa3182b1a,%ebx,%eax
+    7c8905d2  lea    0x0(,%rbp,8),%ecx
+    7c8905d9  sub    %ebp,%ecx
+    7c8905db  sub    %ecx,%eax
+    7c8905dd  add    %edx,%eax
+    7c8905df  movabs $0x76785310c29eeead,%rcx
+    7c8905e9  mov    %rcx,0xbe8(%rsp)
+    7c8905f1  movq   $0x0,0xd28(%rsp)
+    7c8905fd  movq   $0x0,0xcc8(%rsp)
+    7c890609  movq   $0x0,0xb60(%rsp)
+    7c890615  movq   $0x0,0xb38(%rsp)
+    7c890621  xor    %edx,%edx
+    7c890623  xor    %ebp,%ebp
+    7c890625  cmpq   $0x0,0x80(%rsp)
+    7c89062e  setne  %dl
+    7c890631  sete   %bpl
+    7c890648  lea    0xcf641(%rip),%rcx        # 0x7c95fc90
+
+It does not overwrite `edi` with `0` and does not return. It keeps folding, clears
+five stack slots, clears `rdx` and `rbp`, tests `[rsp+0x80]` against zero, and
+**reaches the same jump table at `0x7c95fc90` for a second dispatch**. So `0x652`
+is not the success path with a different ending — it is the next link of the same
+chain, which is exactly why forcing it produces `-45034` instead of `-45020`.
+
+**Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
+sweep of caller-reachable inputs could not have moved it and correctly did not. It is
+a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
+is tested against is `0x4069d333`. The thing that decides `-45020` has now been named
+down to the instruction and shown to be internal, which moves the question from
+"what input steers it" to "what fills `edi`, `ebp` and `rax` at `0xb15d7`".
 ### 5.8a Anisette v3 runs locally (2026-09-27) — and what the `-45075` wall actually was
 
 **Anisette v3 client headers are generated natively on this x86_64 host: no Wine, no QEMU, no emulation layer of any kind, and no remote re-signing server.** The engine is an x86_64 Android binary and the host is x86_64, so the Apple libraries execute directly. Artefact `run-native.sh` (`crates/perun-cli/examples/adi-android/`, commit `43f16eb`), two consecutive clean runs:
