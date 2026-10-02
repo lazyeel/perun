@@ -1736,6 +1736,35 @@ appears only on the forced branch of §5.8k, never in a natural run: without for
 prefix was never the natural state of this lane. It belongs to the forced-branch
 configuration and does not explain the returned `-45034`.
 
+**A Windows-shaped folder path changes nothing, and the byte that would satisfy
+the compare is `0x01`, not `0x2b`.** Returning `C:\Users\perun\AppData\...` from
+`SHGetFolderPathW` leaves the string the guest hands to `GetFullPathNameW` byte for
+byte what it was, and it still contains no `C:`:
+
+    SHGetFolderPathW(csidl=0x8023) -> "C:\Users\perun\AppData\Local\VirtualStore\Common"
+    GetFullPathNameW("<same garbage>\adi.pb", 260)
+
+So on this branch the guest does not read the folder buffer at all, and a
+Windows-shaped path is a shape the host does not have and the guest cannot act on.
+The POSIX-looking path is therefore not the cause of the garbage prefix; the prefix
+is assembled from something else that no shim in this project has written. The
+drive-letter variant was reverted rather than left in place, since it changed
+nothing observable and would have made the shim report a layout that does not exist.
+
+The `eax == 1` derivation also has to be done against the real instructions. `rcx`
+is not a constant at that point, it was written one instruction earlier as
+`byte ^ 0x773bf45f`, so it moves with the byte:
+
+    byte 0x01 -> ecx = 0x773bf45e -> lea = 0x01
+    byte 0x2b -> ecx = 0x773bf474 -> lea = 0x6b
+
+Solving the sequence over all 256 byte values gives exactly one that reaches the
+compare: `0x01`. The `or edi` and `or ebp` remain fatal regardless, because `edi`
+carries the declared output size and `ebp` carries a derived address, and an `or`
+cannot clear a bit: with `edi = 0x200` the result is at best `0x201`. So the flag is
+not reachable by choosing a packet byte; it needs the two mask registers to be zero,
+which means the state they are built from has to be different, not the input.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it

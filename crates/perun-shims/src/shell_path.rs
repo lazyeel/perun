@@ -93,6 +93,10 @@ win32_api! {
         if csidl & CSIDL_FLAG_CREATE != 0 {
             mkdirs(&dir);
         }
+        // Returned as the host spells it. A drive-letter path was tried here and
+        // changed nothing observable: on the branch that reaches the filesystem
+        // the guest never reads this buffer, so a Windows-shaped string would be
+        // a shape the host does not have and the guest cannot act on.
         write_wide(out_path, &dir.to_string_lossy());
         eprintln!(
             "[perun] SHGetFolderPathW(csidl={csidl:#x}) -> {:?}",
