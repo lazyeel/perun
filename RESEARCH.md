@@ -1864,36 +1864,41 @@ the stack. `ctx[+0x18]` is not where the prefix comes from.
 Both of these were the last two standing explanations for the garbage path, and both
 are now excluded by measurement rather than by argument.
 
-**Where `-45034` actually comes from in a natural call.** Sweeping all 37
-`mov $0xffff5016,%edi` sites with the walk off and nothing forced, exactly two fire,
-both 3/3:
+**Correction: those two `-45034` sites do not survive, and the frontier is
+`0x8905c2`.** The claim that the natural `-45034` is published at `0x66c2d` and
+`0x7016b` was half right: both sites do execute, in that order, 3/3. What was
+missed is what the call then returns. The natural full-frame call returns
+`0xffff5024`, `-45020`, at every declared size from `0x10` upward, so the `-45034`
+they publish is overwritten before the caller sees it.
 
-    0x7c866c2d   (RVA 0x66c2d)
-    0x7c87016b   (RVA 0x7016b)
+Sweeping the `-45020` publishers the same way settles it. Of the fourteen
+`mov $0xffff5024,%edi` sites, in the natural path exactly one fires:
 
-Neither is anywhere near the dispatcher, the fold, or the `0x8906a8` site the
-forced branch reaches. Both are in the lower body and both are the same idiom as
-every other publisher:
+    0x7c8905c2   (RVA 0x8905c2)
 
-    lea    0xf9071(%rip),%rcx          # 0x7c95fc90
-    movslq (%rcx,%rax,4),%rax
-    add    %rax,%rcx
-    mov    $0xffff5016,%edi
-    jmp    *%rcx
+and the publish order is fixed 3/3:
 
-and `0x87016b` is followed immediately by
+    1  -45034 @ 0x66c2d
+    2  -45034 @ 0x7016b
+    3  -45020 @ 0x8905c2   <- survives to the return
 
-    mov    $0x4069d332,%r9d
+`0x8905c2` is the site this project measured in its first hardware-breakpoint
+round, before any walk was armed and before any register was forced. That
+measurement was right and the several rounds that followed drifted away from it
+into the walk-armed configuration, where the fold, the masks and the flag base all
+belong but describe a path production does not take.
 
-which is the same constant the barrier's compare is built around. So the natural
-path reaches the same publishing idiom, through a different part of the body, and
-re-sets the flag base on its way out.
+Two errors of my own in reaching this, both from not validating the instrument:
+`rbp` was used as the table index when `rax` already holds the loaded entry, and
+`rax` was then used as the index, which sent both jump targets outside the image
+before the arithmetic was corrected. The value at the breakpoint is the entry, not
+an index into the table, and the two targets then land inside the module
+(`0x66c35` and `0x70178`).
 
-This is the answer to the question the last several rounds were circling, and it is
-the first observation of the natural `-45034` that was not inferred from a forced
-branch or a distorted walk. The frontier is this pair of sites, and the next
-measurement is which of the two publishes first, which is one hardware-breakpoint
-run with the ordering visible. That is cheap, and it is the natural path from here.
+So the frontier is a single site, it is reached without the dispatcher and without
+forcing anything, and the next question is narrow: what selects `0x8905c2` over the
+other thirteen, given that all fourteen are byte-identical in form.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
