@@ -1585,6 +1585,41 @@ than a directory, so it is not a path this runtime produced; the suffix is right
 `adi.pb` exists on disk at 606 bytes, so the next question is which global holds the
 prefix and why it is not the provisioning path.
 
+**The path prefix is uninitialised memory, and the lane never initialises it.**
+Running the identical command three times gives three different prefixes before
+the `adi.pb` suffix, which rules out any fixed global: a constant would repeat.
+
+    run1 prefix-hash=f5475a5a
+    run2 prefix-hash=869a34dc
+    run3 prefix-hash=a60564a7
+
+Poking candidate `.data` globals does not fix it either, and the reason is worth
+recording because it cost a measurement. `--poke-ptr=RVA=VAL` is two indirections:
+the guest global at `base + rva` holds a pointer, and `VAL` is written *through*
+that pointer. Pointing it at a global whose slot is still zero crashed perun
+itself, in its own address space, which is what produced a run of six zeros and
+briefly looked like "the global is not involved". `--poke=RVA=TOKEN` is the direct
+form that stores a pointer into the global, and with it the prefix changes but
+stays garbage.
+
+The cause is visible in the harness rather than the guest. §5.8a records the
+Android sequence as `SetProvisioningPath` -> `SetAndroidID` -> `GetLoginCode` ->
+`ProvisioningStart` -> `ProvisioningEnd`. On this lane the runtime invokes
+`vdfut768ig` and nothing else: `SetProvisioningPath` appears in the tree exactly
+once, in a comment. So the guest is asked for a provisioning blob from a prefix
+that no caller ever set, and it reads whatever was on the stack.
+
+That reframes the `-45034` site. It is not a check on the provisioning data. It is
+the guest assembling a path for a file whose location it was never told, which is
+why no argument sweep could have moved it and why the suffix was right while the
+prefix was noise.
+
+The next step is therefore not another memory sweep but a call sequence: find the
+Windows-side equivalent of the Android setter and run it before `vdfut768ig`. The
+obstacles are already known, and they are the reason §5.8e could not read the blob:
+the whole `-45020` to `-45002` ladder is the call-signature mismatch that would
+have to be solved first.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it

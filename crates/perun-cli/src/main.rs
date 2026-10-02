@@ -1201,8 +1201,19 @@ fn cmd_call(args: &[String]) -> i32 {
             eprintln!("error: bad --poke-ptr value {val_s:?}");
             std::process::exit(2);
         });
+        // Two indirections, and they are easy to misread: the guest global at
+        // `base + rva` holds a pointer, and `val` is written THROUGH that
+        // pointer. `--poke=RVA=V` writes the pointer itself; this writes to
+        // what it points at.
         let slot = (image.base() as u64).wrapping_add(*rva) as *const u64;
         let target = unsafe { std::ptr::read(slot) };
+        if (target as usize) < 0x1000 {
+            eprintln!(
+                "error: --poke-ptr [RVA {rva:#x}]: the slot holds {target:#x}, \
+                 which is not a pointer; the global is probably uninitialised"
+            );
+            std::process::exit(2);
+        }
         unsafe { std::ptr::write(target as *mut u64, val) };
         println!("[perun] poke-ptr [RVA {rva:#x}] -> {target:#x} := {val:#x}");
     }
