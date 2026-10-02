@@ -1306,6 +1306,64 @@ it there. Ring capture for the `-45020` run is in progress.
 is a signed 32-bit table offset (`0xfffcab1b` into a table based at `0x7c890596`),
 and nothing measured so far says what sets it — the caller-reachable inputs were
 already swept (§5.8e) and none of them moved the result.
+### 5.8j The decision is one compare, and it is on the table index (2026-10-02)
+
+The walk-armed run for `-45020` completed: 222 935 steps written, ring capacity
+`1 << 18` = 262 144 so nothing wrapped and the whole trace from step 0 is on disk.
+The three dispatcher hits land where the project had them, one off:
+
+    dispatcher 0x7c8b15c8 : steps 96035, 108764, 222765
+    publisher  0x7c8905c2 : step  222912
+    shared epilogue       : step  222913
+
+The window between the last dispatcher hit and the publisher is **147 steps**,
+exactly the figure the walk-armed chronology predicted. Full listing in
+`/opt/data/adi-re/decision_147_steps.txt`.
+
+**The decision is a single compare, and it selects the table index.** Steps
+222903–222912:
+
+    222903  7c89059a  cmp    $0x4069d333,%r9d
+    222904  7c8905a1  setne  %cl
+    222905  7c8905a4  sete   %bpl
+    222906  7c8905a8  lea    (%rdx,%rbp,1),%eax      ; eax = rdx + (r9d == 0x4069d333 ? 1 : 0)
+    222907  7c8905ab  cltq
+    222908  7c8905ad  lea    0xcf6dc(%rip),%rdi      # 0x7c95fc90   the jump table
+    222909  7c8905b4  movslq (%rdi,%rax,4),%rax
+    222910  7c8905b8  lea    -0x29(%rip),%rsi        # 0x7c890596   the table's base
+    222911  7c8905bf  add    %rax,%rsi
+    222912  7c8905c2  mov    $0xffff5024,%edi
+
+with `rdx = 0x651`. So the outcome is a **one-slot choice** in the table at
+`0x7c95fc90`, resolved against a fixed base `0x7c890596`:
+
+| condition | index | table entry | target | meaning |
+|---|---|---|---|---|
+| `r9d != 0x4069d333` | `0x651` | `0xfffcab1b` | `0x7c85b0b1` | shared epilogue, returns `-45020` |
+| `r9d == 0x4069d333` | `0x652` | `0x00000034` | `0x7c8905ca` | computation continues, nothing published |
+
+The table entry for the failing slot matches the runtime value exactly, and the
+target it yields is the shared epilogue identified in §5.8i. The two slots differ
+by one, so the whole difference between `-45020` and continuing is this compare.
+
+**What `r9` actually is.** At the dispatcher entry `r9 = 0x4069d332`; by step 222776
+it has become `0xf0c5d587`, and that is the value the compare rejects. The
+`0x4069d33x` family therefore appears on both sides: `0x4069d332` enters the
+dispatcher, and `0x4069d333` is the constant that would let the call proceed. The
+project's §5.8e "five recognised versus four unrecognised, exact comparison"
+describes this same family; what was missing was that the comparison selects the
+**index**, not the code directly, and that the code itself is reached through the
+table plus the shared epilogue of §5.8i.
+
+**One correction to the expectation this was checked against.** `0x8f064` is not a
+target of this table at all — scanning indices `0..0x6ff`, no entry resolves to
+`0x7c88f064`. It is reached, but not as the neighbour of this decision, so it cannot
+be the success half of it. The actual other half is `0x652 → 0x7c8905ca`.
+
+**Still open, and now narrow.** What sets `r9` between the dispatcher (`0x4069d332`)
+and the compare (`0xf0c5d587`): 147 steps, and `0x4069d332 → 0x4069d333` is a
+difference of one in the low byte of a value already in the selector family at the
+dispatcher boundary. That is where the next measurement belongs.
 ### 5.8a Anisette v3 runs locally (2026-09-27) — and what the `-45075` wall actually was
 
 **Anisette v3 client headers are generated natively on this x86_64 host: no Wine, no QEMU, no emulation layer of any kind, and no remote re-signing server.** The engine is an x86_64 Android binary and the host is x86_64, so the Apple libraries execute directly. Artefact `run-native.sh` (`crates/perun-cli/examples/adi-android/`, commit `43f16eb`), two consecutive clean runs:
