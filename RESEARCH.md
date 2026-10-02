@@ -1058,6 +1058,69 @@ The remaining question is therefore not "what else feeds the decision" but
 "which packet, if any, steers the dispatcher off `0x905c2`" -- and the
 dispatcher reads buffer byte `+3`, whose value the region computes.
 
+### 5.8f The Android lane is whole, and it never had a wall (2026-10-02)
+
+**Two lanes, do not conflate them.** `run-native.sh` drives Apple's **Android**
+engine (`libstoreservicescore.so` / `libCoreADI.so`, x86_64, run natively under
+a Bionic linker, no emulation). That is the lane §5.8a opened and the lane this
+section is about. The **Windows** lane is `CoreADI64.dll` executed through
+perun's PE32+ runtime, and it is the lane the `-45020` barrier belongs to.
+Nothing in this section says anything about `-45020`; the Windows barrier is
+still open and still where §5.8b--§5.8e left it.
+
+On the Android lane `run-native.sh` provisions end to end with no edits to the
+script:
+
+    [prov] PROVISIONING COMPLETE
+    [adi]  re-check ADIGetLoginCode=0
+    === SUCCESS ===
+    X-Apple-I-MD-M: dp+14uJa5KDz4OxueI4Rav3cfuq3nUaJBT+HaksvYSUaMQk03PzK...
+
+Verified 5/5 cold runs, each after `rm -rf adi-data`, so every run was a full
+network round trip rather than a cached load. The same result reproduces on the
+untouched 27-Sep binary in `/opt/data/apk/x86/` under plain `hermes`, with no
+root, no `sudo` and no patched library.
+
+What read as a barrier here was never one. Every symptom appeared as one of only
+two observables -- hang forever, or exit 0 with zero output -- and all of them
+came from the environment:
+
+| symptom | actual cause |
+|---|---|
+| hangs, `strace` ends at `futex(FUTEX_WAIT_PRIVATE)` on `/proc/stat` | nothing: `fgets` under `sysconf(_SC_NPROCESSORS_ONLN)` inside Bionic's first `malloc`. The process was healthy; the trace was just read at the wrong moment |
+| exits 0, no output | `env` on `PATH` was a 328-byte shell shim that rewrites `PATH` and never `exec`s its argv. Exit code 0, zero effect |
+| `CANNOT LINK EXECUTABLE: libcurl.so not found` | `sudo -E` strips `LD_LIBRARY_PATH` regardless of `env_keep += "*"`. `env` must be passed *after* `sudo`, not before |
+| `Unable to locate package gdb-llvm` | not in Debian 13. `apt-get install` aborts entirely on one unlocatable name, so a single bad entry installs nothing |
+| root cannot `exec` the engine | root cannot follow a symlink in `/tmp` (sticky dir, foreign owner). The interpreter has to live outside `/tmp` |
+
+The futex row is the one to keep: a `futex(FUTEX_WAIT_PRIVATE)` seen after a
+`read("/proc/stat")` is Bionic's `stdio` lock inside the allocator's first
+`sysconf`, and it says nothing about Apple code, in either lane.
+
+**The `libc.so` patch was wrong and has been reverted.** Patching
+`__sysconf_nprocessors_onln` to `mov eax,4; ret` at `0x2b230` was a reasonable
+reading of the futex trace and a plausible fix. It is not required:
+`/opt/data/x86sys/lib64/libc.so` matches the pristine
+`/opt/data/il/libc.so.orig` (`dc55254e238c54c16bf9c1a22fe422b0`) and the lane
+provisions. The patched build was also confirmed working, so the patch was
+neither necessary nor harmful -- it was simply not the cause. Recorded here so
+nobody re-derives it.
+
+**A negative control is now part of the Android lane.** `doctor.sh` checks all
+seven preconditions and exits non-zero on any failure, so a green run means the
+chain was actually verified rather than absent:
+
+    ./doctor.sh            # check only
+    ./doctor.sh --run      # check, then run
+
+It verifies the Bionic sysroot, the APK libraries and the `libstdc++.so` alias,
+the NDK path, the TLS pin against a live `gsa.apple.com`, the `ADI_RESOLVE`
+address, the `PT_INTERP` marker in `adi_native.raw`, and -- the check that would
+have caught the worst fault -- that `env` resolves to a real `env` and is not
+shadowed by a wrapper. The TLS and reachability checks are the MITM tripwire:
+if a proxy ever enters the path, the pin verification fails there and names
+itself, instead of surfacing later as an unexplained provisioning error.
+
 ### 5.8a Anisette v3 runs locally (2026-09-27) — and what the `-45075` wall actually was
 
 **Anisette v3 client headers are generated natively on this x86_64 host: no Wine, no QEMU, no emulation layer of any kind, and no remote re-signing server.** The engine is an x86_64 Android binary and the host is x86_64, so the Apple libraries execute directly. Artefact `run-native.sh` (`crates/perun-cli/examples/adi-android/`, commit `43f16eb`), two consecutive clean runs:
