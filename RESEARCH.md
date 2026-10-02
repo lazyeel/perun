@@ -1703,6 +1703,39 @@ that reaches it. This is the first configuration in the project where the `-4502
 path is entered by an input other than the provisioning call, and it is the one to
 work from next.
 
+**The envelope is the caller's second argument, and the initialiser corrupts the
+header.** Three facts, each checked directly.
+
+The envelope. `ctx[+0x0]` is the data pointer and `ctx[+0x8]` the size, and the
+size is what discriminates. With `ctx[+8] = 0x40` the init opcode reaches `-45020`;
+with `scratch` as the second argument the guest reads `scratch[+8]`, which is `0`,
+fails the bound, and returns `-45034`. `scratch` is a real guest buffer, so this is
+not "a pointer" but a buffer whose declared size passes the check. The second
+argument must be the context.
+
+The corruption. `cvu8io98wun` writes four bytes at `[rcx+0]`, and the first call
+argument is that same address when the initialiser is pointed at `scratch`:
+
+    no initialiser                 scratch+0 = 0x0000000002000000
+    initialiser, rcx = scratch     scratch+0 = 0x0000002000000001
+    initialiser, rcx = own buffer  scratch+0 = 0x0000000002000000
+
+The middle line is the corruption: `00 00 00 02` becomes `01 00 00 00 02 00 00 00`,
+which is the `0x2000000001` pattern. The header the guest reads at entry is gone,
+and the walk ends at step 56 without reaching the branch this project has been
+analysing. Pointing the initialiser at a buffer of its own leaves the header intact,
+so the invocation must never reuse `scratch` for it.
+
+The shim is not at fault for the path. `SHGetFolderPathW` writes through
+`write_wide`, which copies UTF-16 and then stores a terminating zero, maps `0x8023`
+to `Common`, and returns `S_OK`, and the run confirms it is called and returns
+`/opt/data/home/.perun/appdata/Common`. `PathAppendW` is never called, so the
+`PathAppendW`-then-append story does not hold for this path. And `GetFullPathNameW`
+appears only on the forced branch of §5.8k, never in a natural run: without forcing
+`r9`, the guest never reaches the code that builds a path at all, so the garbage
+prefix was never the natural state of this lane. It belongs to the forced-branch
+configuration and does not explain the returned `-45034`.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
