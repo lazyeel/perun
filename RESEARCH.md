@@ -1864,6 +1864,36 @@ the stack. `ctx[+0x18]` is not where the prefix comes from.
 Both of these were the last two standing explanations for the garbage path, and both
 are now excluded by measurement rather than by argument.
 
+**Where `-45034` actually comes from in a natural call.** Sweeping all 37
+`mov $0xffff5016,%edi` sites with the walk off and nothing forced, exactly two fire,
+both 3/3:
+
+    0x7c866c2d   (RVA 0x66c2d)
+    0x7c87016b   (RVA 0x7016b)
+
+Neither is anywhere near the dispatcher, the fold, or the `0x8906a8` site the
+forced branch reaches. Both are in the lower body and both are the same idiom as
+every other publisher:
+
+    lea    0xf9071(%rip),%rcx          # 0x7c95fc90
+    movslq (%rcx,%rax,4),%rax
+    add    %rax,%rcx
+    mov    $0xffff5016,%edi
+    jmp    *%rcx
+
+and `0x87016b` is followed immediately by
+
+    mov    $0x4069d332,%r9d
+
+which is the same constant the barrier's compare is built around. So the natural
+path reaches the same publishing idiom, through a different part of the body, and
+re-sets the flag base on its way out.
+
+This is the answer to the question the last several rounds were circling, and it is
+the first observation of the natural `-45034` that was not inferred from a forced
+branch or a distorted walk. The frontier is this pair of sites, and the next
+measurement is which of the two publishes first, which is one hardware-breakpoint
+run with the ordering visible. That is cheap, and it is the natural path from here.
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
