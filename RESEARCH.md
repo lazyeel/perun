@@ -1502,6 +1502,31 @@ The stack slot the continuation tests is a live context pointer, not zero:
 which is exactly the `ctx` the run was given (`poke ctx[0x0] ... abs
 0x7ffff7bde000`), so `cmpq $0x0,0x80(%rsp)` takes its non-null arm.
 
+**What the 0x652 branch publishes, and what it reads.** Forcing the branch and
+single-stepping a hundred instructions from the 0x652 target gives the whole
+continuation:
+
+    mov  edi,0xffff5036          <- publishes -45002, unconditionally
+    xor  r11d,r11d
+    jmp  rdx
+    ...
+    lea  eax,[r8+0x8]
+    mov  rcx,QWORD PTR [rsp+0x80]
+    cmp  eax,DWORD PTR [rcx+0x8] <- reads ctx[+8]
+
+So the branch past `-45020` does not publish `-45034`, which is what the call
+actually returned. It publishes `-45002` at RVA `0x89065d`, with no guard on the
+way, and then keeps folding and reaches the context. The `-45034` observed at the
+epilogue is written later than these hundred instructions, and none of the 37
+`mov $0xffff5016,%edi` sites fires, so it does not arrive that way either. Both
+`-45002` and `-45034` are set on this path, in that order, and the second overwrites
+the first before the epilogue copies `edi` into the return register.
+
+That also retires the reading that forcing the branch "advances the state machine
+one stage". It does not: it removes the `-45020` publish and reveals the next
+publish, which is `-45002`, and the reason the final value is `-45034` is still
+unaccounted for.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
