@@ -1189,6 +1189,123 @@ artefacts.
 **Still open.** Where the two paths diverge before the publish step, and what selects
 `-45020`. What is established here is narrower and firmer: the clean path's return
 value now has a known publishing site, and the site is not the one the map named.
+### 5.8h One publisher of fourteen runs, and the CFF dispatcher does not run at all (2026-10-02)
+
+Continuing §5.8g on the same clean-path instrument. x86_64 has four debug
+registers, so the fourteen `-45020` sites were covered in four batches of four;
+gdb stops in execution order, so the first reported hit is the first executed.
+
+**Exactly one of the fourteen executes.** `0x905c2`, once. The other thirteen do
+not execute at all on the clean path — not later, not conditionally, not at all:
+
+| batch | sites | result |
+|---|---|---|
+| 1 | `0x8f722` `0x8f96c` `0x8fb8a` `0x8fd94` | no hit |
+| 2 | `0x8ff0a` `0x900cd` `0x9029d` `0x90443` | no hit |
+| 3 | `0x905c2` `0x90780` `0x9090a` `0x90a96` | **`0x905c2` hit, once** |
+| 4 | `0x90b60` `0xb469c` | no hit |
+
+So the thirteen alternatives are not "reached but bypassed at the last step". On
+this configuration they are never entered.
+
+**The CFF dispatcher does not execute.** `0xb15c8` was armed in the same run and
+never fired, while `0x905c2` fired "after 0 dispatcher hits". The address is
+validated by disassembly, and it is the documented instruction:
+
+    7c8b15c8:  0f b6 04 01    movzbl (%rcx,%rax,1),%eax
+
+This matters more than the `-45020` bookkeeping it carries. §5.8b–§5.8e describe a
+113-block dispatcher that selects among publishers by an index folded from packet
+byte `+3`, and that is the mechanism a large part of this project has been
+reconstructing. On the clean path that dispatcher is not in the execution chain at
+all. Whatever selects `-45020` here, it is not the CFF index.
+
+**`0x905c2` is not a return site either.** Its shape:
+
+    7c8905b4:  48 63 04 87       movslq (%rdi,%rax,4),%rax
+    7c8905b8:  48 8d 35 d7 ff ff ff   lea    -0x29(%rip),%rsi   # 0x7c890596
+    7c8905bf:  48 01 c6          add    %rax,%rsi
+    7c8905c2:  bf 24 50 ff ff    mov    $0xffff5024,%edi
+    7c8905c7:  ff e6             jmp    *%rsi
+
+It arms the code in `edi` and then tail-jumps through a second, independent
+jump table. The `-45020` value is therefore *carried*, not returned, and the
+return happens further down that chain. The four bytes above it are themselves a
+table dispatcher — same shape as the CFF one — so `0x905c2` is a target it
+selected, not its origin.
+
+**No static predecessor exists.** Sweeping the disassembly finds zero direct
+branches to `0x905c2` and zero references to the address as an immediate, which is
+consistent with arrival by computed jump. At the hit `rsp` is `0x7fffffffb4c0` and
+the four stack words are all zero, so the block carries no recoverable frame: it is
+entered with a stack that does not describe the chain that led to it. Reading the
+predecessor statically is therefore not available, and the walk-arming trace cannot
+be used here because it changes the state being measured.
+
+**What this leaves.** Established: on the clean path exactly one `-45020` publishing
+site executes, the CFF dispatcher is not executed, and `0x905c2` hands off through
+a jump table rather than returning. Open: which code selects `0x905c2`, and where
+the chain that carries `-45020` in `edi` finally returns it. The next cheap step is
+the same instrument applied to the jump table at `0x890596` — the entry index in
+`rdi`/`rax` at entry to `0x905b4` names the chosen block, and that index is what
+has to be explained.
+### 5.8i The return is a shared epilogue, and the CFF dispatcher never runs (2026-10-02)
+
+Third round on the clean path with the same hardware-breakpoint instrument.
+
+**The clean path does not execute the CFF dispatcher.** `0xb15c8` armed in the
+same run as `0x905c2` reported `after 0 dispatcher hits`: the publisher fired with
+the dispatcher count still at zero. The address is validated by disassembly and is
+the documented instruction —
+
+    7c8b15c8:  0f b6 04 01    movzbl (%rcx,%rax,1),%eax
+
+§5.8b–§5.8e reconstruct a 113-block dispatcher that chooses among publishers by an
+index folded from packet byte `+3`. That mechanism is not in the clean path's
+execution chain. Whatever selects `-45020` there, it is not the CFF index.
+
+**One publisher of fourteen executes, once.** Four batches of four hardware
+breakpoints, gdb stopping in execution order: batch 1 (`0x8f722` `0x8f96c` `0x8fb8a`
+`0x8fd94`) no hit, batch 2 (`0x8ff0a` `0x900cd` `0x9029d` `0x90443`) no hit, batch 3
+(`0x905c2` `0x90780` `0x9090a` `0x90a96`) hit on `0x905c2`, batch 4 (`0x90b60`
+`0xb469c`) no hit. The thirteen alternatives are not reached and then bypassed; they
+are never entered.
+
+**`0x905c2` is not a return site. The value is carried, then moved to `eax` by an
+epilogue every publisher shares.** Read at the `jmp`:
+
+    7c8905b4:  48 63 04 87          movslq (%rdi,%rax,4),%rax
+    7c8905b8:  48 8d 35 d7 ff ff ff  lea    -0x29(%rip),%rsi   # 0x7c890596
+    7c8905bf:  48 01 c6             add    %rax,%rsi
+    7c8905c2:  bf 24 50 ff ff       mov    $0xffff5024,%edi
+    7c8905c7:  ff e6                jmp    *%rsi
+
+    at the jmp:  rsi=0x7c85b0b1  rax=0xfffffffffffcab1b  rdi=0xffff5024
+
+    7c85b0b1:  89 f8                mov    %eax,%edi
+    7c85b0b3:  0f 10 35 00 16 00 00 movaps xmm6,XMMWORD PTR [rsp+0x1600]
+    7c85b0bb:  0f 10 3d 10 16 00 00 movaps xmm7,XMMWORD PTR [rsp+0x1610]
+    ...                                    (xmm8..xmm10 likewise)
+
+So the sequence is: publish into `edi`, jump to `0x7c85b0b1`, and that common tail
+copies `edi` into `eax` and restores the callee-saved XMM registers before returning.
+`0x905c2` is one of several entry points into that shared epilogue, and the code the
+caller receives is decided entirely by which entry point was taken.
+
+This is why the publisher framing of §5.8b never produced a return address to read:
+there is no per-code return to find. There is one return, shared.
+
+**On the instrumentation limit.** The walk-armed configuration and gdb cannot be used
+together: with `PERUN_STEPS` set, perun drives its own single-step and consumes
+`SIGTRAP`, and gdb takes the same trap first, so the process stops under the debugger
+before the walk runs. The 147-step window between dispatcher and publisher exists only
+in that walk-armed configuration, and perun's own ring is the instrument that can read
+it there. Ring capture for the `-45020` run is in progress.
+
+**Open.** What decides which of the entry points is taken. At the dispatch the index
+is a signed 32-bit table offset (`0xfffcab1b` into a table based at `0x7c890596`),
+and nothing measured so far says what sets it — the caller-reachable inputs were
+already swept (§5.8e) and none of them moved the result.
 ### 5.8a Anisette v3 runs locally (2026-09-27) — and what the `-45075` wall actually was
 
 **Anisette v3 client headers are generated natively on this x86_64 host: no Wine, no QEMU, no emulation layer of any kind, and no remote re-signing server.** The engine is an x86_64 Android binary and the host is x86_64, so the Apple libraries execute directly. Artefact `run-native.sh` (`crates/perun-cli/examples/adi-android/`, commit `43f16eb`), two consecutive clean runs:
