@@ -1527,6 +1527,26 @@ one stage". It does not: it removes the `-45020` publish and reveals the next
 publish, which is `-45002`, and the reason the final value is `-45034` is still
 unaccounted for.
 
+**Where `-45034` comes from, and a harness bug that hid it.** Stepping the forced
+branch and logging every change of `edi` gives two writes and no more:
+
+    step 28  0x7c89065d  mov $0xffff5036,%edi   -> edi = -45002
+    step 47  0x7c8906a8  mov $0xffff5016,%edi   -> edi = -45034
+
+and the walk then ends, `edi` still `0xffff5016`, which is what the epilogue copies
+into the return register. So `-45034` is published at RVA `0x8906a8`, nineteen
+instructions after `-45002` is published at `0x89065d`, both on the forced path
+and both unguarded.
+
+An earlier sweep of all 37 `mov $0xffff5016,%edi` sites reported that none of them
+fires, and that was wrong: the sweep's own gdb script ended its hit report with
+`printf "HIT: -45034 site 0x%s"` with no argument for `%s`, so gdb raised
+`Wrong number of arguments for specified format-string` at the moment of the hit
+and the run was scored as a non-fire. Re-run with the format fixed, **two** sites
+fire on this path: `0x8906a8` and `0x8b0cac`. The negative result was an artefact
+of the instrument, and the positive result it hid is the answer to the question
+it was meant to settle.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
