@@ -1765,6 +1765,33 @@ cannot clear a bit: with `edi = 0x200` the result is at best `0x201`. So the fla
 not reachable by choosing a packet byte; it needs the two mask registers to be zero,
 which means the state they are built from has to be different, not the input.
 
+**`edi = 0x200` is the low half of a 33-bit sum, not a declared size.** The mask that
+makes the flag unreachable is arithmetic, not a policy field. The chain is visible
+whole in the ring, immediately before the third dispatcher hit:
+
+    [222761] rip=0x7c8b15b3  edi 0x2 -> 0xff5731
+    [222763] rip=0x7c8b15bd  edi 0xff5731 -> 0xff573100     (shl $0x8)
+    [222764] rip=0x7c8b15c3  edi 0xff573100 -> 0x200         (add $0xa8d100)
+
+and the last step is exact:
+
+    0xff573100 + 0xa8d100 = 0x100000200     (33 bits)
+    low 32 bits           = 0x00000200     <- the value the guest carries
+
+So `edi` lands on 512 by coincidence. It is not the caller's declared output size
+and not an error mask; it is whatever the low 32 bits of an overflowing sum happen
+to be, and the constant `0xa8d100` is chosen so that the overflow lands on `0x200`.
+That is why `edi` has not moved across the whole fold and why §5.8e could not have
+moved it by sweeping caller inputs: no caller input reaches this sum.
+
+`ebp` is the other half and is not yet accounted for. The ring records it
+changing 17 143 times, and the value in the fold, `0xb05c0000`, appears at step
+222753 before being overwritten at 222754 and set again at 222762, so it is
+produced inside the same block. Its two `lea` inputs could not be read reliably
+from the ring because the operand columns were not confirmed against the
+instruction encoding, and a plausible-looking substitution is exactly the kind of
+wrong answer this series has produced before. It stays open rather than guessed.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
