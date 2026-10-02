@@ -50,6 +50,15 @@ static mut STEP_SEALS: u64 = 0;
 /// consumed by the next single-step trap. Zero means nothing to re-seal.
 static mut STEP_RESEAL: usize = 0;
 static mut SEAL_PAGES: u64 = 0;
+
+/// PERUN_FORCE_AT=<rva>:<reg>=<value>,... forces named registers when the walk
+/// reaches that guest address. This exists because the registers that mask the
+/// barrier's flag are produced by arithmetic inside the flattened body, so no
+/// argument sweep can reach them; a debugger is not an option either, since the
+/// walk and gdb both consume SIGTRAP and cannot run at once. Zero means unset.
+static mut FORCE_AT: u64 = 0;
+static mut FORCE_REGS: [(i32, u64); 6] = [(0, 0); 6];
+static mut FORCE_N: usize = 0;
 static mut STEP_PRIMED: bool = false;
 static mut STEP_ENTERED: bool = false;
 static mut STEP_COUNT: u64 = 0;
@@ -347,6 +356,20 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             if rip < STEP_DLL_LO || rip >= STEP_DLL_HI {
                 *regs.add(libc::REG_EFL as usize) = (flags | EFLAGS_TF) as i64;
                 return;
+            }
+
+            // Forced registers, applied to the live context so the instruction at
+            // this address sees them. TF stays set and the step is still recorded,
+            // so the walk is otherwise unchanged and the trace stays honest.
+            unsafe {
+                let (at, n) = (FORCE_AT, FORCE_N);
+                if at != 0 && rip == at {
+                    for k in 0..n {
+                        let (idx, val) = FORCE_REGS[k];
+                        *regs.add(idx as usize) = val as i64;
+                    }
+                    eprintln!("[perun] forced {n} register(s) at rip={rip:#x}");
+                }
             }
 
             STEP_ENTERED = true;
@@ -1267,6 +1290,99 @@ fn cmd_call(args: &[String]) -> i32 {
     // PERUN_SEQ=N: repeat the call N times in the SAME process so gate state set
     // by an earlier call carries into later ones (Android provisioning is a
     // sequence of calls in one process; the Windows dispatcher folds them in).
+    // PERUN_FORCE_AT=<rva>:<reg>=<value>[,<reg>=<value>]...
+    // Registers are the usual x86 names. The address is an RVA in the guest image.
+    if let Ok(spec) = std::env::var("PERUN_FORCE_AT") {
+        let (addr_s, rest) = match spec.split_once(':') {
+            Some(p) => p,
+            None => {
+                eprintln!("[perun] PERUN_FORCE_AT needs <rva>:<reg>=<v>,... : {spec:?}");
+                return 2;
+            }
+        };
+        let addr = match u64::from_str_radix(addr_s.trim_start_matches("0x"), 16) {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("[perun] PERUN_FORCE_AT address is not hex: {addr_s:?}");
+                return 2;
+            }
+        };
+        let mut pairs: Vec<(i32, u64)> = Vec::new();
+        for item in rest.split(',').filter(|s| !s.trim().is_empty()) {
+            let (rname, vname) = match item.split_once('=') {
+                Some(p) => p,
+                None => continue,
+            };
+            let idx = match rname.trim() {
+                "rax" => libc::REG_RAX,
+                "rbx" => libc::REG_RBX,
+                "rcx" => libc::REG_RCX,
+                "rdx" => libc::REG_RDX,
+                "rsi" => libc::REG_RSI,
+                "rdi" => libc::REG_RDI,
+                "rbp" => libc::REG_RBP,
+                "r8" => libc::REG_R8,
+                "r9" => libc::REG_R9,
+                "r10" => libc::REG_R10,
+                "r11" => libc::REG_R11,
+                "r12" => libc::REG_R12,
+                "r13" => libc::REG_R13,
+                "r14" => libc::REG_R14,
+                "r15" => libc::REG_R15,
+                // 32-bit spellings address the same slot in the ucontext on x86_64,
+                // so accept both; the barrier's masks are named that way.
+                "eax" => libc::REG_RAX,
+                "ebx" => libc::REG_RBX,
+                "ecx" => libc::REG_RCX,
+                "edx" => libc::REG_RDX,
+                "esi" => libc::REG_RSI,
+                "edi" => libc::REG_RDI,
+                "ebp" => libc::REG_RBP,
+                "r8d" => libc::REG_R8,
+                "r9d" => libc::REG_R9,
+                "r10d" => libc::REG_R10,
+                "r11d" => libc::REG_R11,
+                "r12d" => libc::REG_R12,
+                "r13d" => libc::REG_R13,
+                "r14d" => libc::REG_R14,
+                "r15d" => libc::REG_R15,
+                other => {
+                    eprintln!("[perun] PERUN_FORCE_AT: unknown register {other:?}");
+                    return 2;
+                }
+            };
+            let v = match u64::from_str_radix(vname.trim_start_matches("0x"), 16) {
+                Ok(v) => v,
+                Err(_) => {
+                    eprintln!("[perun] PERUN_FORCE_AT: value is not hex: {vname:?}");
+                    return 2;
+                }
+            };
+            pairs.push((idx, v));
+        }
+        if pairs.is_empty() || pairs.len() > 6 {
+            eprintln!(
+                "[perun] PERUN_FORCE_AT needs 1..=6 registers, got {}",
+                pairs.len()
+            );
+            return 2;
+        }
+        // The handler sees an absolute rip, so carry the image base with the RVA.
+        // Print both: an RVA that looks absolute is a common way to get this wrong.
+        let abs_addr = image.base() as u64 + addr;
+        unsafe {
+            for (k, p) in pairs.iter().enumerate() {
+                FORCE_REGS[k] = *p;
+            }
+            FORCE_N = pairs.len();
+            FORCE_AT = abs_addr;
+        }
+        eprintln!(
+            "[perun] forcing {} register(s) at guest rva {addr:#x} (abs {abs_addr:#x})",
+            pairs.len()
+        );
+    }
+
     let seq_n: usize = std::env::var("PERUN_SEQ")
         .ok()
         .and_then(|v| v.parse().ok())

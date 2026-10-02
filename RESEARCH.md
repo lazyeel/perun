@@ -1825,6 +1825,45 @@ executing on the clean path, while the fork at `0x89059a` there still sees
 arises by two different routes, and which of them runs in production is still not
 established. Everything in this subsection describes the value, not the route.
 
+**Two negative results close the two hypotheses this series had left open.**
+`PERUN_FORCE_AT=<rva>:<reg>=<value>,...` now forces named registers in the live
+guest context when the walk reaches that address, which is what a debugger could
+not do here: the walk and gdb both consume SIGTRAP and cannot run together. It is
+verified against a control, forcing at the export entry and seeing the handler fire,
+and it accepts both the 32- and 64-bit register spellings because the masks are
+named `edi` and `ebp`.
+
+The first result is negative. The two buffer reads that feed `eax` and `edi` do use
+different registers as offsets, so they are indeed two different bytes:
+
+    7c8b15a1  movzbl (%rcx,%rdi,1),%edi
+    7c8b15c8  movzbl (%rcx,%rax,1),%eax
+
+but forcing `edi = 0` and `ebp = 0` at the `or` changes nothing. The address is
+reached three times per run and the return stays `-45020` for every byte tried,
+including `0x01`:
+
+    byte 0x02, edi=ebp=0 forced   -> -45020
+    byte 0x01, edi=ebp=0 forced   -> -45020
+
+So the masks are not what decides this path. Combined with the fold living in the
+dispatcher, which has never been seen executing on the clean path, the honest
+reading is that this entire line of work describes the walk-armed configuration and
+its value, not the frontier. The frontier is whatever returns `-45034` in a natural
+call, and it does not go through the dispatcher, the fold, or these masks.
+
+The second is also negative. Pointing `ctx[+0x18]` at a real UTF-16LE buffer holding
+`adi-data` does not change the string the guest passes to `GetFullPathNameW`:
+
+    poke ctx[0x18] = 0x7ffff7fb5000     (a UTF-16LE "adi-data")
+    GetFullPathNameW(";IUe0\ufffd...\adi.pb", 260)
+
+and the prefix still differs from run to run, so it is still whatever was left on
+the stack. `ctx[+0x18]` is not where the prefix comes from.
+
+Both of these were the last two standing explanations for the garbage path, and both
+are now excluded by measurement rather than by argument.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
