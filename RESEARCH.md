@@ -1462,6 +1462,46 @@ six-slot offset, because the ring's slot is written before the recorded `rip`
 executes; reading them from the row that carries the `rip` itself is wrong by
 five or six slots and yields a plausible-looking wrong answer.
 
+**The fold is a flag test, and the flag is already 1 when the branch is taken.** The
+xor/and pair with the same constant collapses, by `(X^Y) + 2*(X&Y) == X + Y`, to
+`r9d = eax + 0x527df37e - 0x1214204c`, and `0x527df37e - 0x1214204c` is exactly
+`0x4069d332`. So the compare against `0x4069d333` passes if and only if `eax == 1`.
+The identity was checked on 200 007 values with no failure, and the collapse
+reproduces the observed `0xf0c5d587` from `eax = 0xb05c0255` exactly.
+
+`eax` is born from the buffer, four instructions before the fold:
+
+    movzbl (%rcx,%rax,1),%eax        ; the dispatcher byte, zero-extended
+    mov  %eax,%ecx
+    xor  $0x773bf45f,%ecx
+    and  $0x5f,%eax
+    lea  -0x773bf45f(%rcx,%rax,2),%eax
+    or   %edi,%eax
+    or   %ebp,%eax
+
+Three contributions reach `eax` and it must equal `1`, so all three must carry no
+bit above the low one. Measured they are `edi = 0x200`, `ebp = 0xb05c0000` and the
+byte-derived term `0x55`, with `ebp` built at `0xb15b3` as
+`lea 0x1600211(%rbp,%rbx,2),%ebp`.
+
+Forcing the branch and stopping at the shared epilogue shows what the flag became:
+
+    rax = 0x1     <- exactly the value the compare was asking for
+    rdi = 0xffff5016
+
+so with the branch taken the flag is already correct and the failure has moved
+into a different variable. None of the 37 `mov $0xffff5016,%edi` sites fires on
+this path, checked one site per run, so `-45034` is not published by that idiom
+here at all; it reaches `edi` some other way, and identifying that is now the
+open question rather than the branch.
+
+The stack slot the continuation tests is a live context pointer, not zero:
+
+    [rsp+0x80] = 0x00007ffff7bde000
+
+which is exactly the `ctx` the run was given (`poke ctx[0x0] ... abs
+0x7ffff7bde000`), so `cmpq $0x0,0x80(%rsp)` takes its non-null arm.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
