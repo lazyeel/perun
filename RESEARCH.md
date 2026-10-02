@@ -1121,6 +1121,74 @@ shadowed by a wrapper. The TLS and reachability checks are the MITM tripwire:
 if a proxy ever enters the path, the pin verification fails there and names
 itself, instead of surfacing later as an unexplained provisioning error.
 
+### 5.8g The publisher table was wrong, and the clean path is now observable (2026-10-02)
+
+The barrier map in §5.8b lists one "publisher" per ADI code (`0x8ffbd`→`-45020`,
+`0x905c2`→`-45018`, `0x8ef2d`→`-45002`, `0x8ef22`→`-45034`). **That table does not
+survive a check, and the check was possible only after two things changed.**
+
+**The baseline ladder reproduces verbatim**, from a cold run of the shipped script:
+
+| rung | invocation | return |
+|---|---|---|
+| 1 | `vdfut768ig 0xcfe0b46a ctx 0 0`, no poke | `0xffff5016` (`-45034`) |
+| 2 | same frame, `--poke=0x19db98=scratch` | `0xffff5036` (`-45002`) |
+| 3 | same frame, gate not poked | `0xffff5024` (`-45020`) |
+
+All three rungs need all four positional arguments (`HANDOVER.md` § 9, note on
+`perun call`): with `r8`/`r9` left zero the call silently narrows and returns
+`-45002` whatever the gate holds, which reads like the clean result.
+
+**The clean path is now observable, which it was not before.** `HANDOVER.md` records
+that a trace cannot be taken in the configuration that returns `-45020`: the ring
+dump sits inside the `STEP_ARMED` branch, and arming the walk changes the state it
+measures. Hardware breakpoints fix that, because they write a debug register rather
+than patching the page and never single-step. The release binary is stripped, so
+neither `break mprotect` nor any symbol resolves, and gdb's Python API refuses
+`BP_CATCHPOINT`; the working arming point is a `catch syscall write`, which fires
+after the image is mapped and after its first print, when the page is readable.
+
+Mechanism proven on the guest export entry, with the frame intact:
+
+    HIT export entry vdfut768ig 0x7c85afc0
+    rcx 0xcfe0b46a   rdx 0x7ffff7bde000
+    #0  0x7c85afc0 in ?? ()      <- guest
+    #1  0x55555562ae80 in ?? ()  <- perun
+
+**`0x8ff0a` is not reached on the clean path.** Armed, with the run returning
+`-45020`, it never fires. §5.8e's "the only success site" is therefore not
+executed in this configuration at all.
+
+**The publisher table is wrong, and the `-45018` entry cannot exist.** Sweeping
+`objdump` for the immediate idiom:
+
+| code | sites loading it into `edi` |
+|---|---|
+| `-45020` `0xffff5024` | **14** |
+| `-45018` `0xffff502c` | **0** |
+| `-45002` `0xffff5036` | **46** |
+| `-45034` `0xffff5016` | **37** |
+
+There is no `mov $0xffff502c,%edi` anywhere in the image, so "`0x905c2` publishes
+`-45018`" cannot be right as stated. Each code is loaded at many sites — this is the
+body's repeating shape, not a set of single publishers — and the table took one
+arbitrary instance of each idiom and named it the publisher. `0x8ffbd` is the first
+of the fourteen `-45020` sites; `0x8ff0a`, listed as a success site, is the fifth
+and carries the *same* `mov $0xffff5024,%edi`, i.e. it is an `-45020` site and not a
+success site at all.
+
+**What the clean path actually executes.** On the `-45020` run one publisher fires,
+`0x905c2`, which by disassembly loads `$0xffff5024` — `-45020`, not `-45018`. On the
+poked `-45002` run it does not fire. So the two paths diverge before publishing, and
+the divergence is now located on the publishing step itself rather than inferred.
+
+All fourteen `-45020` sites lie in `0x8f000..0x91000`, below the opaque smear region
+`0x189000..0x1a5500`, so they are ordinary linear-disassembly code and not smear
+artefacts.
+
+**Still open.** Where the two paths diverge before the publish step, and what selects
+`-45020`. What is established here is narrower and firmer: the clean path's return
+value now has a known publishing site, and the site is not the one the map named.
 ### 5.8a Anisette v3 runs locally (2026-09-27) — and what the `-45075` wall actually was
 
 **Anisette v3 client headers are generated natively on this x86_64 host: no Wine, no QEMU, no emulation layer of any kind, and no remote re-signing server.** The engine is an x86_64 Android binary and the host is x86_64, so the Apple libraries execute directly. Artefact `run-native.sh` (`crates/perun-cli/examples/adi-android/`, commit `43f16eb`), two consecutive clean runs:
