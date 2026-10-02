@@ -1442,6 +1442,26 @@ on is the whole of it. This is the same shape §5.8e recorded for the `0x632b8d6
 selector, now reproduced on the clean path by forcing the register rather than
 inferring it from a trace.
 
+**The fold is verified arithmetically.** Taking the operands the ring carries six
+slots ahead of the `lea`, the whole six-instruction sequence reproduces the
+observed value exactly:
+
+    rcx=0x773bf40a  rax=0x55  edi=0x200  ebp=0xb05c0000
+      lea eax = rcx + rax*2 - 0x773bf45f = 0x55
+      or  edi = 0x255
+      or  ebp = 0xb05c0255
+      xor ecx = 0xe221f12b
+      and eax = 0x105c0254
+      lea r9d = 0xf0c5d587      <- matches the ring at step 222776
+
+Two things follow that the earlier reading of this window did not have. `ebp` is
+not an input that gets set once before the third dispatcher hit: it changes
+11 140 times across the window, so it is a working register of the body and
+"who sets ebp" is the wrong question. And the operands are recoverable only at a
+six-slot offset, because the ring's slot is written before the recorded `rip`
+executes; reading them from the row that carries the `rip` itself is wrong by
+five or six slots and yields a plausible-looking wrong answer.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
