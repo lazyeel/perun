@@ -1681,6 +1681,28 @@ this project has been analysing, and a forced `r9` there does nothing at all. Ev
 forced-branch result in §5.8k and §5.8j therefore rests on the larger declared output
 buffer, which is also the configuration in which the guest goes looking for a file.
 
+**The init opcode reaches the `-45020` barrier, and the second argument decides.**
+Driving the dispatcher with the init opcode `0xb0eda7af` and a non-null `arg1`
+produces `-45020` itself, not one of the shallower codes, and it is stable 5/5:
+
+    init vdfut768ig(0xb0eda7af, 0)      -> 0xffff5036  (-45002)
+    init vdfut768ig(0xb0eda7af, ctx)   -> 0xffff5024  (-45020)
+    init vdfut768ig(0xb0eda7af, scratch) -> 0xffff5016  (-45034)
+
+`scratch` is a valid guest buffer and it does not do it, so this is not "any
+pointer". A second argument that looks like a context is what carries the call to
+the barrier, and the barrier then answers `-45020` where the provisioning call
+alone answers `-45034`. Overriding `ctx[+0x8]`, `+0x10`, `+0x18`, `+0x20` and
+`+0x28` in turn does not change the `-45020`, so the discriminating content is
+already in the frame as `perun call` builds it, not in the slots this project has
+been sweeping.
+
+The frontier has therefore moved without the barrier itself moving: the barrier
+is reachable, and it is now the init command with a context-shaped second argument
+that reaches it. This is the first configuration in the project where the `-45020`
+path is entered by an input other than the provisioning call, and it is the one to
+work from next.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
