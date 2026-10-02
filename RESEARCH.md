@@ -1428,6 +1428,20 @@ five stack slots, clears `rdx` and `rbp`, tests `[rsp+0x80]` against zero, and
 is not the success path with a different ending — it is the next link of the same
 chain, which is exactly why forcing it produces `-45034` instead of `-45020`.
 
+**The compare is exact to the bit.** A forced-neighbour run completes the picture,
+three runs each, all deterministic:
+
+| `r9` forced at the fork | return | `cmp $0x4069d333,%r9d` |
+|---|---|---|
+| control, `0xf0c5d587` | `0xffff5024` (`-45020`) | fails |
+| `0x4069d334` (immediate neighbour) | `0xffff5024` (`-45020`) | fails |
+| `0x4069d333` | `0xffff5016` (`-45034`) | passes |
+
+The neighbour behaves exactly as the control, so the single bit the comparison turns
+on is the whole of it. This is the same shape §5.8e recorded for the `0x632b8d6e`
+selector, now reproduced on the clean path by forcing the register rather than
+inferring it from a trace.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
