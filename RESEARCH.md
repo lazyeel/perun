@@ -1620,6 +1620,24 @@ obstacles are already known, and they are the reason §5.8e could not read the b
 the whole `-45020` to `-45002` ladder is the call-signature mismatch that would
 have to be solved first.
 
+**`cvu8io98wun` is the initialiser, and it takes the provisioning path in `rcx`.**
+The image exports exactly two entry points, `cvu8io98wun` at `0xe4b00` and
+`vdfut768ig` at `0x5afc0`, and the first is the one §5.8a had called the
+initialiser without ever calling it. Called with a UTF-16 path buffer in `rcx` it
+returns `0`; called with zeros, or with the path in `rdx`, it returns `-45002`.
+So its shape is `(path_in_rcx, ?, ?, ?)` and `0` means success.
+
+`PERUN_INIT=<export>` with `PERUN_INIT_ARG0`/`PERUN_INIT_ARG1` now runs such an
+export once before the call under test, which is what the Android harness does
+through `SetProvisioningPath` and which this lane had no way to express:
+`perun call` takes one export and `PERUN_SEQ` repeats that same export.
+
+The initialiser changes the walk, and the change is in the right direction: with
+it, the guest no longer calls `GetFullPathNameW` at all. The garbage path is gone
+because nothing tries to assemble one. The return is still `-45034`, so the
+initialiser is necessary and not sufficient: whatever the path was feeding is now
+present, and the next gate is downstream of it.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it

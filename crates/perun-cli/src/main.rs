@@ -1334,6 +1334,30 @@ fn cmd_call(args: &[String]) -> i32 {
         SEAL_PAGES = sealed.len() as u64;
     }
 
+    // Optional session initialiser, run once before the call under test.
+    // CoreADI64.dll exports exactly two entry points and the ADI lane needs
+    // both: the initialiser takes the provisioning path in rcx and returns 0,
+    // and only then does the dispatcher read a well-formed path instead of
+    // whatever was on the stack. PERUN_INIT names the export, PERUN_INIT_ARG0
+    // supplies its first argument (a loaded-buffer token or a literal).
+    if let Ok(init_name) = std::env::var("PERUN_INIT") {
+        if let Some(init_ptr) = image.get_export_by_name(&init_name) {
+            let a0 = std::env::var("PERUN_INIT_ARG0")
+                .ok()
+                .map(|s| resolve_val(&s).unwrap_or(0))
+                .unwrap_or(0);
+            let a1 = std::env::var("PERUN_INIT_ARG1")
+                .ok()
+                .map(|s| resolve_val(&s).unwrap_or(0))
+                .unwrap_or(0);
+            let init_fn: ExportFn = unsafe { std::mem::transmute(init_ptr) };
+            let r = unsafe { init_fn(a0, a1, 0, 0) };
+            println!("[perun] init {init_name}({a0:#x}, {a1:#x}) returned {r:#x} ({r})");
+        } else {
+            eprintln!("[perun] PERUN_INIT={init_name:?} is not an export of this image");
+        }
+    }
+
     for iter in 0..seq_n {
         println!(
             "[perun] call#{iter} {export_name}({:#x}, {:#x}, {:#x}, {:#x})...",
