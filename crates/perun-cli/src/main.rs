@@ -1345,7 +1345,10 @@ fn cmd_call(args: &[String]) -> i32 {
         println!(
             "[perun] xform [{dst:#x}] <- {} pointer(s) [{}] = {}",
             ptrs.len(),
-            ptrs.iter().map(|p| format!("{p:#x}")).collect::<Vec<_>>().join(", "),
+            ptrs.iter()
+                .map(|p| format!("{p:#x}"))
+                .collect::<Vec<_>>()
+                .join(", "),
             blk.iter().map(|x| format!("{x:02x}")).collect::<String>()
         );
     }

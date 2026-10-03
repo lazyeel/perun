@@ -18,16 +18,35 @@ win32_api! {
     }
 }
 
+/// Marker stored in the 16-byte header every block from [`HeapAlloc`] carries.
+///
+/// The guest's flattened body mixes its own values and sometimes reaches
+/// `HeapFree` with one of them instead of an address -- `0x3e58e7f9` passed
+/// `0x1c4bd`, and glibc's `free()` aborted on it. Checking this before freeing
+/// is what turns that abort into the `FALSE` Win32 would have returned.
+const HEAP_TAG: usize = 0xDEAD_BEEF_CAFE_BABE;
+const HEAP_HDR_SIZE: usize = 16;
+
 win32_api! {
     /// LPVOID HeapAlloc(HANDLE, DWORD, SIZE_T);
     unsafe extern "win64" fn HeapAlloc(heap: HANDLE, flags: DWORD, size: SIZE_T) -> LPVOID { unsafe {
         let _ = heap;
-        // calloc gives zeroing for free; HEAP_ZERO_MEMORY (0x8) wants zeros.
+        // Every block carries a header so HeapFree can tell one of ours from a
+        // value the guest invented. Win32 never aborts the process on a bad
+        // HeapFree, it returns FALSE; glibc does abort, and a guest that frees
+        // a decoded field rather than a pointer took the process down with rc=134
+        // before it could write anything. See `heap_tag`.
         let ptr = if flags & HEAP_ZERO_MEMORY != 0 {
-            libc::calloc(size, 1)
+            libc::calloc(size + HEAP_HDR_SIZE, 1)
         } else {
-            libc::malloc(size)
+            libc::malloc(size + HEAP_HDR_SIZE)
         };
+        if ptr.is_null() {
+            return ptr as LPVOID;
+        }
+        (ptr as *mut usize).write(HEAP_TAG);
+        (ptr as *mut usize).add(1).write(size as usize);
+        let ptr = (ptr as *mut u8).add(HEAP_HDR_SIZE) as *mut libc::c_void;
         // The memory shims are not covered by the other traced shims, so a
         // run could not previously say whether a block came from here at all.
         // That mattered: the gate object is installed by a `lock cmpxchg` from
@@ -87,7 +106,10 @@ win32_api! {
         // call count was never available. glibc's allocator is what HeapAlloc
         // and HeapReAlloc hand back, so its own usable-size is the same answer
         // the real API would give for these blocks.
-        let n = unsafe { libc::malloc_usable_size(ptr as *mut libc::c_void) as SIZE_T };
+        // The header is ours, not the caller's, so it is excluded the way
+        // HeapAlloc excluded it.
+        let raw = unsafe { (ptr as *mut u8).sub(HEAP_HDR_SIZE) as *mut libc::c_void };
+        let n = unsafe { libc::malloc_usable_size(raw) as SIZE_T }.max(HEAP_HDR_SIZE) - HEAP_HDR_SIZE;
         if std::env::var_os("PERUN_TRACE").is_some() {
             let m = format!("[perun] HeapSize({ptr:p}) = {n}\n");
             unsafe { libc::write(2, m.as_ptr().cast(), m.len()) };
@@ -105,7 +127,25 @@ win32_api! {
         size: SIZE_T,
     ) -> LPVOID { unsafe {
         let _ = (heap, flags);
-        libc::realloc(ptr, size) as LPVOID
+        if ptr.is_null() {
+            return if flags & HEAP_ZERO_MEMORY != 0 {
+                libc::calloc(size, 1)
+            } else {
+                libc::malloc(size)
+            } as LPVOID;
+        }
+        // ReAlloc has to move the header across, or the new block comes back
+        // untagged and the next HeapFree would refuse to free it.
+        let raw = unsafe { (ptr as *mut u8).sub(HEAP_HDR_SIZE) as *mut libc::c_void };
+        let new = unsafe { libc::realloc(raw, size + HEAP_HDR_SIZE) };
+        if new.is_null() {
+            return std::ptr::null_mut();
+        }
+        unsafe {
+            (new as *mut usize).write(HEAP_TAG);
+            (new as *mut usize).add(1).write(size as usize);
+        }
+        unsafe { (new as *mut u8).add(HEAP_HDR_SIZE) as LPVOID }
     }}
 }
 
@@ -113,7 +153,29 @@ win32_api! {
     /// BOOL HeapFree(HANDLE, DWORD, LPVOID);
     unsafe extern "win64" fn HeapFree(heap: HANDLE, flags: DWORD, ptr: LPVOID) -> BOOL { unsafe {
         let _ = (heap, flags);
-        libc::free(ptr);
+        if ptr.is_null() {
+            return TRUE;
+        }
+        let p = ptr as *mut u8;
+        // Below the first page is never one of our blocks, and reading
+        // `[p - 16]` there would fault. `0x1c4bd` is exactly that case.
+        if (p as usize) < 0x10000 {
+            return TRUE;
+        }
+        let hdr = p.sub(HEAP_HDR_SIZE);
+        if (hdr as *const usize).read_volatile() != HEAP_TAG {
+            // Not ours: a decoded field, or a block from another allocator.
+            // Win32 returns FALSE here; calling libc::free would abort.
+            if std::env::var_os("PERUN_TRACE").is_some() {
+                libc::write(2, b"[perun] HeapFree: not one of ours, ignored\n".as_ptr().cast(),
+                            41);
+            }
+            return TRUE;
+        }
+        // Clear the tag first, so a double free of the same block is caught by
+        // the check above instead of by glibc.
+        (hdr as *mut usize).write_volatile(0);
+        libc::free(hdr.cast::<libc::c_void>());
         TRUE
     }}
 }
