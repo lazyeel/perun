@@ -196,6 +196,41 @@ win32_api! {
 }
 
 win32_api! {
+    /// DWORD GetCurrentDirectoryW(DWORD nBufferLength, LPWSTR lpBuffer);
+    ///
+    /// The guest resolves a relative cache-file name through this, so it is on
+    /// the SPIM path. It was missing, and an unresolved import is a trap that
+    /// returns without writing the buffer.
+    unsafe extern "win64" fn GetCurrentDirectoryW(n: DWORD, buf: LPWSTR) -> DWORD {
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let wide: Vec<u16> = cwd.encode_utf16().chain(std::iter::once(0)).collect();
+        let need = wide.len() as DWORD;
+        if !buf.is_null() {
+            // Windows writes at most n characters, NUL-terminated, and returns
+            // the length it needed -- so a short buffer reports the true size
+            // rather than a truncated string.
+            let room = (n as usize).min(wide.len());
+            unsafe { std::ptr::copy_nonoverlapping(wide.as_ptr(), buf, room) };
+        }
+        if std::env::var("PERUN_TRACE").is_ok() {
+            eprintln!("[perun] GetCurrentDirectoryW({n}) -> {cwd:?}");
+        }
+        need
+    }
+}
+
+win32_api! {
+    /// BOOL SetCurrentDirectoryW(LPCWSTR);
+    unsafe extern "win64" fn SetCurrentDirectoryW(dir: LPWSTR) -> BOOL {
+        let p = wide_to_string(dir);
+        let unix = p.replace('\\', "/");
+        BOOL::from(std::env::set_current_dir(&unix).is_ok())
+    }
+}
+
+win32_api! {
     /// BOOL PathIsDirectoryW(LPCWSTR pszPath);
     unsafe extern "win64" fn PathIsDirectoryW(path: LPCWSTR) -> BOOL {
         let p = wide_to_string(path);

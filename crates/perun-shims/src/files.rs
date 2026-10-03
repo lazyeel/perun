@@ -56,7 +56,7 @@ win32_api! {
     ) -> HANDLE { unsafe {
         let _ = (sa, template);
         let wide = read_wide(name);
-        let path = to_unix_path(&String::from_utf16_lossy(&wide));
+        let path = adi_redirect(to_unix_path(&String::from_utf16_lossy(&wide)));
 
         if std::env::var("PERUN_TRACE").is_ok() {
             eprintln!(
@@ -85,11 +85,14 @@ win32_api! {
             path
         };
         flags |= libc::O_CLOEXEC;
-        let fd = libc::open(
-            std::ffi::CString::new(path).unwrap_or_default().as_ptr(),
-            flags,
-            mode,
-        );
+        // The outcome is logged with the request: an ADI guest probes a cache
+        // file with FILE_READ_ATTRIBUTES and silently gives up if the open
+        // fails, so "requested" and "opened" are different facts.
+        let opened = std::ffi::CString::new(path.clone()).unwrap_or_default();
+        let fd = libc::open(opened.as_ptr(), flags, mode);
+        if std::env::var_os("PERUN_TRACE").is_some() {
+            eprintln!("[perun]   -> fd {fd}");
+        }
         if fd >= 0 {
             handle_new(HostKind::File { fd, shared: false })
         } else {
@@ -275,6 +278,42 @@ fn to_unix_path(path: &str) -> String {
     path.replace('\\', "/")
 }
 
+/// ADI cache-file redirect, `PERUN_ADI_DIR`.
+///
+/// The guest keeps two copies of its provisioning directory: one it fills
+/// through the shell32/shlwapi shims (`SHGetFolderPathW` then `PathAppendW`,
+/// which lands in an addressable buffer), and a second one it composes itself
+/// and never writes — the path that reaches `GetFileAttributesA` as a run of
+/// uninitialised bytes. A cache-file lookup built on that second copy cannot
+/// succeed for any input, so the provisioning phase always reports "no SPIM"
+/// and the call returns success having produced nothing.
+///
+/// Pointing the cache-file APIs at a real directory makes that branch
+/// reachable, which is the only way to find out what the library does once it
+/// has a SPIM to read. Off unless the variable is set: this is a diagnostic
+/// knob, not a claim that the guest's own copy is correct.
+fn adi_redirect(path: String) -> String {
+    let Some(dir) = std::env::var_os("PERUN_ADI_DIR") else {
+        return path;
+    };
+    // Normalise here rather than relying on the caller: the narrow file APIs
+    // pass the name straight through, so the separator may still be a
+    // backslash and the basename split below would not match anything.
+    let path = to_unix_path(&path);
+    let dir = dir.to_string_lossy().into_owned();
+    // `to_unix_path` has already normalised the separators, but these names
+    // arrive as raw bytes from a narrow API, so the basename is taken by
+    // bytes rather than by `str`: the garbage prefix is not valid UTF-8.
+    let base = path.rsplit('/').next().unwrap_or("");
+    let is_cache =
+        base == "adi.pb" || (base.len() == 15 && base.starts_with("adi-") && base.ends_with(".pb"));
+    if is_cache {
+        format!("{dir}/{base}")
+    } else {
+        path
+    }
+}
+
 win32_api! {
     /// BOOL DeleteFileW(LPCWSTR);
     unsafe extern "win64" fn DeleteFileW(name: LPCWSTR) -> BOOL { unsafe {
@@ -340,17 +379,55 @@ win32_api! {
 win32_api! {
     /// DWORD GetFileAttributesA(LPCSTR);
     unsafe extern "win64" fn GetFileAttributesA(name: LPCSTR) -> DWORD { unsafe {
-        let path = read_narrow(name);
-        let attrs = attributes_for_path(&path);
+        let raw = read_narrow(name);
+        let path = adi_redirect(String::from_utf8_lossy(&raw).into_owned());
+        let attrs = attributes_for_path(path.as_bytes());
         if std::env::var("PERUN_TRACE").is_ok() {
+            // The buffer pointer matters as much as the text: the guest holds
+            // two path buffers, one it fills through the shim table and one it
+            // builds elsewhere, and only the address says which is which.
             eprintln!(
-                "[perun] GetFileAttributesA({:?}) -> {attrs:#x}",
-                String::from_utf8_lossy(&path)
+                "[perun] GetFileAttributesA({path:?} @{name:p}) -> {attrs:#x}"
             );
         }
         attrs
     }}
 }
+
+win32_api! {
+    /// BOOL SetFileAttributesA(LPCSTR, DWORD);
+    unsafe extern "win64" fn SetFileAttributesA(name: LPCSTR, attrs: DWORD) -> BOOL { unsafe {
+        set_file_attributes(name, attrs)
+    }}
+}
+
+win32_api! {
+    /// BOOL SetFileAttributesW(LPCWSTR, DWORD);
+    unsafe extern "win64" fn SetFileAttributesW(name: LPCWSTR, attrs: DWORD) -> BOOL { unsafe {
+        let wide = read_wide(name);
+        let raw: Vec<u8> = wide.iter().flat_map(|w| w.to_le_bytes()).collect();
+        set_file_attributes(raw.as_ptr(), attrs)
+    }}
+}
+
+/// Apply the attribute bits the guest actually sets. The cache path uses
+/// `FILE_ATTRIBUTE_NORMAL`/`READONLY` as a lock handshake around the SPIM, and
+/// it was an unresolved import -- a trap that returns having done nothing, so
+/// the guest's clear-then-set sequence silently left the file as it found it.
+unsafe fn set_file_attributes(name: LPCSTR, attrs: DWORD) -> BOOL { unsafe {
+    let raw = read_narrow(name);
+    let path = adi_redirect(String::from_utf8_lossy(&raw).into_owned());
+    let c = std::ffi::CString::new(path.as_bytes()).unwrap_or_default();
+    // Windows has no direct "set readonly bit" call; the read-only state *is*
+    // the write bit, so it is cleared or set through the mode.
+    let readonly = attrs & FILE_ATTRIBUTE_READONLY != 0;
+    let mode: libc::mode_t = if readonly { 0o444 } else { 0o644 };
+    let ok = libc::chmod(c.as_ptr(), mode) == 0;
+    if std::env::var_os("PERUN_TRACE").is_some() {
+        eprintln!("[perun] SetFileAttributes({path:?}, {attrs:#x}) -> {ok}");
+    }
+    BOOL::from(ok)
+}}
 
 win32_api! {
     /// DWORD GetFileSize(HANDLE, LPDWORD);

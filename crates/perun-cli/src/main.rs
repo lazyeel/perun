@@ -7,6 +7,7 @@ use perun_core::loader::{DLL_PROCESS_ATTACH, Image, LoadError};
 use perun_shims::table::ShimTable;
 use std::path::Path;
 
+mod adi;
 mod fetcher;
 mod sap;
 mod scaffold;
@@ -667,6 +668,17 @@ fn low_level_help(sub: &str) -> Option<&'static str> {
             "  Parses a 64-bit Mach-O image: header, segments, sections and the symbol\n",
             "  table, without mapping it or running any guest code.\n"
         ),
+        "adi" => concat!(
+            "usage: perun adi headers [<image.dll>] [--adi-dir DIR]\n\n",
+            "  Runs CoreADI64.dll natively -- no Bionic, no QEMU, no Wine -- and reports\n",
+            "  what the Anisette v3 opcodes produce on this host: each opcode's status\n",
+            "  and how many bytes it wrote.\n\n",
+            "  <image.dll>      the library; defaults to the extracted iTunes copy\n",
+            "  --adi-dir DIR     where the SPIM cache lives (adi.pb, adi-<hash>.pb)\n\n",
+            "  The three opcodes return 0 once the barrier is passed, but this image\n",
+            "  imports no networking API, so no OTP is minted and no token header is\n",
+            "  printed. The command reports that rather than inventing values.\n"
+        ),
         "sap" => concat!(
             "usage: perun sap [<assets-dir>] [--mac AA:BB:CC:DD:EE:FF] [--sign HEX | --file F]\n\n",
             "  Runs the FairPlay SAP session (init, two exchange rounds, sign) against the\n",
@@ -781,6 +793,14 @@ fn run_with_args(args: &[String]) -> i32 {
         "mach" => cmd_mach(&args[2..]),
         "scaffold" => scaffold::run(&args[2..]),
         "sap" => cmd_sap(&args[2..]),
+        "adi" => {
+            if args[2] == "headers" {
+                adi::run(&args[3..])
+            } else {
+                eprintln!("usage: perun adi headers [<image.dll>] [--adi-dir DIR]");
+                2
+            }
+        }
         "store" => store::cli::run(&args[2..]),
         "seq" => cmd_seq(&args[2..]),
         // ipatool-compatible top-level aliases: same grammar, no "store".
@@ -2474,7 +2494,9 @@ fn hex_decode(s: &str) -> Vec<u8> {
 mod help_tests {
     use super::*;
 
-    const LOW_LEVEL: [&str; 7] = ["run", "info", "mach", "sap", "seq", "call", "scaffold"];
+    const LOW_LEVEL: [&str; 8] = [
+        "run", "info", "mach", "sap", "seq", "call", "scaffold", "adi",
+    ];
 
     #[test]
     fn bare_auth_prints_help_instead_of_panicking() {

@@ -138,6 +138,155 @@ win32_api! {
 }
 
 win32_api! {
+    /// BOOL FileTimeToSystemTime(const FILETIME*, LPSYSTEMTIME);
+    ///
+    /// The inverse of `SystemTimeToFileTime`, and the conversion an SPIM needs:
+    /// the ADI cache carries timestamps in `FILETIME`, so reading one reaches
+    /// this before anything else. It was missing, and an unresolved import here
+    /// is a trap that returns without writing the output — the caller then reads
+    /// whatever was already in the buffer, which is how a *reachable* cache file
+    /// still produced nothing downstream.
+    unsafe extern "win64" fn FileTimeToSystemTime(ft: *const FILETIME, st: *mut SYSTEMTIME) -> BOOL {
+    unsafe {
+        if ft.is_null() || st.is_null() {
+            set_last_error(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+        // FILETIME counts 100ns ticks from 1601-01-01; the epoch offset is the
+        // 369 years between that and 1970 in seconds, then scaled to ticks.
+        let ticks = (*ft).as_u64();
+        let secs = (ticks / 10_000_000) as i64 - 11_644_473_600;
+        let sub = (ticks % 10_000_000) / 10_000;
+        let mut tm: libc::tm = std::mem::zeroed();
+        let t = secs as libc::time_t;
+        if libc::gmtime_r(&raw const t, &raw mut tm).is_null() {
+            set_last_error(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+        *st = systemtime_from_tm(&tm, sub as u16);
+        TRUE
+    }
+    }
+}
+
+win32_api! {
+    /// BOOL SystemTimeToFileTime(const SYSTEMTIME*, LPFILETIME);
+    unsafe extern "win64" fn SystemTimeToFileTime(st: *const SYSTEMTIME, ft: *mut FILETIME) -> BOOL {
+    unsafe {
+        if st.is_null() || ft.is_null() {
+            set_last_error(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+        // timegm(), not mktime(): a FILETIME has no zone, so the fields are
+        // already UTC and applying the local offset would shift them twice.
+        let mut tm: libc::tm = std::mem::zeroed();
+        tm.tm_year = (*st).wYear as i32 - 1900;
+        tm.tm_mon = (*st).wMonth as i32 - 1;
+        tm.tm_mday = (*st).wDay as i32;
+        tm.tm_hour = (*st).wHour as i32;
+        tm.tm_min = (*st).wMinute as i32;
+        tm.tm_sec = (*st).wSecond as i32;
+        let secs = libc::timegm(&raw mut tm);
+        if secs == -1 {
+            set_last_error(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+        let ticks = (secs + 11_644_473_600).max(0) as u64 * 10_000_000
+            + u64::from((*st).wMilliseconds) * 10_000;
+        *ft = FILETIME::from_u64(ticks);
+        TRUE
+    }
+    }
+}
+
+win32_api! {
+    /// BOOL SystemTimeToTzSpecificLocalTime(LPTIME_ZONE_INFORMATION,
+    ///                                      LPSYSTEMTIME, LPSYSTEMTIME);
+    ///
+    /// Converts UTC to a named zone's wall clock. A null zone pointer means
+    /// "the current zone", which is what the ADI SPIM path passes: it stamps
+    /// cache entries with local times, so a resolved cache file reaches this
+    /// immediately. It was an unresolved import, and an unresolved import is a
+    /// trap that returns without writing the output buffer — the caller then
+    /// reads whatever was already there, which is why a *found* SPIM still
+    /// yielded no token.
+    unsafe extern "win64" fn SystemTimeToTzSpecificLocalTime(
+        tz: *const TIME_ZONE_INFORMATION,
+        utc: *const SYSTEMTIME,
+        local: *mut SYSTEMTIME,
+    ) -> BOOL {
+    unsafe {
+        if utc.is_null() || local.is_null() {
+            set_last_error(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+        // Bias is minutes *west* of UTC, so the wall clock is bias minutes
+        // ahead of the UTC fields.
+        let bias = if tz.is_null() { host_bias_minutes() } else { (*tz).Bias };
+        let mut tm: libc::tm = std::mem::zeroed();
+        tm.tm_year = (*utc).wYear as i32 - 1900;
+        tm.tm_mon = (*utc).wMonth as i32 - 1;
+        tm.tm_mday = (*utc).wDay as i32;
+        tm.tm_hour = (*utc).wHour as i32;
+        tm.tm_min = (*utc).wMinute as i32;
+        tm.tm_sec = (*utc).wSecond as i32;
+        tm.tm_isdst = -1;
+        let shifted = libc::timegm(&raw mut tm) + i64::from(bias) * 60;
+        let mut out: libc::tm = std::mem::zeroed();
+        if libc::gmtime_r(&raw const shifted, &raw mut out).is_null() {
+            set_last_error(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+        *local = systemtime_from_tm(&out, (*utc).wMilliseconds);
+        TRUE
+    }
+    }
+}
+
+win32_api! {
+    /// BOOL TzSpecificLocalTimeToSystemTime(LPTIME_ZONE_INFORMATION,
+    ///                                      LPSYSTEMTIME, LPSYSTEMTIME);
+    unsafe extern "win64" fn TzSpecificLocalTimeToSystemTime(
+        tz: *const TIME_ZONE_INFORMATION,
+        local: *const SYSTEMTIME,
+        utc: *mut SYSTEMTIME,
+    ) -> BOOL {
+    unsafe {
+        if local.is_null() || utc.is_null() {
+            set_last_error(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+        let bias = if tz.is_null() { host_bias_minutes() } else { (*tz).Bias };
+        let mut tm: libc::tm = std::mem::zeroed();
+        tm.tm_year = (*local).wYear as i32 - 1900;
+        tm.tm_mon = (*local).wMonth as i32 - 1;
+        tm.tm_mday = (*local).wDay as i32;
+        tm.tm_hour = (*local).wHour as i32;
+        tm.tm_min = (*local).wMinute as i32;
+        tm.tm_sec = (*local).wSecond as i32;
+        let back = libc::timegm(&raw mut tm) - i64::from(bias) * 60;
+        let mut out: libc::tm = std::mem::zeroed();
+        if libc::gmtime_r(&raw const back, &raw mut out).is_null() {
+            set_last_error(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+        *utc = systemtime_from_tm(&out, (*local).wMilliseconds);
+        TRUE
+    }
+    }
+}
+
+/// Minutes west of UTC for the host, the quantity Win32 calls `Bias`.
+fn host_bias_minutes() -> i32 {
+    unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&raw const t, &raw mut tm);
+        -((tm.tm_gmtoff / 60) as i32)
+    }
+}
+
+win32_api! {
     /// DWORD GetTimeZoneInformation(LPTIME_ZONE_INFORMATION);
     unsafe extern "win64" fn GetTimeZoneInformation(tz: *mut TIME_ZONE_INFORMATION) -> DWORD {
     unsafe {
