@@ -2137,6 +2137,22 @@ same value. The size comparison contributes only the `bl` term, which is zero he
 because `r8 + 8` equals `ctx[+8]` exactly; making it non-zero is the obvious next
 lever, and `ctx[+8]` is caller-supplied.
 
+**The size lever moves the index but not the outcome.** Sweeping the caller's
+declared size with the flag forced, `bl` does respond and the index does move, but
+both neighbouring entries land on the same publisher:
+
+    ctx[+8]=0x08   r8+8=0x10 > 0x08    bl=1   index 0x649   -45034
+    ctx[+8]=0x10   equal              bl=0   index 0x648   -45034
+    ctx[+8]=0x20   less               bl=0   index 0x648   -45034
+    ctx[+8]=0x40   less               bl=0   index 0x648   -45034
+
+So the size comparison is not what decides this gate; it only shifts the table
+index by one, and entries `0x648` and `0x649` both resolve to `0x8906a8`. Declaring
+a larger output buffer, which was the obvious lever once `bl` was found to be zero
+by equality, changes nothing here. That rules the caller's declared size out as the
+control for `-45034`, which is worth having recorded because it was the last
+caller-reachable quantity in this corner.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
