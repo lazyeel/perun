@@ -414,20 +414,22 @@ win32_api! {
 /// `FILE_ATTRIBUTE_NORMAL`/`READONLY` as a lock handshake around the SPIM, and
 /// it was an unresolved import -- a trap that returns having done nothing, so
 /// the guest's clear-then-set sequence silently left the file as it found it.
-unsafe fn set_file_attributes(name: LPCSTR, attrs: DWORD) -> BOOL { unsafe {
-    let raw = read_narrow(name);
-    let path = adi_redirect(String::from_utf8_lossy(&raw).into_owned());
-    let c = std::ffi::CString::new(path.as_bytes()).unwrap_or_default();
-    // Windows has no direct "set readonly bit" call; the read-only state *is*
-    // the write bit, so it is cleared or set through the mode.
-    let readonly = attrs & FILE_ATTRIBUTE_READONLY != 0;
-    let mode: libc::mode_t = if readonly { 0o444 } else { 0o644 };
-    let ok = libc::chmod(c.as_ptr(), mode) == 0;
-    if std::env::var_os("PERUN_TRACE").is_some() {
-        eprintln!("[perun] SetFileAttributes({path:?}, {attrs:#x}) -> {ok}");
+unsafe fn set_file_attributes(name: LPCSTR, attrs: DWORD) -> BOOL {
+    unsafe {
+        let raw = read_narrow(name);
+        let path = adi_redirect(String::from_utf8_lossy(&raw).into_owned());
+        let c = std::ffi::CString::new(path.as_bytes()).unwrap_or_default();
+        // Windows has no direct "set readonly bit" call; the read-only state *is*
+        // the write bit, so it is cleared or set through the mode.
+        let readonly = attrs & FILE_ATTRIBUTE_READONLY != 0;
+        let mode: libc::mode_t = if readonly { 0o444 } else { 0o644 };
+        let ok = libc::chmod(c.as_ptr(), mode) == 0;
+        if std::env::var_os("PERUN_TRACE").is_some() {
+            eprintln!("[perun] SetFileAttributes({path:?}, {attrs:#x}) -> {ok}");
+        }
+        BOOL::from(ok)
     }
-    BOOL::from(ok)
-}}
+}
 
 win32_api! {
     /// DWORD GetFileSize(HANDLE, LPDWORD);

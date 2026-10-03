@@ -239,8 +239,7 @@ fn headers(image_path: &str, adi_dir: Option<&str>) -> Result<String, String> {
 /// names one, so this counts what actually changed in a buffer the library
 /// holds a pointer to, rather than assuming a layout.
 fn output_bytes(scratch: *mut core::ffi::c_void) -> usize {
-    let page =
-        unsafe { std::slice::from_raw_parts(scratch.cast::<u8>(), SCRATCH_LEN) };
+    let page = unsafe { std::slice::from_raw_parts(scratch.cast::<u8>(), SCRATCH_LEN) };
     page[PACKET.len()..].iter().filter(|b| **b != 0).count()
 }
 
@@ -324,9 +323,24 @@ mod tests {
     #[test]
     fn report_names_the_lane_boundary_when_nothing_is_written() {
         let stages = [
-            Stage { name: "initialise", opcode: OPCODE_INIT, status: 0, wrote_output: 0 },
-            Stage { name: "provision", opcode: OPCODE_PROVISION, status: 0, wrote_output: 0 },
-            Stage { name: "login code", opcode: OPCODE_LOGIN, status: 0, wrote_output: 0 },
+            Stage {
+                name: "initialise",
+                opcode: OPCODE_INIT,
+                status: 0,
+                wrote_output: 0,
+            },
+            Stage {
+                name: "provision",
+                opcode: OPCODE_PROVISION,
+                status: 0,
+                wrote_output: 0,
+            },
+            Stage {
+                name: "login code",
+                opcode: OPCODE_LOGIN,
+                status: 0,
+                wrote_output: 0,
+            },
         ];
         let text = report("CoreADI64.dll", &stages);
         assert!(text.contains("all opcodes returned 0, but no token bytes"));
