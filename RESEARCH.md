@@ -2417,6 +2417,32 @@ two remaining levers are both known and both are image bytes: the byte feeding t
 second read, and whatever feeds `ebp`. No forcing, no gdb: `--patch` alone walks
 the barrier from `-45020` to within one unit of passing.
 
+**Only one of the two frame bytes is reachable, and only one input byte controls it.**
+Both frame bytes are written by the same instruction and both are hash folds, but
+patching each byte of the folded window in turn shows what is actually live:
+
+    0x164505 -> 0x00   B2 changes, B3 unchanged, run survives
+    every other byte    the run dies before the fold
+
+So `0x164505` is the one safe lever, and it drives `B2` on the exact relation
+`B2 = 0xff - value`. `B3` does not come from that window at all — patching it
+either does nothing or kills the run, which means the bytes are live data the
+library depends on rather than merely hash input. With `B2` driven to `0x00` the
+three terms at the `or` reduce to
+
+    eax = 0x3b   the second frame byte, source not yet located
+    edi = 0x00   reached, by patch alone
+    ebp = 0x843a0000   the machine hash
+
+and the compare sits at `eax == 0`, one unit from the `eax == 1` it wants. The two
+remaining terms are `B3` and the machine hash, and `B3` is the nearer of the two
+because it is a byte and the hash is derived state.
+
+Note for whoever continues: `--patch` shifts the guest stack base (`0x...c800`
+becomes `0x...c7e0`), because patching pages with RWX changes the mmap layout. Any
+measurement that hard-codes a guest stack address has to be re-checked after adding
+a patch.
+
 ### 5.8a Anisette v3 runs locally (2026-09-27) — and what the `-45075` wall actually was
 
 **Anisette v3 client headers are generated natively on this x86_64 host: no Wine, no QEMU, no emulation layer of any kind, and no remote re-signing server.** The engine is an x86_64 Android binary and the host is x86_64, so the Apple libraries execute directly. Artefact `run-native.sh` (`crates/perun-cli/examples/adi-android/`, commit `43f16eb`), two consecutive clean runs:
