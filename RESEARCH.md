@@ -2443,6 +2443,29 @@ becomes `0x...c7e0`), because patching pages with RWX changes the mmap layout. A
 measurement that hard-codes a guest stack address has to be re-checked after adding
 a patch.
 
+**Two of the three terms are now exactly on target.** The second frame byte is
+written by the same instruction as the first and is equally controllable: the fold
+indexes the image by the frame offset, so offset 2 folds the byte at `0x164505`
+and offset 3 folds `0x164506`. Sweeping the second one gives `0xb3 -> 0x01`, and with
+
+    --patch=0x164505=ff --patch=0x164506=b3
+
+the terms at the `or` are
+
+    eax = 0x1          the required value
+    edi = 0x0          zeroed
+    ebp = 0x843a0000   still the machine hash
+
+so the only thing standing between the clean configuration and the barrier is
+`ebp`. No register is forced anywhere in this; it is two byte patches.
+
+One subtlety worth keeping: `r9d` at the compare reads `0x4069d332`, that is
+`eax == 0`, even though the `or` measured `0x843a0001`. The dispatcher runs three
+times and the compare is fed by a different one of them from the one sampled at the
+`or`. So the two patches have to be read against the invocation that actually
+reaches the compare, and the term-by-term view above is from a single invocation.
+That is the next thing to pin down, together with the source of `ebp`.
+
 ### 5.8a Anisette v3 runs locally (2026-09-27) — and what the `-45075` wall actually was
 
 **Anisette v3 client headers are generated natively on this x86_64 host: no Wine, no QEMU, no emulation layer of any kind, and no remote re-signing server.** The engine is an x86_64 Android binary and the host is x86_64, so the Apple libraries execute directly. Artefact `run-native.sh` (`crates/perun-cli/examples/adi-android/`, commit `43f16eb`), two consecutive clean runs:
