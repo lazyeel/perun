@@ -2085,6 +2085,34 @@ before the decision point, which is why sweeping publishers was never going to
 resolve it. What remains is the `-45034` gate reached through `0x8905ca`, and it
 should be attacked with breakpoints rather than with step counters.
 
+**The `-45034` behind the continuation is published at `0x8906a8`.** Sweeping the
+37 `-45034` publishers with the flag forced changes which ones fire, so the site
+is a function of the route rather than a fixed answer:
+
+    control, nothing forced    0x66c2d, 0x7016b
+    flag forced                0x8906a8, 0x8b0cac
+
+Arming the jump and the publisher together gives the whole chain in one run:
+
+    jmp *rsi   rsi = 0x7c8905ca   index = rdx + 1 = 0x652
+    PUBLISH -45034 @ 0x8906a8
+
+So after passing the compare, control lands at `0x8905ca`, walks a short distance
+and publishes `-45034` at `0x8906a8`, which sits in the same region as the
+compare. That site looks like the rest of the family:
+
+    movslq (%rbx,%rbp,4),%rbp
+    lea    -0x3d(%rip),%rdx
+    add    %rax,%rdx
+    mov    $0xffff5016,%edi
+    mov    %ebp,%r9d
+    jmp    *%rdx
+
+and it is the first gate past the barrier: the flag reaches it, and it is now the
+thing to take apart. Nothing about `-45034` is a formatting or shim problem: both
+numbers are armed by the library, both before the decision, and the difference is
+one jump target.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
