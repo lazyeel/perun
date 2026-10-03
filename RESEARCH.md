@@ -2507,6 +2507,44 @@ times and the compare is fed by a different one of them from the one sampled at 
 reaches the compare, and the term-by-term view above is from a single invocation.
 That is the next thing to pin down, together with the source of `ebp`.
 
+**The barrier is passed. `vdfut768ig` returns 0, natively.**
+
+The three dispatcher invocations were distinguished, and that is what closed it.
+Numbering them by order of execution, with `rcx` showing which buffer each reads:
+
+    READ-A inv #1  rcx=0x7fffffffc800  rdi=0x2  byte=0x71   guest stack
+    READ-B inv #1  rcx=0x7fffffffc800  rax=0x3  byte=0x3b
+    READ-A inv #2  rcx=0x7ffff7fb6000  rdi=0x2  byte=0      scratch
+    READ-B inv #2  rcx=0x7ffff7fb6000  rax=0x3  byte=0x1
+    READ-A inv #3  rcx=0x7ffff7fb6000  rdi=0x6  byte=0      scratch
+    READ-B inv #3  rcx=0x7ffff7fb6000  rax=0x7  byte=0
+
+Only the third feeds the compare, and the third reads **the caller's scratch at
+offsets 6 and 7** — not the guest stack frame that every earlier measurement was
+looking at. Invocation 2 is already in the passing shape, `eax=1 edi=0 ebp=0`, and
+it goes unused. The relations from §5.8n then apply directly to our own buffer:
+byte 6 must be `0x00` for the `edi` term to vanish and byte 7 must be `0x01` for
+`lea` to produce `1`.
+
+    --poke=scratch+0x6=0x00 --poke=scratch+0x7=0x01
+
+    OR-INV #3  eax=0x1  edi=0  ebp=0
+    COMPARE    r9d=0x4069d333      passes
+    call#0 vdfut768ig returned 0x0 (0)
+
+Five runs of five, no gdb, no `--patch`, no forced register:
+
+    returned 0x0 (0)      x5
+    without the two pokes: returned 0xffff5024 (-45020)
+
+That is the barrier down. The call then proceeds past the gate it has been
+returning `-45020` from, reaches the cache-file search for `adi.pb` and
+`adi-843A713B.pb`, and returns success. The base directory in those paths is still
+the uninitialised buffer of §5.8l, so the provisioning blob itself is not yet
+written; what is settled is that the `-45020` gate was never about the packet, the
+frame or the declared sizes, and that the flag is two bytes in a buffer the caller
+already owns.
+
 ### 5.8a Anisette v3 runs locally (2026-09-27) — and what the `-45075` wall actually was
 
 **Anisette v3 client headers are generated natively on this x86_64 host: no Wine, no QEMU, no emulation layer of any kind, and no remote re-signing server.** The engine is an x86_64 Android binary and the host is x86_64, so the Apple libraries execute directly. Artefact `run-native.sh` (`crates/perun-cli/examples/adi-android/`, commit `43f16eb`), two consecutive clean runs:
