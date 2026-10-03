@@ -2228,6 +2228,33 @@ identifier, and the library reaches the file stage rather than stopping at the
 barrier. What is still missing is a populated base directory, and the earlier
 measurements say the guest never uses the answer `SHGetFolderPathW` gives it.
 
+**There is no writer: the buffer is already garbage before the guest runs.** The
+buffer address is deterministic for a fixed command line, `0x7ffff7e223a7`, three
+runs out of three, and reaching `GetFullPathNameW` is five out of five. But a
+hardware watchpoint on that address never fires, at the unaligned address or at the
+aligned word beside it, and the reason is visible once the buffer is read at the
+moment the export is entered:
+
+    === AT EXPORT ENTRY, before the guest runs ===
+      content at 0x7ffff7e223a7:  0xc35b 0x1f0f 0x0080 0x0000 0x8300 0x39e2
+
+That is already the garbage. The library does not build the base directory during
+this call at all; it reads a slot that nothing ever wrote. So the question "where
+does the base directory come from" has the answer "from nowhere" on this path, and
+the prefix is not a failed concatenation but the absence of one. The `\adi.pb`
+suffix is present, so something appends the file name to whatever the buffer holds,
+and the buffer is untouched stack.
+
+This also explains why the cache directory exists but the file never appears:
+`SHGetFolderPathW` with `CSIDL_FLAG_CREATE` makes the directory, and the guest never
+obtains a usable path with which to put anything in it.
+
+One caveat on the measurement, recorded because it cost runs: adding hardware
+breakpoints to this configuration changes whether `GetFullPathNameW` is reached at
+all. Five runs with one breakpoint reach it; runs with two sometimes do not. The
+instrument perturbs the path here, which is the same class of failure already logged
+in §13b and is the reason the single-breakpoint readings are the ones quoted.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
