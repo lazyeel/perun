@@ -2113,6 +2113,30 @@ thing to take apart. Nothing about `-45034` is a formatting or shim problem: bot
 numbers are armed by the library, both before the decision, and the difference is
 one jump target.
 
+**One folded value drives both gates.** The continuation computes the index for the
+`-45034` block from the same `r9d` that the barrier's compare uses, so there is
+not a second independent quantity to satisfy:
+
+    0x890678  cmp   r8+8, [ctx+8]        ; r8 = 8, ctx[+8] = 0x10, so 0x10 <= 0x10
+    0x89067e  seta  bl                   ; bl = 0, not strictly greater
+    0x89068d  add   r9d,ebx
+    0x890690  movslq ebx,rax             ; index = 0x648
+    0x890693  lea   table
+    0x89069a  movslq (table)[rax*4],rax
+    0x8906a8  mov   $0xffff5016,%edi    ; -45034
+
+`ebx = 0x648` comes from `r9d`, and `r9d` is the folded flag value
+`eax + 0x4069d332`. So the value that satisfies the barrier's compare is the same
+value that picks this next gate, and passing the first one does not by itself pick
+the right branch here: it changed the index from whatever the unfed run used to
+`0x648`, and `0x648` lands on `-45034`.
+
+That is a tighter statement than "two gates in sequence". It is one computed
+quantity consumed twice, and the second consumption wants a different range of the
+same value. The size comparison contributes only the `bl` term, which is zero here
+because `r8 + 8` equals `ctx[+8]` exactly; making it non-zero is the obvious next
+lever, and `ctx[+8]` is caller-supplied.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
