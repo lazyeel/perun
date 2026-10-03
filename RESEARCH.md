@@ -2386,6 +2386,37 @@ The frame itself is not populated from our packet either: at both read sites it
 holds the same bytes whatever `packet[3]` is, and they are not the packet's. That
 is consistent with the missing base directory — one frame, never written by anyone.
 
+**The writer is caught, and the flag is one controlled step away.** The byte the
+dispatcher reads at the frame is written by a hash fold over bytes of the image
+itself:
+
+    0x7c87262b  xor dl, BYTE PTR [rdi+rcx+0x4]    ; rdi = 0x7c964500, rcx = 2
+    0x7c872637  xor dl, BYTE PTR [rdi+rcx+0x3]
+    0x7c87263b  xor dl, al
+    0x7c87263d  mov BYTE PTR [r11+rbp], dl       <- writes 0x71, RVA 0x72641
+
+The value came from `rdx`, and the two bytes folded in are `0x7c964505 = 0x8e` and
+`0x7c964506 = 0xc6` in `.rdata`. That is why the frame byte never changes with
+the packet: it is derived from the module, not from the input. `--patch` reaches
+it. Sweeping the byte at RVA `0x164505` gives an exact linear relation,
+
+    frame byte = 0xff - value at 0x164505
+
+so `--patch=0x164505=ff` drives the byte to `0x00`, which makes the `edi` term
+vanish. With that patch alone the compare reads `r9d = 0x4069d332`, that is
+`eax == 0`, one short of the `0x4069d333` the barrier wants. The three terms at
+the `or` are then
+
+    eax = 0x3b        the second frame byte, also a hash fold
+    edi = 0x00        driven to zero by the patch
+    ebp = 0x843a0000  a machine-derived value, and 0x843a is the prefix that also
+                      appears in the cache filename
+
+So the machine hash does exist and is not in the filename — it is in `ebp`. The
+two remaining levers are both known and both are image bytes: the byte feeding the
+second read, and whatever feeds `ebp`. No forcing, no gdb: `--patch` alone walks
+the barrier from `-45020` to within one unit of passing.
+
 ### 5.8a Anisette v3 runs locally (2026-09-27) — and what the `-45075` wall actually was
 
 **Anisette v3 client headers are generated natively on this x86_64 host: no Wine, no QEMU, no emulation layer of any kind, and no remote re-signing server.** The engine is an x86_64 Android binary and the host is x86_64, so the Apple libraries execute directly. Artefact `run-native.sh` (`crates/perun-cli/examples/adi-android/`, commit `43f16eb`), two consecutive clean runs:
