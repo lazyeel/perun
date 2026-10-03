@@ -2338,6 +2338,33 @@ The common error in every row is the same: a plausible reading of one artefact
 taken for a measurement, usually with an instrument that had silently stopped
 working. §13b of the research skill records the rule that came out of it.
 
+**The flag is not a packet check, and that is now proven rather than suspected.**
+The fold's two contributors come from two different buffer bytes, and both are
+reached uniquely:
+
+    byte A read at 0x8b15a1  ->  edi == 0  only for 0x00
+    byte B read at 0x8b15c8  ->  lea == 1  only for 0x01
+
+Those bytes are read from a guest stack frame at `rcx = 0x7fffffffc7b0`, offsets
+`2` and `3`, not from the packet directly, so what matters is what the guest
+copies into that frame. Sweeping both bytes over all 256 values each, and both
+orders, gives a closed result: only `packet[2] == 0x00` reaches the compare at all,
+and within that only `packet[3]` in `{0x01, 0x02}` gets as far as it.
+
+    packet[2]=0x00 packet[3]=0x01   r9d = 0x4069d331   (eax = 0xffffffff)
+    packet[2]=0x00 packet[3]=0x02   r9d = 0xc2f8fe58   (eax = 0xb05c0255)
+
+The target is `0x4069d333`, which needs `eax == 1`. Neither reachable route
+produces it, and the other 254 values never reach the compare. Both reachable routes
+return `-45020` unforced.
+
+So the dispatcher offers exactly two routes to this call, and the barrier is not a
+function of the packet. `packet[3]` is a path selector — `0x02` is provisioning,
+`0x01` is a neighbouring branch that lands two short — and nothing a caller can put
+in the packet selects a third. What satisfies the flag must come from session state
+the guest copies into that stack frame, which is the same state that would have to
+supply the missing base directory.
+
 ### 5.8a Anisette v3 runs locally (2026-09-27) — and what the `-45075` wall actually was
 
 **Anisette v3 client headers are generated natively on this x86_64 host: no Wine, no QEMU, no emulation layer of any kind, and no remote re-signing server.** The engine is an x86_64 Android binary and the host is x86_64, so the Apple libraries execute directly. Artefact `run-native.sh` (`crates/perun-cli/examples/adi-android/`, commit `43f16eb`), two consecutive clean runs:
