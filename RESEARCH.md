@@ -2023,6 +2023,41 @@ The remaining question is therefore precise and sits above the UCRT: which guest
 routine builds `_Path`. The callers of `_wfullpath` are the place to read next, and
 they are below the CFF that ends at `0xb5c98`, so they decompile to ordinary C++.
 
+**The whole chain below the guest is three UCRT functions, and it dead-ends
+there.** Counting references and filtering by whether the referring address is in
+an executable section, because not every xref is code:
+
+    GetFullPathNameW        <- common_fullpath_user_buffer   2 sites, all executable
+    common_fullpath_user_buffer <- _wfullpath                2 sites, all executable
+    _wfullpath              <- is_usable_drive_or_unc_root   2 sites, all executable
+    is_usable_drive_or_unc_root <- (none in the image)
+
+The filter matters: one reference to `common_fullpath_user_buffer` looked like a
+call site at `0x1a0990` and looked like the answer, but `.pdata` starts at
+`0x1a0000` while `.text` ends at `0x141b70`, so that address is an unwind record
+and not code at all. Following it led nowhere.
+
+`is_usable_drive_or_unc_root` has no direct caller anywhere in the image, so the
+guest reaches it indirectly, through a computed jump out of the obfuscated body:
+
+    bool is_usable_drive_or_unc_root(wchar_t *path) {
+      if (wcspbrk(path, L"./\\") == 0) return false;
+      saved = *__doserrno(); *__doserrno() = 0;
+      p = _wfullpath(local_238, path, 0x104);
+      if (!p && *__doserrno() == 0x22) p = _wfullpath(0, path, 0);
+      else *__doserrno() = saved;
+      if (!p) return false;
+      len = wcslen(p);
+      return len == 3 || is_root_unc_name(p) ? GetDriveTypeW(path) > 1 : false;
+    }
+
+The garbage is therefore produced before any of this runs: `path` arrives as the
+argument, is handed unchanged to `_wfullpath`, and reaches the kernel call
+untouched. Nothing on this side of the boundary can fix or even see it, and the
+caller that fills it lives behind the CFF. That closes the UCRT question and
+hands the next step back to the obfuscated region, where the flag already gave
+one stage of progress.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
