@@ -2153,6 +2153,24 @@ by equality, changes nothing here. That rules the caller's declared size out as 
 control for `-45034`, which is worth having recorded because it was the last
 caller-reachable quantity in this corner.
 
+**There is exactly one folded value that clears the barrier, so there is nothing to
+sweep.** Forcing `eax = N` at the `or` sweeps the folded result, and only `N = 1`
+reaches the continuation at all:
+
+    N=1     r9d = 0x4069d333   index 0x648   -45034 @0x8906a8
+    N=2,3,4,8,16,32,64,128,256   the compare fails, the epilogue is taken
+
+That is the exactness of the barrier seen from the other side: it is a single
+value, not a range. And it bounds what is reachable past it. After the continue,
+the index for the next gate is built from `r9d` plus `bl`, and `bl` is a single
+bit from `seta`. So exactly two indices are reachable, `0x648` and `0x649`, and both
+resolve to `0x8906a8`.
+
+With the flag cleared, `-45034` is therefore unavoidable along this route: no
+folded value other than 1 reaches it, and among the two indices it does reach, both
+land on the same publisher. Moving past it needs something the caller controls that
+has not been tried, not a different value of the quantity already found.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
