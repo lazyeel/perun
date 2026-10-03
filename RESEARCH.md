@@ -2058,6 +2058,33 @@ caller that fills it lives behind the CFF. That closes the UCRT question and
 hands the next step back to the obfuscated region, where the flag already gave
 one stage of progress.
 
+**What the flag actually decides, and a second instrument failure worth recording.**
+Arming the three known publishers at once gives the same sequence in both modes:
+
+    PUBLISH -45034 @ 0x66c2d
+    PUBLISH -45034 @ 0x7016b
+    PUBLISH -45020 @ 0x8905c2
+
+but the control returns `-45020` and the forced-flag run returns `-45034`. So the
+publishes are not what differs; control flow after `0x8905c2` is. That is exactly
+what the compare decides: index `rdx` gives `rsi = 0x7c85b0b1`, the epilogue, and
+the armed `-45020` reaches the caller; index `rdx + 1` gives `rsi = 0x7c8905ca`,
+the continuation, and whatever happens downstream publishes `-45034`.
+
+The second failure is mine and it is a repeat. A tracker that single-steps `edi`
+from the export was used to locate the final `-45034`. It reported addresses inside
+perun's own PIE from step 196, which means the guest had already returned and the
+counter was walking host code. The same defect was caught earlier in this series,
+the conclusion was retracted, and the instrument was then reused unchanged. The
+recorded publish order and the return values come from hardware breakpoints, which
+do not have this failure mode; nothing from the stepper is recorded here.
+
+So the state is narrow and firm: the barrier is the compare at `0x89059a`, passing
+it costs one stage and changes `-45020` to `-45034`, and both numbers are published
+before the decision point, which is why sweeping publishers was never going to
+resolve it. What remains is the `-45034` gate reached through `0x8905ca`, and it
+should be attacked with breakpoints rather than with step counters.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
