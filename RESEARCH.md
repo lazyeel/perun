@@ -2261,6 +2261,83 @@ a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the const
 is tested against is `0x4069d333`. The thing that decides `-45020` has now been named
 down to the instruction and shown to be internal, which moves the question from
 "what input steers it" to "what fills `edi`, `ebp` and `rax` at `0xb15d7`".
+### 5.8l End state, consolidated (2026-10-02)
+
+This supersedes the running narrative of §5.8a–§5.8g. Where those sections
+disagree with this one, this one is what was measured and this one wins.
+
+**The barrier is a single compare and it is passed.**
+
+    0x89059a   cmp   $0x4069d333,%r9d
+
+The fold that feeds it collapses to a plain add. The `xor`/`and` pair at
+`0x8b15e4`/`0x8b15ea` uses the same constant, and by
+`(X^Y) + 2*(X&Y) == X + Y` the whole sequence reduces to
+
+    r9d = eax + 0x527df37e - 0x1214204c = eax + 0x4069d332
+
+so the compare passes **if and only if `eax == 1`**. Solved over all 256 buffer
+bytes, exactly one reaches that: `0x01`.
+
+Clearing it works and is reproducible. Setting `eax = 1`, `edi = 0`, `ebp = 0` in
+the live context at the `or` on `0x8b15de` gives `r9d = 0x4069d333`, control goes to
+`0x8905ca` instead of the epilogue, and the return moves from `-45020` to
+`-45034`, three runs out of three against a two of two control.
+
+**What the compare decides is the jump target, not the code.** `mov
+$0xffff5024,%edi` at `0x8905c2` sits between the table load and the `jmp *%rsi`
+and is not guarded by the branch; it runs on both routes. Index `rdx` sends `rsi`
+to the epilogue `0x7c85b0b1` and the armed `-45020` reaches the caller. Index
+`rdx + 1` sends it to `0x8905ca`, and downstream `-45034` is published at
+`0x8906a8`. Both numbers are armed before the decision point, which is why
+sweeping publishers never could have answered the question.
+
+**Past the barrier `-45034` is a closed door on this route.** The folded value has
+a single passing point, so there is nothing to sweep. The size comparison
+`cmp r8+8,[ctx+8]` contributes one bit, and it moves the index from `0x648` to
+`0x649`; both resolve to `0x8906a8`. Every other field the caller sets
+(`ctx[+0x10]` through `+0x30`) is inert. With the packet sweep of §5.8e, that is
+the whole of the caller's influence, and none of it moves `-45034`.
+
+**There is no base directory to concatenate.** At the moment the export is entered
+the path buffer already holds garbage, before a single guest instruction runs, and
+a hardware watchpoint on it never fires, aligned or not. So there is no writer to
+catch: the library reads a slot nothing initialised. That also explains why the
+cache directory exists but stays empty — `SHGetFolderPathW` with
+`CSIDL_FLAG_CREATE` makes it, and the guest never obtains a usable path.
+
+**The cache name is derived from the packet, not the machine.** With a zero packet
+the library asks for `adi-843A713B.pb`. With the 347-byte SPIM from
+`/opt/data/itunes-recon/spim.raw` in a properly framed packet it asks for
+`adi-00000001.pb`. The `843A713B` of §5.8c is therefore a value the zero packet
+happened to produce, not a hardware signature.
+
+**Two lanes, and they do not meet.** The Android lane (`run-native.sh`, Apple Music
+`libstoreservicescore.so`, native under a Bionic linker) provisions end to end, five
+cold runs of five. Everything above is the Windows lane (`CoreADI64.dll` through
+perun's PE32+ runtime). Neither conclusion transfers to the other.
+
+### 5.8m Claims in §5.8a–§5.8k that later measurement overturned
+
+Each was believed and acted on, and each is wrong. They are listed so that a later
+reader does not re-derive them.
+
+| claim | where | what measurement showed |
+|---|---|---|
+| the CFF dispatcher `0xb15c8` never executes | §5.8g | it executes **three times** per run; the zero came from arming two hardware breakpoints at once and scoring the un-armed one as a miss |
+| the `-45020` publisher is `0x8ffbd` | §5.8b table | the site that runs is `0x905c2`; the table names one instance of a repeated idiom |
+| `0x905c2` publishes `-45018` | §5.8b | it loads `0xffff5024`, which is `-45020` |
+| `0x8ff0a` is the ADI code resolver and the only success site | §5.8b | it is the fifth of fourteen sites that load `-45020`; nothing about it is a success path |
+| a cache or allocation is tagged with `0x22` and holds path candidates | §5.8k | the call is `__doserrno()`; `0x22` is `ERANGE` and `0x16` is `EINVAL` |
+| the walk leaves the image at `0x8905c2` | §5.8h | the step counter was still running after the guest returned and walked perun's own code |
+| `GetFullPathNameW` is broken because `SHGetFolderPathW` returns a POSIX path | §5.8k | a drive-letter path changed nothing; the guest never reads that buffer |
+| `843A713B` is a Hardware Device Signature | §5.8c | it is a function of the packet |
+| the garbage path is stack a shim failed to fill | §5.8l | the buffer is never written at all, by anyone |
+
+The common error in every row is the same: a plausible reading of one artefact
+taken for a measurement, usually with an instrument that had silently stopped
+working. §13b of the research skill records the rule that came out of it.
+
 ### 5.8a Anisette v3 runs locally (2026-09-27) — and what the `-45075` wall actually was
 
 **Anisette v3 client headers are generated natively on this x86_64 host: no Wine, no QEMU, no emulation layer of any kind, and no remote re-signing server.** The engine is an x86_64 Android binary and the host is x86_64, so the Apple libraries execute directly. Artefact `run-native.sh` (`crates/perun-cli/examples/adi-android/`, commit `43f16eb`), two consecutive clean runs:
