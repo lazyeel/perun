@@ -213,8 +213,12 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
         let r10 = unsafe { STEP_R10[slot] };
         let r12 = unsafe { STEP_R12[slot] };
         let sp = unsafe { STEP_RSP[slot] };
+        // rbx rides along because the ADI out-pointers are published by
+        // `mov [rsp+X], rbx`, so the question "which instruction loaded rbx"
+        // cannot be answered from a window that omits it.
+        let bx = unsafe { STEP_RBX[slot] };
         println!(
-            "  [{k:4}] rip={rp:#018x} edx={ed:#010x} rdx={dx:#018x} edi={edi:#010x} rax={rax:#010x} r10={r10:#018x} rcx={cx:#x} r12={r12:#018x} rsp={sp:#018x}"
+            "  [{k:4}] rip={rp:#018x} edx={ed:#010x} rdx={dx:#018x} edi={edi:#010x} rax={rax:#010x} r10={r10:#018x} rcx={cx:#x} rbx={bx:#018x} r12={r12:#018x} rsp={sp:#018x}"
         );
     }
 }
@@ -1119,6 +1123,8 @@ fn cmd_call(args: &[String]) -> i32 {
     // (kind, target, value_string)
     let mut poke_specs: Vec<(u8, u64, String)> = Vec::new();
     let mut poke_ptr_specs: Vec<(u64, String)> = Vec::new();
+    let mut xform_specs: Vec<String> = Vec::new();
+    let mut dump_ptr_specs: Vec<String> = Vec::new();
     // The positional stream (with --verbose already filtered out) drives both
     // the argument slots and the --patch/--poke/--peek option parsing below.
     for a in &pos[2..] {
@@ -1200,6 +1206,20 @@ fn cmd_call(args: &[String]) -> i32 {
             }
             continue;
         }
+        if let Some(spec) = a.strip_prefix("--dump-ptr=") {
+            // --dump-ptr=ADDR[:N]  read N qwords (default 8) at ADDR after the
+            // call. The ADI out-parameters land in host addresses known only
+            // inside this process, so they cannot be dumped from a script.
+            dump_ptr_specs.push(spec.to_string());
+            continue;
+        }
+        if let Some(spec) = a.strip_prefix("--poke-xform=") {
+            // --poke-xform=DST:A,B
+            // Encode the two host addresses A and B into D using ADI's
+            // out-pointer encoding, in this process -- see `xform_block`.
+            xform_specs.push(spec.to_string());
+            continue;
+        }
         if let Some(spec) = a.strip_prefix("--poke-ptr=") {
             // --poke-ptr=RVA=VALUE: read the qword at guest RVA as a host
             // pointer, then write VALUE to the pointed-to memory. Used to poke
@@ -1242,6 +1262,18 @@ fn cmd_call(args: &[String]) -> i32 {
         if let Some((_, addr, _)) = loads.iter().find(|(n, _, _)| n == s) {
             return Some(*addr);
         }
+        // A loaded buffer with an offset: `SP+0x8`. An ADI out-pointer block
+        // lands inside the packet buffer, and the packet is a --load, so this
+        // form is what names both.
+        if let Some((name, off_s)) = s.rsplit_once('+')
+            && !off_s.is_empty()
+            && !name.is_empty()
+            && !name.ends_with('t')
+            && let Some((_, addr, _)) = loads.iter().find(|(n, _, _)| n == name)
+            && let Some(off) = parse_num(off_s)
+        {
+            return Some(addr.wrapping_add(off));
+        }
         if let Some(off_s) = s.strip_prefix("ctx+") {
             let off = parse_num(off_s)?;
             return Some((ctx as u64).wrapping_add(off));
@@ -1258,6 +1290,64 @@ fn cmd_call(args: &[String]) -> i32 {
             std::process::exit(2);
         });
         pokes.push((*kind, *tgt, val));
+    }
+    // Deferred: resolved after the positional args, so a --load name works.
+    let dump_ptr_addrs: Vec<(u64, usize)> = dump_ptr_specs
+        .iter()
+        .map(|spec| {
+            let (a_s, n_s) = spec.split_once(':').unwrap_or((spec.as_str(), "8"));
+            let n = parse_num(n_s).unwrap_or(8) as usize;
+            match resolve_val(a_s) {
+                Some(v) => (v, n),
+                None => {
+                    eprintln!("error: --dump-ptr bad address {a_s:?}");
+                    std::process::exit(2);
+                }
+            }
+        })
+        .collect();
+    for spec in &xform_specs {
+        let Some((dst_s, pair_s)) = spec.split_once(':') else {
+            eprintln!("error: --poke-xform needs DST:ADDR1,ADDR2");
+            std::process::exit(2);
+        };
+        let Some((a_s, b_s)) = pair_s.split_once(',') else {
+            eprintln!("error: --poke-xform needs two addresses");
+            std::process::exit(2);
+        };
+        // Any number of addresses, not just two: the guest takes as many
+        // out-pointers as the call has outputs and reads them in order.
+        let mut ptrs = Vec::new();
+        for tok in pair_s.split(',').filter(|t| !t.is_empty()) {
+            match resolve_val(tok) {
+                Some(v) => ptrs.push(v),
+                None => {
+                    eprintln!("error: --poke-xform bad address {tok:?}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        let Some(dst) = resolve_val(dst_s) else {
+            eprintln!("error: --poke-xform bad destination in {spec:?}");
+            std::process::exit(2);
+        };
+        if ptrs.is_empty() {
+            eprintln!("error: --poke-xform needs at least one address");
+            std::process::exit(2);
+        }
+        let blk = xform_block(&ptrs);
+        // SAFETY: the destination is a guest-visible buffer this process owns
+        // (scratch, ctx, or a --load buffer), and the block is 21 bytes,
+        // which is what the Android packer writes at buffer+0x08.
+        unsafe {
+            std::ptr::copy_nonoverlapping(blk.as_ptr(), dst as *mut u8, blk.len());
+        }
+        println!(
+            "[perun] xform [{dst:#x}] <- {} pointer(s) [{}] = {}",
+            ptrs.len(),
+            ptrs.iter().map(|p| format!("{p:#x}")).collect::<Vec<_>>().join(", "),
+            blk.iter().map(|x| format!("{x:02x}")).collect::<String>()
+        );
     }
     for (rva, val_s) in &poke_ptr_specs {
         let val = resolve_val(val_s).unwrap_or_else(|| {
@@ -1645,6 +1735,18 @@ fn cmd_call(args: &[String]) -> i32 {
             None => unsafe { f(argv[0], argv[1], argv[2], argv[3]) },
         };
         println!("[perun] call#{iter} {export_name} returned {r:#x} ({r})");
+        for (addr, n) in &dump_ptr_addrs {
+            let mut line = String::new();
+            use std::fmt::Write as _;
+            for k in 0..*n {
+                // SAFETY: the address is one this process handed the guest, and
+                // the call has returned, so nothing can unmap it here.
+                let at = (*addr).wrapping_add((k * 8) as u64);
+                let v = unsafe { std::ptr::read_volatile(at as *const u64) };
+                let _ = write!(line, " {v:016x}");
+            }
+            println!("[dump] {addr:#x} x{n} ={line}");
+        }
         if mem_on {
             let after_mem =
                 unsafe { std::slice::from_raw_parts(scratch as *const u64, 0x1000 / 8) };
@@ -2166,6 +2268,51 @@ fn cmd_seq(args: &[String]) -> i32 {
     }
     println!("[seq] done ({step} steps)");
     0
+}
+
+/// ADI out-pointer encoding, from `asabc800ag` (libstoreservicescore.so, RVA
+/// `0x1d2086`-`0x1d219c`).
+///
+/// The Android packer takes the two host pointers of `*cpim` / `*cpim_len`,
+/// mixes each with `x - (2x & MASK) + ADD`, and writes the result as eight
+/// `shr`+`xor` bytes plus a final `^0x1a`. `CoreADI64.dll` decodes that block
+/// back into two addresses and dereferences them at RVA `0xb49e5`, so a wrong
+/// value here is a SIGSEGV rather than a wrong answer.
+///
+/// The addresses are per-process (ASLR), which is why this runs inside perun
+/// instead of in a script: outside, the buffer address is not knowable before
+/// the process starts.
+const XFORM_MASK: u64 = 0x62e1_fd4f_2b03_4634;
+const XFORM_ADD: u64 = 0x3170_fea7_9581_a31a;
+const XFORM_XOR: [u8; 8] = [0x31, 0x70, 0xfe, 0xa7, 0x95, 0x81, 0xa3, 0x1a];
+
+/// Encode one host pointer into the 8 bytes `asabc800ag` writes for it.
+fn xform_word(x: u64) -> [u8; 8] {
+    let v = x
+        .wrapping_sub((x.wrapping_mul(2)) & XFORM_MASK)
+        .wrapping_add(XFORM_ADD);
+    let mut out = [0u8; 8];
+    for (i, k) in XFORM_XOR.iter().enumerate() {
+        out[i] = ((v >> (8 * (7 - i))) & 0xff) as u8 ^ k;
+    }
+    out
+}
+
+/// Encode a run of pointers into the block: eight bytes each, consecutively.
+///
+/// Eight bytes per pointer, not nine: the run is seven `shr`+`xor` pairs
+/// (0x38 down to 0x08) and then `xor $0x1a` on the low byte, which is the
+/// eighth. Reading 21 bytes for two pointers left the second one misaligned and
+/// it decoded as garbage.
+///
+/// The count is open because the guest consumes as many as the call has
+/// out-parameters, and it consumes them in order from the envelope.
+fn xform_block(ptrs: &[u64]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(ptrs.len() * 8);
+    for p in ptrs {
+        out.extend_from_slice(&xform_word(*p));
+    }
+    out
 }
 
 fn parse_num(s: &str) -> Option<u64> {
