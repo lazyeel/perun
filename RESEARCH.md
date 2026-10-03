@@ -2365,6 +2365,27 @@ in the packet selects a third. What satisfies the flag must come from session st
 the guest copies into that stack frame, which is the same state that would have to
 supply the missing base directory.
 
+**What the packet actually steers is the route, not the fold.** Reading both
+contributors at both packet values shows every input identical:
+
+    READ-A  rcx=0x7fffffffc790 rdi=0x2 byte=0x71  rax=0x16ca8af3
+    READ-B  rcx=0x7fffffffc790 rax=0x3 byte=0x3b  rdi=0x7100 rbp=0x843a0000
+
+with `packet[2]=0x00 packet[3]=0x01` and `packet[2]=0x00 packet[3]=0x02` alike, while
+`r9d` at the compare differs (`0x4069d331` against `0xc2f8fe58`). The frame the
+dispatcher reads is the same stack block in both cases and the bytes it reads are
+the same. So `packet[3]` does not feed the flag at all; it selects which of the
+dispatcher's routes the call takes, and the fold runs identically on both.
+
+That closes the question the sweep raised. The flag is unreachable from the packet
+not because the two bytes are wrong, but because the packet never reaches the
+arithmetic that produces `eax`. What differs between the routes has to be found at
+the dispatch itself, not at the reads.
+
+The frame itself is not populated from our packet either: at both read sites it
+holds the same bytes whatever `packet[3]` is, and they are not the packet's. That
+is consistent with the missing base directory — one frame, never written by anyone.
+
 ### 5.8a Anisette v3 runs locally (2026-09-27) — and what the `-45075` wall actually was
 
 **Anisette v3 client headers are generated natively on this x86_64 host: no Wine, no QEMU, no emulation layer of any kind, and no remote re-signing server.** The engine is an x86_64 Android binary and the host is x86_64, so the Apple libraries execute directly. Artefact `run-native.sh` (`crates/perun-cli/examples/adi-android/`, commit `43f16eb`), two consecutive clean runs:
