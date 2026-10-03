@@ -2171,6 +2171,28 @@ folded value other than 1 reaches it, and among the two indices it does reach, b
 land on the same publisher. Moving past it needs something the caller controls that
 has not been tried, not a different value of the quantity already found.
 
+**The caller's surface is exhausted on this route.** With the flag forced, every
+remaining field the caller sets is inert:
+
+    ctx[+0x8]  0x08 / 0x10 / 0x20 / 0x40   index 0x648 / 0x649 / 0x648 / 0x648   -45034
+    ctx[+0x10] 0x40                          index 0x648                            -45034
+    ctx[+0x18] 0x40                          index 0x648                            -45034
+    ctx[+0x20] 0x40                          index 0x648                            -45034
+    ctx[+0x28] 0x40                          index 0x648                            -45034
+    ctx[+0x30] 0x40                          index 0x648                            -45034
+
+Taken with §5.8e's packet sweep and the folded-value sweep, that is the whole of
+what a caller can influence on this path, and none of it moves `-45034`. The declared
+size shifts the index by one and both neighbours land on the same publisher; the
+other fields do nothing at all; the folded value admits a single passing point.
+
+So the honest end state is a closed door rather than an open question: with the flag
+cleared, this route cannot get past `-45034`, and the next attempt has to change
+something structural rather than tune an input. The candidates this leaves are a
+different call shape entirely, a caller that performs the session Android performs
+(§5.8d's `cvu8io98wun` plus whatever else it needs), or work on the real barrier
+rather than on the branch behind it.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
