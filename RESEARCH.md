@@ -2193,6 +2193,41 @@ different call shape entirely, a caller that performs the session Android perfor
 (§5.8d's `cvu8io98wun` plus whatever else it needs), or work on the real barrier
 rather than on the branch behind it.
 
+**A live SPIM changes the computed cache name, which is the first sign that the
+packet reaches the identifier computation.** The packet was built the way the
+Android harness frames a provisioning call:
+
+    [+0x00..+0x03] 00 00 00 02
+    [+0x04..+0x0B] ffffffffffffffff   dsid = -1
+    [+0x0C..+0x0F] 5b 01 00 00        347, little-endian
+    [+0x10..]       347 bytes from /opt/data/itunes-recon/spim.raw
+
+    ctx[+0x00] = packet   ctx[+0x08] = 0x200   ctx[+0x0c] = 0x200
+
+With an all-zero packet the library names the cache `adi-843A713B.pb`. With the
+live SPIM it names **`adi-00000001.pb`**. The hash in the filename is not a machine
+identifier after all; it is derived from the packet, and the zero packet happened to
+produce `843A713B`. That retires the reading in §5.8c that `843A713B` was a hardware
+signature.
+
+The return value does not move. Live SPIM without forcing still returns `-45020`,
+the same as a zero packet. With the flag forced on top of the live SPIM the walk
+gets further than it ever has: it reaches the file stage, calls
+`GetFullPathNameW` for both `adi.pb` and `adi-00000001.pb`, and then faults at
+`0xb49e5`, which is `or $0xc7480000,%eax` in the same jump-table idiom as
+everything else around it. No unimplemented import is involved; the shim log shows
+only `SHGetFolderPathW` and `GetFullPathNameW`.
+
+Neither run writes a cache file. The directory
+`~/.perun/appdata/Common/Apple Computer/iTunes/adi` is created by
+`SHGetFolderPathW` with `CSIDL_FLAG_CREATE`, and it stays empty, so the library never
+gets as far as opening or creating the blob.
+
+Two things are now measurable that were not before: the packet content moves the
+identifier, and the library reaches the file stage rather than stopping at the
+barrier. What is still missing is a populated base directory, and the earlier
+measurements say the guest never uses the answer `SHGetFolderPathW` gives it.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
