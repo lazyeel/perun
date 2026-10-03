@@ -2292,19 +2292,17 @@ to the epilogue `0x7c85b0b1` and the armed `-45020` reaches the caller. Index
 `0x8906a8`. Both numbers are armed before the decision point, which is why
 sweeping publishers never could have answered the question.
 
-**Past the barrier `-45034` is a closed door on this route.** The folded value has
-a single passing point, so there is nothing to sweep. The size comparison
-`cmp r8+8,[ctx+8]` contributes one bit, and it moves the index from `0x648` to
-`0x649`; both resolve to `0x8906a8`. Every other field the caller sets
-(`ctx[+0x10]` through `+0x30`) is inert. With the packet sweep of §5.8e, that is
-the whole of the caller's influence, and none of it moves `-45034`.
+**Past the barrier the caller's surface is exhausted, but the flag itself is not.**
+Every input a caller controls has been swept: the packet (512 runs over the two
+bytes that decide whether the compare is reached at all), the folded value (one
+passing point), the size compare (one bit, and both neighbours land on the same
+publisher) and the remaining `ctx` fields (inert). None moves `-45034`.
 
-**There is no base directory to concatenate.** At the moment the export is entered
-the path buffer already holds garbage, before a single guest instruction runs, and
-a hardware watchpoint on it never fires, aligned or not. So there is no writer to
-catch: the library reads a slot nothing initialised. That also explains why the
-cache directory exists but stays empty — `SHGetFolderPathW` with
-`CSIDL_FLAG_CREATE` makes it, and the guest never obtains a usable path.
+That closed the input, not the gate. §5.8n goes at the barrier from the other
+side and finds that the two frame bytes the fold reads are **image bytes under our
+control**, reachable with `--patch`, and that driving them puts `eax` at exactly the
+required `1` and `edi` at `0`. Only `ebp`, the machine hash, is left. So the next
+step is no longer "try another input": it is to find what feeds `ebp`.
 
 **The cache name is derived from the packet, not the machine.** With a zero packet
 the library asks for `adi-843A713B.pb`. With the 347-byte SPIM from
@@ -2332,11 +2330,54 @@ reader does not re-derive them.
 | the walk leaves the image at `0x8905c2` | §5.8h | the step counter was still running after the guest returned and walked perun's own code |
 | `GetFullPathNameW` is broken because `SHGetFolderPathW` returns a POSIX path | §5.8k | a drive-letter path changed nothing; the guest never reads that buffer |
 | `843A713B` is a Hardware Device Signature | §5.8c | it is a function of the packet |
+| the garbage path is a POSIX-vs-Windows formatting problem | §5.8k | a drive-letter path changed nothing; the guest never reads that buffer |
+| `0x133834` allocates the path buffer and stamps it | §5.8k | it is `__doserrno()`; `0x22` is `ERANGE` |
+| the packet byte feeds the flag arithmetic | §5.8n | every register at both fold reads is identical across packets; the packet selects a route |
+| patching other bytes in the fold window kills the run | §5.8n | that was a stale gdb script, not a dead run; `0x164506` controls the second byte |
+
 | the garbage path is stack a shim failed to fill | §5.8l | the buffer is never written at all, by anyone |
 
 The common error in every row is the same: a plausible reading of one artefact
 taken for a measurement, usually with an instrument that had silently stopped
 working. §13b of the research skill records the rule that came out of it.
+
+### 5.8n The frame bytes are controllable by patch, and two of three terms now match
+
+The barrier can be walked without touching a register, by patching bytes of the
+image. The writer behind the frame byte the dispatcher reads is at RVA `0x72641`:
+
+    0x7c87262b  xor  dl, BYTE PTR [rdi+rcx+0x4]
+    0x7c872637  xor  dl, BYTE PTR [rdi+rcx+0x3]
+    0x7c87263b  xor  dl, al
+    0x7c87263d  mov  BYTE PTR [r11+rbp], dl
+
+The value comes from `rdx`, and the fold indexes the image **by the frame offset**,
+so offset 2 folds the byte at `0x164505` and offset 3 folds `0x164506`. Both are
+reachable, each by a linear relation found by sweep:
+
+    frame byte 2 = 0xff - value at 0x164505
+    0x164506 = 0xb3            -> frame byte 3 = 0x01
+
+With
+
+    --patch=0x164505=ff --patch=0x164506=b3
+
+the three terms at the `or` on `0x8b15de` are
+
+    eax = 0x1          the required value
+    edi = 0x0          zeroed
+    ebp = 0x843a0000   the machine hash, and 0x843a is also the cache filename prefix
+
+so `ebp` is the last thing standing between a clean configuration and the
+barrier. No register is forced anywhere in this; it is two byte patches.
+
+Two cautions. `r9d` at the compare reads `0x4069d332`, that is `eax == 0`, even
+though the `or` measured `0x843a0001`: the dispatcher runs three times and the
+compare is fed by a different invocation from the one sampled at the `or`, so the
+patches must be read against the invocation that actually reaches the compare.
+And `--patch` shifts the guest stack base (`0x...c800` becomes `0x...c7e0`), because
+patching pages RWX changes the mmap layout; any measurement that hard-codes a guest
+stack address has to be redone after adding a patch.
 
 **The flag is not a packet check, and that is now proven rather than suspected.**
 The fold's two contributors come from two different buffer bytes, and both are
