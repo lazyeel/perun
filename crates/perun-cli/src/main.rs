@@ -169,6 +169,26 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
         "[stop] rip={rip:#018x} edi={edi:#x} rax={rax:#018x} rbx={rbx:#018x} rcx={rcx:#x} rsp={rsp:#018x}"
     );
     println!("[perun] last guest instructions, oldest first:");
+    // PERUN_SLOTS=off[,off,...] reads those `[rsp+off]` guest stack slots at
+    // the stop point. The ring carries registers and rip but no memory read, so
+    // a slot that decides a branch -- `rsp+0x80` at RVA 0x90625 -- could only be
+    // inspected by attaching gdb, which cannot take a hardware watchpoint here
+    // and cannot write the 0xcc into perun's RX mapping either. Off unless asked:
+    // reading guest memory here is safe (this runs after the walk has stopped),
+    // but an offset typo would otherwise print whatever is there.
+    if let Some(spec) = std::env::var_os("PERUN_SLOTS") {
+        for off_s in spec.to_string_lossy().split(',').filter(|s| !s.is_empty()) {
+            let Ok(off) = u64::from_str_radix(off_s.trim().trim_start_matches("0x"), 16) else {
+                println!("[slot] {off_s:?} is not hex");
+                continue;
+            };
+            let addr = rsp.wrapping_add(off);
+            // SAFETY: the walk has stopped and this is the same process, so
+            // nothing can unmap the guest stack under this read.
+            let v = unsafe { std::ptr::read_volatile(addr as *const u64) };
+            println!("[slot] rsp+{off:#x} = {addr:#018x} -> {v:#018x}");
+        }
+    }
     let n = unsafe { STEP_IDX }.min(STEP_RING);
     // STEP_IDX is the index AFTER the last store, so the oldest entry of a
     // window ending there is at STEP_IDX - n. Adding k to STEP_IDX instead
