@@ -1976,6 +1976,53 @@ by any caller input.
 between the table load and the `jmp` and is not guarded by the compare; what the
 compare decides is where control goes afterwards, not whether `-45020` is armed.
 
+**The path builder is MSVC UCRT code inside the library, not guest logic.** The two
+addresses are not obfuscated at all, and Ghidra names both immediately:
+
+    0x7c933834  __doserrno
+    0x7c938fa8  _wfullpath
+
+`common_fullpath_user_buffer` is the UCRT helper behind `GetFullPathNameW`, and the
+caller is `_wfullpath`:
+
+    wchar_t *_wfullpath(wchar_t *_FullPath, wchar_t *_Path, size_t _SizeInWords)
+    {
+      if ((_Path == 0) || (*_Path == L'\0'))  return _wgetcwd(_FullPath, ...);
+      if (_FullPath == 0) { n = GetFullPathNameW(_Path, 0, 0, 0); p = _calloc_base(...); ... }
+      return common_fullpath_user_buffer(_FullPath, _Path, _SizeInWords);
+    }
+
+    wchar_t *common_fullpath_user_buffer(wchar_t *buf, wchar_t *name, uint64 size)
+    {
+      if (size == 0) { *__doserrno() = 0x16; _invalid_parameter_noinfo(); }   // EINVAL
+      else if (size < 0x100000000 && (n = GetFullPathNameW(name, size, buf, 0)) && n < size)
+        return n ? buf : (*__acrt_errno_map_os_error(GetLastError()), 0);
+      else { *__doserrno() = 0x22; }                                          // ERANGE
+      return 0;
+    }
+
+This corrects the reading that the guest "allocates a buffer, writes one DWORD tag
+and hands it over uninitialised". `mov [rax],0x22` is `*__doserrno() = ERANGE` and
+`mov [rax],0x16` is `EINVAL`; the call at `0x138f62` is `__doserrno()`, not an
+allocator. The repeated records seen a fixed stride apart in memory were errno
+writes, not path candidates.
+
+What the register state actually shows at the shim, against the UCRT signature:
+
+    rcx = _Path      = 0x555557e4adc0   the garbage string
+    rdx = _SizeInWords = 0x104 (260)
+    r8  = _FullPath  = 0x7fffffff9350   a host stack buffer
+
+So the output buffer is a perfectly ordinary host stack slot, and **the input string
+is guest memory that the guest itself filled**. Nothing in this runtime hands that
+string over, and nothing here can repair it: `SHGetFolderPathW` is asked for
+`CSIDL 0x8023` and answers correctly, and the guest does not use that answer for
+this path.
+
+The remaining question is therefore precise and sits above the UCRT: which guest
+routine builds `_Path`. The callers of `_wfullpath` are the place to read next, and
+they are below the CFF that ends at `0xb5c98`, so they decompile to ordinary C++.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
