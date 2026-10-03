@@ -1899,6 +1899,42 @@ So the frontier is a single site, it is reached without the dispatcher and witho
 forcing anything, and the next question is narrow: what selects `0x8905c2` over the
 other thirteen, given that all fourteen are byte-identical in form.
 
+**The guest allocates its own path buffer and passes it to `GetFullPathNameW`
+without writing anything into it.** The caller is at guest RVA `0x138f80`, reached
+through frame 1 rather than through `[rsp]`, because the shim's prologue has already
+moved the stack pointer by the time the breakpoint fires:
+
+    7c938f62:  call   0x7c933834          ; allocate, result in rax
+    7c938f67:  movl   $0x22,(%rax)        ; write one DWORD tag, 34
+    7c938f6f:  xor    %r9d,%r9d          ; hFile = 0
+    7c938f72:  mov    %rdi,%r8           ; lpFilePart
+    7c938f75:  mov    %ebx,%edx          ; nBufferLength
+    7c938f77:  mov    %rax,%rcx          ; lpFileName = the fresh block
+    7c938f7a:  call   *0x7c942278        ; GetFullPathNameW, IAT
+    7c938f80:  <- return address, what frame 2 reports
+
+So the garbage prefix is not uninitialised stack that a shim failed to write. The
+guest allocates the block itself, stores a single DWORD in it, and hands it over as
+a file name. The repeated records a fixed stride apart seen at `0x555557e4adc0` are
+those allocations, each tagged `0x22`, and the walk fills them one after another.
+Nothing in this project can make that buffer contain a path, because nothing in this
+project is ever asked to.
+
+`SHGetFolderPathW` is not the source. The guest asks for exactly one CSIDL, `0x8023`,
+and the shim answers it correctly:
+
+    SHGetFolderPathW(csidl=0x8023 create=true out_path=0x7fffffffc670)
+      -> "/opt/data/home/.perun/appdata/Common"
+
+so the four-candidate-directory reading is excluded by measurement: `0x1a`, `0x1c`
+and the module directory are never requested, and a Windows-shaped path changed
+nothing earlier for the same reason. The shim now logs every CSIDL with its buffer
+pointer so a later read-back is visible rather than assumed.
+
+What remains is not a formatting problem. The guest reaches the file-search stage
+with an allocation it never populates, on the forced branch only: in a natural call
+it publishes `-45020` at `0x8905c2` and returns without going near any of this.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it

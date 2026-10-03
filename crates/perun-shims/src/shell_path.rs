@@ -85,6 +85,15 @@ win32_api! {
         out_path: LPWSTR,
     ) -> i32 {
         let csidl = csidl as u32;
+        // Log every request, mapped or not, with the buffer pointer: the guest
+        // building its provisioning path was observed allocating its own buffer
+        // and passing it straight to GetFullPathNameW, so whether it ever reads
+        // this buffer back is worth seeing rather than assuming.
+        eprintln!(
+            "[perun] SHGetFolderPathW(csidl={csidl:#x} create={} out_path={:?})",
+            csidl & CSIDL_FLAG_CREATE != 0,
+            out_path
+        );
         let subdir = if let Some(s) = csidl_subdir(csidl) { s } else {
             eprintln!("[perun] SHGetFolderPathW(csidl={csidl:#x}) — unmapped CSIDL");
             return E_INVALIDARG;
