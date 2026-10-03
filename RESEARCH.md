@@ -1935,6 +1935,47 @@ What remains is not a formatting problem. The guest reaches the file-search stag
 with an allocation it never populates, on the forced branch only: in a natural call
 it publishes `-45020` at `0x8905c2` and returns without going near any of this.
 
+**Correction, and the flag moves the barrier one stage.** The claim that the
+dispatcher, the fold and the compare belong only to the walk-armed configuration was
+wrong; they all run in a natural call. Measured directly, each on its own
+breakpoint:
+
+    0x7c8b15c8  dispatcher executes, three times, r9 = 1 on entry
+    0x7c89059a  compare reached, r9d = 0xf0c5d587, rdx = 0x651
+    0x7c8905c2  publisher reached, rax = 0xfffcab1b, rsi = 0x7c85b0b1
+
+The earlier "zero dispatcher hits" came from a two-breakpoint script that armed
+badly and scored as zero, the same class of instrument error this series has kept
+making. The dispatcher reaching three times in a natural call is exactly what the
+walk chronology recorded, so the walk and the natural path were never separate here.
+
+Forcing the flag at the `or` and reading the outcome settles the barrier itself.
+With `eax = 1`, `edi = 0`, `ebp = 0` set on the live context:
+
+    compare      r9d = 0x4069d333   passes
+    jmp target   0x7c8905ca          index rdx + 1 = 0x652
+    return       0xffff5016         (-45034)
+
+against the untouched control, three runs and two runs respectively:
+
+    flag forced    -> 0xffff5016  (-45034)   3/3
+    control        -> 0xffff5024  (-45020)   2/2
+
+So the flag is the barrier and passing it advances one stage, to `-45034`. With the
+masks zeroed and `eax` left alone the fold becomes visible:
+
+    0x3b, 0x2, 0x55 across the three hits
+    r9d = 0x4069d387 = 0x55 + 0x4069d332
+
+which is the identity of §5.8k holding on the natural path. The remaining gap is
+that the third `lea` term has to be `0x01` rather than `0x55`, which is the packet
+byte question, and the masks are produced by arithmetic inside the body rather than
+by any caller input.
+
+`mov $0xffff5024,%edi` at `0x8905c2` executes on both routes, because it sits
+between the table load and the `jmp` and is not guarded by the compare; what the
+compare decides is where control goes afterwards, not whether `-45020` is armed.
+
 **Where this leaves the barrier.** `r9` is not a caller-supplied value, so §5.8e's
 sweep of caller-reachable inputs could not have moved it and correctly did not. It is
 a fold over `edi`/`ebp`/a table lookup inside the dispatcher body, and the constant it
