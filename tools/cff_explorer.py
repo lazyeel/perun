@@ -101,6 +101,30 @@ def decode_at(rip, count=1):
     return next(cs.disasm(data[off:off + 16], rip, count=count), None)
 
 
+EPILOGUE_RVAS = []
+
+
+def scan_epilogue():
+    """The single exit of vdfut768ig: `add rsp,0x16a8` then the pops.
+
+    The frame is 0x16a8 for the whole call, which is what makes `[rsp+off]`
+    resolvable from the run's own stop address. Only one such sequence exists in
+    `.text`, so it is the reliable epilogue marker even though the image holds
+    584 `ret` overall.
+    """
+    code = data[TEXT_OFF:TEXT_OFF + TEXT_SIZE]
+    pat = bytes.fromhex("4881c4a8160000")   # add $0x16a8,%rsp
+    out = []
+    i = 0
+    while True:
+        i = code.find(pat, i)
+        if i < 0:
+            break
+        out.append(TEXT_RVA + i)
+        i += 1
+    return out
+
+
 def scan_publishers():
     """Every `mov reg, imm` whose immediate is an ADI status.
 
@@ -236,6 +260,12 @@ def dump(g, blocks, hot, publishers, rows):
     print("== ADI literals present in decoded blocks ==")
     for v, n in lits.most_common():
         print("    %d %-28s x%d" % (v, ERRORS[v], n))
+
+    eps = scan_epilogue()
+    print()
+    print("== epilogue ==")
+    print("  add rsp,0x16a8 sites: %d -> %s"
+          % (len(eps), ", ".join("0x%x" % e for e in eps)))
 
     pubs_all = scan_publishers()
     print()
