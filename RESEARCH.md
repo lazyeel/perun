@@ -382,6 +382,17 @@ The gate is a chain of checks, not one. On the clean path, without the `0x19db98
 
 **Recognised opcodes (five of nine tested).** `0x632b8d6e`, `0x85fe63b0`, `0x3e58e7f9`, `0xcfe0b46a`, `0xb0eda7af`. **Not recognised (→ `-45019`):** `0xb23c691e`, `0xc774d292`, `0x4069d332`, `0x4069d333`, `0`. The match is exact and by equality: `0x632b8d6e − 1` and `+ 1` both fail.
 
+**Opcode enumeration by scanning immediates cannot work (2026-10-04).** An
+exhaustive scan of `.text` for every `mov r32, imm32` (`B8..BF`) carrying an
+ADI status constant finds 104 sites, listed by `tools/cff_explorer.py`. **None
+of the five recognised opcodes occurs anywhere in `.text` as a 4-byte
+immediate**, so the dispatcher never compares them literally -- it compares a
+derived value and reaches the magics through the CFF table. This is why the
+194 `cmp edx, imm32` candidates are worthless: called, every one of them
+returns `-45019 unknownAdiFunction`. Recognised opcodes are only discoverable by
+behavioural sweep, and the magics are single points of equality (`+-1` both
+fail), not ranges.
+
 **The success opcode is `0xcfe0b46a`.** The ordered Android phase dump puts the `SUCCESS` banner after call 6, which carries `0xcfe0b46a` and a 48-byte payload; calls 7 and 8 are `0x3e58e7f9` and run *after* the success. Most of this phase was spent on the wrong opcode, and that is why the convention question took as long as it did.
 
 **The packet is four bytes.** Nothing past byte 3 is read: a big-endian body length in bytes 4..7, the `OtpPayload` struct, a 48-byte payload, 28 bytes of padding and a real 347-byte SPIM all produce the identical result, as does setting any single byte from `+0x04` to `+0x2c`. `frame[+0x00]` is a **pointer to the packet** and `frame[+0x08]` is its length; the earlier reading of those as an output buffer and a capacity is retired.
