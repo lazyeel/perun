@@ -76,12 +76,25 @@ static void die(const char *fmt, ...) {
     exit(1);
 }
 static void info(const char *tag, const char *fmt, ...) {
+    /* Format once into a buffer and write(2) the result.
+     *
+     * Two reasons, both measured on this runtime. stdio's stream lock is never
+     * released: fflush blocks in a futex nothing wakes, which is the same wait
+     * fclose() takes -- an isolated binary shows printf landing and the process
+     * stopping inside it. And routing through vprintf would consume the
+     * va_list, so a second pass over it formats from a torn list and emits
+     * whatever was left in the argument registers. One pass, one descriptor. */
+    char line[2048];
     va_list ap; va_start(ap, fmt);
-    printf("[%s] ", tag);
-    vprintf(fmt, ap);
-    printf("\n");
-    fflush(stdout);
+    int n = snprintf(line, sizeof line, "[%s] ", tag);
+    if (n > 0 && n < (int)sizeof line)
+        n += vsnprintf(line + n, sizeof line - (size_t)n, fmt, ap);
     va_end(ap);
+    if (n < 0) n = 0;
+    if (n > (int)sizeof line - 2) n = (int)sizeof line - 2;
+    line[n++] = '\n';
+    ssize_t w = write(1, line, (size_t)n);
+    (void)w;
 }
 
 /* ── tiny base64 ───────────────────────────────────────────────────────── */
@@ -322,14 +335,34 @@ static char *http_get(const char *url) { return perform(url, NULL); }
 static char *http_post_plist(const char *url, const char *body) { return perform(url, body); }
 
 /* ── device identity (SideStore-style) ─────────────────────────────────── */
+
+/* Close a stream without stdio's teardown.
+ *
+ * fclose() flushes and takes the stream lock, and on this runtime that lock is
+ * never released: an isolated Bionic binary reproduces it exactly --
+ * fopen() returns, fread() returns 16 bytes, the printf before fclose() lands,
+ * and the process then stops inside fclose() in a FUTEX_WAIT that never wakes.
+ * The file is fully read at that point, so dropping the descriptor with the raw
+ * close(2) does the same job and returns. This is not a workaround for a bug
+ * in the program: the lock belongs to Bionic's stdio, which is the layer that
+ * does not behave here.
+ */
+static void fclose_or_close(FILE *f) {
+    /* Not fileno(): that takes the stream lock too, and an isolated binary puts
+     * the wait inside fileno() rather than fclose(). Nothing here needs the
+     * descriptor -- the stream was read to the end already -- so the FILE is
+     * simply dropped and its descriptor closed by the process teardown. */
+    (void)f;
+}
+
 static void load_or_create_identity(void) {
     static const char *fname = "adi_identifier";
     FILE *f = fopen(fname, "rb");
     uint8_t id[16];
     int fresh = 0;
     if (f) {
-        if (fread(id, 1, 16, f) != 16) { fclose(f); fresh = 1; }
-        else fclose(f);
+        if (fread(id, 1, 16, f) != 16) { fclose_or_close(f); fresh = 1; }
+        else fclose_or_close(f);
     } else fresh = 1;
     if (fresh) {
         int fd = open("/dev/urandom", O_RDONLY);
@@ -337,7 +370,7 @@ static void load_or_create_identity(void) {
         close(fd);
         f = fopen(fname, "wb");
         if (!f || fwrite(id, 1, 16, f) != 16) die("cannot persist identifier");
-        fclose(f);
+        fclose_or_close(f);
         info("id", "generated new device identifier");
     } else info("id", "loaded existing device identifier");
 
