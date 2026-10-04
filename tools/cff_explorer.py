@@ -261,6 +261,19 @@ def dump(g, blocks, hot, publishers, rows):
     for v, n in lits.most_common():
         print("    %d %-28s x%d" % (v, ERRORS[v], n))
 
+    # Which of the exhaustive publishers did this run actually reach? The
+    # difference is the useful part: a publisher that is never hit on a given
+    # packet tells you the packet never reached that check.
+    reached = {b["rva"] for b in blocks.values()}
+    pubs_all_r = scan_publishers()
+    hit, missed = [], []
+    for v, rs in pubs_all_r.items():
+        (hit if any(r in reached for r in rs) else missed).append(v)
+    print()
+    print("== publisher reachability on this packet ==")
+    print("  reached   : %s" % ", ".join("%d %s" % (v, ERRORS[v]) for v in sorted(hit)))
+    print("  not reached: %s" % ", ".join("%d %s" % (v, ERRORS[v]) for v in sorted(missed)))
+
     eps = scan_epilogue()
     print()
     print("== epilogue ==")
