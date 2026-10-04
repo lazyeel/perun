@@ -8,6 +8,7 @@ use perun_shims::table::ShimTable;
 use std::path::Path;
 
 mod adi;
+mod adi_net;
 mod fetcher;
 mod sap;
 mod scaffold;
@@ -818,11 +819,16 @@ fn run_with_args(args: &[String]) -> i32 {
         "scaffold" => scaffold::run(&args[2..]),
         "sap" => cmd_sap(&args[2..]),
         "adi" => {
-            if args[2] == "headers" {
-                adi::run(&args[3..])
-            } else {
-                eprintln!("usage: perun adi headers [<image.dll>] [--adi-dir DIR]");
-                2
+            match args[2].as_str() {
+                "headers" => adi::run(&args[3..]),
+                // The network half on its own: proof the anonymous GSA
+                // bootstrap works before the guest half is wired in.
+                "net-probe" => adi::net_probe(),
+                _ => {
+                    eprintln!("usage: perun adi headers [<image.dll>] [--adi-dir DIR]");
+                    eprintln!("       perun adi net-probe");
+                    2
+                }
             }
         }
         "store" => store::cli::run(&args[2..]),

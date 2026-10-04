@@ -50,6 +50,39 @@ const EXIT_USAGE: i32 = 2;
 const EXIT_FAIL: i32 = 1;
 
 /// Run `perun adi headers [<image.dll>] [--adi-dir DIR]`.
+/// `perun adi net-probe` -- run only the network half and print what came
+/// back. Separate from `headers` so the two can be checked independently while
+/// the guest half is still being brought up.
+pub fn net_probe() -> i32 {
+    let id = crate::adi_net::identity();
+    println!("[adi] X-Mme-Device-Id: {}", id.device_id);
+    println!("[adi] X-Apple-I-MD-LU: {}", id.lu);
+    let eps = match crate::adi_net::lookup(&id) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("[adi] lookup failed: {e}");
+            return EXIT_FAIL;
+        }
+    };
+    println!("[adi] start  = {}", eps.start);
+    println!("[adi] finish = {}", eps.finish);
+    match crate::adi_net::start_provisioning(&id, &eps) {
+        Ok(s) => {
+            println!("[adi] ptxid = {}", s.ptxid);
+            println!(
+                "[adi] spim  = {} bytes, first 8 {:02x?}",
+                s.spim.len(),
+                &s.spim[..8.min(s.spim.len())]
+            );
+            EXIT_OK
+        }
+        Err(e) => {
+            eprintln!("[adi] startMachineProvisioning failed: {e}");
+            EXIT_FAIL
+        }
+    }
+}
+
 pub fn run(args: &[String]) -> i32 {
     let mut image_path: Option<String> = None;
     let mut adi_dir: Option<String> = None;
