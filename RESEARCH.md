@@ -1087,10 +1087,11 @@ script:
     === SUCCESS ===
     X-Apple-I-MD-M: dp+14uJa5KDz4OxueI4Rav3cfuq3nUaJBT+HaksvYSUaMQk03PzK...
 
-Verified 5/5 cold runs, each after `rm -rf adi-data`, so every run was a full
-network round trip rather than a cached load. The same result reproduces on the
-untouched 27-Sep binary in `/opt/data/apk/x86/` under plain `hermes`, with no
-root, no `sudo` and no patched library.
+Verified 5/5 runs. **The "cold" part of that claim is withdrawn** — see §5.8o:
+`rm -rf adi-data` failed silently against a root-owned cache, so the round trip
+was not exercised. The result itself reproduces on the untouched 27-Sep binary
+in `/opt/data/apk/x86/` under plain `hermes`, with no root, no `sudo` and no
+patched library.
 
 What read as a barrier here was never one. Every symptom appeared as one of only
 two observables -- hang forever, or exit 0 with zero output -- and all of them
@@ -1131,6 +1132,38 @@ have caught the worst fault -- that `env` resolves to a real `env` and is not
 shadowed by a wrapper. The TLS and reachability checks are the MITM tripwire:
 if a proxy ever enters the path, the pin verification fails there and names
 itself, instead of surfacing later as an unexplained provisioning error.
+
+### 5.8o The Android lane, re-verified with asserted cold starts (2026-10-05)
+
+§5.8f records "5/5 cold runs, each after `rm -rf adi-data`". That verification was sound in appearance and wrong in fact, and the same mistake recurred today, so both are recorded here rather than quietly replaced.
+
+**Why the 5/5 claim did not hold.** The stand runs through `sudo` (the loader needs it), so the `adi-data/` it writes is root-owned. `rm -rf adi-data` from the invoking user fails with `Permission denied`, and a script that only checks its own exit status reports a cold start anyway. Every run then loads the cached `adi.pb` and prints a perfectly good `=== SUCCESS ===` without touching the network. The tell is in the log: **zero `[net]` lines**, and `ADIGetLoginCode=0` printed straight after the identity block instead of `-45061 (not provisioned: provisioning now)`.
+
+**What is established now, on asserted runs.** Each of the three verification runs opens its log with `cold: cache absent (verified)` — the deletion is checked, not assumed — and every one carries eight `[net]` lines:
+
+    [net] GET  .../GsService2/lookup                    -> 200 (25576 bytes)
+    [net] POST .../MidService/startMachineProvisioning -> 200 (1109 bytes)
+    [prov] spim received (347 bytes decoded)
+    [prov] cpim ready (276 bytes, session=3601880849)
+    [net] POST .../MidService/finishMachineProvisioning -> 200 (1440 bytes)
+    [prov] ptm/tk received (routing info: 50660608)
+    [adi] re-check ADIGetLoginCode=0
+    === SUCCESS ===
+
+`X-Apple-I-MD` rotates per run and `X-Apple-I-MD-M` is stable, which is the intended behaviour. So the §5.8f result is real as a result; what was wrong was only the cold-start claim, and it is withdrawn rather than restated.
+
+**The four walls, and what each one actually was.** All in the Bionic runtime, none in Apple's code, each found with a control binary:
+
+| wall | mechanism |
+|---|---|
+| loader ignores `LD_LIBRARY_PATH` | resolves only `/system/lib64`, `/vendor/lib64`; raised in a private mount namespace |
+| `linker64` `__dl__ZL10g_dl_mutex` at `0x17040` | image carries `0x4000`, robust bit set with no owner, so the first `dlopen` waits forever |
+| 61 further robust mutexes | same shape, across `libselinux`, `libLLVM` and the Apple libraries |
+| `flockfile` at `0x23a20` | 26-byte tail call into `pthread_mutex_lock`; the single cause behind every stdio hang, including `libcurl`'s `BIO_gets` on the CA bundle |
+
+**What did not work, measured.** Cutting `libCoreFoundation.so` from the preload list does not remove it: it is named in `NEEDED` by both `libstoreservicescore.so` and `libmediaplatform.so`, and it is present in the working 27-Sep reference set. Removing the GUI stack from the sysroot turns the hang into `could not load library "libbinder.so"`. The stack hangs in its *constructors*, not in anything Anisette calls — no Apple library lists `libhwui`, `libRS` or `libLLVM` in `NEEDED`.
+
+**Tooling notes that cost the most.** `unshare -r -m` cannot bind-mount here ("wrong fs type"); `mkdir` inside the namespace lands in the shared layer regardless; `debugfs` lives in `/sbin`, which is not on `PATH`. A rebuild script that copies `linker64` over the patched copy silently reverts `g_dl_mutex` and kills the lane — the one script of its kind that was written was deleted after it did exactly that twice.
 
 ### 5.8g The publisher table was wrong, and the clean path is now observable (2026-10-02)
 
