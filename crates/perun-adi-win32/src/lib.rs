@@ -176,7 +176,7 @@ pub fn replay(
             0,
         )
     };
-    let packet = page(64);
+    let packet = page(4096);
     let spimp = page(0x1000);
     let urlp = page(0x1000);
     let ctx = page(0x1_0000);
@@ -205,14 +205,28 @@ pub fn replay(
         // A fresh packet and a fresh envelope per call: the library consumes
         // and rewrites both, and the second call must not inherit the first
         // one's result struct.
+        // PERUN_PACKET_VARIANT=user prescribes the hypothesis layout: header
+        // 00 00 00 02 | 00 00 00 01 | the whole SPIM from +8. The default is
+        // the measured Android packet: 00 00 00 02 plus 44 arbitrary bytes,
+        // with the SPIM travelling through the +0x30 pointer instead.
+        let user_variant = std::env::var("PERUN_PACKET_VARIANT").ok().as_deref() == Some("user");
+        let in_len: u64 = if user_variant { (8 + spim.len()) as u64 } else { 0x34 };
         unsafe {
-            std::ptr::write_bytes(packet.cast::<u8>(), 0, 64);
+            std::ptr::write_bytes(packet.cast::<u8>(), 0, 4096);
             // 00 00 00 02: Action 2, the header Android stamps before its call.
             *packet.cast::<u8>().add(3) = 2;
+            if user_variant {
+                *packet.cast::<u8>().add(7) = 1;
+                std::ptr::copy_nonoverlapping(
+                    spim.as_ptr(),
+                    packet.cast::<u8>().add(8),
+                    spim.len(),
+                );
+            }
             std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
             let c = ctx.cast::<u64>();
-            std::ptr::write(c.add(0), packet as u64);         // +0x00 request packet
-            std::ptr::write(c.add(1), 0x0000_0004_0000_0034); // +0x08 in_len=52, flags=4
+            std::ptr::write(c.add(0), packet as u64); // +0x00 request packet
+            std::ptr::write(c.add(1), (4u64 << 32) | in_len); // +0x08 in_len, flags=4
             std::ptr::write(c.add(2), 0);                     // +0x10
             std::ptr::write(c.add(3), spim.len() as u64);     // +0x18 SPIM length
             std::ptr::write(c.add(4), urlp as u64);           // +0x20 provisioning URL
@@ -286,7 +300,7 @@ pub fn replay(
     }
 
     unsafe {
-        libc::munmap(packet, 64);
+        libc::munmap(packet, 4096);
         libc::munmap(spimp, 0x1000);
         libc::munmap(urlp, 0x1000);
         libc::munmap(ctx, 0x1_0000);
