@@ -55,7 +55,10 @@ pub struct AnisetteHeaders {
 #[derive(Debug)]
 pub enum AdiError {
     /// The stand, its libraries or its sysroot are not where they should be.
-    StandMissing(String),
+    ///
+    /// Carries what is missing, not a path: the fix is always the same build,
+    /// and naming the path only sends the reader looking in the wrong tree.
+    StandMissing(&'static str),
     /// The stand ran but printed nothing parseable — usually a hang or a
     /// fatal line. Carries the tail of its output so the cause is visible.
     NoTokens { tail: String },
@@ -71,11 +74,15 @@ pub enum AdiError {
 impl fmt::Display for AdiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::StandMissing(p) => write!(
+            Self::StandMissing(what) => write!(
                 f,
-                "the Bionic stand is not in place at {p}\n\
-                 see `perun-adi-bionic`: the runtime is built from an Android system \
-                 image and is not vendored"
+                "the Bionic stand is not built here: {what}\n\n\
+                 The runtime is not vendored -- it comes out of an android-21 system \
+                 image and the Apple libraries out of an APK, which is the same \
+                 arrangement the Store lane uses for its own assets. To build it:\n\n  \
+                 crates/perun-cli/examples/adi-android/run.sh\n\n\
+                 That needs the NDK, debugfs and a one-off image download; after \
+                 it, `perun adi-android headers` runs unattended."
             ),
             Self::NoTokens { tail } => {
                 write!(f, "the stand produced no X-Apple-I-MD headers")?;
@@ -188,7 +195,7 @@ pub fn generate_headers() -> Result<AnisetteHeaders, AdiError> {
 /// [`generate_headers`] against an explicit layout.
 pub fn generate_headers_from(paths: &StandPaths) -> Result<AnisetteHeaders, AdiError> {
     if let Some(what) = paths.missing() {
-        return Err(AdiError::StandMissing(format!("{what} ({})", paths.stage.display())));
+        return Err(AdiError::StandMissing(what));
     }
     let out = stand::run(paths)?;
     if !out.status_ok {
@@ -281,7 +288,9 @@ mod tests {
         };
         assert_eq!(p.missing(), Some("the stand binary (adi-native)"));
         let e = generate_headers_from(&p).unwrap_err();
-        assert!(e.to_string().contains("not vendored"), "{e}");
+        let text = e.to_string();
+        assert!(text.contains("run.sh"), "the error must say how to build it: {text}");
+        assert!(text.contains("not vendored"), "{text}");
     }
 
     #[test]
