@@ -95,7 +95,7 @@ pub fn identity() -> Identity {
         lu.push_str(&format!("{b:02X}"));
     }
     Identity {
-        device_id: format!("{}", device_id.to_uppercase()),
+        device_id: device_id.to_uppercase().to_string(),
         lu,
     }
 }

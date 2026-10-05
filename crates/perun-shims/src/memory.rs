@@ -136,16 +136,14 @@ win32_api! {
         }
         // ReAlloc has to move the header across, or the new block comes back
         // untagged and the next HeapFree would refuse to free it.
-        let raw = unsafe { (ptr as *mut u8).sub(HEAP_HDR_SIZE) as *mut libc::c_void };
-        let new = unsafe { libc::realloc(raw, size + HEAP_HDR_SIZE) };
+        let raw = (ptr as *mut u8).sub(HEAP_HDR_SIZE) as *mut libc::c_void;
+        let new = libc::realloc(raw, size + HEAP_HDR_SIZE);
         if new.is_null() {
             return std::ptr::null_mut();
         }
-        unsafe {
-            (new as *mut usize).write(HEAP_TAG);
-            (new as *mut usize).add(1).write(size as usize);
-        }
-        unsafe { (new as *mut u8).add(HEAP_HDR_SIZE) as LPVOID }
+        (new as *mut usize).write(HEAP_TAG);
+        (new as *mut usize).add(1).write(size as usize);
+        (new as *mut u8).add(HEAP_HDR_SIZE) as LPVOID
     }}
 }
 

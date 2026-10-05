@@ -43,130 +43,31 @@ const INPUT_SIZE: u64 = 0x200;
 /// Scratch is one page and the packet lives at its base.
 const SCRATCH_LEN: usize = 0x1000;
 
-/// Perun's usual exit codes, kept local so this module does not depend on the
-/// dispatcher's notion of them.
-const EXIT_OK: i32 = 0;
-const EXIT_USAGE: i32 = 2;
-const EXIT_FAIL: i32 = 1;
-
-/// Run `perun adi headers [<image.dll>] [--adi-dir DIR]`.
-/// `perun adi net-probe` -- run only the network half and print what came
-/// back. Separate from `headers` so the two can be checked independently while
-/// the guest half is still being brought up.
-pub fn net_probe() -> i32 {
-    let id = crate::adi_net::identity();
-    println!("[adi] X-Mme-Device-Id: {}", id.device_id);
-    println!("[adi] X-Apple-I-MD-LU: {}", id.lu);
-    let eps = match crate::adi_net::lookup(&id) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("[adi] lookup failed: {e}");
-            return EXIT_FAIL;
-        }
-    };
-    println!("[adi] start  = {}", eps.start);
-    println!("[adi] finish = {}", eps.finish);
-    match crate::adi_net::start_provisioning(&id, &eps) {
-        Ok(s) => {
-            println!("[adi] ptxid = {}", s.ptxid);
-            println!(
-                "[adi] spim  = {} bytes, first 8 {:02x?}",
-                s.spim.len(),
-                &s.spim[..8.min(s.spim.len())]
-            );
-            EXIT_OK
-        }
-        Err(e) => {
-            eprintln!("[adi] startMachineProvisioning failed: {e}");
-            EXIT_FAIL
-        }
-    }
-}
-
-pub fn run(args: &[String]) -> i32 {
-    let mut image_path: Option<String> = None;
-    let mut adi_dir: Option<String> = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--adi-dir" => {
-                let Some(v) = args.get(i + 1) else {
-                    eprintln!("error: --adi-dir needs a directory");
-                    return EXIT_USAGE;
-                };
-                adi_dir = Some(v.clone());
-                i += 2;
-            }
-            other if other.starts_with("--adi-dir=") => {
-                adi_dir = Some(other["--adi-dir=".len()..].to_string());
-                i += 1;
-            }
-            other => {
-                if image_path.is_some() {
-                    eprintln!("error: unexpected argument {other:?}");
-                    return EXIT_USAGE;
-                }
-                image_path = Some(other.to_string());
-                i += 1;
-            }
-        }
-    }
-
-    let Some(image_path) = image_path.or_else(default_adi_image) else {
-        eprintln!("error: no CoreADI64.dll given and none found in the usual places");
-        return EXIT_USAGE;
-    };
-
-    match headers(&image_path, adi_dir.as_deref()) {
-        Ok(report) => {
-            print!("{report}");
-            EXIT_OK
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            EXIT_FAIL
-        }
-    }
-}
-
-/// Where the library lives when the caller does not say.
-///
-/// The extraction tree sits next to the repository rather than inside it, so
-/// the search walks up from the current directory as well as trying the
-/// paths relative to it: the ADI artefacts are not in version control.
-fn default_adi_image() -> Option<String> {
-    const RELATIVE: [&str; 3] = [
-        "adi-pe/extracted/itunes_extracted/iTunes/CoreADI64.dll",
-        "adi-pe/CoreADI64.dll",
-        "win32-adi-shim/CoreADI64.dll",
-    ];
-    let cwd = std::env::current_dir().ok()?;
-    let mut roots = vec![cwd.clone()];
-    for up in cwd.ancestors().skip(1).take(3) {
-        roots.push(up.to_path_buf());
-    }
-    for root in &roots {
-        for rel in RELATIVE {
-            let p = root.join(rel);
-            if p.is_file() {
-                return Some(p.to_string_lossy().into_owned());
-            }
-        }
-    }
-    None
-}
-
 /// Outcome of one opcode.
-struct Stage {
-    name: &'static str,
-    opcode: u64,
-    status: u32,
+pub struct Stage {
+    pub name: &'static str,
+    pub opcode: u64,
+    pub status: u32,
     /// Bytes the call left in the scratch page outside the packet.
-    wrote_output: usize,
+    pub wrote_output: usize,
 }
 
-/// Run the three opcodes against one loaded image and format the report.
-fn headers(image_path: &str, adi_dir: Option<&str>) -> Result<String, String> {
+/// What one run produced: every stage's outcome, and the rendered report.
+pub struct Probe {
+    pub image_path: String,
+    pub stages: Vec<Stage>,
+    pub report: String,
+}
+
+impl Probe {
+    /// True when every opcode reported success.
+    pub fn all_signed(&self) -> bool {
+        !self.stages.is_empty() && self.stages.iter().all(|s| signed(s.status) == 0)
+    }
+}
+
+/// Run the three opcodes against one loaded image.
+pub fn probe(image_path: &str, adi_dir: Option<&str>) -> Result<Probe, String> {
     let bytes = std::fs::read(image_path).map_err(|e| format!("read {image_path}: {e}"))?;
     let mut table = ShimTable::collect();
     let image = Image::load(&bytes, &mut table).map_err(|e| format!("{e:?}"))?;
@@ -262,7 +163,38 @@ fn headers(image_path: &str, adi_dir: Option<&str>) -> Result<String, String> {
         libc::munmap(ctx.cast(), 0x1_0000);
     }
 
-    Ok(report(image_path, &stages))
+    Ok(Probe {
+        image_path: image_path.to_string(),
+        report: report(image_path, &stages),
+        stages,
+    })
+}
+
+/// Where the library lives when the caller does not say.
+///
+/// The extraction tree sits next to the repository rather than inside it, so
+/// the search walks up from the current directory as well as trying the paths
+/// relative to it: the ADI artefacts are not in version control.
+pub fn default_adi_image() -> Option<String> {
+    const RELATIVE: [&str; 3] = [
+        "adi-pe/extracted/itunes_extracted/iTunes/CoreADI64.dll",
+        "adi-pe/CoreADI64.dll",
+        "win32-adi-shim/CoreADI64.dll",
+    ];
+    let cwd = std::env::current_dir().ok()?;
+    let mut roots = vec![cwd.clone()];
+    for up in cwd.ancestors().skip(1).take(3) {
+        roots.push(up.to_path_buf());
+    }
+    for root in &roots {
+        for rel in RELATIVE {
+            let p = root.join(rel);
+            if p.is_file() {
+                return Some(p.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
 }
 
 /// Bytes written into the scratch page outside the eight-byte packet.
@@ -328,7 +260,7 @@ fn report(image_path: &str, stages: &[Stage]) -> String {
 }
 
 /// Win32 HRESULT as signed, which is how the guest reports errors.
-fn signed(status: u32) -> i32 {
+pub fn signed(status: u32) -> i32 {
     status as i32
 }
 

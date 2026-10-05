@@ -1,0 +1,21 @@
+[package]
+name = "perun-adi-win32"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Anisette v3 research runtime for CoreADI64.dll under the Perun PE32+ projection"
+
+[lib]
+name = "perun_adi_win32"
+path = "src/lib.rs"
+
+[dependencies]
+# The Windows lane runs the guest inside Perun's own PE32+ runtime. Unlike the
+# Bionic lane it needs both halves of that runtime: the image loader for the
+# PE, and the shim table for everything the guest resolves but the host does
+# not implement. It needs neither anything from the Bionic lane nor the CLI.
+perun-core = { workspace = true }
+perun-shims = { workspace = true }
+libc = "0.2"
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip", "json"] }
