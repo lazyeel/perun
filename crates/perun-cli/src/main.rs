@@ -7,12 +7,81 @@ use perun_core::loader::{DLL_PROCESS_ATTACH, Image, LoadError};
 use perun_shims::table::ShimTable;
 use std::path::Path;
 
-mod adi;
-mod adi_net;
 mod fetcher;
 mod sap;
 mod scaffold;
 mod store;
+
+/// `perun adi-android headers` -- live Anisette headers from the Bionic lane.
+fn cmd_adi_android(args: &[String]) -> i32 {
+    match args.first().map(String::as_str) {
+        None | Some("headers") => {}
+        Some(other) => {
+            eprintln!("error: unknown subcommand {other:?}");
+            eprintln!("usage: perun adi-android headers");
+            return 2;
+        }
+    }
+    match perun_adi_bionic::generate_headers() {
+        Ok(h) => {
+            println!("X-Apple-I-MD:   {}", h.md);
+            println!("X-Apple-I-MD-M: {}", h.mdm);
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
+}
+
+/// `perun adi-windows headers [<image.dll>] [--adi-dir DIR]`.
+fn cmd_adi_windows(args: &[String]) -> i32 {
+    if args.first().map(String::as_str) != Some("headers") {
+        eprintln!("usage: perun adi-windows headers [<image.dll>] [--adi-dir DIR]");
+        return 2;
+    }
+    let mut image: Option<String> = None;
+    let mut adi_dir: Option<String> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--adi-dir" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("error: --adi-dir needs a directory");
+                    return 2;
+                };
+                adi_dir = Some(v.clone());
+                i += 2;
+            }
+            other if other.starts_with("--adi-dir=") => {
+                adi_dir = Some(other["--adi-dir=".len()..].to_string());
+                i += 1;
+            }
+            other => {
+                if image.is_some() {
+                    eprintln!("error: unexpected argument {other:?}");
+                    return 2;
+                }
+                image = Some(other.to_string());
+                i += 1;
+            }
+        }
+    }
+
+    // The report is printed whether or not the opcodes signed: a failure here
+    // is the interesting artefact, not an error to swallow.
+    match perun_adi_win32::probe_windows(image.as_deref(), adi_dir.as_deref()) {
+        Ok(p) => {
+            print!("{}", p.report);
+            if p.all_signed() { 0 } else { 1 }
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
+}
 
 fn main() {
     unsafe { install_crash_probe() };
@@ -387,9 +456,13 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             // Forced registers, applied to the live context so the instruction at
             // this address sees them. TF stays set and the step is still recorded,
             // so the walk is otherwise unchanged and the trace stays honest.
-            unsafe {
+            {
                 let (at, n) = (FORCE_AT, FORCE_N);
                 if at != 0 && rip == at {
+                    // Indexed rather than iterated: FORCE_REGS is a `static
+                    // mut`, and iterating it would make a shared reference to
+                    // mutable state for the length of the loop.
+                    #[allow(clippy::needless_range_loop)]
                     for k in 0..n {
                         let (idx, val) = FORCE_REGS[k];
                         *regs.add(idx as usize) = val as i64;
@@ -693,16 +766,16 @@ fn low_level_help(sub: &str) -> Option<&'static str> {
             "  Parses a 64-bit Mach-O image: header, segments, sections and the symbol\n",
             "  table, without mapping it or running any guest code.\n"
         ),
-        "adi" => concat!(
-            "usage: perun adi headers [<image.dll>] [--adi-dir DIR]\n\n",
-            "  Runs CoreADI64.dll natively -- no Bionic, no QEMU, no Wine -- and reports\n",
-            "  what the Anisette v3 opcodes produce on this host: each opcode's status\n",
-            "  and how many bytes it wrote.\n\n",
-            "  <image.dll>      the library; defaults to the extracted iTunes copy\n",
-            "  --adi-dir DIR     where the SPIM cache lives (adi.pb, adi-<hash>.pb)\n\n",
-            "  The three opcodes return 0 once the barrier is passed, but this image\n",
-            "  imports no networking API, so no OTP is minted and no token header is\n",
-            "  printed. The command reports that rather than inventing values.\n"
+        "adi-android" => concat!(
+            "usage: perun adi-android headers\n\n",
+            "  Run Anisette v3 against the Android Bionic runtime, un-emulated on\n",
+            "  x86_64, and print the live X-Apple-I-MD headers it produces.\n\n",
+        ),
+        "adi-windows" => concat!(
+            "usage: perun adi-windows headers [<image.dll>] [--adi-dir DIR]\n\n",
+            "  Run CoreADI64.dll through the PE32+ projection and report what each\n",
+            "  opcode answered. Research instrumentation: the image imports no\n",
+            "  networking API, so this lane reports rather than mints a token.\n\n",
         ),
         "sap" => concat!(
             "usage: perun sap [<assets-dir>] [--mac AA:BB:CC:DD:EE:FF] [--sign HEX | --file F]\n\n",
@@ -799,7 +872,7 @@ fn run_with_args(args: &[String]) -> i32 {
     }
     if args.len() < 2 {
         eprintln!(
-            "usage: perun run <image.dll> [--verbose] [--trace] [--trace-file F] [--no-teb]\n       perun info <image.dll>\n       perun mach info <macho>\n       perun scaffold \"TRAP-line\" [...]\n       perun sap [--mac AA:BB:CC:DD:EE:FF] [--sign HEX|--file F]\n       perun store <auth|search|purchase|download|list-purchases|list-versions|get-version-metadata> ...\n       ipatool aliases: perun auth login|info|revoke · perun search -t ... · perun purchase -i ...\n                        perun download -i ... · perun list-purchases · perun list-versions ..."
+            "usage: perun run <image.dll> [--verbose] [--trace] [--trace-file F] [--no-teb]\n       perun info <image.dll>\n       perun mach info <macho>\n       perun adi-android headers\n       perun adi-windows headers [<image.dll>] [--adi-dir DIR]\n       perun scaffold \"TRAP-line\" [...]\n       perun sap [--mac AA:BB:CC:DD:EE:FF] [--sign HEX|--file F]\n       perun store <auth|search|purchase|download|list-purchases|list-versions|get-version-metadata> ...\n       ipatool aliases: perun auth login|info|revoke · perun search -t ... · perun purchase -i ...\n                        perun download -i ... · perun list-purchases · perun list-versions ..."
         );
         return 2;
     }
@@ -818,19 +891,8 @@ fn run_with_args(args: &[String]) -> i32 {
         "mach" => cmd_mach(&args[2..]),
         "scaffold" => scaffold::run(&args[2..]),
         "sap" => cmd_sap(&args[2..]),
-        "adi" => {
-            match args[2].as_str() {
-                "headers" => adi::run(&args[3..]),
-                // The network half on its own: proof the anonymous GSA
-                // bootstrap works before the guest half is wired in.
-                "net-probe" => adi::net_probe(),
-                _ => {
-                    eprintln!("usage: perun adi headers [<image.dll>] [--adi-dir DIR]");
-                    eprintln!("       perun adi net-probe");
-                    2
-                }
-            }
-        }
+        "adi-android" => cmd_adi_android(&args[2..]),
+        "adi-windows" => cmd_adi_windows(&args[2..]),
         "store" => store::cli::run(&args[2..]),
         "seq" => cmd_seq(&args[2..]),
         // ipatool-compatible top-level aliases: same grammar, no "store".
@@ -1317,10 +1379,10 @@ fn cmd_call(args: &[String]) -> i32 {
             eprintln!("error: --poke-xform needs DST:ADDR1,ADDR2");
             std::process::exit(2);
         };
-        let Some((a_s, b_s)) = pair_s.split_once(',') else {
+        if pair_s.split_once(',').is_none() {
             eprintln!("error: --poke-xform needs two addresses");
             std::process::exit(2);
-        };
+        }
         // Any number of addresses, not just two: the guest takes as many
         // out-pointers as the call has outputs and reads them in order.
         let mut ptrs = Vec::new();
@@ -2670,8 +2732,9 @@ fn hex_decode(s: &str) -> Vec<u8> {
 mod help_tests {
     use super::*;
 
-    const LOW_LEVEL: [&str; 8] = [
-        "run", "info", "mach", "sap", "seq", "call", "scaffold", "adi",
+    const LOW_LEVEL: [&str; 9] = [
+        "run", "info", "mach", "sap", "seq", "call", "scaffold", "adi-android",
+        "adi-windows",
     ];
 
     #[test]

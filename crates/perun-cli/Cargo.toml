@@ -32,6 +32,11 @@ rep-bench = []
 [dependencies]
 perun-core = { workspace = true }
 perun-shims = { workspace = true }
+# The two Anisette lanes arrive as independent crates; the CLI is the only
+# thing that knows both, and it dispatches to them without either seeing the
+# other.
+perun-adi-bionic = { workspace = true }
+perun-adi-win32 = { workspace = true }
 libc = "0.2"
 # bzip2 for the first-run asset fetcher. 0.6 defaults to `libbz2-rs-sys`, a
 # pure-Rust translation of libbzip2, so this is not a C dependency. It replaced

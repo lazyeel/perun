@@ -4,6 +4,12 @@ members = [
     "crates/perun-core",
     "crates/perun-shims",
     "crates/perun-cli",
+    # The two Anisette lanes are separate crates on purpose: they share a
+    # protocol and nothing else. perun-adi-bionic depends on neither the
+    # projection runtime nor perun-cli, and perun-adi-win32 depends on
+    # neither the Bionic lane nor its stand.
+    "crates/perun-adi-bionic",
+    "crates/perun-adi-win32",
 ]
 
 [workspace.package]
@@ -15,6 +21,8 @@ repository = "https://github.com/lazyeel/perun"
 [workspace.dependencies]
 perun-core = { path = "crates/perun-core" }
 perun-shims = { path = "crates/perun-shims" }
+perun-adi-bionic = { path = "crates/perun-adi-bionic" }
+perun-adi-win32 = { path = "crates/perun-adi-win32" }
 
 [profile.release]
 debug = false
