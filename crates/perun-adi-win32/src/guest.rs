@@ -23,8 +23,8 @@ use perun_shims::table::ShimTable;
 
 /// The three obfuscated selectors, as they appear in the dispatch table.
 const OPCODE_INIT: u64 = 0xb0ed_a7af;
-const OPCODE_PROVISION: u64 = 0xcfe0_b46a;
-const OPCODE_LOGIN: u64 = 0x3e58_e7f9;
+pub const OPCODE_PROVISION: u64 = 0xcfe0_b46a;
+pub const OPCODE_LOGIN: u64 = 0x3e58_e7f9;
 
 /// The parameter packet that reaches the success path.
 ///

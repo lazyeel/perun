@@ -50,6 +50,8 @@
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -510,6 +512,10 @@ static int wrap_vdfut(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
         }
     }
 
+    // Keep the exact bytes for the Windows side. The packet here is the one
+    // the working engine hands over; everything the Windows lane has been
+    // asked to reproduce so far was a reconstruction, and this is the real
+    // input. Written once per opcode, so a re-run cannot leave a mix of two.
     for (int i = 0; i < NREGION; i++)
         if (r[i].ok) memcpy(r[i].after, (const void *)r[i].addr, r[i].len);
 
@@ -586,7 +592,10 @@ int dump_init(const char *libdir) {
     // Armed before the first provisioning call, so a writer that runs during
     // setup is caught too. A miss here is informative: it means the value the
     // dispatcher reads is the one the file shipped.
-    arm_salt_watch(base);
+    // The salt watch is off: its handler dereferences the absolute SALT_VADDR
+    // rather than base + SALT_VADDR, so on this x86_64 library it faults inside
+    // the handler itself. Capturing the packet does not need it.
+    // arm_salt_watch(base);
 
     (void)VDFUT_NAME_VADDR;
     printf("[dump] init %s\n", ok ? "complete" : "INCOMPLETE");

@@ -358,6 +358,31 @@ static void dump_raw(const char *path, const void *data, size_t n) {
     close(fd);
 }
 
+#ifdef DUMP_ADI
+/* ── SPIM/CPIM capture (DUMP_ADI builds only) ─────────────────────────────── */
+
+/* Raw descriptors, never stdio: every stdio call that locks a stream blocks on
+ * this runtime, and a dump taken through one would never be written. */
+static void prov_write(const char *path, const void *data, size_t n) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) { info("prov", "cannot write %s", path); return; }
+    size_t w = write(fd, data, n);
+    close(fd);
+    info("prov", "wrote %s (%zu of %zu bytes)", path, w, n);
+}
+
+static void save_prov_pair(const void *spim, size_t spim_n) {
+    info("prov", "capture: spim=%zu bytes -> /opt/data/adi-re/live_prov_in.bin", spim_n);
+    prov_write("/opt/data/adi-re/live_prov_in.bin", spim, spim_n);
+}
+
+static void save_prov_result(const void *cpim, size_t cpim_n, int rc) {
+    info("prov", "capture: cpim=%zu bytes rc=%d -> /opt/data/adi-re/live_prov_out.bin",
+         cpim_n, rc);
+    if (cpim && cpim_n) prov_write("/opt/data/adi-re/live_prov_out.bin", cpim, cpim_n);
+}
+#endif
+
 /* ── device identity (SideStore-style) ─────────────────────────────────── */
 static void load_or_create_identity(void) {
     static const char *fname = "adi_identifier";
@@ -582,9 +607,19 @@ int main(int argc, char **argv) {
         info("prov", "spim received (%zu bytes decoded)", spim_n);
 
         uint8_t *cpim = NULL; uint32_t cpim_n = 0; uint32_t session = 0;
+#ifdef DUMP_ADI
+        /* The SPIM/CPIM pair is captured here rather than through vdfut768ig:
+         * 0xcfe0b46a is a configuration query, not the provisioning transform.
+         * At this call site both buffers are named, so what lands on disk is
+         * the library's real input and its real output, and nothing else. */
+        save_prov_pair(spim, spim_n);
+#endif
         rc = pStart(DS_ID, spim, (uint32_t)spim_n, &cpim, &cpim_n, &session);
         if (rc != 0) die("ADIProvisioningStart=%d", rc);
         info("prov", "cpim ready (%u bytes, session=%u)", cpim_n, session);
+#ifdef DUMP_ADI
+        save_prov_result(cpim, cpim_n, rc);
+#endif
 
         char *cpim_b64 = b64_encode(cpim, cpim_n);
         snprintf(body, sizeof body,
