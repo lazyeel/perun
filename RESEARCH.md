@@ -472,6 +472,66 @@ Artifacts from the sweep (the 256-command histogram and the objdump-based verifi
 
 ---
 
+## 6.8 Anisette v3 on the Android lane (2026-10-05)
+
+This is the lane `main` ships, in `crates/perun-adi-bionic`, behind
+`perun adi-android headers`. The Windows lane below stays on its research
+branch and does not appear here.
+
+**Un-emulated, native x86_64, in an Android userland.** Three separate claims,
+none of them "it is native Linux": no instruction emulation (`comm=adi_native`,
+no `qemu-*` in the process tree), native x86_64 (every `.so` is `ELF 64-bit
+x86-64`, mapped straight into the host), and **not** native Linux, because the
+libc is Bionic (`SONAME libc.so`, against `libc.so.6` for glibc; not one byte of
+glibc is in the lane). Bionic is a requirement rather than a workaround:
+`libstoreservicescore.so` is built for the Android ABI and sizes its
+provisioning state from the libc underneath it. Under glibc that state comes
+out the wrong size, the dispatch index walks past its end, and the library
+answers `-45075`.
+
+**The round trip, end to end, with no credential anywhere.** Anisette is
+anonymous machine attestation, so nothing here handles an account, a password
+or an SMS code:
+
+    GET  gsa.apple.com/grandslam/GsService2/lookup              -> 200 (25576 B)
+    POST .../MidService/startMachineProvisioning               -> 200 (1109 B)
+         spim received (347 bytes decoded)
+         cpim ready (276 bytes, session=NNNN)
+    POST .../MidService/finishMachineProvisioning              -> 200 (1440 B)
+         ptm/tk received (routing info: 50660608)
+    ADIGetLoginCode = 0
+
+**Five binary patches, and each one is a defect in a specific Android-21
+binary.** They live in `patches.rs` as data, each knowing the pristine bytes it
+expects, so `apply()` refuses a foreign image and is idempotent:
+
+| site | offset | what |
+|---|---|---|
+| `linker64` | file `0x16040` | `g_dl_mutex` ships initialised to `0x4000`; Bionic then treats it as an owner-died mutex, recovers and immediately re-waits on the same word, which nothing will change. Every `dlopen` never returns. |
+| `libc.so` | `0x23A20`, `0x23A60` | `flockfile`/`funlockfile` are a tail call to `pthread_mutex_lock` on that same class of word. This is the single cause of every stdio hang in the lane: `fgets` inside `BIO_gets` reading the CA bundle, `fclose` on any file, `fileno`. |
+| `libc.so` | `0x2B230` | `sysconf` counts CPUs through `sysconf(_SC_NPROCESSORS_ONLN)`, which needs the allocator that is being initialised. Two paths exist for the same question, and only one passes through this symbol. |
+| `libLLVM.so` | `0xB75765` | `MutexImpl::acquire` on a mutex nothing initialises, reached through `ManagedStatic` from the transitive GUI stack. |
+
+**Where the GUI stack comes from, and why it cannot be excluded.**
+`libCoreFoundation.so` is in `NEEDED` twice — once in `libstoreservicescore.so`
+and once in `libmediaplatform.so` — so trimming the preload list does not remove
+it; the loader pulls it either way, and then
+`libCoreFoundation → libandroid → libandroid_runtime → libhwui → libRS → libLLVM`
+with it. Stripping those from the sysroot does not help either: it converts the
+hang into `could not load library "libbinder.so"`, because the chain is
+required for the load to succeed at all. No Apple library names any of them; the
+chain arrives transitively. The working 27-Sep reference set contains
+`libCoreFoundation.so` and loads it the same way.
+
+**A "cold" run is not cold until it has been proven.** `adi-data/` is created by
+the stand, which runs under `sudo` because the loader needs root, so the
+directory is root-owned and `rm -rf` from an unprivileged shell fails with
+`Permission denied` while the script reports a cold start anyway. The tell is in
+the log: **zero `[net]` lines under a `SUCCESS` banner** means a cache read.
+Every verification log opens with `cold: cache absent (verified)` and carries
+eight `[net]` lines. Three earlier "cold" results in this project's history were
+cache reads.
+
 ## 7. Ecosystem Context
 
 The August-2026 enforcement wave ("empty 403 / 204 on login") broke every third-party storefront client that lacked the action signature. Three independent solution families emerged within days of each other:
