@@ -11,3 +11,30 @@ adi-data/
 # per-machine provisioning state
 adi_identifier
 adi-data/
+
+# Stand tooling added 2026-10-05: the namespace runner and its controls.
+# The controls are diagnostics, not shipped artifacts.
+ctl_*.c
+ctl_*.raw
+ctlbuild.sh
+nsrun.sh
+rebuild.sh
+nsbt.sh
+nsbtc.sh
+nsmem.sh
+nsmutex.sh
+nssym.sh
+honestns.sh
+honestrun.sh
+poke.py
+unlock.py
+unrobust.py
+whowaits.py
+gdlmutex.py
+ctl_probe.txt
+.hns.*
+.bt.txt
+.btc.txt
+.mem.txt
+.mutex.txt
+.sym.txt
