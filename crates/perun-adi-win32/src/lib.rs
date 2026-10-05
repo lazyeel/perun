@@ -125,6 +125,19 @@ pub fn generate_headers_windows_from(
 /// is supplied the two are compared byte for byte, because "did it work" and
 /// "did it produce the same thing" are different questions and only the second
 /// one settles whether the Windows image implements the transform.
+/// Replay an SPIM through `CoreADI64.dll` with the envelope measured on the
+/// working Android engine.
+///
+/// The transform is `vdfut768ig(0x716bd86c, ...)` — measured from a cold
+/// provisioning run where that single call sits between the SPIM capture and
+/// the CPIM. Every slot below is copied from that dump rather than invented:
+/// the SPIM pointer at +0x30/+0x68, the length mirrored at +0x18/+0x38/+0x58,
+/// the provisioning URL at +0x20/+0x78, and the two write-backs the library
+/// performs into +0x54 (CPIM length) and +0x80 (CPIM pointer).
+///
+/// Two opcodes are tried because the Android one may not exist as a selector
+/// on this image: `0x716bd86c` is the measured transform, `0xcfe0b46a` is what
+/// the Windows lane has been calling "provision" so far.
 pub fn replay(
     image_path: Option<&str>,
     spim: &[u8],
@@ -137,118 +150,149 @@ pub fn replay(
     let bytes = std::fs::read(&path).map_err(|e| AdiError::Load(format!("read {path}: {e}")))?;
 
     let mut table = perun_shims::table::ShimTable::collect();
-    let image = Image::load(&bytes, &mut table)
-        .map_err(|e| AdiError::Load(format!("{e:?}")))?;
-    // SAFETY: per-thread TEB; this thread is the only one running.
+    let image = Image::load(&bytes, &mut table).map_err(|e| AdiError::Load(format!("{e:?}")))?;
     let _teb = unsafe { perun_core::teb::init_thread_teb(image.base() as u64) };
     let dll_main = unsafe { image.entry_dll_main() }
         .ok_or_else(|| AdiError::NotAnAdiImage(path.clone()))?;
-    // SAFETY: DllMain(PROCESS_ATTACH) on a freshly mapped image, as `perun run`
-    // does for the same file.
     if unsafe { dll_main(image.base(), DLL_PROCESS_ATTACH, std::ptr::null_mut()) } == 0 {
         return Err(AdiError::NotAnAdiImage(format!("{path}: DllMain returned FALSE")));
     }
-
     let entry = image
         .get_export_by_name("vdfut768ig")
         .ok_or_else(|| AdiError::NotAnAdiImage(format!("{path}: no vdfut768ig")))?;
-    // SAFETY: `HRESULT (u32, ADIRequest*, void*, void*)`, the signature
-    // `perun call` already drives this export with.
     let f: unsafe extern "win64" fn(u64, u64, u64, u64) -> u64 =
         unsafe { std::mem::transmute(entry) };
 
-    let packet = unsafe {
+    const URL: &[u8] =
+        b"https://gsa.apple.com/grandslam/MidService/startMachineProvisioning\0";
+
+    let page = |len: usize| unsafe {
         libc::mmap(
             std::ptr::null_mut(),
-            packet_len(spim),
+            len,
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
             -1,
             0,
         )
     };
-    let ctx = unsafe {
-        libc::mmap(
-        std::ptr::null_mut(),
-        0x1_0000,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-            -1,
-            0,
-        )
-    };
-    if packet == libc::MAP_FAILED || ctx == libc::MAP_FAILED {
-        return Err(AdiError::Load("could not map the packet or context page".to_string()));
+    let packet = page(64);
+    let spimp = page(0x1000);
+    let urlp = page(0x1000);
+    let ctx = page(0x1_0000);
+    if [packet, spimp, urlp, ctx].iter().any(|p| *p == libc::MAP_FAILED) {
+        return Err(AdiError::Load("could not map the replay pages".to_string()));
     }
-    let n = packet_len(spim);
     unsafe {
-        std::ptr::write_bytes(packet.cast::<u8>(), 0, n);
-        std::ptr::copy_nonoverlapping(spim.as_ptr(), packet.cast::<u8>(), spim.len());
-        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
-        let c = ctx.cast::<u64>();
-        std::ptr::write(c, packet as u64);
-        // The Android frame's input-size slot is the packet length in the low
-        // half and something else in the high half; -45018 means the library
-        // could not read even its eight-byte header, so the size it is given
-        // has to be at least that. 0x1000 is the value the working ladder used.
-        let size: u64 = std::env::var("PERUN_PROV_INPUT_SIZE")
-            .ok()
-            .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
-            .unwrap_or(0x1000);
-        std::ptr::write(c.add(1), size);
-        std::ptr::write(c.add(2), 0);
-        std::ptr::write(c.add(10), 0xc8);
+        std::ptr::copy_nonoverlapping(spim.as_ptr(), spimp.cast::<u8>(), spim.len());
+        std::ptr::copy_nonoverlapping(URL.as_ptr(), urlp.cast::<u8>(), URL.len());
     }
 
     let mut out = String::new();
     out.push_str(&format!("image: {path}\n"));
-    out.push_str(&format!("input: {} bytes, first 4 {:02x?}\n", spim.len(), &spim[..4.min(spim.len())]));
+    out.push_str(&format!(
+        "input: {} bytes SPIM, first 8 {:02x?}\n",
+        spim.len(),
+        &spim[..8.min(spim.len())]
+    ));
+    out.push_str("envelope: measured transform layout, opcode 0x716bd86c\n");
 
-    for (name, opcode) in [("provision", guest::OPCODE_PROVISION), ("login code", guest::OPCODE_LOGIN)] {
-        let rc = unsafe { f(opcode, ctx as u64, 0, 0) };
-        let produced = unsafe { (*ctx.cast::<u64>().add(3) & 0xffff_ffff) as usize };
+    let opcodes = [
+        ("measured transform", 0x716bd86c_u64),
+        ("windows provision", guest::OPCODE_PROVISION),
+    ];
+    for (name, opcode) in opcodes {
+        // A fresh packet and a fresh envelope per call: the library consumes
+        // and rewrites both, and the second call must not inherit the first
+        // one's result struct.
+        unsafe {
+            std::ptr::write_bytes(packet.cast::<u8>(), 0, 64);
+            // 00 00 00 02: Action 2, the header Android stamps before its call.
+            *packet.cast::<u8>().add(3) = 2;
+            std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+            let c = ctx.cast::<u64>();
+            std::ptr::write(c.add(0), packet as u64);         // +0x00 request packet
+            std::ptr::write(c.add(1), 0x0000_0004_0000_0034); // +0x08 in_len=52, flags=4
+            std::ptr::write(c.add(2), 0);                     // +0x10
+            std::ptr::write(c.add(3), spim.len() as u64);     // +0x18 SPIM length
+            std::ptr::write(c.add(4), urlp as u64);           // +0x20 provisioning URL
+            std::ptr::write(c.add(5), 2);                     // +0x28
+            std::ptr::write(c.add(6), spimp as u64);          // +0x30 SPIM pointer
+            std::ptr::write(c.add(7), spim.len() as u64);     // +0x38
+            std::ptr::write(c.add(8), 4);                     // +0x40
+            std::ptr::write(c.add(9), 0);                     // +0x48 code ptr (Android-only)
+            std::ptr::write(c.add(10), 0);                    // +0x50 -> written: CPIM len
+            std::ptr::write(c.add(11), spim.len() as u64);    // +0x58
+            std::ptr::write(c.add(12), 0);                    // +0x60
+            std::ptr::write(c.add(13), spimp as u64);         // +0x68 SPIM pointer again
+            std::ptr::write(c.add(14), 464);                  // +0x70 capacity
+            std::ptr::write(c.add(15), urlp as u64);          // +0x78 URL again
+            std::ptr::write(c.add(16), 0);                    // +0x80 -> written: CPIM ptr
+            // +0x88..+0xa8: five function pointers on Android; left zero here.
+        }
+        // arg2 = -1 mirrors the Android call's third argument (rdx = 0xffffffff).
+        let rc = unsafe { f(opcode, ctx as u64, 0xffff_ffff, 0) };
         out.push_str(&format!(
-            "{name}: opcode {opcode:#010x} -> rc={rc} ({}), ctx[+0x0c]={produced}\n",
+            "{name}: opcode {opcode:#010x} -> rc={rc} ({})\n",
             describe(rc as u32)
         ));
-        let got = unsafe {
-            std::slice::from_raw_parts(packet.cast::<u8>(), spim.len().min(n).max(produced.min(n)))
-        };
-        let got = &got[..spim.len().min(got.len())];
-        let changed = got != &spim[..got.len()];
+        let cpim_len =
+            unsafe { std::ptr::read_unaligned(ctx.cast::<u8>().add(0x54).cast::<u32>()) } as usize;
+        let cpim_ptr =
+            unsafe { std::ptr::read_unaligned(ctx.cast::<u8>().add(0x80).cast::<u64>()) };
         out.push_str(&format!(
-            "   buffer rewritten: {changed}, non-zero after packet: {}\n",
-            got.iter().filter(|b| **b != 0).count()
+            "   ctx[+0x54]={cpim_len:#x} ctx[+0x80]={cpim_ptr:#x}\n"
         ));
-        match oracle {
-            Some(refc) if name == "provision" => {
-                let refc: &[u8] = refc;
-                let same = got == refc;
+        let plausible = cpim_ptr > 0x1_0000
+            && cpim_ptr < 0x8000_0000_0000
+            && cpim_len > 0
+            && cpim_len <= 8192;
+        if plausible {
+            let got = unsafe { std::slice::from_raw_parts(cpim_ptr as *const u8, cpim_len) };
+            out.push_str(&format!(
+                "   produced {cpim_len} bytes, first 16 {:02x?}\n",
+                &got[..16.min(cpim_len)]
+            ));
+            if let Some(ref refc) = oracle {
                 out.push_str(&format!(
                     "   vs Android CPIM ({} bytes): {}\n",
                     refc.len(),
-                    if same { "IDENTICAL" } else { "differs" }
+                    if got == *refc {
+                        "IDENTICAL"
+                    } else {
+                        "differs"
+                    }
                 ));
-                if !same {
-                    let common = got.iter().zip(refc.iter()).take_while(|(a, b)| a == b).count();
-                    out.push_str(&format!(
-                        "   common prefix: {common} bytes\n   windows: {}\n   android: {}\n",
-                        hex(got),
-                        hex(refc)
-                    ));
+                if got != *refc {
+                    let common = got
+                        .iter()
+                        .zip(refc.iter())
+                        .take_while(|(a, b)| a == b)
+                        .count();
+                    out.push_str(&format!("   common prefix: {common} bytes\n"));
+                    if common < 24 {
+                        out.push_str(&format!("   windows: {}\n", hex(got)));
+                        out.push_str(&format!("   android: {}\n", hex(refc)));
+                    }
                 }
             }
-            _ => {}
+        } else {
+            let pk = unsafe { std::slice::from_raw_parts(packet.cast::<u8>(), 52) };
+            out.push_str(&format!(
+                "   no plausible CPIM; packet after call: {}\n",
+                hex(pk)
+            ));
         }
     }
 
     unsafe {
-        libc::munmap(packet, packet_len(spim));
+        libc::munmap(packet, 64);
+        libc::munmap(spimp, 0x1000);
+        libc::munmap(urlp, 0x1000);
         libc::munmap(ctx, 0x1_0000);
     }
     Ok(out)
 }
-
 /// The packet page has to hold the input and whatever the library writes back.
 fn packet_len(spim: &[u8]) -> usize {
     let want = spim.len().next_power_of_two().max(0x1000);

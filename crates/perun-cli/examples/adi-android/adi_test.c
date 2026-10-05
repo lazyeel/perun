@@ -361,6 +361,11 @@ static void dump_raw(const char *path, const void *data, size_t n) {
 #ifdef DUMP_ADI
 /* ── SPIM/CPIM capture (DUMP_ADI builds only) ─────────────────────────────── */
 
+/* Where the captured SPIM lives, so the dumper can search the transform's
+ * envelope for it at vdfut768ig entry. */
+const unsigned char *g_cap_spim;
+size_t g_cap_spim_n;
+
 /* Raw descriptors, never stdio: every stdio call that locks a stream blocks on
  * this runtime, and a dump taken through one would never be written. */
 static void prov_write(const char *path, const void *data, size_t n) {
@@ -374,6 +379,8 @@ static void prov_write(const char *path, const void *data, size_t n) {
 static void save_prov_pair(const void *spim, size_t spim_n) {
     info("prov", "capture: spim=%zu bytes -> /opt/data/adi-re/live_prov_in.bin", spim_n);
     prov_write("/opt/data/adi-re/live_prov_in.bin", spim, spim_n);
+    g_cap_spim = spim;
+    g_cap_spim_n = spim_n;
 }
 
 static void save_prov_result(const void *cpim, size_t cpim_n, int rc) {

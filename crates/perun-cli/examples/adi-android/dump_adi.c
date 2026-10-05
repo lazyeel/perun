@@ -444,6 +444,97 @@ static int save_payload(uint64_t op, uint64_t frame) {
     return save_payload_n(op, frame, payload_path(op) && op == 0xb0eda7afULL ? n : 0);
 }
 
+/* Set by adi_test.c at the pStart capture site: where the live SPIM lives and
+ * how long it is. The transform question is exactly "which envelope slot or
+ * library global carries these bytes into vdfut768ig", and guessing it has
+ * already cost rounds. */
+extern const unsigned char *g_cap_spim;
+extern size_t g_cap_spim_n;
+
+static int contains_bytes(const unsigned char *h, size_t hn,
+                          const unsigned char *n, size_t nn) {
+    if (!h || !n || nn == 0 || hn < nn) return 0;
+    for (size_t i = 0; i + nn <= hn; i++)
+        if (h[i] == n[0] && !memcmp(h + i, n, nn)) return 1;
+    return 0;
+}
+
+static void scan_region(const char *tag, uint64_t addr, size_t len) {
+    if (!addr || !readable((void *)addr)) return;
+    const unsigned char *p = (const unsigned char *)addr;
+    if (contains_bytes(p, len, g_cap_spim, 16))
+        printf("    [hunt] SPIM CONTENT FOUND in %s @%#lx (%zu bytes scanned)\n",
+               tag, (unsigned long)addr, len);
+}
+
+/* The transform opcode: the only vdfut call between the SPIM capture and the
+ * CPIM result. */
+#define OPCODE_TRANSFORM 0x716bd86cULL
+
+static void hunt_spim(uint64_t a1) {
+    if (!g_cap_spim || g_cap_spim_n < 16) {
+        printf("    [hunt] no SPIM recorded\n");
+        return;
+    }
+    printf("    [hunt] SPIM at %p len %zu, %02x %02x %02x %02x ..\n",
+           (const void *)g_cap_spim, g_cap_spim_n,
+           g_cap_spim[0], g_cap_spim[1], g_cap_spim[2], g_cap_spim[3]);
+
+    /* 1. The envelope and the packet buffer it points at. */
+    scan_region("env[0..512]", a1, 512);
+    if (a1 && readable((void *)a1)) {
+        uint64_t pkt = *(uint64_t *)a1;
+        scan_region("packet[0..512]", pkt, 512);
+    }
+
+    /* 2. Every pointer slot in the envelope. */
+    if (a1 && readable((void *)a1)) {
+        uint64_t *slots = (uint64_t *)a1;
+        for (int i = 0; i < 24; i++) {
+            uint64_t v = slots[i];
+            if (v == (uint64_t)(uintptr_t)g_cap_spim)
+                printf("    [hunt] slot +%#x == SPIM POINTER\n", i * 8);
+            if (v > 0x10000 && v < 0x800000000000 && readable((void *)v))
+                scan_region("slot-ptr-target", v, 512);
+        }
+    }
+
+    /* 3. A window of stack around the envelope. */
+    scan_region("stack-1024", a1 - 1024, 1024);
+    scan_region("stack+512..4096", a1 + 512, 4096 - 512);
+
+    /* 4. The caller library's writable image: if a global holds the SPIM or
+     * its pointer, it is in a PT_LOAD with PF_W. */
+    uint64_t base = base_of("libstoreservicescore.so");
+    if (base && readable((void *)base)) {
+        unsigned char *eh = (unsigned char *)base;
+        uint64_t phoff = *(uint64_t *)(eh + 0x20);
+        uint16_t phentsize = *(uint16_t *)(eh + 0x36);
+        uint16_t phnum = *(uint16_t *)(eh + 0x38);
+        for (uint16_t i = 0; i < phnum; i++) {
+            unsigned char *ph = eh + phoff + (uint64_t)i * phentsize;
+            if (*(uint32_t *)ph != 1) continue;           /* PT_LOAD */
+            if (!(*(uint32_t *)(ph + 4) & 2)) continue;   /* PF_W */
+            uint64_t vaddr = *(uint64_t *)(ph + 16);
+            uint64_t filesz = *(uint64_t *)(ph + 32);
+            scan_region("lib writable image", base + vaddr, (size_t)filesz);
+            /* also: does any 8-byte slot equal the SPIM pointer? */
+            unsigned char *p = (unsigned char *)(base + vaddr);
+            unsigned char nd[8];
+            uint64_t pv = (uint64_t)(uintptr_t)g_cap_spim;
+            memcpy(nd, &pv, 8);
+            for (uint64_t j = 0; j + 8 <= filesz; j++) {
+                if (p[j] == nd[0] && !memcmp(p + j, nd, 8)) {
+                    printf("    [hunt] SPIM POINTER in lib writable image at vaddr %#lx (file off %#lx)\n",
+                           (unsigned long)(vaddr + j), (unsigned long)(vaddr + j));
+                    break;
+                }
+            }
+        }
+    }
+    printf("    [hunt] scan complete\n");
+}
+
 static int wrap_vdfut(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
     const char *prev = phase;
     phase = "vdfut768ig";
@@ -454,6 +545,7 @@ static int wrap_vdfut(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
     // basis of every Windows-side hypothesis so far, and the first question
     // worth answering with data is what the working engine actually passes.
     save_payload(a0, a1);
+    if (a0 == OPCODE_TRANSFORM) hunt_spim(a1);
 
     // Deep dump of the caller's ctx. The frame is 96 bytes and eight of its
     // slots are host pointers; whether they are buffers, strings or numbers is
@@ -463,7 +555,7 @@ static int wrap_vdfut(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
         uint64_t *p = (uint64_t *)a1;
         if (a1 && readable((void *)a1)) {
             printf("    === DEEP DUMP CTX (%s) ===\n", phase);
-            for (int i = 0; i < 12; i++) {
+            for (int i = 0; i < 24; i++) {
                 uint64_t v = p[i];
                 printf("    ctx[+0x%02x] = 0x%016lx\n", i * 8, (unsigned long)v);
                 if (v > 0x10000 && v < 0x800000000000 && readable((void *)v)) {
