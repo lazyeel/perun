@@ -12,6 +12,29 @@ mod sap;
 mod scaffold;
 mod store;
 
+/// `perun adi-android headers` -- live Anisette headers from the Bionic lane.
+fn cmd_adi_android(args: &[String]) -> i32 {
+    match args.first().map(String::as_str) {
+        None | Some("headers") => {}
+        Some(other) => {
+            eprintln!("error: unknown subcommand {other:?}");
+            eprintln!("usage: perun adi-android headers");
+            return 2;
+        }
+    }
+    match perun_adi_bionic::generate_headers() {
+        Ok(h) => {
+            println!("X-Apple-I-MD:   {}", h.md);
+            println!("X-Apple-I-MD-M: {}", h.mdm);
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
+}
+
 fn main() {
     unsafe { install_crash_probe() };
     let code = run();
@@ -223,6 +246,9 @@ fn low_level_help(sub: &str) -> Option<&'static str> {
             "  PERUN_SEQ=N repeats one call in-process (call#0, call#1, …).\n"
         ),
         "scaffold" => concat!(
+            "usage: perun adi-android headers\n\n",
+            "  Run Anisette v3 against the Android Bionic runtime, un-emulated on\n",
+            "  x86_64, and print the live X-Apple-I-MD headers it produces.\n\n",
             "usage: perun scaffold \"TRAP-line\" [...]\n\n",
             "  Turns an unresolved-import trap report into a compiling `win32_api!` stub\n",
             "  with the observed arguments and the file whose family owns the API. Accepts\n",
@@ -276,7 +302,7 @@ fn run_with_args(args: &[String]) -> i32 {
     }
     if args.len() < 2 {
         eprintln!(
-            "usage: perun run <image.dll> [--verbose] [--trace] [--trace-file F] [--no-teb]\n       perun info <image.dll>\n       perun mach info <macho>\n       perun scaffold \"TRAP-line\" [...]\n       perun sap [--mac AA:BB:CC:DD:EE:FF] [--sign HEX|--file F]\n       perun store <auth|search|purchase|download|list-purchases|list-versions|get-version-metadata> ...\n       ipatool aliases: perun auth login|info|revoke · perun search -t ... · perun purchase -i ...\n                        perun download -i ... · perun list-purchases · perun list-versions ..."
+            "usage: perun run <image.dll> [--verbose] [--trace] [--trace-file F] [--no-teb]\n       perun info <image.dll>\n       perun mach info <macho>\n       perun adi-android headers\n       perun scaffold \"TRAP-line\" [...]\n       perun sap [--mac AA:BB:CC:DD:EE:FF] [--sign HEX|--file F]\n       perun store <auth|search|purchase|download|list-purchases|list-versions|get-version-metadata> ...\n       ipatool aliases: perun auth login|info|revoke · perun search -t ... · perun purchase -i ...\n                        perun download -i ... · perun list-purchases · perun list-versions ..."
         );
         return 2;
     }
@@ -294,6 +320,7 @@ fn run_with_args(args: &[String]) -> i32 {
         "call" => cmd_call(&args[2..]),
         "mach" => cmd_mach(&args[2..]),
         "scaffold" => scaffold::run(&args[2..]),
+        "adi-android" => cmd_adi_android(&args[2..]),
         "sap" => cmd_sap(&args[2..]),
         "store" => store::cli::run(&args[2..]),
         "seq" => cmd_seq(&args[2..]),

@@ -1,0 +1,20 @@
+[package]
+name = "perun-adi-bionic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Anisette v3 attestation against the Android Bionic runtime, un-emulated on x86_64"
+
+# The stand needs to execute: it dlopen()s Apple's libraries through a Bionic
+# linker that the host kernel must load as PT_INTERP, and it needs its own
+# filesystem namespace for the /system and /vendor paths. None of that is a
+# cdylib surface, so there is no lib target here on purpose.
+[lib]
+name = "perun_adi_bionic"
+path = "src/lib.rs"
+
+[dependencies]
+# No perun-core, no perun-shims: this crate must not inherit anything from the
+# Windows projection runtime. That isolation is the whole point of the split.
+libc = "0.2"

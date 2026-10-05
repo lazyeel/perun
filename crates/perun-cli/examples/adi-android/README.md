@@ -15,7 +15,7 @@ Needs `ANDROID_NDK`, `ANDROID_NDK` pointing at an NDK root, `ADI_APK` at an
 Apple Music APK, and `ADI_RESOLVE` set, e.g.
 
     export ADI_RESOLVE="gsa.apple.com:443:17.179.252.2,buy.itunes.apple.com:443:17.8.136.39"
-    ANDROID_NDK=/opt/data/ndk/android-ndk-r27c ./run.sh
+    ANDROID_NDK=$HOME/ndk/android-ndk-r27c ./run.sh
 
 The first run builds an Android sysroot from the `sys-img` repository: a 211 MB
 `android-21` arm64 image, extracted with `debugfs` (the image is plain ext4, so
@@ -61,9 +61,6 @@ only the zip central directory and the needed members via HTTP Range — no
 142 MB download and nothing outside `lib/x86_64/`. That APK is universal
 (arm64-v8a, armeabi-v7a, x86, x86_64) and carries the classic ADI exports
 (`kq56gsgHG6` … `fy34trz2st`) plus a `libCoreADI.so` exporting
-`vdfut768ig`/`cvu8io98wun`, identical to the older 3.9.0-beta x86_64 kit.
-
-To use the older arm64+x86_64 config split instead, set
-`APK_X86=/path/to/config.x86_64.apk`; `run-native.sh` then extracts that
+`vdfut768ig`/`cvu8io98wun`, identical to the older 
 split. The arm64 kit also runs under `run.sh` via `qemu-aarch64-static`,
 but the native x86_64 path is the one that needs no emulator.

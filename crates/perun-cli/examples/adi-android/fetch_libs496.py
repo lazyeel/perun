@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pull the x86_64 native libraries straight from Apple's Apple Music APK.
+"""Pull native libraries straight from Apple's Apple Music APK.
 
 Source: apps.mzstatic.com/content/android-apple-music-apk/applemusic.apk
 (Apple Music 4.9.6, versionCode 1447 -- a universal APK carrying arm64-v8a,
@@ -9,12 +9,16 @@ kq56gsgHG6, Sph98paBcz, nf92ngaK92, aslgmuibau, qi864985u0, rsegvyrt87,
 uv5t6nhkui, jk24uiwqrg, p435tmhbla, tn46gtiuhw, fy34trz2st.
 
 The APK is ~142 MB, so we read only the members we need: the zip central
-directory via HTTP Range, then each x86_64 member's local header + deflate
-stream, again by Range. No full download, no APK unpacking, and nothing
-outside lib/x86_64/ is ever fetched.
+directory via HTTP Range, then each member's local header + deflate stream,
+again by Range. No full download, no APK unpacking, and nothing outside
+lib/<abi>/ is ever fetched.
 
-    fetch_libs496.py <outdir>            # default: ./libs496
+    fetch_libs496.py <outdir> [--abi x86_64|arm64-v8a]
+
+This APK (Apple Music 4.9.6) is the single engine source for the project.
+x86_64 is the native path; arm64-v8a feeds the qemu fallback (run.sh).
 """
+import argparse
 import os
 import struct
 import sys
@@ -38,7 +42,12 @@ def total_size() -> int:
 
 
 def main() -> int:
-    out = sys.argv[1] if len(sys.argv) > 1 else "libs496"
+    ap = argparse.ArgumentParser()
+    ap.add_argument("outdir", nargs="?", default="libs496")
+    ap.add_argument("--abi", default="x86_64", choices=["x86_64", "arm64-v8a"])
+    args = ap.parse_args()
+    out, abi = args.outdir, args.abi
+    prefix = f"lib/{abi}/"
     os.makedirs(out, exist_ok=True)
     size = total_size()
     print(f"APK {size/1e6:.1f} MB; reading the central directory only", file=sys.stderr)
@@ -70,7 +79,7 @@ def main() -> int:
 
     got = 0
     for nm in sorted(members):
-        if not nm.startswith("lib/x86_64/") or not nm.endswith(".so"):
+        if not nm.startswith(prefix) or not nm.endswith(".so"):
             continue
         raw = pull(nm)
         base = os.path.basename(nm)
@@ -84,7 +93,7 @@ def main() -> int:
     alias = os.path.join(out, "libstdc++.so")
     if not os.path.exists(alias):
         os.symlink("libc++_shared.so", alias)
-    print(f"extracted {got} x86_64 libraries into {out}/", file=sys.stderr)
+    print(f"extracted {got} {abi} libraries into {out}/", file=sys.stderr)
     return 0
 
 

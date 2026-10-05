@@ -379,11 +379,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "perun-adi-bionic"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "perun-cli"
 version = "0.1.0"
 dependencies = [
  "bzip2",
  "libc",
+ "perun-adi-bionic",
  "perun-core",
  "perun-shims",
  "ureq",

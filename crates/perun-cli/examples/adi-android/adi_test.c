@@ -68,20 +68,40 @@ static const char *N_DISPOSE   = "jk24uiwqrg";
 #define DS_ID ((uint64_t)-2)
 
 static void die(const char *fmt, ...) {
+    /* Same reason as info(): one formatting pass, then write(2). */
+    char line[2048];
     va_list ap; va_start(ap, fmt);
-    fprintf(stderr, "[FATAL] ");
-    vfprintf(stderr, fmt, ap);
-    fprintf(stderr, "\n");
+    int n = snprintf(line, sizeof line, "[FATAL] ");
+    if (n > 0 && n < (int)sizeof line)
+        n += vsnprintf(line + n, sizeof line - (size_t)n, fmt, ap);
     va_end(ap);
+    if (n < 0) n = 0;
+    if (n > (int)sizeof line - 2) n = (int)sizeof line - 2;
+    line[n++] = '\n';
+    ssize_t w = write(2, line, (size_t)n);
+    (void)w;
     exit(1);
 }
 static void info(const char *tag, const char *fmt, ...) {
+    /* Format once into a buffer, then write(2) the result.
+     *
+     * Two reasons, both measured on this runtime. stdio's stream lock is never
+     * released: fflush blocks in a futex nothing wakes, which is the same wait
+     * fclose() takes -- an isolated binary shows printf landing and the process
+     * stopping inside it. And routing through vprintf would consume the
+     * va_list, so a second pass over it formats from a torn list and emits
+     * whatever was left in the argument registers. One pass, one descriptor. */
+    char line[2048];
     va_list ap; va_start(ap, fmt);
-    printf("[%s] ", tag);
-    vprintf(fmt, ap);
-    printf("\n");
-    fflush(stdout);
+    int n = snprintf(line, sizeof line, "[%s] ", tag);
+    if (n > 0 && n < (int)sizeof line)
+        n += vsnprintf(line + n, sizeof line - (size_t)n, fmt, ap);
     va_end(ap);
+    if (n < 0) n = 0;
+    if (n > (int)sizeof line - 2) n = (int)sizeof line - 2;
+    line[n++] = '\n';
+    ssize_t w = write(1, line, (size_t)n);
+    (void)w;
 }
 
 /* ── tiny base64 ───────────────────────────────────────────────────────── */
@@ -150,7 +170,12 @@ typedef struct { char *data; size_t len; } buf;
 
 static const char *g_stage = "startup";
 static void on_crash(int sig) {
-    fprintf(stderr, "\n[FATAL] signal %d caught at stage: %s\n", sig, g_stage);
+    /* Async-signal-safe on purpose: snprintf into a local buffer and one
+     * write(2), no stdio and no vsnprintf, which is not reentrant here. */
+    char msg[512];
+    int mn = snprintf(msg, sizeof msg, "\n[FATAL] signal %d at stage: %s\n",
+                      sig, g_stage ? g_stage : "?");
+    if (mn > 0) { ssize_t w = write(2, msg, (size_t)mn); (void)w; }
     _exit(139);
 }
 
@@ -321,23 +346,37 @@ static char *perform(const char *url, const char *post_body) {
 static char *http_get(const char *url) { return perform(url, NULL); }
 static char *http_post_plist(const char *url, const char *body) { return perform(url, body); }
 
+/* Write a file with raw descriptors.
+ *
+ * A closed helper for the ADI_DUMP_* probes: those run on the same runtime as
+ * the stand, where fopen/fwrite/fclose block on the stream lock, so a dump taken
+ * that way would never complete. */
+static void dump_raw(const char *path, const void *data, size_t n) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return;
+    if (write(fd, data, n) != (ssize_t)n) { /* best effort */ }
+    close(fd);
+}
+
 /* ── device identity (SideStore-style) ─────────────────────────────────── */
 static void load_or_create_identity(void) {
     static const char *fname = "adi_identifier";
-    FILE *f = fopen(fname, "rb");
+    /* Raw descriptors, no stdio: the file is 16 bytes and needs no buffering,
+     * while every stdio call that locks a stream blocks on this runtime. */
+    int fd = open(fname, O_RDONLY);
     uint8_t id[16];
     int fresh = 0;
-    if (f) {
-        if (fread(id, 1, 16, f) != 16) { fclose(f); fresh = 1; }
-        else fclose(f);
+    if (fd >= 0) {
+        if (read(fd, id, 16) != 16) fresh = 1;
+        close(fd);
     } else fresh = 1;
     if (fresh) {
-        int fd = open("/dev/urandom", O_RDONLY);
+        fd = open("/dev/urandom", O_RDONLY);
         if (fd < 0 || read(fd, id, 16) != 16) die("cannot gather randomness");
         close(fd);
-        f = fopen(fname, "wb");
-        if (!f || fwrite(id, 1, 16, f) != 16) die("cannot persist identifier");
-        fclose(f);
+        fd = open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd < 0 || write(fd, id, 16) != 16) die("cannot persist identifier");
+        close(fd);
         info("id", "generated new device identifier");
     } else info("id", "loaded existing device identifier");
 
@@ -417,11 +456,14 @@ int main(int argc, char **argv) {
      * libcurl's bindings in the global namespace. */
     char so[1024];
     static const char *deps[] = {
-        "libc++_shared.so",                    /* first: ICU links against it */
-        "libicudata_sv_apple.so", "libicuuc_sv_apple.so", "libicui18n_sv_apple.so",
-        "libxml2.so", "libBlocksRuntime.so", "libdispatch.so",
-        "libCoreFoundation.so", "libmediaplatform.so",
+        /* Anisette v3 needs exactly three. libCoreFoundation belongs to the
+         * Apple Music player and drags the whole Android GUI stack with it:
+         * libCoreFoundation -> libandroid -> libandroid_runtime -> libhwui ->
+         * libRS -> libLLVM. Its constructors then block on their own mutexes.
+         * Neither Provision nor the working reference ever loads it. */
+        "libc++_shared.so",
         "libCoreADI.so",
+        "libstoreservicescore.so",
     };
     for (size_t i = 0; i < sizeof deps / sizeof deps[0]; i++) {
         snprintf(so, sizeof so, "%s/%s", libdir, deps[i]);
@@ -435,15 +477,6 @@ int main(int argc, char **argv) {
     info("dl", "dlopen %s", so);
     void *h = dlopen(so, RTLD_NOW | RTLD_LOCAL);
     if (!h) die("dlopen libstoreservicescore.so: %s", dlerror());
-
-#ifdef DUMP_ADI
-    /* Install the argument dumper after both libraries are mapped and before
-     * any entry point is called. The hooks are inline patches, so they take
-     * effect regardless of which pointer the caller holds. */
-    extern int dump_init(const char *);
-    if (dump_init(libdir) == 0)
-        die("dump_init(%s) failed", libdir);
-#endif
 
     /* Classic stable obfuscated exports (byte-verified in this exact .so):
      * kq56gsgHG6=LoadLibraryWithPath Sph98paBcz=SetAndroidID
@@ -470,6 +503,15 @@ int main(int argc, char **argv) {
     int rc = pLoad(absdir);
     if (rc != 0) die("ADILoadLibraryWithPath(%s)=%d", absdir, rc);
     info("adi", "library loaded (%s)", absdir);
+
+#ifdef DUMP_ADI
+    /* The dumper swaps the function pointers the library has just stored, so it
+     * has to run after the load that fills them in, and before the first
+     * provisioning call. */
+    extern int dump_init(const char *);
+    if (dump_init(libdir) == 0)
+        die("dump_init(%s) failed", libdir);
+#endif
 
     /* probe: is the engine responsive at all before any configuration? */
     int code = pCode(DS_ID);
@@ -519,7 +561,7 @@ int main(int argc, char **argv) {
     if (code == -45061) {
         /* 4a. full provisioning cycle */
         char *lookup = http_get("https://gsa.apple.com/grandslam/GsService2/lookup");
-        if (getenv("ADI_DUMP_LOOKUP")) { FILE *f = fopen(getenv("ADI_DUMP_LOOKUP"), "wb"); fwrite(lookup, 1, strlen(lookup), f); fclose(f); }
+        if (getenv("ADI_DUMP_LOOKUP")) dump_raw(getenv("ADI_DUMP_LOOKUP"), lookup, strlen(lookup));
         char *u_start = xml_string_after_key(lookup, "midStartProvisioning");
         char *u_fin   = xml_string_after_key(lookup, "midFinishProvisioning");
         free(lookup);
@@ -531,7 +573,7 @@ int main(int argc, char **argv) {
         snprintf(body, sizeof body, "%s<key>Header</key><dict/><key>Request</key><dict/>%s",
                  PLIST_HEAD, PLIST_TAIL);
         char *r1 = http_post_plist(u_start, body);
-        if (getenv("ADI_DUMP_START")) { FILE *f = fopen(getenv("ADI_DUMP_START"), "wb"); fwrite(r1, 1, strlen(r1), f); fclose(f); }
+        if (getenv("ADI_DUMP_START")) dump_raw(getenv("ADI_DUMP_START"), r1, strlen(r1));
         char *spim_b64 = xml_string_after_key(r1, "spim");
         free(r1);
         if (!spim_b64) die("no spim in startProvisioning response");
@@ -577,10 +619,17 @@ int main(int argc, char **argv) {
 
     char *mid_b64 = b64_encode(mid, mid_n);
     char *otp_b64 = b64_encode(otp, otp_n);
-    printf("\n=== SUCCESS ===\n");
-    printf("X-Apple-I-MD:   %s\n", otp_b64);
-    printf("X-Apple-I-MD-M: %s\n", mid_b64);
-    printf("===============\n");
+    /* The banner is the whole point of the stand, so it goes out the same way
+     * as info(): one formatting pass, then write(2). Four printf() calls look
+     * harmless but each takes the stream lock this runtime never releases. */
+    char banner[2048];
+    int bn = snprintf(banner, sizeof banner,
+        "\n=== SUCCESS ===\n"
+        "X-Apple-I-MD:   %s\n"
+        "X-Apple-I-MD-M: %s\n"
+        "===============\n",
+        otp_b64, mid_b64);
+    if (bn > 0) { ssize_t w = write(1, banner, (size_t)bn); (void)w; }
 
     pDisp(mid); pDisp(otp);
     info("done", "engine works: anisette tokens generated locally");

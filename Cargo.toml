@@ -4,6 +4,10 @@ members = [
     "crates/perun-core",
     "crates/perun-shims",
     "crates/perun-cli",
+    # The Android Anisette lane, kept as its own crate so it inherits nothing
+    # from the projection runtime. Its Windows counterpart (CoreADI64.dll) is
+    # R&D and lives on the research branch, not here.
+    "crates/perun-adi-bionic",
 ]
 
 [workspace.package]
@@ -15,6 +19,7 @@ repository = "https://github.com/lazyeel/perun"
 [workspace.dependencies]
 perun-core = { path = "crates/perun-core" }
 perun-shims = { path = "crates/perun-shims" }
+perun-adi-bionic = { path = "crates/perun-adi-bionic" }
 
 [profile.release]
 debug = false

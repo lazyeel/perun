@@ -32,6 +32,9 @@ rep-bench = []
 [dependencies]
 perun-core = { workspace = true }
 perun-shims = { workspace = true }
+# The Android Anisette lane; its Windows counterpart is R&D and stays on the
+# research branch.
+perun-adi-bionic = { workspace = true }
 libc = "0.2"
 # bzip2 for the first-run asset fetcher. 0.6 defaults to `libbz2-rs-sys`, a
 # pure-Rust translation of libbzip2, so this is not a C dependency. It replaced
