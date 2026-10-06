@@ -228,6 +228,16 @@ pub struct STARTUPINFOW {
     pub hStdError: HANDLE,
 }
 
+
+// The CRT resolves this by name at startup to decide between ANSI and
+// Unicode file APIs. Returning NULL (an unimplemented name) leaves the
+// caller with no valid answer, and CoreADI64.dll's path parser ran off an
+// invalid table index on that path (SIGSEGV at RVA 0xaf68e).
+crate::win32_api! {
+    /// BOOL AreFileApisANSI(void);
+    unsafe extern "win64" fn AreFileApisANSI() -> BOOL { TRUE }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
