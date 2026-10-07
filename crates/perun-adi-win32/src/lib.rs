@@ -107,10 +107,14 @@ pub fn generate_headers_windows_from(
     // error carries the report rather than two empty header strings that a
     // caller might send somewhere.
     if !probe.all_signed() {
-        return Err(AdiError::NotSigned { report: probe.report });
+        return Err(AdiError::NotSigned {
+            report: probe.report,
+        });
     }
 
-    Err(AdiError::NotSigned { report: probe.report })
+    Err(AdiError::NotSigned {
+        report: probe.report,
+    })
 }
 
 /// Feed a captured SPIM to `CoreADI64.dll` and report what came back.
@@ -152,10 +156,12 @@ pub fn replay(
     let mut table = perun_shims::table::ShimTable::collect();
     let image = Image::load(&bytes, &mut table).map_err(|e| AdiError::Load(format!("{e:?}")))?;
     let _teb = unsafe { perun_core::teb::init_thread_teb(image.base() as u64) };
-    let dll_main = unsafe { image.entry_dll_main() }
-        .ok_or_else(|| AdiError::NotAnAdiImage(path.clone()))?;
+    let dll_main =
+        unsafe { image.entry_dll_main() }.ok_or_else(|| AdiError::NotAnAdiImage(path.clone()))?;
     if unsafe { dll_main(image.base(), DLL_PROCESS_ATTACH, std::ptr::null_mut()) } == 0 {
-        return Err(AdiError::NotAnAdiImage(format!("{path}: DllMain returned FALSE")));
+        return Err(AdiError::NotAnAdiImage(format!(
+            "{path}: DllMain returned FALSE"
+        )));
     }
     let entry = image
         .get_export_by_name("vdfut768ig")
@@ -163,8 +169,7 @@ pub fn replay(
     let f: unsafe extern "win64" fn(u64, u64, u64, u64) -> u64 =
         unsafe { std::mem::transmute(entry) };
 
-    const URL: &[u8] =
-        b"https://gsa.apple.com/grandslam/MidService/startMachineProvisioning\0";
+    const URL: &[u8] = b"https://gsa.apple.com/grandslam/MidService/startMachineProvisioning\0";
 
     let page = |len: usize| unsafe {
         libc::mmap(
@@ -180,7 +185,7 @@ pub fn replay(
     let spimp = page(0x1000);
     let urlp = page(0x1000);
     let ctx = page(0x1_0000);
-    if [packet, spimp, urlp, ctx].iter().any(|p| *p == libc::MAP_FAILED) {
+    if [packet, spimp, urlp, ctx].contains(&libc::MAP_FAILED) {
         return Err(AdiError::Load("could not map the replay pages".to_string()));
     }
     unsafe {
@@ -210,7 +215,11 @@ pub fn replay(
         // the measured Android packet: 00 00 00 02 plus 44 arbitrary bytes,
         // with the SPIM travelling through the +0x30 pointer instead.
         let user_variant = std::env::var("PERUN_PACKET_VARIANT").ok().as_deref() == Some("user");
-        let in_len: u64 = if user_variant { (8 + spim.len()) as u64 } else { 0x34 };
+        let in_len: u64 = if user_variant {
+            (8 + spim.len()) as u64
+        } else {
+            0x34
+        };
         unsafe {
             std::ptr::write_bytes(packet.cast::<u8>(), 0, 4096);
             // 00 00 00 02: Action 2, the header Android stamps before its call.
@@ -227,21 +236,21 @@ pub fn replay(
             let c = ctx.cast::<u64>();
             std::ptr::write(c.add(0), packet as u64); // +0x00 request packet
             std::ptr::write(c.add(1), (4u64 << 32) | in_len); // +0x08 in_len, flags=4
-            std::ptr::write(c.add(2), 0);                     // +0x10
-            std::ptr::write(c.add(3), spim.len() as u64);     // +0x18 SPIM length
-            std::ptr::write(c.add(4), urlp as u64);           // +0x20 provisioning URL
-            std::ptr::write(c.add(5), 2);                     // +0x28
-            std::ptr::write(c.add(6), spimp as u64);          // +0x30 SPIM pointer
-            std::ptr::write(c.add(7), spim.len() as u64);     // +0x38
-            std::ptr::write(c.add(8), 4);                     // +0x40
-            std::ptr::write(c.add(9), 0);                     // +0x48 code ptr (Android-only)
-            std::ptr::write(c.add(10), 0);                    // +0x50 -> written: CPIM len
-            std::ptr::write(c.add(11), spim.len() as u64);    // +0x58
-            std::ptr::write(c.add(12), 0);                    // +0x60
-            std::ptr::write(c.add(13), spimp as u64);         // +0x68 SPIM pointer again
-            std::ptr::write(c.add(14), 464);                  // +0x70 capacity
-            std::ptr::write(c.add(15), urlp as u64);          // +0x78 URL again
-            std::ptr::write(c.add(16), 0);                    // +0x80 -> written: CPIM ptr
+            std::ptr::write(c.add(2), 0); // +0x10
+            std::ptr::write(c.add(3), spim.len() as u64); // +0x18 SPIM length
+            std::ptr::write(c.add(4), urlp as u64); // +0x20 provisioning URL
+            std::ptr::write(c.add(5), 2); // +0x28
+            std::ptr::write(c.add(6), spimp as u64); // +0x30 SPIM pointer
+            std::ptr::write(c.add(7), spim.len() as u64); // +0x38
+            std::ptr::write(c.add(8), 4); // +0x40
+            std::ptr::write(c.add(9), 0); // +0x48 code ptr (Android-only)
+            std::ptr::write(c.add(10), 0); // +0x50 -> written: CPIM len
+            std::ptr::write(c.add(11), spim.len() as u64); // +0x58
+            std::ptr::write(c.add(12), 0); // +0x60
+            std::ptr::write(c.add(13), spimp as u64); // +0x68 SPIM pointer again
+            std::ptr::write(c.add(14), 464); // +0x70 capacity
+            std::ptr::write(c.add(15), urlp as u64); // +0x78 URL again
+            std::ptr::write(c.add(16), 0); // +0x80 -> written: CPIM ptr
             // +0x88..+0xa8: five function pointers on Android; left zero here.
         }
         // arg2 = -1 mirrors the Android call's third argument (rdx = 0xffffffff).
@@ -257,27 +266,21 @@ pub fn replay(
         out.push_str(&format!(
             "   ctx[+0x54]={cpim_len:#x} ctx[+0x80]={cpim_ptr:#x}\n"
         ));
-        let plausible = cpim_ptr > 0x1_0000
-            && cpim_ptr < 0x8000_0000_0000
-            && cpim_len > 0
-            && cpim_len <= 8192;
+        let plausible =
+            cpim_ptr > 0x1_0000 && cpim_ptr < 0x8000_0000_0000 && cpim_len > 0 && cpim_len <= 8192;
         if plausible {
             let got = unsafe { std::slice::from_raw_parts(cpim_ptr as *const u8, cpim_len) };
             out.push_str(&format!(
                 "   produced {cpim_len} bytes, first 16 {:02x?}\n",
                 &got[..16.min(cpim_len)]
             ));
-            if let Some(ref refc) = oracle {
+            if let Some(refc) = oracle {
                 out.push_str(&format!(
                     "   vs Android CPIM ({} bytes): {}\n",
                     refc.len(),
-                    if got == *refc {
-                        "IDENTICAL"
-                    } else {
-                        "differs"
-                    }
+                    if got == refc { "IDENTICAL" } else { "differs" }
                 ));
-                if got != *refc {
+                if got != refc {
                     let common = got
                         .iter()
                         .zip(refc.iter())
@@ -307,14 +310,14 @@ pub fn replay(
     }
     Ok(out)
 }
-/// The packet page has to hold the input and whatever the library writes back.
-fn packet_len(spim: &[u8]) -> usize {
-    let want = spim.len().next_power_of_two().max(0x1000);
-    want + 0x1000
-}
 
+/// The packet page has to hold the input and whatever the library writes back.
 fn hex(b: &[u8]) -> String {
-    b.iter().take(48).map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" ")
+    b.iter()
+        .take(48)
+        .map(|x| format!("{x:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn describe(status: u32) -> String {
@@ -330,10 +333,7 @@ fn describe(status: u32) -> String {
 /// This is what a researcher actually wants: the failure report is the
 /// interesting artefact, and `generate_headers_windows` above refuses to
 /// summarise it away.
-pub fn probe_windows(
-    image_path: Option<&str>,
-    adi_dir: Option<&str>,
-) -> Result<Probe, AdiError> {
+pub fn probe_windows(image_path: Option<&str>, adi_dir: Option<&str>) -> Result<Probe, AdiError> {
     let path = image_path
         .map(str::to_owned)
         .or_else(guest::default_adi_image)
@@ -360,7 +360,10 @@ mod tests {
         };
         let text = e.to_string();
         assert!(text.contains("did not all take their success path"));
-        assert!(text.contains("provision"), "the report must survive: {text}");
+        assert!(
+            text.contains("provision"),
+            "the report must survive: {text}"
+        );
     }
 
     #[test]

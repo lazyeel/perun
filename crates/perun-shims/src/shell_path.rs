@@ -16,12 +16,13 @@
 //! writes land in a stable, inspectable place:
 //!
 //! ```text
-//! $PERUN_APPDATA (default $HOME/.perun/appdata)
+//! $PERUN_DIR/appdata (default $HOME/.perun/appdata)
 //!   ├── Roaming/   CSIDL_APPDATA        (0x001a)
 //!   ├── Local/     CSIDL_LOCAL_APPDATA  (0x001c)
 //!   └── Common/    CSIDL_COMMON_APPDATA (0x0023)
 //! ```
 
+use crate::util::set_last_error;
 use crate::win32::{BOOL, DWORD, FALSE, HANDLE, LPCWSTR, LPWSTR, TRUE};
 use crate::win32_api;
 
@@ -35,17 +36,12 @@ const CSIDL_COMMON_APPDATA: u32 = 0x0023;
 const CSIDL_FLAG_CREATE: u32 = 0x8000;
 const CSIDL_MASK: u32 = 0x00FF;
 
-/// Root directory for all mapped Windows folders.
-fn appdata_root() -> std::path::PathBuf {
-    match std::env::var("PERUN_APPDATA") {
-        Ok(v) if !v.is_empty() => std::path::PathBuf::from(v),
-        _ => {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            std::path::PathBuf::from(home)
-                .join(".perun")
-                .join("appdata")
-        }
-    }
+/// Root directory for all mapped Windows folders: `PERUN_DIR/appdata`, the
+/// same single-root configuration every other perun lane uses. An unusable
+/// `PERUN_DIR` (aimed at a system tree) has no safe folder root to offer,
+/// so the mapping reports failure.
+fn appdata_root() -> Option<std::path::PathBuf> {
+    perun_core::paths::appdata().ok()
 }
 
 /// Map a CSIDL to a subdirectory name, if known.
@@ -98,19 +94,35 @@ win32_api! {
             eprintln!("[perun] SHGetFolderPathW(csidl={csidl:#x}) — unmapped CSIDL");
             return E_INVALIDARG;
         };
-        let dir = appdata_root().join(subdir);
-        if csidl & CSIDL_FLAG_CREATE != 0 {
-            mkdirs(&dir);
+        let Some(base) = appdata_root() else {
+            eprintln!("[perun] SHGetFolderPathW(csidl={csidl:#x}) — no usable PERUN_DIR");
+            return E_INVALIDARG;
+        };
+        let dir = base.join(subdir);
+        // The jail resolves the directory this shim hands out: PERUN_DIR
+        // is an environment variable, and a value pointing at a host system
+        // root must not turn the create-flag into a `mkdir -p` against it.
+        // The jail root *is* the appdata tree, so the resolution both
+        // validates it and canonicalises it.
+        match crate::jail::resolve_in_jail(&dir.to_string_lossy()) {
+            Ok(jailed) => {
+                if csidl & CSIDL_FLAG_CREATE != 0 {
+                    mkdirs(&jailed);
+                }
+                write_wide(out_path, &jailed.to_string_lossy());
+                eprintln!(
+                    "[perun] SHGetFolderPathW(csidl={csidl:#x}) -> {:?}",
+                    jailed.to_string_lossy()
+                );
+            }
+            Err(code) => {
+                eprintln!(
+                    "[perun] SHGetFolderPathW(csidl={csidl:#x}) — appdata root {dir:?} is jailed (err {code})"
+                );
+                set_last_error(code);
+                return E_INVALIDARG;
+            }
         }
-        // Returned as the host spells it. A drive-letter path was tried here and
-        // changed nothing observable: on the branch that reaches the filesystem
-        // the guest never reads this buffer, so a Windows-shaped string would be
-        // a shape the host does not have and the guest cannot act on.
-        write_wide(out_path, &dir.to_string_lossy());
-        eprintln!(
-            "[perun] SHGetFolderPathW(csidl={csidl:#x}) -> {:?}",
-            dir.to_string_lossy()
-        );
         S_OK
     }
 }
@@ -226,7 +238,18 @@ win32_api! {
     unsafe extern "win64" fn SetCurrentDirectoryW(dir: LPWSTR) -> BOOL {
         let p = wide_to_string(dir);
         let unix = p.replace('\\', "/");
-        BOOL::from(std::env::set_current_dir(&unix).is_ok())
+        // The guest's cwd is a host-process-global and every later relative
+        // path inherits it; an unjailed chdir is what let a garbage pointer
+        // turn `chmod(".")` into a chmod of the host root. Resolve into the
+        // jail and chdir there — the guest sees its own tree, the host cwd
+        // never moves outside it.
+        match crate::jail::resolve_in_jail(&unix) {
+            Ok(jailed) => BOOL::from(std::env::set_current_dir(&jailed).is_ok()),
+            Err(code) => {
+                set_last_error(code);
+                FALSE
+            }
+        }
     }
 }
 
@@ -268,7 +291,20 @@ win32_api! {
         if std::env::var("PERUN_TRACE").is_ok() {
             eprintln!("[perun] CreateDirectoryExW({p:?})");
         }
-        match std::fs::create_dir_all(&unix) {
+        // Same jail as CreateDirectoryW: `create_dir_all` walks the whole
+        // path, so a traversal inside it would build directories across a
+        // system root, not just at the leaf.
+        let jailed = match crate::jail::resolve_in_jail(&unix) {
+            Ok(path) => path,
+            Err(code) => {
+                set_last_error(code);
+                if std::env::var_os("PERUN_TRACE").is_some() {
+                    eprintln!("[perun] CreateDirectoryExW({p:?}) — jailed (err {code})");
+                }
+                return FALSE;
+            }
+        };
+        match std::fs::create_dir_all(&jailed) {
             Ok(()) => TRUE,
             Err(_) => FALSE,
         }

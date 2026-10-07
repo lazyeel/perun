@@ -84,6 +84,28 @@ fn cmd_adi_windows(args: &[String]) -> i32 {
 }
 
 fn main() {
+    // Configuration gate: every filesystem lane derives from PERUN_DIR, and
+    // a root aimed at a system tree is refused before a single path is built.
+    // The message names the fix, because this fires at the worst possible
+    // moment — a run that already has its inputs ready.
+    if let Err(e) = perun_core::paths::preflight() {
+        eprintln!("perun: {e}");
+        std::process::exit(1);
+    }
+    // Root guard. Every shim runs on the host's credentials: a `mkdir` or
+    // `chmod` that would be a harmless permission error as the user becomes
+    // a real filesystem change under sudo. The ADI stand is the one lane that
+    // historically needed root (bind mounts for the Bionic loader), which is
+    // exactly why the escape hatch is an explicit opt-in variable rather
+    // than a flag someone could leave in a script by accident.
+    if unsafe { libc::geteuid() } == 0 && std::env::var_os("PERUN_ALLOW_ROOT").is_none() {
+        eprintln!(
+            "perun: refusing to run as root (euid 0). The shims translate Win32 calls \
+             into host filesystem operations, and a root-owned run turns guest path \
+             bugs into host damage. Set PERUN_ALLOW_ROOT=1 to override deliberately."
+        );
+        std::process::exit(1);
+    }
     unsafe { install_crash_probe() };
     let code = run();
     // Exit via C ABI to avoid unwinding across guest frames.
@@ -2733,7 +2755,14 @@ mod help_tests {
     use super::*;
 
     const LOW_LEVEL: [&str; 9] = [
-        "run", "info", "mach", "sap", "seq", "call", "scaffold", "adi-android",
+        "run",
+        "info",
+        "mach",
+        "sap",
+        "seq",
+        "call",
+        "scaffold",
+        "adi-android",
         "adi-windows",
     ];
 

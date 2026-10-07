@@ -76,9 +76,214 @@ pub const HEAP_ZERO_MEMORY: DWORD = 0x0000_0008;
 
 pub const ERROR_SUCCESS: DWORD = 0;
 pub const ERROR_FILE_NOT_FOUND: DWORD = 2;
+pub const ERROR_ACCESS_DENIED: DWORD = 5;
 pub const ERROR_INVALID_PARAMETER: DWORD = 87;
 pub const ERROR_INSUFFICIENT_BUFFER: DWORD = 122;
 pub const ERROR_MORE_DATA: DWORD = 234;
+
+/// The one host tree the shims may act on. Every path the guest names is
+/// resolved inside it (`jail::resolve_in_jail`); this function is the
+/// lexical fallback that backs the same rule on kernels without `openat2`
+/// (pre-5.6) and the fast pre-filter for it.
+///
+/// The rule is an **allowlist by construction**: there is no list of
+/// forbidden host directories that someone must remember to keep complete —
+/// the first list shipped with exactly that shape blocked the *default*
+/// appdata layout (`/home/<user>/.perun/appdata`) because it named `/home`.
+/// One allowed tree, everything else denied.
+pub fn sanitize_guest_path(path: &std::path::Path) -> Result<std::path::PathBuf, DWORD> {
+    let s = path.to_string_lossy();
+    if s.is_empty() {
+        return Err(ERROR_INVALID_PARAMETER);
+    }
+    // Resolve `.` and `..` lexically. `Path::components` already skips `.`
+    // and a leading `//`; `..` is folded against the preceding component the
+    // way the kernel's path walker would fold it.
+    let mut normalised = std::path::PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                // `..` at the root of the normalised prefix: the path walks
+                // above its own anchor. Only a jail root can still contain it,
+                // so pop; a prefix-less `..` chain keeps the path relative and
+                // it will be rejected by the allowlist comparison below.
+                normalised.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => normalised.push(other.as_os_str()),
+        }
+    }
+    let norm_str = normalised.to_string_lossy();
+    if norm_str.is_empty() {
+        return Err(ERROR_INVALID_PARAMETER);
+    }
+    // A relative path is not a violation: the caller resolves it against
+    // the jail root (this is what `jail::resolve_in_jail` does before
+    // calling in, and what the standalone lexical callers rely on too).
+    // Rebase it under the root and re-check the prefix, so both callers
+    // share one rule: the final target must live inside the jail.
+    let root = crate::jail::lexical_jail_root()?;
+    let absolute = if normalised.is_absolute() {
+        normalised.clone()
+    } else {
+        root.join(&normalised)
+    };
+    if absolute == root || absolute.starts_with(&root) {
+        Ok(if normalised.is_absolute() {
+            normalised
+        } else {
+            absolute
+        })
+    } else {
+        Err(ERROR_ACCESS_DENIED)
+    }
+}
+
+#[cfg(test)]
+mod jail_tests {
+    use super::*;
+
+    fn with_root<T>(f: impl FnOnce(std::path::PathBuf) -> T) -> T {
+        let _guard = crate::jail::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // A private root for each test: the allowlist is read per call from
+        // PERUN_DIR, and ambient state from other tests must not leak. The
+        // jail root is `<PERUN_DIR>/appdata`, so the paths under test are
+        // built relative to that.
+        let base = std::env::temp_dir().join(format!("perun-lexical-jail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        // Edition 2024: env mutation is unsafe; no guest threads exist at test time.
+        unsafe { std::env::set_var("PERUN_DIR", &base) };
+        let r = f(base.join("appdata"));
+        unsafe { std::env::remove_var("PERUN_DIR") };
+        let _ = std::fs::remove_dir_all(&base);
+        r
+    }
+
+    #[test]
+    fn empty_path_is_rejected() {
+        with_root(|_| {
+            assert_eq!(
+                sanitize_guest_path(std::path::Path::new("")),
+                Err(ERROR_INVALID_PARAMETER)
+            );
+        });
+    }
+
+    #[test]
+    fn system_roots_are_denied() {
+        with_root(|_| {
+            for denied in [
+                "/", "/etc", "/var", "/run", "/tmp", "/nix", "/boot", "/usr", "/bin",
+            ] {
+                assert_eq!(
+                    sanitize_guest_path(std::path::Path::new(denied)),
+                    Err(ERROR_ACCESS_DENIED),
+                    "{denied} must not resolve"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn paths_inside_system_roots_are_denied() {
+        with_root(|_| {
+            assert_eq!(
+                sanitize_guest_path(std::path::Path::new("/etc/passwd")),
+                Err(ERROR_ACCESS_DENIED)
+            );
+            assert_eq!(
+                sanitize_guest_path(std::path::Path::new("/tmp/scratch/adi.pb")),
+                Err(ERROR_ACCESS_DENIED)
+            );
+            assert_eq!(
+                sanitize_guest_path(std::path::Path::new("/usr/lib/dylib")),
+                Err(ERROR_ACCESS_DENIED)
+            );
+        });
+    }
+
+    #[test]
+    fn dotdot_escape_into_a_host_root_is_rejected() {
+        with_root(|root| {
+            let deep = root.join("Common/x/y");
+            assert_eq!(
+                sanitize_guest_path(&deep.join("../../../..")),
+                Err(ERROR_ACCESS_DENIED),
+                "climb out of the jail root must deny, not pop past it"
+            );
+            assert_eq!(
+                sanitize_guest_path(std::path::Path::new("/etc/../..")),
+                Err(ERROR_ACCESS_DENIED)
+            );
+        });
+    }
+
+    #[test]
+    fn the_jail_root_and_everything_inside_it_is_allowed() {
+        with_root(|root| {
+            assert_eq!(
+                sanitize_guest_path(&root),
+                Ok(root.clone()),
+                "the jail root itself must resolve"
+            );
+            let leaf = root.join("Common/Apple Computer/iTunes/adi");
+            assert_eq!(sanitize_guest_path(&leaf), Ok(leaf));
+        });
+    }
+
+    #[test]
+    fn the_default_home_layout_is_allowed() {
+        // Regression for the denylist version: a literal `/home` entry
+        // denied the *default* appdata root on any ordinary distro, where
+        // HOME is /home/<user>. The allowlist cannot reproduce that bug,
+        // and this test pins it.
+        with_root(|root| {
+            let leaf = root.join("Roaming/x");
+            assert!(sanitize_guest_path(&leaf).is_ok());
+            unsafe { std::env::remove_var("PERUN_DIR") };
+            let home_layout = std::path::Path::new("/home/admin/.perun/appdata/Roaming/x");
+            let saved = std::env::var("HOME").unwrap_or_default();
+            unsafe { std::env::set_var("HOME", "/home/admin") };
+            // The default derives from HOME; PERUN_DIR must stay unset for
+            // the default path to be taken.
+            unsafe { std::env::remove_var("PERUN_DIR") };
+            assert_eq!(
+                sanitize_guest_path(home_layout),
+                Ok(home_layout.to_path_buf())
+            );
+            unsafe { std::env::set_var("HOME", saved) };
+        });
+    }
+
+    #[test]
+    fn relative_paths_are_allowed_but_normalised() {
+        with_root(|root| {
+            // A relative path is not a violation: it lands under the jail
+            // root (the rebase `jail::resolve_in_jail` also relies on), and
+            // the result is the absolute host path inside the root.
+            let ok = sanitize_guest_path(std::path::Path::new("appdata/Common/x/y/../../z"));
+            assert_eq!(ok.unwrap(), root.join("appdata/Common/z"));
+        });
+    }
+
+    #[test]
+    fn prefix_words_outside_the_jail_are_denied() {
+        // The allowlist is a prefix on *paths*, not on strings: a sibling
+        // of the jail root that merely shares its name must not pass.
+        with_root(|root| {
+            let sibling = std::path::PathBuf::from(format!("{}-sibling", root.display()));
+            assert_eq!(
+                sanitize_guest_path(&sibling),
+                Err(ERROR_ACCESS_DENIED),
+                "a string-prefixed sibling {sibling:?} must not resolve"
+            );
+        });
+    }
+}
+
 pub const ERROR_NO_MORE_FILES: DWORD = 18;
 
 /// `SYSTEMTIME`.
@@ -227,7 +432,6 @@ pub struct STARTUPINFOW {
     pub hStdOutput: HANDLE,
     pub hStdError: HANDLE,
 }
-
 
 // The CRT resolves this by name at startup to decide between ANSI and
 // Unicode file APIs. Returning NULL (an unimplemented name) leaves the

@@ -23,6 +23,7 @@
 
 pub mod files;
 pub mod files_enum;
+pub mod jail;
 pub mod mach;
 pub mod machine_id;
 pub mod memory;

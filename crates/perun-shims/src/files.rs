@@ -56,13 +56,34 @@ win32_api! {
     ) -> HANDLE { unsafe {
         let _ = (sa, template);
         let wide = read_wide(name);
-        let path = adi_redirect(to_unix_path(&String::from_utf16_lossy(&wide)));
+        let mut raw = adi_redirect(to_unix_path(&String::from_utf16_lossy(&wide)));
+
+        // Path helpers (shlwapi) are stubs in phase 1; guests often probe
+        // "C:\"-style paths — strip the drive prefix so the tail resolves
+        // inside the jail like any relative path.
+        if raw.len() >= 2 && raw.as_bytes()[1] == b':' {
+            raw = raw[2..].to_string();
+        }
 
         if std::env::var("PERUN_TRACE").is_ok() {
             eprintln!(
-                "[perun] CreateFileW({path:?}, access={access:#x}, disp={disposition})"
+                "[perun] CreateFileW({raw:?}, access={access:#x}, disp={disposition})"
             );
         }
+
+        // Every path this shim can act on resolves inside the jail first —
+        // including read-only opens, because the creating dispositions
+        // mutate and the jail check is one uniform gate before any fd
+        // exists. A denied path reports INVALID_HANDLE_VALUE with
+        // ERROR_ACCESS_DENIED, which is what a Win32 caller expects for a
+        // path it may not touch.
+        let path = match crate::jail::resolve_in_jail(&raw) {
+            Ok(p) => p.into_os_string().into_string().unwrap_or_default(),
+            Err(code) => {
+                set_last_error(code);
+                return INVALID_HANDLE_VALUE;
+            }
+        };
 
         // Directory open (used by guests probing folder existence).
         if attrs & FILE_ATTRIBUTE_DIRECTORY != 0 && disposition == OPEN_EXISTING {
@@ -77,13 +98,6 @@ win32_api! {
 
         let (mut flags, mode) = open_flags(access, disposition);
         let _ = share;
-        // Path helpers (shlwapi) are stubs in phase 1; guests often probe
-        // "C:\"-style paths — map a drive-root prefix to the process cwd.
-        let path = if path.len() >= 2 && path.as_bytes()[1] == b':' {
-            format!(".{}", &path[2..])
-        } else {
-            path
-        };
         flags |= libc::O_CLOEXEC;
         // The outcome is logged with the request: an ADI guest probes a cache
         // file with FILE_READ_ATTRIBUTES and silently gives up if the open
@@ -278,7 +292,7 @@ fn to_unix_path(path: &str) -> String {
     path.replace('\\', "/")
 }
 
-/// ADI cache-file redirect, `PERUN_ADI_DIR`.
+/// ADI cache-file redirect, `PERUN_DIR/adi`.
 ///
 /// The guest keeps two copies of its provisioning directory: one it fills
 /// through the shell32/shlwapi shims (`SHGetFolderPathW` then `PathAppendW`,
@@ -290,10 +304,11 @@ fn to_unix_path(path: &str) -> String {
 ///
 /// Pointing the cache-file APIs at a real directory makes that branch
 /// reachable, which is the only way to find out what the library does once it
-/// has a SPIM to read. Off unless the variable is set: this is a diagnostic
-/// knob, not a claim that the guest's own copy is correct.
+/// has a SPIM to read. `PERUN_ADI_DIR` used to be the knob; with the
+/// single-root migration the redirect target is `PERUN_DIR/adi` — the one
+/// directory every lane uses, validated once at startup.
 fn adi_redirect(path: String) -> String {
-    let Some(dir) = std::env::var_os("PERUN_ADI_DIR") else {
+    let Some(dir) = perun_core::paths::adi_cache().ok() else {
         return path;
     };
     // Normalise here rather than relying on the caller: the narrow file APIs
@@ -317,8 +332,15 @@ fn adi_redirect(path: String) -> String {
 win32_api! {
     /// BOOL DeleteFileW(LPCWSTR);
     unsafe extern "win64" fn DeleteFileW(name: LPCWSTR) -> BOOL { unsafe {
-        let path = to_unix_path(&String::from_utf16_lossy(&read_wide(name)));
-        let c = std::ffi::CString::new(path).unwrap_or_default();
+        let raw = to_unix_path(&String::from_utf16_lossy(&read_wide(name)));
+        let jailed = match crate::jail::resolve_in_jail(&raw) {
+            Ok(p) => p,
+            Err(code) => {
+                set_last_error(code);
+                return FALSE;
+            }
+        };
+        let c = std::ffi::CString::new(jailed.to_string_lossy().as_bytes()).unwrap_or_default();
         if libc::unlink(c.as_ptr()) == 0 {
             TRUE
         } else {
@@ -333,8 +355,23 @@ win32_api! {
         name: LPCWSTR,
         _sa: *const SECURITY_ATTRIBUTES,
     ) -> BOOL { unsafe {
-        let path = to_unix_path(&String::from_utf16_lossy(&read_wide(name)));
-        let c = std::ffi::CString::new(path).unwrap_or_default();
+        let raw = to_unix_path(&String::from_utf16_lossy(&read_wide(name)));
+        // Jail: the guest path is resolved inside the perun-owned appdata
+        // root with kernel enforcement (openat2 RESOLVE_BENEATH), so `..`,
+        // symlink escapes and foreign absolute paths cannot reach the host
+        // filesystem. The original incident was exactly this call landing
+        // on the process cwd under sudo.
+        let jailed = match crate::jail::resolve_in_jail(&raw) {
+            Ok(p) => p,
+            Err(code) => {
+                set_last_error(code);
+                if std::env::var_os("PERUN_TRACE").is_some() {
+                    eprintln!("[perun] CreateDirectoryW({raw:?}) — jailed (err {code})");
+                }
+                return FALSE;
+            }
+        };
+        let c = std::ffi::CString::new(jailed.to_string_lossy().as_bytes()).unwrap_or_default();
         if libc::mkdir(c.as_ptr(), 0o755) == 0 {
             TRUE
         } else {
@@ -414,11 +451,26 @@ win32_api! {
 /// `FILE_ATTRIBUTE_NORMAL`/`READONLY` as a lock handshake around the SPIM, and
 /// it was an unresolved import -- a trap that returns having done nothing, so
 /// the guest's clear-then-set sequence silently left the file as it found it.
+/// The path resolves inside the jail before `chmod` runs: this is the call
+/// that produced the original incident (garbage pointer → `chmod(".")` →
+/// the host root under sudo), so it is kernel-enforced, not string-checked.
 unsafe fn set_file_attributes(name: LPCSTR, attrs: DWORD) -> BOOL {
     unsafe {
         let raw = read_narrow(name);
         let path = adi_redirect(String::from_utf8_lossy(&raw).into_owned());
-        let c = std::ffi::CString::new(path.as_bytes()).unwrap_or_default();
+        let jailed = match crate::jail::resolve_in_jail(&path) {
+            Ok(p) => p,
+            Err(code) => {
+                set_last_error(code);
+                if std::env::var_os("PERUN_TRACE").is_some() {
+                    eprintln!(
+                        "[perun] SetFileAttributes({path:?}, {attrs:#x}) — jailed (err {code})"
+                    );
+                }
+                return FALSE;
+            }
+        };
+        let c = std::ffi::CString::new(jailed.to_string_lossy().as_bytes()).unwrap_or_default();
         // Windows has no direct "set readonly bit" call; the read-only state *is*
         // the write bit, so it is cleared or set through the mode.
         let readonly = attrs & FILE_ATTRIBUTE_READONLY != 0;
