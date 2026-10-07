@@ -69,26 +69,15 @@ pub(crate) fn state_dir_override_for_test(dir: Option<PathBuf>) {
     STATE_DIR_OVERRIDE.with(|slot| *slot.borrow_mut() = dir);
 }
 
-/// Per-user state directory: `$PERUN_STORE_DIR`, else `~/.local/state/perun/`
-/// (XDG), holding the cookie jar, the encrypted account file and the plaintext
-/// storefront sidecar.
+/// Per-user state directory: `PERUN_DIR/state` (default `~/.perun/state`),
+/// holding the cookie jar, the encrypted account file and the plaintext
+/// storefront sidecar. One root for every lane — see `perun_core::paths`.
 pub fn state_dir() -> Result<PathBuf, String> {
     #[cfg(test)]
     if let Some(dir) = STATE_DIR_OVERRIDE.with(|slot| slot.borrow().clone()) {
         return Ok(dir);
     }
-    if let Ok(dir) = std::env::var("PERUN_STORE_DIR") {
-        let dir = PathBuf::from(dir);
-        std::fs::create_dir_all(&dir).map_err(|e| format!("create {dir:?}: {e}"))?;
-        return Ok(dir);
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let dir = std::path::Path::new(&home)
-        .join(".local")
-        .join("state")
-        .join("perun");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {dir:?}: {e}"))?;
-    Ok(dir)
+    perun_core::paths::state().map_err(|e| e.to_string())
 }
 
 /// The machine MAC as `AA:BB:CC:DD:EE:FF` (Store identity + file binding).

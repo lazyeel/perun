@@ -98,7 +98,9 @@ pub fn probe(image_path: &str, adi_dir: Option<&str>) -> Result<Probe, String> {
     if let Some(dir) = adi_dir {
         // SAFETY: this thread is the only one alive in the process at this
         // point, and nothing else reads the environment concurrently.
-        unsafe { std::env::set_var("PERUN_ADI_DIR", dir) };
+        // PERUN_DIR is the single root: the cache redirect and the jail both
+        // derive from it, so the redirect target is `<dir>/adi`.
+        unsafe { std::env::set_var("PERUN_DIR", dir) };
     }
 
     let scratch = unsafe {

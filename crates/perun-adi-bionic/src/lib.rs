@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 mod patches;
 pub(crate) mod stand;
 
-pub use patches::{Patch, PatchSite, PATCHES};
+pub use patches::{PATCHES, Patch, PatchSite};
 
 /// The headers Anisette v3 produces.
 ///
@@ -188,7 +188,10 @@ pub fn generate_headers() -> Result<AnisetteHeaders, AdiError> {
 /// [`generate_headers`] against an explicit layout.
 pub fn generate_headers_from(paths: &StandPaths) -> Result<AnisetteHeaders, AdiError> {
     if let Some(what) = paths.missing() {
-        return Err(AdiError::StandMissing(format!("{what} ({})", paths.stage.display())));
+        return Err(AdiError::StandMissing(format!(
+            "{what} ({})",
+            paths.stage.display()
+        )));
     }
     let out = stand::run(paths)?;
     if !out.status_ok {
@@ -290,7 +293,10 @@ mod tests {
         // best; at worst it corrupts a neighbouring section.
         for p in PATCHES {
             assert!(
-                matches!(p.site, PatchSite::Libc | PatchSite::Linker | PatchSite::Llvm),
+                matches!(
+                    p.site,
+                    PatchSite::Libc | PatchSite::Linker | PatchSite::Llvm
+                ),
                 "unknown site in {p:?}"
             );
         }

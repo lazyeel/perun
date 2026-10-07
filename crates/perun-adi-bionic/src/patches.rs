@@ -101,11 +101,7 @@ pub enum PatchError {
     },
     /// The replacement is longer than the bytes it replaces, which would
     /// shift everything after it. No patch here may do that.
-    Grows {
-        at: usize,
-        from: usize,
-        to: usize,
-    },
+    Grows { at: usize, from: usize, to: usize },
 }
 
 impl std::fmt::Display for PatchError {
@@ -210,9 +206,21 @@ mod tests {
 
     #[test]
     fn every_patch_is_present_at_its_site() {
-        assert_eq!(PATCHES.iter().filter(|p| p.site == PatchSite::Linker).count(), 1);
-        assert_eq!(PATCHES.iter().filter(|p| p.site == PatchSite::Libc).count(), 3);
-        assert_eq!(PATCHES.iter().filter(|p| p.site == PatchSite::Llvm).count(), 1);
+        assert_eq!(
+            PATCHES
+                .iter()
+                .filter(|p| p.site == PatchSite::Linker)
+                .count(),
+            1
+        );
+        assert_eq!(
+            PATCHES.iter().filter(|p| p.site == PatchSite::Libc).count(),
+            3
+        );
+        assert_eq!(
+            PATCHES.iter().filter(|p| p.site == PatchSite::Llvm).count(),
+            1
+        );
     }
 
     #[test]
@@ -234,7 +242,7 @@ mod tests {
         match p.apply(&mut img) {
             Err(PatchError::Unexpected { at, found, .. }) => {
                 assert_eq!(at, 0x16040);
-                assert_eq!(found, "efbeadde");  // 0xdeadbeef, little-endian
+                assert_eq!(found, "efbeadde"); // 0xdeadbeef, little-endian
             }
             other => panic!("expected Unexpected, got {other:?}"),
         }
@@ -277,7 +285,11 @@ mod tests {
     #[test]
     fn every_patch_documents_itself() {
         for p in PATCHES {
-            assert!(p.because.len() > 40, "{:?} needs a real explanation", p.file_offset);
+            assert!(
+                p.because.len() > 40,
+                "{:?} needs a real explanation",
+                p.file_offset
+            );
             assert!(!p.expect.is_empty());
         }
     }

@@ -68,24 +68,31 @@ exec "$@"
     let mut cmd = Command::new("sudo");
     cmd.current_dir(&paths.adi_dir)
         .args([
-        "-n", "unshare", "-m", "--propagation", "private", "/bin/sh", "-c", script,
-    ])
-    .arg("--")
-    .arg(&paths.stage)
-    .arg(&paths.binary)
-    .arg(&libs)
-    .env("LD_LIBRARY_PATH", &libs)
-    .env("CA_BUNDLE", default_ca_bundle(paths))
-    .env("ANDROID_ROOT", "/system")
-    .env("ANDROID_DATA", &paths.adi_dir)
-    .env("TMPDIR", &paths.adi_dir)
-    .env("ANDROID_ASSETS_ROOT", "/system/app")
-    .env("EXTERNAL_STORAGE", &paths.adi_dir)
-    .env("ANDROID_RUNTIME_ROOT", "/apex/com.android.runtime")
-    .env(
-        "ADI_RESOLVE",
-        "gsa.apple.com:443:17.179.252.2,buy.itunes.apple.com:443:17.8.136.39",
-    );
+            "-n",
+            "unshare",
+            "-m",
+            "--propagation",
+            "private",
+            "/bin/sh",
+            "-c",
+            script,
+        ])
+        .arg("--")
+        .arg(&paths.stage)
+        .arg(&paths.binary)
+        .arg(&libs)
+        .env("LD_LIBRARY_PATH", &libs)
+        .env("CA_BUNDLE", default_ca_bundle(paths))
+        .env("ANDROID_ROOT", "/system")
+        .env("ANDROID_DATA", &paths.adi_dir)
+        .env("TMPDIR", &paths.adi_dir)
+        .env("ANDROID_ASSETS_ROOT", "/system/app")
+        .env("EXTERNAL_STORAGE", &paths.adi_dir)
+        .env("ANDROID_RUNTIME_ROOT", "/apex/com.android.runtime")
+        .env(
+            "ADI_RESOLVE",
+            "gsa.apple.com:443:17.179.252.2,buy.itunes.apple.com:443:17.8.136.39",
+        );
 
     let mut child = cmd
         .stdout(Stdio::piped())
@@ -167,7 +174,8 @@ fn default_ca_bundle(paths: &StandPaths) -> std::path::PathBuf {
     if let Ok(v) = std::env::var("CA_BUNDLE") {
         return std::path::PathBuf::from(v);
     }
-    paths.adi_dir
+    paths
+        .adi_dir
         .parent()
         .map(|p| p.join("apple_chain.pem"))
         .unwrap_or_else(|| std::path::PathBuf::from("/opt/data/apk/x86/apple_chain.pem"))
@@ -175,9 +183,7 @@ fn default_ca_bundle(paths: &StandPaths) -> std::path::PathBuf {
 
 fn cleanup_mount_points() {
     for dir in ["/system", "/vendor"] {
-        let _ = Command::new("sudo")
-            .args(["-n", "rm", "-rf", dir])
-            .output();
+        let _ = Command::new("sudo").args(["-n", "rm", "-rf", dir]).output();
     }
 }
 
@@ -186,7 +192,14 @@ fn unshare_available() -> bool {
     // Not a probe of the syscall — a probe of the exact capability the lane
     // needs, because CLONE_NEWUSER succeeds and then cannot bind-mount.
     Command::new("sudo")
-        .args(["-n", "unshare", "-m", "--propagation", "private", "/bin/true"])
+        .args([
+            "-n",
+            "unshare",
+            "-m",
+            "--propagation",
+            "private",
+            "/bin/true",
+        ])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)

@@ -776,7 +776,7 @@ mod tests {
         let scratch = std::env::temp_dir().join(format!("perun-http-e2e-{}", std::process::id()));
         std::fs::create_dir_all(&scratch).unwrap();
         unsafe {
-            std::env::set_var("PERUN_STORE_DIR", &scratch);
+            std::env::set_var("PERUN_DIR", &scratch);
             std::env::set_var("no_proxy", "127.0.0.1,localhost");
         }
 

@@ -95,18 +95,10 @@ const PROGRESS_EVERY: u64 = 16 << 20;
 
 // ── cache directory ───────────────────────────────────────────────────────
 
-/// Resolve the asset cache directory: `$PERUN_SAP_DIR` if set, else
-/// `~/.cache/perun/sap/` (XDG-style). The directory is created on demand.
+/// Resolve the asset cache directory: `PERUN_DIR/cache/sap`. One root for
+/// every lane — see `perun_core::paths`.
 pub fn cache_dir() -> Result<PathBuf, String> {
-    if let Ok(dir) = std::env::var("PERUN_SAP_DIR") {
-        let dir = PathBuf::from(dir);
-        std::fs::create_dir_all(&dir).map_err(|e| format!("create {dir:?}: {e}"))?;
-        return Ok(dir);
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let dir = Path::new(&home).join(".cache").join("perun").join("sap");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {dir:?}: {e}"))?;
-    Ok(dir)
+    perun_core::paths::sap_cache().map_err(|e| e.to_string())
 }
 
 /// One-shot SHA-256 over an in-memory buffer.

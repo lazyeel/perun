@@ -1005,12 +1005,17 @@ mod rdtsc_table_tests {
     /// claim that names a known build yields a table at all.
     #[test]
     fn a_supplied_digest_selects_the_table_and_a_wrong_one_selects_nothing() {
-        let dir = std::env::var("PERUN_SAP_DIR").unwrap_or_else(|_| {
-            format!(
-                "{}/.cache/perun/sap",
-                std::env::var("HOME").unwrap_or_default()
-            )
-        });
+        let dir = crate::paths::sap_cache()
+            .map(|d| d.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let dir = if dir.is_empty() {
+            std::env::temp_dir()
+                .join("perun-sap-test")
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            dir
+        };
         let path = std::path::Path::new(&dir).join("CoreFP");
         let Ok(file) = std::fs::File::open(&path) else {
             eprintln!("skipping: {path:?} not present");
@@ -1148,12 +1153,17 @@ mod rdtsc_table_tests {
     /// empty table and a mistyped `CommerceKit` offset would not be caught.
     #[test]
     fn commercekit_table_rows_are_genuine_scan_sites() {
-        let dir = std::env::var("PERUN_SAP_DIR").unwrap_or_else(|_| {
-            format!(
-                "{}/.cache/perun/sap",
-                std::env::var("HOME").unwrap_or_default()
-            )
-        });
+        let dir = crate::paths::sap_cache()
+            .map(|d| d.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let dir = if dir.is_empty() {
+            std::env::temp_dir()
+                .join("perun-sap-test")
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            dir
+        };
         let path = std::path::Path::new(&dir).join("CommerceKit");
         let Ok(blob) = std::fs::read(&path) else {
             eprintln!("skipping: {path:?} not present");
@@ -1187,12 +1197,17 @@ mod rdtsc_table_tests {
     /// it is the real thing, over 13.66 MiB of `CoreFP` code.
     #[test]
     fn table_matches_scan_on_real_corefp() {
-        let dir = std::env::var("PERUN_SAP_DIR").unwrap_or_else(|_| {
-            format!(
-                "{}/.cache/perun/sap",
-                std::env::var("HOME").unwrap_or_default()
-            )
-        });
+        let dir = crate::paths::sap_cache()
+            .map(|d| d.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let dir = if dir.is_empty() {
+            std::env::temp_dir()
+                .join("perun-sap-test")
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            dir
+        };
         let path = std::path::Path::new(&dir).join("CoreFP");
         let Ok(blob) = std::fs::read(&path) else {
             eprintln!("skipping: {path:?} not present");
