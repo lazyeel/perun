@@ -216,6 +216,14 @@ static mut STEP_RSP: [u64; STEP_RING] = [0; STEP_RING];
 /// without this the three bytes the barrier reads cannot be observed.
 static mut FOLD_PKT: [u8; 4096] = [0; 4096];
 static mut FOLD_PKT_TAKEN: bool = false;
+/// The second barrier (RVA 0x88fd68, `cmp $0x4069d333,%r9d`) is downstream
+/// of the fold bridge and gdb cannot watch it while the walk owns SIGTRAP.
+/// The walker itself records r9d on every visit to the barrier window.
+static mut R9_STOP: [u32; 8] = [0; 8];
+static mut R9_MARK: [u32; 8] = [0; 8];
+static mut VISIT_910BE: u32 = 0;
+static mut VISIT_905CA: u32 = 0;
+static mut R9_STOP_N: usize = 0;
 /// The rest of the register file, for the same reason. The transform loop at
 /// RVA `0x6783f` reads `rax` as its base, `r10` as its limit and `edi` as the
 /// byte, and derives `eax` from `r14d` -- and none of the four is initialised
@@ -276,6 +284,22 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
     println!(
         "[stop] rip={rip:#018x} edi={edi:#x} rax={rax:#018x} rbx={rbx:#018x} rcx={rcx:#x} rsp={rsp:#018x}"
     );
+    unsafe {
+        if VISIT_910BE > 0 || VISIT_905CA > 0 {
+            let a = VISIT_910BE;
+            let b = VISIT_905CA;
+            println!("[route] 0x910be visits: {a}, 0x905ca visits: {b}");
+        }
+    }
+    unsafe {
+        if R9_STOP_N > 0 {
+            print!("[r9stop] barrier-compare r9d samples:");
+            for q in 0..R9_STOP_N {
+                print!(" site{}={:#x}", R9_MARK[q], R9_STOP[q]);
+            }
+            println!();
+        }
+    }
     println!("[perun] last guest instructions, oldest first:");
     // PERUN_SLOTS=off[,off,...] reads those `[rsp+off]` guest stack slots at
     // the stop point. The ring carries registers and rip but no memory read, so
@@ -575,6 +599,32 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
                 }
             }
 
+            let rva_here = rip - STEP_DLL_LO;
+            // All sixteen `cmp $0x4069d333` sites: the barrier compare is
+            // fanned out across the flattened body, and which copy a route
+            // visits is itself route data.
+            const R9_SITES: [u32; 16] = [
+                0x66d14, 0x66d5e, 0x88f6fa, 0x88f945, 0x88fb62, 0x88fd6c, 0x88fee2, 0x8900a5,
+                0x890275, 0x89041b, 0x89059a, 0x890758, 0x8b4665, 0x905c7, 0x906e4, 0x90758,
+            ];
+            for (si, srva) in R9_SITES.iter().enumerate() {
+                let lo = srva & !7u32;
+                let lo64 = u64::from(lo);
+                if (lo64..lo64 + 8).contains(&rva_here) && unsafe { R9_STOP_N } < 8 {
+                    let idx = unsafe { R9_STOP_N };
+                    unsafe {
+                        R9_STOP[idx] = *regs.add(libc::REG_R9 as usize) as u32;
+                        R9_MARK[idx] = si as u32;
+                        R9_STOP_N = idx + 1;
+                    }
+                }
+            }
+            if rva_here == 0x910be && unsafe { VISIT_910BE } < 100 {
+                unsafe { VISIT_910BE += 1 };
+            }
+            if rva_here == 0x905ca && unsafe { VISIT_905CA } < 100 {
+                unsafe { VISIT_905CA += 1 };
+            }
             STEP_ENTERED = true;
             let slot = STEP_IDX & (STEP_RING - 1);
             STEP_RIP[slot] = rip;
