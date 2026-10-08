@@ -200,6 +200,13 @@ static mut STEP_R12: [u64; STEP_RING] = [0; STEP_RING];
 /// the recorded trace can answer offline, by decoding each instruction and
 /// asking whether its destination operand is `[rsp+0x50]`.
 static mut STEP_RSP: [u64; STEP_RING] = [0; STEP_RING];
+
+/// The fold packet, sniffed once when the walk first reaches the fold site
+/// (RVA 0x15a0..0x15a8): 64 bytes at the packet pointer, which the fold's
+/// index constants select bytes from. The ring carries registers only, so
+/// without this the three bytes the barrier reads cannot be observed.
+static mut FOLD_PKT: [u8; 64] = [0; 64];
+static mut FOLD_PKT_TAKEN: bool = false;
 /// The rest of the register file, for the same reason. The transform loop at
 /// RVA `0x6783f` reads `rax` as its base, `r10` as its limit and `edi` as the
 /// byte, and derives `eax` from `r14d` -- and none of the four is initialised
@@ -279,6 +286,44 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
             // nothing can unmap the guest stack under this read.
             let v = unsafe { std::ptr::read_volatile(addr as *const u64) };
             println!("[slot] rsp+{off:#x} = {addr:#018x} -> {v:#018x}");
+        }
+    }
+    // The fold packet sniffed during the walk, if the fold site was reached.
+    if unsafe { FOLD_PKT_TAKEN } {
+        let pkt = unsafe { FOLD_PKT };
+        println!(
+            "[fold-pkt] {}",
+            pkt.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+        );
+    }
+    // PERUN_DEREF=off[,off...] — follow [rsp+off] one level and dump 64 bytes
+    // of what the pointer names: the fold reads the packet through exactly
+    // such a chain, and the bytes it reads are the whole barrier question.
+    // "the call returned" reports rsp=0, so fall back to the ring's last
+    // recorded guest rsp — reading address 0x80 faults the whole process.
+    let deref_rsp = if rsp != 0 { rsp } else { unsafe { STEP_RSP[STEP_IDX.wrapping_sub(1) & (STEP_RING - 1)] } };
+    if let Some(spec) = std::env::var_os("PERUN_DEREF") {
+        for off_s in spec.to_string_lossy().split(',').filter(|s| !s.is_empty()) {
+            let Ok(off) = u64::from_str_radix(off_s.trim().trim_start_matches("0x"), 16) else {
+                continue;
+            };
+            let slot = deref_rsp.wrapping_add(off);
+            // SAFETY: post-stop read of guest stack, same process.
+            let ptr = unsafe { std::ptr::read_volatile(slot as *const u64) };
+            println!("[deref] rsp+{off:#x} -> {ptr:#018x}");
+            if ptr > 0x1000 && ptr < 0x8000_0000_0000 {
+                // SAFETY: the target is a mapping this process handed the guest.
+                let bytes =
+                    unsafe { std::slice::from_raw_parts(ptr as *const u8, 64) };
+                println!(
+                    "[deref]   [0..63] = {}",
+                    bytes
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+            }
         }
     }
     let n = unsafe { STEP_IDX }.min(STEP_RING);
@@ -507,6 +552,26 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             // per instruction and nothing here may allocate. RSP is what makes
             // a stack slot addressable from the recorded trace.
             STEP_RSP[slot] = rsp;
+            // Sniff the packet at the fold site, once. The reads the fold
+            // does at 0x15a1/0x15c8 index into this buffer, so one snapshot
+            // answers every r8d-scan question arithmetically.
+            if !FOLD_PKT_TAKEN {
+                let rva = (rip - STEP_DLL_LO) as u64;
+                if (0x15a0..0x15a9).contains(&rva) {
+                    let pkt = *regs.add(libc::REG_RCX as usize) as u64;
+                    if pkt > 0x1000 && pkt < 0x8000_0000_0000 {
+                        // Index the raw pointer instead of iter_mut: taking a
+                        // mutable reference to the static trips the 2024
+                        // static-mut lint, and per-store writes are the same
+                        // two stores the ring itself does.
+                        for i in 0..64usize {
+                            FOLD_PKT[i] =
+                                std::ptr::read_volatile((pkt + i as u64) as *const u8);
+                        }
+                        FOLD_PKT_TAKEN = true;
+                    }
+                }
+            }
             STEP_R9[slot] = *regs.add(libc::REG_R9 as usize) as u64;
             STEP_R11[slot] = *regs.add(libc::REG_R11 as usize) as u64;
             STEP_R14[slot] = *regs.add(libc::REG_R14 as usize) as u64;

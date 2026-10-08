@@ -22,10 +22,12 @@ fn page(len: usize) -> *mut core::ffi::c_void {
 }
 
 fn main() {
-    let image_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "/opt/data/adi-pe/extracted/itunes_extracted/iTunes/CoreADI64.dll".into());
-    let spim_path = std::env::args().nth(2).unwrap_or_else(|| "/opt/data/adi-re/live_prov_in.bin".into());
+    let image_path = std::env::args().nth(1).unwrap_or_else(|| {
+        "/opt/data/adi-pe/extracted/itunes_extracted/iTunes/CoreADI64.dll".into()
+    });
+    let spim_path = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "/opt/data/adi-re/live_prov_in.bin".into());
     let bytes = std::fs::read(&image_path).expect("read image");
     let spim = std::fs::read(&spim_path).expect("read spim");
     let url = b"https://gsa.apple.com/grandslam/MidService/startMachineProvisioning\0";
@@ -115,10 +117,10 @@ fn main() {
         std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
         if tp_test == "2" {
             const ANDROID_PKT: [u8; 52] = [
-                0x00, 0x00, 0x00, 0x02, 0xab, 0xd8, 0x56, 0x03, 0xad, 0xb8, 0x98, 0xdb, 0xb5,
-                0x08, 0x40, 0x74, 0x5e, 0x6a, 0xcc, 0xf4, 0xd4, 0xac, 0xaf, 0x83, 0xf8, 0x2d,
-                0xf8, 0x38, 0x5b, 0xe5, 0xf7, 0x47, 0x8d, 0x0c, 0xe2, 0x36, 0x96, 0xc8, 0xe5,
-                0x50, 0x5b, 0x52, 0xce, 0xd3, 0x95, 0x9d, 0x10, 0xfe, 0x5f, 0x65, 0x6f, 0xbe,
+                0x00, 0x00, 0x00, 0x02, 0xab, 0xd8, 0x56, 0x03, 0xad, 0xb8, 0x98, 0xdb, 0xb5, 0x08,
+                0x40, 0x74, 0x5e, 0x6a, 0xcc, 0xf4, 0xd4, 0xac, 0xaf, 0x83, 0xf8, 0x2d, 0xf8, 0x38,
+                0x5b, 0xe5, 0xf7, 0x47, 0x8d, 0x0c, 0xe2, 0x36, 0x96, 0xc8, 0xe5, 0x50, 0x5b, 0x52,
+                0xce, 0xd3, 0x95, 0x9d, 0x10, 0xfe, 0x5f, 0x65, 0x6f, 0xbe,
             ];
             std::ptr::copy_nonoverlapping(ANDROID_PKT.as_ptr(), pkt.cast::<u8>(), 52);
         } else {
@@ -146,7 +148,16 @@ fn main() {
         std::ptr::write(c.add(5), 2);
         std::ptr::write(c.add(6), spimp as u64);
         std::ptr::write(c.add(7), spim.len() as u64);
-        std::ptr::write(c.add(8), 4);
+        // +0x40: the Android envelope carried 4. The measured arithmetic:
+        // the third fold pass reads r8d from here, rax_const = (r8d ^
+        // 0x9fcbfafb) + 2*(r8d & 0x1fcbfafb) + 0x76fe8ff8, and the edi/ebp
+        // terms vanish exactly when rax_const == 0x16ca8af3, i.e. r8d == 0.
+        // PERUN_SLOT40 overrides the slot to test that prediction.
+        let slot40 = match std::env::var("PERUN_SLOT40") {
+            Ok(v) => v.parse::<u64>().unwrap_or(4),
+            Err(_) => 4,
+        };
+        std::ptr::write(c.add(8), slot40);
         // +0x48: the Android envelope carries a pointer to the packer's
         // xform block here — the same encoding `--poke-xform` implements:
         // each 8-byte word is an out-pointer mixed with
@@ -173,20 +184,16 @@ fn main() {
             // length slot.
             let xf = page(64);
             std::ptr::copy_nonoverlapping(enc(out as u64).as_ptr(), xf.cast::<u8>(), 8);
-            std::ptr::copy_nonoverlapping(
-                enc(olen as u64).as_ptr(),
-                (xf as *mut u8).add(8),
-                8,
-            );
+            std::ptr::copy_nonoverlapping(enc(olen as u64).as_ptr(), (xf as *mut u8).add(8), 8);
             std::ptr::write(c.add(9), xf as u64);
         }
-        std::ptr::write(c.add(10), olen as u64);   // +0x50 CPIM len slot
+        std::ptr::write(c.add(10), olen as u64); // +0x50 CPIM len slot
         std::ptr::write(c.add(11), spim.len() as u64);
         std::ptr::write(c.add(12), 0);
         std::ptr::write(c.add(13), spimp as u64);
         std::ptr::write(c.add(14), 0x1d0);
         std::ptr::write(c.add(15), urlp as u64);
-        std::ptr::write(c.add(16), out as u64);    // +0x80 CPIM ptr slot
+        std::ptr::write(c.add(16), out as u64); // +0x80 CPIM ptr slot
         // +0x88..+0xa8: the Android envelope carries five function
         // pointers here. PERUN_TP_TEST=3 installs simple `ret` stubs so the
         // worker, if it calls one, returns immediately instead of crashing.
@@ -201,7 +208,11 @@ fn main() {
         let r = f(0x716bd86c, ctx as u64, 0xffff_ffff, 0);
         println!("[transform] rc={r:#x} ({r})");
         let c = ctx.cast::<u64>();
-        println!("ctx +0x50={:#x}  +0x80={:#x}", std::ptr::read(c.add(10)), std::ptr::read(c.add(16)));
+        println!(
+            "ctx +0x50={:#x}  +0x80={:#x}",
+            std::ptr::read(c.add(10)),
+            std::ptr::read(c.add(16))
+        );
 
         let olen_v = unsafe { std::ptr::read(olen.cast::<u64>()) };
         println!("olen qword = {olen_v:#x}");
