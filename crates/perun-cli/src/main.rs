@@ -293,7 +293,10 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
         let pkt = unsafe { FOLD_PKT };
         println!(
             "[fold-pkt] {}",
-            pkt.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+            pkt.iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
         );
         // The reading triple is (r8d+1, r8d+2, r8d+3) while r8d stays under
         // ~80, so the candidate scan is: every offset K where
@@ -301,7 +304,12 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
         // step and makes the dump self-describing.
         for k in 0..252usize {
             if pkt[k + 1] == 0 && pkt[k + 2] == 0 && pkt[k + 3] == 1 {
-                println!("[fold-pkt] PASS-candidate r8d={k} (bytes {:#x} {:#x} {:#x})", pkt[k + 1], pkt[k + 2], pkt[k + 3]);
+                println!(
+                    "[fold-pkt] PASS-candidate r8d={k} (bytes {:#x} {:#x} {:#x})",
+                    pkt[k + 1],
+                    pkt[k + 2],
+                    pkt[k + 3]
+                );
             }
         }
     }
@@ -310,7 +318,11 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
     // such a chain, and the bytes it reads are the whole barrier question.
     // "the call returned" reports rsp=0, so fall back to the ring's last
     // recorded guest rsp — reading address 0x80 faults the whole process.
-    let deref_rsp = if rsp != 0 { rsp } else { unsafe { STEP_RSP[STEP_IDX.wrapping_sub(1) & (STEP_RING - 1)] } };
+    let deref_rsp = if rsp != 0 {
+        rsp
+    } else {
+        unsafe { STEP_RSP[STEP_IDX.wrapping_sub(1) & (STEP_RING - 1)] }
+    };
     if let Some(spec) = std::env::var_os("PERUN_DEREF") {
         for off_s in spec.to_string_lossy().split(',').filter(|s| !s.is_empty()) {
             let Ok(off) = u64::from_str_radix(off_s.trim().trim_start_matches("0x"), 16) else {
@@ -322,8 +334,7 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
             println!("[deref] rsp+{off:#x} -> {ptr:#018x}");
             if ptr > 0x1000 && ptr < 0x8000_0000_0000 {
                 // SAFETY: the target is a mapping this process handed the guest.
-                let bytes =
-                    unsafe { std::slice::from_raw_parts(ptr as *const u8, 64) };
+                let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, 64) };
                 println!(
                     "[deref]   [0..63] = {}",
                     bytes
@@ -565,7 +576,7 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             // does at 0x15a1/0x15c8 index into this buffer, so one snapshot
             // answers every r8d-scan question arithmetically.
             if !FOLD_PKT_TAKEN {
-                let rva = (rip - STEP_DLL_LO) as u64;
+                let rva = rip - STEP_DLL_LO;
                 if (0xb15a0..0xb15a9).contains(&rva) {
                     let pkt = *regs.add(libc::REG_RCX as usize) as u64;
                     if pkt > 0x1000 && pkt < 0x8000_0000_0000 {
@@ -573,9 +584,16 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
                         // mutable reference to the static trips the 2024
                         // static-mut lint, and per-store writes are the same
                         // two stores the ring itself does.
+                        // Index the static through a raw pointer: taking a
+                        // mutable reference to it trips the 2024 static-mut
+                        // lint, and these per-store writes are the same two
+                        // stores the ring itself does.
+                        let dst = std::ptr::addr_of_mut!(FOLD_PKT) as *mut u8;
                         for i in 0..4096usize {
-                            FOLD_PKT[i] =
-                                std::ptr::read_volatile((pkt + i as u64) as *const u8);
+                            std::ptr::write_volatile(
+                                dst.add(i),
+                                std::ptr::read_volatile((pkt + i as u64) as *const u8),
+                            );
                         }
                         FOLD_PKT_TAKEN = true;
                     }
@@ -2497,8 +2515,7 @@ fn cmd_seq(args: &[String]) -> i32 {
                 }
                 println!(
                     "[seq] step {step}: saved {} ({len} bytes) -> {}",
-                    toks[1],
-                    toks[2]
+                    toks[1], toks[2]
                 );
             }
             "call" => {

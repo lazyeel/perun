@@ -129,10 +129,10 @@ fn main() {
         }
         // PERUN_TP_B: sweep knob — overwrite packet byte 7 (the fold input)
         // on top of whatever form was selected, without rebuilding.
-        if let Ok(b) = std::env::var("PERUN_TP_B") {
-            if let Ok(v) = u8::from_str_radix(&b, 16) {
-                *pkt.cast::<u8>().add(7) = v;
-            }
+        if let Ok(b) = std::env::var("PERUN_TP_B")
+            && let Ok(v) = u8::from_str_radix(&b, 16)
+        {
+            *pkt.cast::<u8>().add(7) = v;
         }
 
         std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
@@ -166,7 +166,7 @@ fn main() {
         // ctx+0x48/+0x20/+0x30, and RVA 0xb49e5 decodes exactly this block
         // before writing the CPIM, so the block must exist and hold the
         // out-buffer addresses, in the order the worker consumes them.
-        unsafe {
+        {
             const XFORM_MASK: u64 = 0x62e1_fd4f_2b03_4634;
             const XFORM_ADD: u64 = 0x3170_fea7_9581_a31a;
             const XFORM_XOR: [u8; 8] = [0x31, 0x70, 0xfe, 0xa7, 0x95, 0x81, 0xa3, 0x1a];
@@ -214,7 +214,7 @@ fn main() {
             std::ptr::read(c.add(16))
         );
 
-        let olen_v = unsafe { std::ptr::read(olen.cast::<u64>()) };
+        let olen_v = std::ptr::read(olen.cast::<u64>());
         println!("olen qword = {olen_v:#x}");
         let out_b = std::slice::from_raw_parts(out.cast::<u8>(), 0x100);
         println!("out[0..64]: {:02x?}", &out_b[..64]);
