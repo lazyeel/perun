@@ -152,6 +152,15 @@ static mut SEAL_PAGES: u64 = 0;
 static mut FORCE_AT: u64 = 0;
 static mut FORCE_REGS: [(i32, u64); 6] = [(0, 0); 6];
 static mut FORCE_N: usize = 0;
+/// PERUN_FORCE_AT_ON_ITER: when set, the force applies only to this call index.
+static mut FORCE_ON_ITER: Option<usize> = None;
+/// PERUN_FORCE2_AT: a second force point, independent of the first — the ADI
+/// sequence needs one register steered at the init epilogue and another at
+/// the transform fold, in the same process, on different calls.
+static mut FORCE2_AT: u64 = 0;
+static mut FORCE2_REGS: [(i32, u64); 6] = [(0, 0); 6];
+static mut FORCE2_N: usize = 0;
+static mut FORCE2_ON_ITER: Option<usize> = None;
 static mut STEP_PRIMED: bool = false;
 static mut STEP_ENTERED: bool = false;
 static mut STEP_COUNT: u64 = 0;
@@ -545,7 +554,15 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             // so the walk is otherwise unchanged and the trace stays honest.
             {
                 let (at, n) = (FORCE_AT, FORCE_N);
-                if at != 0 && rip == at {
+                let (at2, n2) = (FORCE2_AT, FORCE2_N);
+                if at2 != 0 && rip == at2 && n2 > 0 {
+                    #[allow(clippy::needless_range_loop)]
+                    for k in 0..n2 {
+                        let (idx, val) = FORCE2_REGS[k];
+                        *regs.add(idx as usize) = val as i64;
+                    }
+                }
+                if at != 0 && rip == at && n > 0 {
                     // Indexed rather than iterated: FORCE_REGS is a `static
                     // mut`, and iterating it would make a shared reference to
                     // mutable state for the length of the loop.
@@ -708,6 +725,16 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
         // image — the debug watchpoint plants are gone. Report and die: the
         // state at the trap is not recoverable.
         if sig == libc::SIGTRAP {
+            // Exception: a leftover trap flag on host code. Between the calls
+            // of an in-process sequence the walker is disarmed but the thread's
+            // TF bit survives, and the first host instruction after the return
+            // traps here. Clear the bit and resume instead of dying — the trap
+            // came from the flag we set, not from an int3 plant.
+            let flags = *regs.add(libc::REG_EFL as usize) as u64;
+            if flags & 0x100 != 0 {
+                *regs.add(libc::REG_EFL as usize) = (flags & !0x100) as i64;
+                return;
+            }
             let mut out: [u8; 128] = [0; 128];
             let mut n = 0usize;
             let push = |s: &[u8], out: &mut [u8], n: &mut usize| {
@@ -1284,6 +1311,8 @@ fn cmd_call(args: &[String]) -> i32 {
     // (kind, target, value): kind 0 = guest RVA, kind 1 = ctx offset,
     // kind 2 = scratch offset
     let mut pokes: Vec<(u8, u64, u64)> = Vec::new();
+    // kind 3: pokes into a named --load buffer, (base, offset, value).
+    let mut buf_pokes: Vec<(u64, u64, u64)> = Vec::new();
     // --patch=RVA=HEXBYTES: raw code patch into the mapped image (mprotect'd)
     let mut patches: Vec<(u64, Vec<u8>)> = Vec::new();
     // --peek=RVA[,RVA...]: read guest qwords after the call
@@ -1379,6 +1408,16 @@ fn cmd_call(args: &[String]) -> i32 {
                     std::process::exit(2);
                 });
                 poke_specs.push((2, off, val_s.to_string()));
+            } else if let Some((name, off_s)) = tgt_s.split_once('+') {
+                // A loaded-buffer name with an offset: `CTXI+0x8` pokes the
+                // buffer named CTXI. The envelope split (init vs transform)
+                // needs per-buffer pokes; ctx+/scratch+ only reach the two
+                // built-in regions.
+                let off = parse_num(off_s).unwrap_or_else(|| {
+                    eprintln!("error: bad buffer offset {off_s:?}");
+                    std::process::exit(2);
+                });
+                poke_specs.push((3, off, format!("{name}={val_s}")));
             } else {
                 let rva = parse_num(tgt_s).unwrap_or_else(|| {
                     eprintln!("error: bad --poke rva {tgt_s:?}");
@@ -1467,6 +1506,21 @@ fn cmd_call(args: &[String]) -> i32 {
         resolve(s)
     };
     for (kind, tgt, val_s) in &poke_specs {
+        if *kind == 3 {
+            // val_s is "NAME=VALUE": the buffer name travels through the same
+            // string slot. Resolve here, after --load has run.
+            let (name, vs) = val_s.split_once('=').unwrap_or((val_s, "0"));
+            let base = resolve_val(name).unwrap_or_else(|| {
+                eprintln!("error: bad --poke buffer {name:?}");
+                std::process::exit(2);
+            });
+            let val = resolve_val(vs).unwrap_or_else(|| {
+                eprintln!("error: bad --poke value {vs:?}");
+                std::process::exit(2);
+            });
+            buf_pokes.push((base, *tgt, val));
+            continue;
+        }
         let val = resolve_val(val_s).unwrap_or_else(|| {
             eprintln!("error: bad --poke value {val_s:?}");
             std::process::exit(2);
@@ -1571,6 +1625,13 @@ fn cmd_call(args: &[String]) -> i32 {
             _ => format!("scratch[{tgt:#x}]"),
         };
         println!("[perun] poke {label} = {val:#x} (abs {addr:p})");
+    }
+
+    // Named-buffer pokes (kind 3): write into the --load registry target.
+    for (base, off, val) in &buf_pokes {
+        let addr = base.wrapping_add(*off) as *mut u64;
+        unsafe { std::ptr::write(addr, *val) };
+        println!("[perun] poke buf[{off:#x}] = {val:#x} (abs {addr:p})");
     }
 
     // Apply raw code patches. The image sections are mapped RX, so flip the
@@ -1696,7 +1757,11 @@ fn cmd_call(args: &[String]) -> i32 {
         // The handler sees an absolute rip, so carry the image base with the RVA.
         // Print both: an RVA that looks absolute is a common way to get this wrong.
         let abs_addr = image.base() as u64 + addr;
+        let force_iter = std::env::var("PERUN_FORCE_AT_ON_ITER")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok());
         unsafe {
+            FORCE_ON_ITER = force_iter;
             for (k, p) in pairs.iter().enumerate() {
                 FORCE_REGS[k] = *p;
             }
@@ -1707,12 +1772,96 @@ fn cmd_call(args: &[String]) -> i32 {
             "[perun] forcing {} register(s) at guest rva {addr:#x} (abs {abs_addr:#x})",
             pairs.len()
         );
+        // PERUN_FORCE2_AT=<rva>:<reg>=<v>[,...] with PERUN_FORCE2_ON_ITER:
+        // the same grammar as the first force, an independent trigger point.
+        if let Ok(spec2) = std::env::var("PERUN_FORCE2_AT")
+            && let Some((addr2_s, rest2)) = spec2.split_once(':')
+            && let Ok(addr2) = u64::from_str_radix(addr2_s.trim_start_matches("0x"), 16)
+        {
+            {
+                {
+                    let mut pairs2: Vec<(i32, u64)> = Vec::new();
+                    for item in rest2.split(',').filter(|s| !s.trim().is_empty()) {
+                        if let Some((rn, vn)) = item.split_once('=') {
+                            let idx = match rn.trim() {
+                                "rax" | "eax" => Some(libc::REG_RAX),
+                                "rbx" | "ebx" => Some(libc::REG_RBX),
+                                "rcx" | "ecx" => Some(libc::REG_RCX),
+                                "rdx" | "edx" => Some(libc::REG_RDX),
+                                "rsi" | "esi" => Some(libc::REG_RSI),
+                                "rdi" | "edi" => Some(libc::REG_RDI),
+                                "rbp" | "ebp" => Some(libc::REG_RBP),
+                                "r8" | "r8d" => Some(libc::REG_R8),
+                                "r9" | "r9d" => Some(libc::REG_R9),
+                                "r10" | "r10d" => Some(libc::REG_R10),
+                                "r11" | "r11d" => Some(libc::REG_R11),
+                                "r12" | "r12d" => Some(libc::REG_R12),
+                                "r13" | "r13d" => Some(libc::REG_R13),
+                                "r14" | "r14d" => Some(libc::REG_R14),
+                                "r15" | "r15d" => Some(libc::REG_R15),
+                                _ => None,
+                            };
+                            let val = parse_num(vn.trim()).or_else(|| resolve_val(vn.trim()));
+                            if let (Some(idx), Some(val)) = (idx, val) {
+                                pairs2.push((idx, val));
+                            }
+                        }
+                    }
+                    if !pairs2.is_empty() {
+                        let it2 = std::env::var("PERUN_FORCE2_ON_ITER")
+                            .ok()
+                            .and_then(|v| v.parse::<usize>().ok());
+                        unsafe {
+                            FORCE2_ON_ITER = it2;
+                            for (k, p) in pairs2.iter().enumerate() {
+                                FORCE2_REGS[k] = *p;
+                            }
+                            FORCE2_N = pairs2.len();
+                            FORCE2_AT = image.base() as u64 + addr2;
+                        }
+                        eprintln!("[perun] force2 at rva {addr2:#x} armed");
+                    }
+                }
+            }
+        }
     }
 
     let seq_n: usize = std::env::var("PERUN_SEQ")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1);
+    // PERUN_SEQ_CSV="arg0;arg0;..." — a list of FIRST-ARGUMENT values, one per
+    // in-process call. The ADI sequence needs different opcodes in one process
+    // (init then transform) on the SAME live envelope, and PERUN_SEQ alone can
+    // only repeat one call. Semicolon-separated; parse_num syntax per entry.
+    let seq_argv: Vec<u64> = std::env::var("PERUN_SEQ_CSV")
+        .ok()
+        .map(|s| {
+            s.split(';')
+                .filter(|e| !e.trim().is_empty())
+                .filter_map(|e| parse_num(e.trim()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let seq_n: usize = if seq_argv.is_empty() {
+        seq_n
+    } else {
+        seq_argv.len()
+    };
+    // PERUN_SEQ_CTX_CSV="buf1;buf2;..." — one ctx-buffer NAME per call. The ADI
+    // init and transform envelopes are different shapes (init: 16-byte packet,
+    // len 0x10; transform: 52-byte packet, len 0x34), and the in-process
+    // sequence needs each call to see its own envelope. Names resolve through
+    // the same --load registry as pokes do; positional argv stays for arg2/3.
+    let seq_ctx: Vec<u64> = std::env::var("PERUN_SEQ_CTX_CSV")
+        .ok()
+        .map(|s| {
+            s.split(';')
+                .filter(|e| !e.trim().is_empty())
+                .filter_map(|e| resolve_val(e.trim()))
+                .collect()
+        })
+        .unwrap_or_default();
 
     // PERUN_STEPS=N single-steps the call, for a body whose control flow is
     // flattened and therefore invisible to a static decompiler.
@@ -1810,6 +1959,20 @@ fn cmd_call(args: &[String]) -> i32 {
     }
 
     for iter in 0..seq_n {
+        // FORCE_ON_ITER: only the named call takes the force; the others run
+        // with it disarmed so their own folds read their own envelopes. A
+        // two-call sequence (init then transform) with the force live on both
+        // points the init fold at the transform-shaped fake and crashes it.
+        let force_live = unsafe { FORCE_ON_ITER }.is_none_or(|n| n == iter);
+        let force2_live = unsafe { FORCE2_ON_ITER }.is_none_or(|n| n == iter);
+        let saved_n = unsafe { FORCE_N };
+        let saved_n2 = unsafe { FORCE2_N };
+        if !force_live {
+            unsafe { FORCE_N = 0 };
+        }
+        if !force2_live {
+            unsafe { FORCE2_N = 0 };
+        }
         println!(
             "[perun] call#{iter} {export_name}({:#x}, {:#x}, {:#x}, {:#x})...",
             argv[0], argv[1], argv[2], argv[3]
@@ -1817,7 +1980,7 @@ fn cmd_call(args: &[String]) -> i32 {
         // Arm here, not before the loop: DllMain runs guest code too, and its
         // instructions would otherwise consume the whole budget before the
         // export is ever entered.
-        if steps > 0 && iter == 0 {
+        if steps > 0 {
             unsafe {
                 STEP_DLL_LO = image.base() as u64;
                 STEP_DLL_HI = STEP_DLL_LO + 0x1A_5000;
@@ -1933,13 +2096,29 @@ fn cmd_call(args: &[String]) -> i32 {
         } else {
             None
         };
+        let a0 = if seq_argv.is_empty() {
+            argv[0]
+        } else {
+            seq_argv[iter]
+        };
+        let a1 = if seq_ctx.is_empty() {
+            argv[1]
+        } else {
+            seq_ctx[iter]
+        };
         let r = match pe_stack {
             Some(top) => unsafe {
-                perun_core::teb::call_on_stack(f, top, [argv[0], argv[1], argv[2], argv[3]])
+                perun_core::teb::call_on_stack(f, top, [a0, a1, argv[2], argv[3]])
             },
-            None => unsafe { f(argv[0], argv[1], argv[2], argv[3]) },
+            None => unsafe { f(a0, a1, argv[2], argv[3]) },
         };
         println!("[perun] call#{iter} {export_name} returned {r:#x} ({r})");
+        if !force_live {
+            unsafe { FORCE_N = saved_n };
+        }
+        if !force2_live {
+            unsafe { FORCE2_N = saved_n2 };
+        }
         for (addr, n) in &dump_ptr_addrs {
             let mut line = String::new();
             use std::fmt::Write as _;
