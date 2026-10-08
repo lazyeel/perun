@@ -610,20 +610,18 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             for (si, srva) in R9_SITES.iter().enumerate() {
                 let lo = srva & !7u32;
                 let lo64 = u64::from(lo);
-                if (lo64..lo64 + 8).contains(&rva_here) && unsafe { R9_STOP_N } < 8 {
-                    let idx = unsafe { R9_STOP_N };
-                    unsafe {
-                        R9_STOP[idx] = *regs.add(libc::REG_R9 as usize) as u32;
-                        R9_MARK[idx] = si as u32;
-                        R9_STOP_N = idx + 1;
-                    }
+                if (lo64..lo64 + 8).contains(&rva_here) && R9_STOP_N < 8 {
+                    let idx = R9_STOP_N;
+                    R9_STOP[idx] = *regs.add(libc::REG_R9 as usize) as u32;
+                    R9_MARK[idx] = si as u32;
+                    R9_STOP_N = idx + 1;
                 }
             }
-            if rva_here == 0x910be && unsafe { VISIT_910BE } < 100 {
-                unsafe { VISIT_910BE += 1 };
+            if rva_here == 0x910be && VISIT_910BE < 100 {
+                VISIT_910BE += 1;
             }
-            if rva_here == 0x905ca && unsafe { VISIT_905CA } < 100 {
-                unsafe { VISIT_905CA += 1 };
+            if rva_here == 0x905ca && VISIT_905CA < 100 {
+                VISIT_905CA += 1;
             }
             STEP_ENTERED = true;
             let slot = STEP_IDX & (STEP_RING - 1);
