@@ -224,6 +224,13 @@ static mut R9_MARK: [u32; 8] = [0; 8];
 static mut VISIT_910BE: u32 = 0;
 static mut VISIT_905CA: u32 = 0;
 static mut R9_STOP_N: usize = 0;
+/// Window sniffer: every instruction in RVA 0x910be..0x91560 records the
+/// full register file, so the fork between the work cluster and the worker
+/// call is captured without a giant ring tail (a big tail delays dump_ring
+/// past the second call and silently short-routes it).
+static mut WIN_ROWS: [[u64; 8]; 512] = [[0; 8]; 512];
+static mut WIN_N: usize = 0;
+static mut WIN_RVAS: [u32; 512] = [0; 512];
 /// The rest of the register file, for the same reason. The transform loop at
 /// RVA `0x6783f` reads `rax` as its base, `r10` as its limit and `edi` as the
 /// byte, and derives `eax` from `r14d` -- and none of the four is initialised
@@ -284,6 +291,20 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
     println!(
         "[stop] rip={rip:#018x} edi={edi:#x} rax={rax:#018x} rbx={rbx:#018x} rcx={rcx:#x} rsp={rsp:#018x}"
     );
+    unsafe {
+        if WIN_N > 0 {
+            let n = WIN_N;
+            println!("[win] {n} rows in 0x910be..0x91560");
+            for w in 0..n.min(260) {
+                println!(
+                    "[win] {w:3} rva={:#x} rax={:#x} rcx={:#x} rdx={:#x} rsi={:#x} rdi={:#x} r11={:#x} r14={:#x} r15={:#x}",
+                    WIN_RVAS[w], WIN_ROWS[w][0], WIN_ROWS[w][1], WIN_ROWS[w][2],
+                    WIN_ROWS[w][3], WIN_ROWS[w][4], WIN_ROWS[w][5], WIN_ROWS[w][6],
+                    WIN_ROWS[w][7]
+                );
+            }
+        }
+    }
     unsafe {
         if VISIT_910BE > 0 || VISIT_905CA > 0 {
             let a = VISIT_910BE;
@@ -585,6 +606,7 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
                         let (idx, val) = FORCE2_REGS[k];
                         *regs.add(idx as usize) = val as i64;
                     }
+                    eprintln!("[perun] force2 applied {n2} reg(s) at rip={rip:#x}");
                 }
                 if at != 0 && rip == at && n > 0 {
                     // Indexed rather than iterated: FORCE_REGS is a `static
@@ -600,6 +622,19 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             }
 
             let rva_here = rip - STEP_DLL_LO;
+            if (0x910be..=0x91560).contains(&rva_here) && WIN_N < 512 {
+                let w = WIN_N;
+                WIN_RVAS[w] = rva_here as u32;
+                WIN_ROWS[w][0] = *regs.add(libc::REG_RAX as usize) as u64;
+                WIN_ROWS[w][1] = *regs.add(libc::REG_RCX as usize) as u64;
+                WIN_ROWS[w][2] = *regs.add(libc::REG_RDX as usize) as u64;
+                WIN_ROWS[w][3] = *regs.add(libc::REG_RSI as usize) as u64;
+                WIN_ROWS[w][4] = *regs.add(libc::REG_RDI as usize) as u64;
+                WIN_ROWS[w][5] = *regs.add(libc::REG_R11 as usize) as u64;
+                WIN_ROWS[w][6] = *regs.add(libc::REG_R14 as usize) as u64;
+                WIN_ROWS[w][7] = *regs.add(libc::REG_R15 as usize) as u64;
+                WIN_N = w + 1;
+            }
             // All sixteen `cmp $0x4069d333` sites: the barrier compare is
             // fanned out across the flattened body, and which copy a route
             // visits is itself route data.
