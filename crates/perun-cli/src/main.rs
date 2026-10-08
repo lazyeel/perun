@@ -2255,6 +2255,65 @@ fn cmd_seq(args: &[String]) -> i32 {
     // Each `call` step re-resolves the export by name, so the default export
     // resolved above is only the fallback for scripts that never name one.
     let mut loads: Vec<(String, u64, usize)> = Vec::new();
+    // PERUN_FORCE_AT in sequences — the lever `perun call` has had all along.
+    // Parsed up front into raw tokens; literal values resolve immediately and
+    // buffer names stay pending until the script's own `load` steps create
+    // the pages, at which point they resolve to addresses and the force
+    // arms before the first `call`.
+    let mut force_pairs: Vec<(i32, u64)> = Vec::new();
+    let mut force_pending: Vec<(usize, String)> = Vec::new();
+    let mut force_addr = 0u64;
+    if let Ok(spec) = std::env::var("PERUN_FORCE_AT") {
+        let Some((addr_s, rest)) = spec.split_once(':') else {
+            eprintln!("[seq] PERUN_FORCE_AT needs <rva>:<reg>=<v>,...");
+            return 2;
+        };
+        let Ok(addr) = u64::from_str_radix(addr_s.trim_start_matches("0x"), 16) else {
+            eprintln!("[seq] PERUN_FORCE_AT address is not hex: {addr_s:?}");
+            return 2;
+        };
+        for item in rest.split(',').filter(|s| !s.trim().is_empty()) {
+            let Some((rname, vname)) = item.split_once('=') else {
+                continue;
+            };
+            let idx = match rname.trim() {
+                "rax" | "eax" => libc::REG_RAX,
+                "rbx" | "ebx" => libc::REG_RBX,
+                "rcx" | "ecx" => libc::REG_RCX,
+                "rdx" | "edx" => libc::REG_RDX,
+                "rsi" | "esi" => libc::REG_RSI,
+                "rdi" | "edi" => libc::REG_RDI,
+                "rbp" | "ebp" => libc::REG_RBP,
+                "r8" | "r8d" => libc::REG_R8,
+                "r9" | "r9d" => libc::REG_R9,
+                "r10" | "r10d" => libc::REG_R10,
+                "r11" | "r11d" => libc::REG_R11,
+                "r12" | "r12d" => libc::REG_R12,
+                "r13" | "r13d" => libc::REG_R13,
+                "r14" | "r14d" => libc::REG_R14,
+                "r15" | "r15d" => libc::REG_R15,
+                other => {
+                    eprintln!("[seq] PERUN_FORCE_AT: unknown register {other:?}");
+                    return 2;
+                }
+            };
+            let tok = vname.trim().to_string();
+            match u64::from_str_radix(tok.trim_start_matches("0x"), 16) {
+                Ok(v) => force_pairs.push((idx, v)),
+                // A buffer name: the load step that creates the page may be
+                // later in the script, so keep the token pending.
+                Err(_) => {
+                    force_pending.push((force_pairs.len(), tok.clone()));
+                    force_pairs.push((idx, 0));
+                }
+            }
+        }
+        if force_pairs.is_empty() || force_pairs.len() > 6 {
+            eprintln!("[seq] PERUN_FORCE_AT needs 1..=6 registers");
+            return 2;
+        }
+        force_addr = image.base() as u64 + addr;
+    }
     let script = match std::fs::read_to_string(&script_path) {
         Ok(s) => s,
         Err(e) => {
@@ -2319,6 +2378,21 @@ fn cmd_seq(args: &[String]) -> i32 {
                     toks[1], toks[2]
                 );
                 loads.push((toks[1].to_string(), buf as u64, len));
+                // A pending FORCE_AT value naming this buffer resolves now:
+                // the page exists, so the address is real. First match wins,
+                // and any name that never resolves fails the run loudly at
+                // the first call rather than forcing a zero.
+                let lname = toks[1];
+                let mut still = Vec::new();
+                for (slot, tok) in std::mem::take(&mut force_pending) {
+                    if tok == lname {
+                        force_pairs[slot].1 = buf as u64;
+                        println!("[seq] FORCE_AT {tok:?} -> {:#x}", buf as u64);
+                    } else {
+                        still.push((slot, tok));
+                    }
+                }
+                force_pending = still;
             }
             "poke" => {
                 if toks.len() < 3 {
@@ -2452,6 +2526,48 @@ fn cmd_seq(args: &[String]) -> i32 {
                         eprintln!("[seq] step {step}: bad call arg {tok:?}");
                         return 2;
                     };
+                }
+                // Arm the register force before the first call: every
+                // pending name must have resolved by now, or the script is
+                // missing a load for a force that would otherwise write a
+                // zero into a live register.
+                if force_addr != 0 {
+                    if !force_pending.is_empty() {
+                        eprintln!(
+                            "[seq] step {step}: FORCE_AT names unloaded buffers: {force_pending:?}"
+                        );
+                        return 2;
+                    }
+                    unsafe {
+                        for (k, pr) in force_pairs.iter().enumerate() {
+                            FORCE_REGS[k] = *pr;
+                        }
+                        FORCE_N = force_pairs.len();
+                        FORCE_AT = force_addr;
+                    }
+                    println!(
+                        "[seq] step {step}: forcing {} register(s) at {force_addr:#x}",
+                        force_pairs.len()
+                    );
+                    force_addr = 0; // arm once; later calls keep the statics
+                    // The force is applied by the single-step SIGTRAP handler,
+                    // which only runs once the walk is armed — a sequence
+                    // with a force and no walk would print the arming and
+                    // then silently not force anything. Arm on the first
+                    // call, exactly as `perun call` does.
+                    let steps: u64 = std::env::var("PERUN_STEPS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    if steps > 0 {
+                        unsafe {
+                            STEP_DLL_LO = image.base() as u64;
+                            STEP_DLL_HI = STEP_DLL_LO + 0x1A_5000;
+                            arm_steps(steps);
+                            libc::raise(libc::SIGTRAP);
+                        }
+                        eprintln!("[seq] step {step}: walking, up to {steps} instructions");
+                    }
                 }
                 println!(
                     "[seq] step {step}: call {export_name}({:#x}, {:#x}, {:#x}, {:#x})...",
