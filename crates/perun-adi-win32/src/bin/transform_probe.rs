@@ -79,25 +79,68 @@ fn main() {
             println!("[{opcode:#010x}] rc={r:#x} ({r})");
             r
         };
-        call(0xb0eda7af, 0x10); // init
-        call(0xb23c691e, 0x10); // set provisioning path
-        call(0xc774d292, 0x14); // set android id
-        call(0xb0eda7af, 0x10); // init again, as the dump shows
+        // init with the Android-shaped header (v2 + 12 non-zero bytes):
+        // if this returns -45020 the fold is machine-state-dependent and
+        // the v1 pass form is a bypass, not the real envelope.
+        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+        const INIT_PKT: [u8; 16] = [
+            0x00, 0x00, 0x00, 0x02, 0xc9, 0x34, 0x19, 0x2e, 0x14, 0xf2, 0xae, 0x3f, 0x98, 0x49,
+            0x66, 0xca,
+        ];
+        std::ptr::copy_nonoverlapping(INIT_PKT.as_ptr(), pkt.cast::<u8>(), 16);
+        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+        {
+            let c = ctx.cast::<u64>();
+            std::ptr::write(c.add(0), pkt as u64);
+            std::ptr::write(c.add(1), 0x10);
+            std::ptr::write(c.add(2), 0);
+            let r = f(0xb0eda7af, ctx as u64, 0, 0);
+            println!("[init v2-android-pkt] rc={r:#x} ({r})");
+        }
+        call(0xb0eda7af, 0x10); // init, v1 pass form
+        // setpath/setid omitted: this DLL rejects both with -45019
+        // (unknownAdiFunction) and a follow-up init then takes the -45018
+        // route — the Android-specific selectors poison the dispatcher
+        // state. The canonical order is cvu -> init -> target.
 
         // SPIM + URL
         std::ptr::copy_nonoverlapping(spim.as_ptr(), spimp.cast::<u8>(), spim.len());
         std::ptr::copy_nonoverlapping(url.as_ptr(), urlp.cast::<u8>(), url.len());
 
-        // transform packet: 00 00 00 01, byte7=1 (the pass form measured on this DLL)
+        // transform packet, form selected by PERUN_TP_TEST:
+        //  base: 00 00 00 01, byte7=1 (the pass form measured on this DLL)
+        //  2:    00 00 00 02 + 48 bytes copied from the Android capture's
+        //        live packet (dumprun4 call 6), 52 bytes total.
+        let tp_test = std::env::var("PERUN_TP_TEST").unwrap_or_default();
         std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
-        *pkt.cast::<u8>().add(3) = 1;
-        *pkt.cast::<u8>().add(7) = 1;
+        if tp_test == "2" {
+            const ANDROID_PKT: [u8; 52] = [
+                0x00, 0x00, 0x00, 0x02, 0xab, 0xd8, 0x56, 0x03, 0xad, 0xb8, 0x98, 0xdb, 0xb5,
+                0x08, 0x40, 0x74, 0x5e, 0x6a, 0xcc, 0xf4, 0xd4, 0xac, 0xaf, 0x83, 0xf8, 0x2d,
+                0xf8, 0x38, 0x5b, 0xe5, 0xf7, 0x47, 0x8d, 0x0c, 0xe2, 0x36, 0x96, 0xc8, 0xe5,
+                0x50, 0x5b, 0x52, 0xce, 0xd3, 0x95, 0x9d, 0x10, 0xfe, 0x5f, 0x65, 0x6f, 0xbe,
+            ];
+            std::ptr::copy_nonoverlapping(ANDROID_PKT.as_ptr(), pkt.cast::<u8>(), 52);
+        } else {
+            *pkt.cast::<u8>().add(3) = 1;
+            *pkt.cast::<u8>().add(7) = 1;
+        }
+        // PERUN_TP_B: sweep knob — overwrite packet byte 7 (the fold input)
+        // on top of whatever form was selected, without rebuilding.
+        if let Ok(b) = std::env::var("PERUN_TP_B") {
+            if let Ok(v) = u8::from_str_radix(&b, 16) {
+                *pkt.cast::<u8>().add(7) = v;
+            }
+        }
 
         std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
         let c = ctx.cast::<u64>();
         std::ptr::write(c.add(0), pkt as u64);
         std::ptr::write(c.add(1), 0x4000_0000_0034); // len 0x34, flags 4
-        std::ptr::write(c.add(2), 0);
+        // +0x10: the Android envelope carried 0x00007fff00000000 here (a
+        // guest-stack value). PERUN_TP_TEST=1 pokes a real buffer pointer.
+        let slot10 = if tp_test == "1" { page(4096) as u64 } else { 0 };
+        std::ptr::write(c.add(2), slot10);
         std::ptr::write(c.add(3), spim.len() as u64);
         std::ptr::write(c.add(4), urlp as u64);
         std::ptr::write(c.add(5), 2);
@@ -144,6 +187,16 @@ fn main() {
         std::ptr::write(c.add(14), 0x1d0);
         std::ptr::write(c.add(15), urlp as u64);
         std::ptr::write(c.add(16), out as u64);    // +0x80 CPIM ptr slot
+        // +0x88..+0xa8: the Android envelope carries five function
+        // pointers here. PERUN_TP_TEST=3 installs simple `ret` stubs so the
+        // worker, if it calls one, returns immediately instead of crashing.
+        if tp_test == "3" {
+            let stub = page(4096);
+            std::ptr::write(stub.cast::<u8>(), 0xc3u8); // ret
+            for i in 17..22 {
+                std::ptr::write(c.add(i), stub as u64);
+            }
+        }
 
         let r = f(0x716bd86c, ctx as u64, 0xffff_ffff, 0);
         println!("[transform] rc={r:#x} ({r})");
