@@ -1634,6 +1634,15 @@ fn cmd_call(args: &[String]) -> i32 {
         STEP_STOP_EDI_LO = rd("PERUN_STOP_EDI_ZERO_LO").unwrap_or(0);
         STEP_STOP_EDI_HI = rd("PERUN_STOP_EDI_ZERO_HI").unwrap_or(u64::MAX);
     };
+    // PERUN_STOP_ON_CODE=0: address-only stopping for PERUN_STEP_UNTIL walks.
+    // A code of 0 matches every zero register, so an address-study run must be
+    // able to turn the register condition off rather than trip on the first
+    // harmless zero it sees.
+    if let Ok(v) = std::env::var("PERUN_STOP_ON_CODE") {
+        unsafe {
+            STEP_STOP_ON_CODE = !(v == "0" || v.is_empty());
+        }
+    }
     if let Ok(v) = std::env::var("PERUN_STOP_CODE") {
         let parsed = if let Some(hex) = v.trim().strip_prefix("0x") {
             u32::from_str_radix(hex, 16).ok()
@@ -2308,6 +2317,30 @@ fn cmd_seq(args: &[String]) -> i32 {
                 println!("[seq] step {step}: dump");
                 dump_region("scratch", scratch as u64, 0x1000 / 8);
                 dump_region("ctx", ctx as u64, 0x10000 / 8);
+            }
+            // `save NAME FILE` — write a loaded guest buffer back to a host file.
+            // The load buffers live in guest memory only; without this verb a
+            // run that writes into them (a CPIM out-buffer) cannot be observed
+            // from outside the process, because the mmap copy is not the file.
+            "save" => {
+                if toks.len() < 3 {
+                    eprintln!("[seq] step {step}: save NAME FILE");
+                    return 2;
+                }
+                let Some((_, addr, len)) = loads.iter().find(|(n, _, _)| n == toks[1]) else {
+                    eprintln!("[seq] step {step}: no loaded buffer {:?}", toks[1]);
+                    return 2;
+                };
+                let bytes = unsafe { std::slice::from_raw_parts(*addr as *const u8, *len) };
+                if let Err(e) = std::fs::write(toks[2], bytes) {
+                    eprintln!("[seq] step {step}: save {:#x}..: {e}", *addr);
+                    return 2;
+                }
+                println!(
+                    "[seq] step {step}: saved {} ({len} bytes) -> {}",
+                    toks[1],
+                    toks[2]
+                );
             }
             "call" => {
                 let export_name = toks.get(1).copied().unwrap_or("vdfut768ig");
