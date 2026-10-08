@@ -202,10 +202,10 @@ static mut STEP_R12: [u64; STEP_RING] = [0; STEP_RING];
 static mut STEP_RSP: [u64; STEP_RING] = [0; STEP_RING];
 
 /// The fold packet, sniffed once when the walk first reaches the fold site
-/// (RVA 0x15a0..0x15a8): 64 bytes at the packet pointer, which the fold's
+/// (RVA 0xb15a0..0xb15a8): 64 bytes at the packet pointer, which the fold's
 /// index constants select bytes from. The ring carries registers only, so
 /// without this the three bytes the barrier reads cannot be observed.
-static mut FOLD_PKT: [u8; 64] = [0; 64];
+static mut FOLD_PKT: [u8; 4096] = [0; 4096];
 static mut FOLD_PKT_TAKEN: bool = false;
 /// The rest of the register file, for the same reason. The transform loop at
 /// RVA `0x6783f` reads `rax` as its base, `r10` as its limit and `edi` as the
@@ -295,6 +295,15 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
             "[fold-pkt] {}",
             pkt.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
         );
+        // The reading triple is (r8d+1, r8d+2, r8d+3) while r8d stays under
+        // ~80, so the candidate scan is: every offset K where
+        // p[K+1]==0, p[K+2]==0, p[K+3]==1. Printing it here saves the offline
+        // step and makes the dump self-describing.
+        for k in 0..252usize {
+            if pkt[k + 1] == 0 && pkt[k + 2] == 0 && pkt[k + 3] == 1 {
+                println!("[fold-pkt] PASS-candidate r8d={k} (bytes {:#x} {:#x} {:#x})", pkt[k + 1], pkt[k + 2], pkt[k + 3]);
+            }
+        }
     }
     // PERUN_DEREF=off[,off...] — follow [rsp+off] one level and dump 64 bytes
     // of what the pointer names: the fold reads the packet through exactly
@@ -557,14 +566,14 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             // answers every r8d-scan question arithmetically.
             if !FOLD_PKT_TAKEN {
                 let rva = (rip - STEP_DLL_LO) as u64;
-                if (0x15a0..0x15a9).contains(&rva) {
+                if (0xb15a0..0xb15a9).contains(&rva) {
                     let pkt = *regs.add(libc::REG_RCX as usize) as u64;
                     if pkt > 0x1000 && pkt < 0x8000_0000_0000 {
                         // Index the raw pointer instead of iter_mut: taking a
                         // mutable reference to the static trips the 2024
                         // static-mut lint, and per-store writes are the same
                         // two stores the ring itself does.
-                        for i in 0..64usize {
+                        for i in 0..4096usize {
                             FOLD_PKT[i] =
                                 std::ptr::read_volatile((pkt + i as u64) as *const u8);
                         }
@@ -1642,8 +1651,19 @@ fn cmd_call(args: &[String]) -> i32 {
             let v = match u64::from_str_radix(vname.trim_start_matches("0x"), 16) {
                 Ok(v) => v,
                 Err(_) => {
-                    eprintln!("[perun] PERUN_FORCE_AT: value is not hex: {vname:?}");
-                    return 2;
+                    // A register force may name a loaded buffer instead of a
+                    // literal: `rcx=FAKE` points the fold at a page this run
+                    // controls, which no hex literal can do under ASLR.
+                    let resolved = resolve_val(vname.trim());
+                    match resolved {
+                        Some(v) => v,
+                        None => {
+                            eprintln!(
+                                "[perun] PERUN_FORCE_AT: value is not hex or a buffer: {vname:?}"
+                            );
+                            return 2;
+                        }
+                    }
                 }
             };
             pairs.push((idx, v));
