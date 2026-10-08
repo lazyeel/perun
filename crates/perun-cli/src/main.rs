@@ -216,6 +216,13 @@ static mut STEP_RSP: [u64; STEP_RING] = [0; STEP_RING];
 /// without this the three bytes the barrier reads cannot be observed.
 static mut FOLD_PKT: [u8; 4096] = [0; 4096];
 static mut FOLD_PKT_TAKEN: bool = false;
+/// Worker-call-site snapshot (RVA 0x9150b, `call *0x548(%rsp)`): the call
+/// target, the mini-envelope pointer (rcx), and the envelope's 8 bytes.
+static mut WCAL_TAKEN: bool = false;
+static mut WCAL_TARGET: u64 = 0;
+static mut WCAL_ENV: u64 = 0;
+static mut WCAL_RSP: u64 = 0;
+static mut WCAL_ENV_BYTES: [u8; 8] = [0; 8];
 /// The second barrier (RVA 0x88fd68, `cmp $0x4069d333,%r9d`) is downstream
 /// of the fold bridge and gdb cannot watch it while the walk owns SIGTRAP.
 /// The walker itself records r9d on every visit to the barrier window.
@@ -228,9 +235,14 @@ static mut R9_STOP_N: usize = 0;
 /// full register file, so the fork between the work cluster and the worker
 /// call is captured without a giant ring tail (a big tail delays dump_ring
 /// past the second call and silently short-routes it).
-static mut WIN_ROWS: [[u64; 8]; 512] = [[0; 8]; 512];
+static mut WIN_ROWS: [[u64; 10]; 512] = [[0; 10]; 512];
 static mut WIN_N: usize = 0;
 static mut WIN_RVAS: [u32; 512] = [0; 512];
+/// Worker-decoder window: RVA 0x9000d8..0x9001d0 — the mini-envelope decode
+/// (edi), the 563-table fetch (rax), and the state-pointer load (r14).
+static mut WDEC_ROWS: [[u64; 8]; 96] = [[0; 8]; 96];
+static mut WDEC_N: usize = 0;
+static mut WDEC_RVAS: [u32; 96] = [0; 96];
 /// The rest of the register file, for the same reason. The transform loop at
 /// RVA `0x6783f` reads `rax` as its base, `r10` as its limit and `edi` as the
 /// byte, and derives `eax` from `r14d` -- and none of the four is initialised
@@ -292,15 +304,43 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
         "[stop] rip={rip:#018x} edi={edi:#x} rax={rax:#018x} rbx={rbx:#018x} rcx={rcx:#x} rsp={rsp:#018x}"
     );
     unsafe {
+        if WDEC_N > 0 {
+            let n = WDEC_N;
+            println!("[wdec] {n} rows in 0x900050..0x9000c9");
+            for w in 0..n {
+                println!(
+                    "[wdec] {w:2} rva={:#x} rax={:#x} rcx={:#x} rdx={:#x} rdi={:#x} r14={:#x} r15={:#x} rbx={:#x} rsp={:#x}",
+                    WDEC_RVAS[w],
+                    WDEC_ROWS[w][0],
+                    WDEC_ROWS[w][1],
+                    WDEC_ROWS[w][2],
+                    WDEC_ROWS[w][3],
+                    WDEC_ROWS[w][4],
+                    WDEC_ROWS[w][5],
+                    WDEC_ROWS[w][6],
+                    WDEC_ROWS[w][7]
+                );
+            }
+        }
+    }
+    unsafe {
         if WIN_N > 0 {
             let n = WIN_N;
             println!("[win] {n} rows in 0x910be..0x91560");
             for w in 0..n.min(260) {
                 println!(
-                    "[win] {w:3} rva={:#x} rax={:#x} rcx={:#x} rdx={:#x} rsi={:#x} rdi={:#x} r11={:#x} r14={:#x} r15={:#x}",
-                    WIN_RVAS[w], WIN_ROWS[w][0], WIN_ROWS[w][1], WIN_ROWS[w][2],
-                    WIN_ROWS[w][3], WIN_ROWS[w][4], WIN_ROWS[w][5], WIN_ROWS[w][6],
-                    WIN_ROWS[w][7]
+                    "[win] {w:3} rva={:#x} rax={:#x} rcx={:#x} rdx={:#x} rsi={:#x} rdi={:#x} r11={:#x} r14={:#x} r15={:#x} rbp={:#x} rbx={:#x}",
+                    WIN_RVAS[w],
+                    WIN_ROWS[w][0],
+                    WIN_ROWS[w][1],
+                    WIN_ROWS[w][2],
+                    WIN_ROWS[w][3],
+                    WIN_ROWS[w][4],
+                    WIN_ROWS[w][5],
+                    WIN_ROWS[w][6],
+                    WIN_ROWS[w][7],
+                    WIN_ROWS[w][8],
+                    WIN_ROWS[w][9]
                 );
             }
         }
@@ -341,6 +381,21 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
             let v = unsafe { std::ptr::read_volatile(addr as *const u64) };
             println!("[slot] rsp+{off:#x} = {addr:#018x} -> {v:#018x}");
         }
+    }
+    // The worker call-site snapshot, if the transform route reached it.
+    if unsafe { WCAL_TAKEN } {
+        let env = unsafe { WCAL_ENV };
+        let target = unsafe { WCAL_TARGET };
+        let rsp_g = unsafe { WCAL_RSP };
+        let bytes = unsafe { WCAL_ENV_BYTES };
+        println!(
+            "[wcal] call *0x548(rsp={rsp_g:#x}) -> {target:#x}; mini-env @ {env:#x} = {}",
+            bytes
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
     }
     // The fold packet sniffed during the walk, if the fold site was reached.
     if unsafe { FOLD_PKT_TAKEN } {
@@ -622,6 +677,22 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             }
 
             let rva_here = rip - STEP_DLL_LO;
+            if ((0x900050..=0x900110).contains(&rva_here)
+                || (0x9150c..=0x91530).contains(&rva_here))
+                && WDEC_N < 96
+            {
+                let w = WDEC_N;
+                WDEC_RVAS[w] = rva_here as u32;
+                WDEC_ROWS[w][0] = *regs.add(libc::REG_RAX as usize) as u64;
+                WDEC_ROWS[w][1] = *regs.add(libc::REG_RCX as usize) as u64;
+                WDEC_ROWS[w][2] = *regs.add(libc::REG_RDX as usize) as u64;
+                WDEC_ROWS[w][3] = *regs.add(libc::REG_RDI as usize) as u64;
+                WDEC_ROWS[w][4] = *regs.add(libc::REG_R14 as usize) as u64;
+                WDEC_ROWS[w][5] = *regs.add(libc::REG_R15 as usize) as u64;
+                WDEC_ROWS[w][6] = *regs.add(libc::REG_RBX as usize) as u64;
+                WDEC_ROWS[w][7] = *regs.add(libc::REG_RSP as usize) as u64;
+                WDEC_N = w + 1;
+            }
             if (0x910be..=0x91560).contains(&rva_here) && WIN_N < 512 {
                 let w = WIN_N;
                 WIN_RVAS[w] = rva_here as u32;
@@ -675,6 +746,28 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             // Sniff the packet at the fold site, once. The reads the fold
             // does at 0x15a1/0x15c8 index into this buffer, so one snapshot
             // answers every r8d-scan question arithmetically.
+            // Sniff the worker call site once: RVA 0x9150b is
+            // `call *0x548(%rsp)`. The slot holds the worker address, and
+            // rcx names the 8-byte mini-envelope the worker decodes.
+            if !WCAL_TAKEN {
+                let rva = rip - STEP_DLL_LO;
+                if rva == 0x9150b {
+                    let rsp_g = *regs.add(libc::REG_RSP as usize) as u64;
+                    let target = std::ptr::read_volatile((rsp_g + 0x548) as *const u64);
+                    let env = *regs.add(libc::REG_RCX as usize) as u64;
+                    let dst = std::ptr::addr_of_mut!(WCAL_ENV_BYTES) as *mut u8;
+                    WCAL_TARGET = target;
+                    WCAL_ENV = env;
+                    WCAL_RSP = rsp_g;
+                    for i in 0..8usize {
+                        std::ptr::write_volatile(
+                            dst.add(i),
+                            std::ptr::read_volatile((env + i as u64) as *const u8),
+                        );
+                    }
+                    WCAL_TAKEN = true;
+                }
+            }
             if !FOLD_PKT_TAKEN {
                 let rva = rip - STEP_DLL_LO;
                 if (0xb15a0..0xb15a9).contains(&rva) {
@@ -1939,10 +2032,13 @@ fn cmd_call(args: &[String]) -> i32 {
     let seq_ctx: Vec<u64> = std::env::var("PERUN_SEQ_CTX_CSV")
         .ok()
         .map(|s| {
-            s.split(';')
+            let v: Vec<u64> = s
+                .split(';')
                 .filter(|e| !e.trim().is_empty())
                 .filter_map(|e| resolve_val(e.trim()))
-                .collect()
+                .collect();
+            eprintln!("[seq-ctx] parsed {v:?} (loads: {})", loads.len());
+            v
         })
         .unwrap_or_default();
 
