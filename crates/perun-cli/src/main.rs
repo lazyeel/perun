@@ -219,6 +219,13 @@ static mut FOLD_PKT_TAKEN: bool = false;
 /// Worker-call-site snapshot (RVA 0x9150b, `call *0x548(%rsp)`): the call
 /// target, the mini-envelope pointer (rcx), and the envelope's 8 bytes.
 static mut WCAL_TAKEN: bool = false;
+/// Callback-probe sniffer: at RVA 0x85b3bf the gate-object init calls the
+/// stack slot *0x708(%rsp) and stores the result into the object's [+0x10];
+/// at 0x85b3c6 r12 holds it. The slot's value and result decide whether
+/// [+0x10] is a real event handle or garbage on this build.
+static mut CBK_TARGET: u64 = 0;
+static mut CBK_RESULT: u64 = 0;
+static mut CBK_TAKEN: bool = false;
 static mut WCAL_TARGET: u64 = 0;
 static mut WCAL_ENV: u64 = 0;
 static mut WCAL_RSP: u64 = 0;
@@ -381,6 +388,15 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
             let v = unsafe { std::ptr::read_volatile(addr as *const u64) };
             println!("[slot] rsp+{off:#x} = {addr:#018x} -> {v:#018x}");
         }
+    }
+    // The object-init callback probe, if the gate-object init ran.
+    if unsafe { CBK_TAKEN } {
+        let target = unsafe { CBK_TARGET };
+        let result = unsafe { CBK_RESULT };
+        println!(
+            "[cbk] gate-init callback *0x708(rsp) -> {target:#x}; result r12 = {result:#x} ({})",
+            if result == 0 { "GARBAGE/NULL" } else { "value" }
+        );
     }
     // The worker call-site snapshot, if the transform route reached it.
     if unsafe { WCAL_TAKEN } {
@@ -766,6 +782,22 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
                         );
                     }
                     WCAL_TAKEN = true;
+                }
+            }
+            if !CBK_TAKEN {
+                let rva = rip - STEP_DLL_LO;
+                if rva == 0x85b3bf {
+                    // One snapshot of the object-init callback: the callee
+                    // address from the stack slot, and the args it receives.
+                    let rsp_g = *regs.add(libc::REG_RSP as usize) as u64;
+                    let target = std::ptr::read_volatile((rsp_g + 0x708) as *const u64);
+                    CBK_TARGET = target;
+                    CBK_TAKEN = true;
+                }
+                if rva == 0x85b3c6 {
+                    // Right after the call: r12 is the result the object's
+                    // [+0x10] field will store.
+                    CBK_RESULT = *regs.add(libc::REG_R12 as usize) as u64;
                 }
             }
             if !FOLD_PKT_TAKEN {
@@ -2513,6 +2545,14 @@ fn cmd_seq(args: &[String]) -> i32 {
             unsafe { STEP_STOP_CODE = code };
         }
     }
+    // PERUN_FORCE_AT_ON_ITER in a sequence: apply the armed force only on
+    // the Nth export call (0-based) rather than on every one. The fold force
+    // is route-specific — arming it for init poisons that call, and a
+    // file-script cannot express "force only the transform call" today.
+    let force_on_iter: Option<usize> = std::env::var("PERUN_FORCE_AT_ON_ITER")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    let mut call_iter: usize = 0;
     let path = &args[0];
     let export_name = &args[1];
     let mut script_path: Option<String> = None;
@@ -2987,9 +3027,20 @@ fn cmd_seq(args: &[String]) -> i32 {
                     }
                     eprintln!("[seq] step {step}: walking, up to {steps} instructions");
                 }
+                let this_iter = call_iter;
+                call_iter += 1;
+                let force_live = force_on_iter.is_none_or(|n| n == this_iter);
+                let saved_force_n = unsafe { FORCE_N };
+                if !force_live {
+                    unsafe { FORCE_N = 0 };
+                }
                 println!(
-                    "[seq] step {step}: call {export_name}({:#x}, {:#x}, {:#x}, {:#x})...",
-                    argv[0], argv[1], argv[2], argv[3]
+                    "[seq] step {step}: call {export_name}({:#x}, {:#x}, {:#x}, {:#x})... [iter {this_iter}{}]",
+                    argv[0],
+                    argv[1],
+                    argv[2],
+                    argv[3],
+                    if force_live { ", force live" } else { "" }
                 );
                 let r = unsafe {
                     match pe_stack {
@@ -3002,6 +3053,9 @@ fn cmd_seq(args: &[String]) -> i32 {
                     }
                 };
                 println!("[seq] step {step}: returned {r:#x} ({r})");
+                if !force_live {
+                    unsafe { FORCE_N = saved_force_n };
+                }
                 // Show what the guest wrote into the scratch param block.
                 dump_region("scratch", scratch as u64, 0x1000 / 8);
             }
