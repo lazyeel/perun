@@ -260,9 +260,51 @@ win32_api! {
         alertable: BOOL,
     ) -> DWORD { unsafe {
         let _ = alertable;
+        // PERUN_SESSION_DIRECTOR: the iTunes contract has the HOST own the
+        // second thread of the producer-consumer pair -- CoreADI64 never
+        // creates one (no CreateThread in its imports). With the switch on,
+        // a one-shot host thread stands in: it waits for the guest's
+        // hEventWorkReady (to_signal) and then sets hEventWorkDone
+        // (to_wait), so the guest's own INFINITE wait returns instead of
+        // parking forever on a one-thread host.
+        if std::env::var_os("PERUN_SESSION_DIRECTOR").is_some()
+            && matches!(handle_get(to_wait).map(|o| &o.kind), Some(HostKind::Event(_)))
+        {
+            session_director_once(to_signal, to_wait);
+        }
         SetEvent(to_signal);
         WaitForSingleObject(to_wait, timeout_ms)
     }}
+}
+
+/// One-shot stand-in for the host's worker thread. Spawned the first time a
+/// SignalObjectAndWait sees an event pair with the director enabled; parked
+/// on the ready-event until the guest signals it, then the done-event is
+/// set so the guest's wait unblocks. The thread exits after one cycle.
+fn session_director_once(ready: HANDLE, done: HANDLE) {
+    static DIRECTOR: std::sync::Once = std::sync::Once::new();
+    DIRECTOR.call_once(|| {
+        // HANDLE is a raw pointer, which is not Send. The handle table is
+        // global and the objects it names outlive this thread (they are the
+        // guest's own events), so the boundary crossing is sound; wrap it.
+        let ready = ready as usize;
+        let done = done as usize;
+        std::thread::spawn(move || unsafe {
+            let ready = ready as HANDLE;
+            let done = done as HANDLE;
+            if std::env::var_os("PERUN_TRACE_SYNC").is_some() {
+                eprintln!("[sync] session director: waiting ready {ready:?}");
+            }
+            // Wait for the guest's "work ready" signal. The handle kinds were
+            // validated by the caller; unknown ready-handles fall through the
+            // shim's unknown-object fiction and the wait returns at once.
+            let _ = WaitForSingleObject(ready, INFINITE);
+            if std::env::var_os("PERUN_TRACE_SYNC").is_some() {
+                eprintln!("[sync] session director: ready seen, setting done {done:?}");
+            }
+            let _ = SetEvent(done);
+        });
+    });
 }
 
 win32_api! {
