@@ -74,6 +74,11 @@ fn main() {
     let state = page(4096);
     unsafe {
         *state.cast::<u64>() = 0x2000000001;
+        // The fold triple: bytes 6,7 = 0,1 -- the measured cvu-scratch key
+        // that opens the fold barrier (run_pass.sh's scratch+0x6/0x7 pokes).
+        // Without it every route past the fold returns -45020 immediately.
+        *state.cast::<u8>().add(6) = 0;
+        *state.cast::<u8>().add(7) = 1;
         let r = cvu(state as u64, 0x2000000001, 0, 0);
         println!("[cvu] rc={r}");
     }
@@ -162,6 +167,37 @@ fn main() {
         std::ptr::write(c.add(14), 0x1d0);
         std::ptr::write(c.add(15), urlp as u64);
         std::ptr::write(c.add(16), out as u64);
+        // The measured 24-slot reference (dumprun4 Call 6, the live Android
+        // transform): the envelope does NOT end at the out pointer. The live
+        // caller carries a stack-ish tag at +0x10, a heap pointer at +0x48,
+        // FIVE more pointers at +0x88..+0xa8 (host stack locals that the
+        // Windows dispatcher may read as callback slots), and the machine
+        // identity as a 16-hex ASCII string at +0xb0..+0xbf -- on the live
+        // stand it is SetAndroidID("1A7DC0308887C2D8"). The Windows build
+        // has no SetAndroidID export (-45019), so the identity rides in the
+        // envelope; derive ours from the same device-id the SPIM was minted
+        // under (first 16 hex of X-Mme-Device-Id, dots dropped).
+        std::ptr::write(c.add(2), 0x0000_7fff_0000_0000); // +0x10 stack-ish
+        let aux5 = page(4096);
+        std::ptr::write(c.add(9), aux5 as u64); // +0x48 heap-ish, measured non-null
+        let cb1 = page(4096);
+        let cb2 = page(4096);
+        let cb3 = page(4096);
+        let cb4 = page(4096);
+        let cb5 = page(4096);
+        std::ptr::write(c.add(17), cb1 as u64); // +0x88
+        std::ptr::write(c.add(18), cb2 as u64); // +0x90
+        std::ptr::write(c.add(19), cb3 as u64); // +0x98
+        std::ptr::write(c.add(20), cb4 as u64); // +0xa0
+        std::ptr::write(c.add(21), cb5 as u64); // +0xa8
+        let idhex: String = id
+            .device_id
+            .chars()
+            .filter(|c| *c != '.')
+            .take(16)
+            .collect();
+        let idb = idhex.as_bytes();
+        std::ptr::copy_nonoverlapping(idb.as_ptr(), (ctx as *mut u8).add(0xb0), idb.len() + 1);
         let r = f(0x716bd86c, ctx as u64, 0xffff_ffff, 0);
         println!("[transform] rc={r:#x} ({r})");
     }
