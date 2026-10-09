@@ -310,6 +310,21 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
     println!(
         "[stop] rip={rip:#018x} edi={edi:#x} rax={rax:#018x} rbx={rbx:#018x} rcx={rcx:#x} rsp={rsp:#018x}"
     );
+    // Fold-site readout: when the stop lands on a fold read (rcx valid,
+    // rax a small index), print the byte the fold is about to consume and
+    // the 8 bytes around it -- the fold key lives there.
+    if rcx > 0x10000 && rcx < 0x8000_0000_0000 && rax < 0x100 {
+        let at = rcx.wrapping_add(rax);
+        let mut words = [0u8; 8];
+        for (i, w) in words.iter_mut().enumerate() {
+            *w = unsafe { std::ptr::read_volatile(at.wrapping_add(i as u64) as *const u8) };
+        }
+        println!(
+            "[stop] fold-read [{at:#x}] byte={:#04x} context={:02x?}",
+            unsafe { std::ptr::read_volatile(at as *const u8) },
+            words
+        );
+    }
     unsafe {
         if WDEC_N > 0 {
             let n = WDEC_N;
@@ -2192,10 +2207,17 @@ fn cmd_call(args: &[String]) -> i32 {
         // instructions would otherwise consume the whole budget before the
         // export is ever entered.
         if steps > 0 {
+            // PERUN_STEP_UNTIL_ON_ITER gates the address-stop to the Nth
+            // call, so a two-call sequence can stop inside the second
+            // call's fold without the first call tripping it.
+            let until_on_iter: Option<usize> = std::env::var("PERUN_STEP_UNTIL_ON_ITER")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok());
+            let stop_live = until_on_iter.is_none_or(|n| n == iter);
             unsafe {
                 STEP_DLL_LO = image.base() as u64;
                 STEP_DLL_HI = STEP_DLL_LO + 0x1A_5000;
-                STEP_STOP_RVA = if stop_rva != 0 {
+                STEP_STOP_RVA = if stop_rva != 0 && stop_live {
                     STEP_DLL_LO + stop_rva
                 } else {
                     0
