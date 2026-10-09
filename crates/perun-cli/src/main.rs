@@ -226,6 +226,17 @@ static mut WCAL_TAKEN: bool = false;
 static mut CBK_TARGET: u64 = 0;
 static mut CBK_RESULT: u64 = 0;
 static mut CBK_TAKEN: bool = false;
+/// Fold-series sniffer: every visit to the fold block entry (RVA 0xb15a5)
+/// records edi/rbx/rcx/rax/r9 so the accumulator drift from zero to
+/// 0x1200/0x1c9e0000 becomes a sequence instead of two endpoints.
+static mut FSER_N: usize = 0;
+static mut FSER_ROWS: [[u64; 6]; 64] = [[0; 6]; 64];
+/// Fold-neighbourhood micro-trace: every instruction in RVA 0xb15a0..0xb1699,
+/// with the register file, so the accumulator drift between two fold
+/// iterations is visible instruction by instruction.
+static mut FWIN_N: usize = 0;
+static mut FWIN_ROWS: [[u64; 8]; 512] = [[0; 8]; 512];
+static mut FWIN_RVAS: [u32; 512] = [0; 512];
 static mut WCAL_TARGET: u64 = 0;
 static mut WCAL_ENV: u64 = 0;
 static mut WCAL_RSP: u64 = 0;
@@ -412,6 +423,32 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
             "[cbk] gate-init callback *0x708(rsp) -> {target:#x}; result r12 = {result:#x} ({})",
             if result == 0 { "GARBAGE/NULL" } else { "value" }
         );
+    }
+    // The fold-series samples, if the route visited the fold block.
+    if unsafe { FSER_N } > 0 {
+        let n = unsafe { FSER_N };
+        println!("[fser] {n} fold-block entries (rax, rcx, rbx, edi, r9d, rbp):");
+        #[allow(clippy::needless_range_loop)]
+        for w in 0..n {
+            let r = unsafe { FSER_ROWS[w] };
+            println!(
+                "[fser] {w:2} rax={:#x} rcx={:#x} rbx={:#x} edi={:#x} r9d={:#x} rbp={:#x}",
+                r[0], r[1], r[2], r[3], r[4] as u32, r[5]
+            );
+        }
+    }
+    // The fold-neighbourhood micro-trace, if the route visited the window.
+    if unsafe { FWIN_N } > 0 {
+        let n = unsafe { FWIN_N };
+        println!("[fwin] {n} rows in 0xb15a0..0xb1699:");
+        for w in 0..n {
+            let r = unsafe { FWIN_ROWS[w] };
+            let rva = unsafe { FWIN_RVAS[w] };
+            println!(
+                "[fwin] {w:3} rva={rva:#x} rax={:#x} rcx={:#x} rbx={:#x} edi={:#x} r9d={:#x} rbp={:#x} rsi={:#x} rdx={:#x}",
+                r[0], r[1], r[2], r[3], r[4] as u32, r[5], r[6], r[7]
+            );
+        }
     }
     // The worker call-site snapshot, if the transform route reached it.
     if unsafe { WCAL_TAKEN } {
@@ -797,6 +834,36 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
                         );
                     }
                     WCAL_TAKEN = true;
+                }
+            }
+            {
+                let rva = rip - STEP_DLL_LO;
+                if rva == 0xb15a5 && FSER_N < 64 {
+                    let w = FSER_N;
+                    FSER_ROWS[w][0] = *regs.add(libc::REG_RAX as usize) as u64;
+                    FSER_ROWS[w][1] = *regs.add(libc::REG_RCX as usize) as u64;
+                    FSER_ROWS[w][2] = *regs.add(libc::REG_RBX as usize) as u64;
+                    FSER_ROWS[w][3] = rdi;
+                    FSER_ROWS[w][4] = *regs.add(libc::REG_R9 as usize) as u64;
+                    FSER_ROWS[w][5] = *regs.add(libc::REG_RBP as usize) as u64;
+                    FSER_N = w + 1;
+                }
+                // Fold-neighbourhood micro-trace: the CFF blocks between
+                // two fold iterations are where the edi/rbx accumulators
+                // first become non-zero, and no ring tail covers them. The
+                // window spans the fold block and its transition tail.
+                if (0xb15a0..=0xb1699).contains(&rva) && FWIN_N < 512 {
+                    let w = FWIN_N;
+                    FWIN_ROWS[w][0] = *regs.add(libc::REG_RAX as usize) as u64;
+                    FWIN_ROWS[w][1] = *regs.add(libc::REG_RCX as usize) as u64;
+                    FWIN_ROWS[w][2] = *regs.add(libc::REG_RBX as usize) as u64;
+                    FWIN_ROWS[w][3] = rdi;
+                    FWIN_ROWS[w][4] = *regs.add(libc::REG_R9 as usize) as u64;
+                    FWIN_ROWS[w][5] = *regs.add(libc::REG_RBP as usize) as u64;
+                    FWIN_ROWS[w][6] = *regs.add(libc::REG_RSI as usize) as u64;
+                    FWIN_ROWS[w][7] = *regs.add(libc::REG_RDX as usize) as u64;
+                    FWIN_RVAS[w] = rva as u32;
+                    FWIN_N = w + 1;
                 }
             }
             if !CBK_TAKEN {
