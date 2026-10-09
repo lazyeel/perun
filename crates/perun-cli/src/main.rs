@@ -2495,6 +2495,24 @@ fn cmd_seq(args: &[String]) -> i32 {
         eprintln!("usage: perun seq <image.dll> <export> --script=FILE");
         return 2;
     }
+    // The stop knobs are parsed in cmd_call only; a sequence with PERUN_STEPS
+    // arms the same handler, so without this the code-stop silently stays on
+    // (default -45018) and kills the walk before the call under study.
+    if let Ok(v) = std::env::var("PERUN_STOP_ON_CODE") {
+        unsafe {
+            STEP_STOP_ON_CODE = !(v == "0" || v.is_empty());
+        }
+    }
+    if let Ok(v) = std::env::var("PERUN_STOP_CODE") {
+        let parsed = if let Some(hex) = v.trim().strip_prefix("0x") {
+            u32::from_str_radix(hex, 16).ok()
+        } else {
+            v.trim().parse::<u32>().ok()
+        };
+        if let Some(code) = parsed {
+            unsafe { STEP_STOP_CODE = code };
+        }
+    }
     let path = &args[0];
     let export_name = &args[1];
     let mut script_path: Option<String> = None;
@@ -2817,7 +2835,8 @@ fn cmd_seq(args: &[String]) -> i32 {
                     eprintln!("[seq] step {step}: poke-ptr RVA VALUE");
                     return 2;
                 }
-                let rva = parse_num(toks[1]).unwrap_or_else(|| {
+                let base_tok = toks[1].split_once('+').map_or(toks[1], |(b, _)| b);
+                let rva = parse_num(base_tok).unwrap_or_else(|| {
                     eprintln!("[seq] step {step}: bad poke-ptr rva {:?}", toks[1]);
                     std::process::exit(2);
                 });
@@ -2828,10 +2847,35 @@ fn cmd_seq(args: &[String]) -> i32 {
                         eprintln!("[seq] step {step}: bad poke-ptr value {:?}", toks[2]);
                         return 2;
                     };
-                let slot = (image.base() as u64).wrapping_add(rva) as *const u64;
+                // `poke-ptr RVA+OFF VALUE` writes at target+OFF: the state
+                // object's flag fields ([+0x8]/[+0xc]) live inside the heap
+                // allocation, not at its base.
+                // `poke-ptr RVA VALUE` writes the value through the pointer
+                // stored at RVA. `poke-ptr RVA+OFF VALUE` writes at
+                // target+OFF instead: the state object's flag fields
+                // ([+0x8]/[+0xc]) live inside the heap allocation, not at
+                // its base, and no existing verb reached them.
+                let (slot_rva, obj_off) = match toks[1].split_once('+') {
+                    Some((base_s, off_s)) => {
+                        let base = parse_num(base_s).unwrap_or_else(|| {
+                            eprintln!("[seq] step {step}: bad poke-ptr rva {base_s:?}");
+                            std::process::exit(2);
+                        });
+                        let off = parse_num(off_s).unwrap_or_else(|| {
+                            eprintln!("[seq] step {step}: bad poke-ptr offset {off_s:?}");
+                            std::process::exit(2);
+                        });
+                        (base, off)
+                    }
+                    None => (rva, 0u64),
+                };
+                let slot = (image.base() as u64).wrapping_add(slot_rva) as *const u64;
                 let target = unsafe { std::ptr::read(slot) };
-                unsafe { std::ptr::write(target as *mut u64, val) };
-                println!("[seq] step {step}: poke-ptr [RVA {rva:#x}] -> {target:#x} = {val:#x}");
+                let at = target.wrapping_add(obj_off);
+                unsafe { std::ptr::write(at as *mut u64, val) };
+                println!(
+                    "[seq] step {step}: poke-ptr [RVA {slot_rva:#x}] -> {target:#x}+{obj_off:#x} = {val:#x}"
+                );
             }
             "zero" => {
                 if toks.len() < 2 {
@@ -2925,24 +2969,23 @@ fn cmd_seq(args: &[String]) -> i32 {
                         force_pairs.len()
                     );
                     force_addr = 0; // arm once; later calls keep the statics
-                    // The force is applied by the single-step SIGTRAP handler,
-                    // which only runs once the walk is armed — a sequence
-                    // with a force and no walk would print the arming and
-                    // then silently not force anything. Arm on the first
-                    // call, exactly as `perun call` does.
-                    let steps: u64 = std::env::var("PERUN_STEPS")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(0);
-                    if steps > 0 {
-                        unsafe {
-                            STEP_DLL_LO = image.base() as u64;
-                            STEP_DLL_HI = STEP_DLL_LO + 0x1A_5000;
-                            arm_steps(steps);
-                            libc::raise(libc::SIGTRAP);
-                        }
-                        eprintln!("[seq] step {step}: walking, up to {steps} instructions");
+                }
+                // A walk is worth arming even without a force: it is the only
+                // way to watch a route (r9/window/stop handlers) in a sequence,
+                // and `perun call` arms it unconditionally when PERUN_STEPS
+                // is set. The force arm above stays inside its own branch.
+                let steps: u64 = std::env::var("PERUN_STEPS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                if steps > 0 && unsafe { !STEP_ARMED } {
+                    unsafe {
+                        STEP_DLL_LO = image.base() as u64;
+                        STEP_DLL_HI = STEP_DLL_LO + 0x1A_5000;
+                        arm_steps(steps);
+                        libc::raise(libc::SIGTRAP);
                     }
+                    eprintln!("[seq] step {step}: walking, up to {steps} instructions");
                 }
                 println!(
                     "[seq] step {step}: call {export_name}({:#x}, {:#x}, {:#x}, {:#x})...",

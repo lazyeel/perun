@@ -178,6 +178,15 @@ win32_api! {
 }
 
 fn wait_on_event(e: &EventState, timeout_ms: DWORD) -> DWORD {
+    // PERUN_EVENT_NOBLOCK=1: single-threaded seq runs have no second thread
+    // to SetEvent the object the guest parks on, so an unsignaled event
+    // would hang the whole run forever (measured: SignalObjectAndWait into
+    // [r14+0x18] never returns). With the switch, the shim answers
+    // WAIT_OBJECT_0 at once — the same fiction an unknown handle gets —
+    // and the run advances to the next real gate.
+    if std::env::var_os("PERUN_EVENT_NOBLOCK").is_some() {
+        return WAIT_OBJECT_0;
+    }
     let deadline = if timeout_ms == INFINITE {
         None
     } else {
