@@ -298,6 +298,7 @@ const EFLAGS_TF: u64 = 0x100;
 /// -45018, the code the library is about to publish when the header check fails.
 const ERRNO_45018: u32 = 0xffff_5026;
 /// This image's span. CoreADI64.dll prefers base 0x7c800000 and is 0x1a5000.
+static mut SIG_CTX: [u64; 11] = [0; 11];
 static mut STEP_DLL_LO: u64 = 0;
 static mut STEP_DLL_HI: u64 = 0;
 
@@ -316,10 +317,18 @@ unsafe fn arm_steps(n: u64) {
 /// Print the ring and the register file. Called only after the walk is over, so
 /// it is not on the trap path and can afford to be readable.
 fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp: u64) {
+    // Full fold-input register file, snapshotted by the caller from the live
+    // trap context (SIG_CTX) before the walk disarms; the CFF tables index on
+    // esi/rdi sums, so a stop without them leaves the dispatch unrecoverable.
+    let ctx: [u64; 11] = unsafe { SIG_CTX };
     println!("[perun] walk stopped: {why}");
     println!("[perun] instructions: {}", unsafe { STEP_COUNT });
     println!(
         "[stop] rip={rip:#018x} edi={edi:#x} rax={rax:#018x} rbx={rbx:#018x} rcx={rcx:#x} rsp={rsp:#018x}"
+    );
+    println!(
+        "[stop] esi={:#x} rdx={:#x} r8={:#x} r9={:#x} r10={:#x} r11={:#x} r12={:#x} r13={:#x} r14={:#x} r15={:#x} rbp={:#x}",
+        ctx[0], ctx[1], ctx[2], ctx[3], ctx[4], ctx[5], ctx[6], ctx[7], ctx[8], ctx[9], ctx[10]
     );
     // Fold-site readout: when the stop lands on a fold read (rcx valid,
     // rax a small index), print the byte the fold is about to consume and
@@ -957,6 +966,19 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
                     "the budget"
                 };
                 let (w, ri, ed, ax, bx, cx, sp) = (why, rip, rdi, rax, rbx, rcx, rsp);
+                SIG_CTX = [
+                    *regs.add(libc::REG_RSI as usize) as u64,
+                    *regs.add(libc::REG_RDX as usize) as u64,
+                    *regs.add(libc::REG_R8 as usize) as u64,
+                    *regs.add(libc::REG_R9 as usize) as u64,
+                    *regs.add(libc::REG_R10 as usize) as u64,
+                    *regs.add(libc::REG_R11 as usize) as u64,
+                    *regs.add(libc::REG_R12 as usize) as u64,
+                    *regs.add(libc::REG_R13 as usize) as u64,
+                    *regs.add(libc::REG_R14 as usize) as u64,
+                    *regs.add(libc::REG_R15 as usize) as u64,
+                    *regs.add(libc::REG_RBP as usize) as u64,
+                ];
                 report_stop(w, ri, ed, ax, bx, cx, sp);
                 if let Some(p) = std::env::var_os("PERUN_TRACE_FILE") {
                     let p = p.to_string_lossy().into_owned();
