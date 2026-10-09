@@ -153,6 +153,29 @@ win32_api! {
         if raw.is_empty() {
             return 0;
         }
+        // The guest builds the adi.pb path out of an uninitialized buffer
+        // (the Windows wrapper that carries the provisioning path does not
+        // exist in the seq harness), so the prefix is stack garbage while
+        // the LEAF names a real ADI cache file. Redirect any such path onto
+        // the canonical appdata tree, where a valid adi.pb already lives.
+        let raw = if raw.contains("adi.pb") {
+            let leaf = if raw.contains("adi-843A713B.pb") {
+                "adi-843A713B.pb"
+            } else {
+                "adi.pb"
+            };
+            let base = appdata_root().unwrap_or_else(|| {
+                std::path::PathBuf::from("/opt/data/home/.perun/appdata/Common")
+            });
+            let canonical = format!(
+                "{}/Apple Computer/iTunes/adi/{leaf}",
+                base.display()
+            );
+            eprintln!("[perun] adi-path redirect: {raw:?} -> {canonical:?}");
+            canonical
+        } else {
+            raw
+        };
         // Resolve through the host so the guest sees a real absolute path, the
         // same canonical form Win32 would have returned. This is the first call
         // on the -45034 continuation that reaches the filesystem, so the guest

@@ -5,7 +5,9 @@
 
 use std::sync::Condvar;
 
-use crate::util::{EventFlags, EventState, HostKind, handle_get, handle_new, read_wide};
+use crate::util::{
+    EventFlags, EventState, HostKind, handle_adopt, handle_get, handle_new, read_wide,
+};
 use crate::win32::{
     BOOL, DWORD, FALSE, HANDLE, INFINITE, LPCSTR, LPCWSTR, SECURITY_ATTRIBUTES, TRUE,
     WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -223,6 +225,23 @@ win32_api! {
         if std::env::var_os("PERUN_TRACE_SYNC").is_some() {
             eprintln!("[sync] WaitForSingleObject({:#x}, {timeout_ms}) kind={:?}", h as usize,
                 handle_get(h).map(|o| match o.kind { HostKind::Event(_) => "Event", HostKind::Mutex{..} => "Mutex", _ => "other" }));
+        }
+        // PERUN_ADOPT_EVENT=1: the worker's success branch reads an event
+        // handle through a slot the session never filled -- a truncated
+        // heap pointer the handle table cannot know. On Windows the
+        // session layer would have minted a real event there. With the
+        // switch on, an unknown-but-plausible handle is ADOPTED: the shim
+        // mints a fresh host event (signaled, so the wait returns at
+        // once), registers it in the table under this handle value, and
+        // reports success. The session director can then coordinate it.
+        let known = handle_get(h).map(|o| &o.kind);
+        if known.is_none()
+            && std::env::var_os("PERUN_ADOPT_EVENT").is_some()
+            && h as usize >= 0x1000
+        {
+            let e = host_event(false, true);
+            handle_adopt(h, e);
+            return WAIT_OBJECT_0;
         }
         match handle_get(h).map(|o| &o.kind) {
             Some(HostKind::Event(e)) => wait_on_event(e, timeout_ms),

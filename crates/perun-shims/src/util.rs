@@ -103,12 +103,37 @@ pub(crate) fn handle_new(kind: HostKind) -> HANDLE {
     ptr as HANDLE
 }
 
+/// ADOPTED handles: the guest sometimes reads an event handle out of a
+/// slot its session never filled -- a truncated heap pointer the live-set
+/// cannot know. `handle_adopt` maps that bogus value onto a real host
+/// event, and `handle_get` resolves the alias first, so the wait/set
+/// machinery keeps working under the fiction.
+pub(crate) fn handle_adopt(bogus: HANDLE, real: HANDLE) {
+    ADOPTED
+        .lock()
+        .unwrap()
+        .insert(bogus as usize, real as usize);
+}
+
+fn adopted_get(bogus: HANDLE) -> Option<HANDLE> {
+    ADOPTED
+        .lock()
+        .unwrap()
+        .get(&(bogus as usize))
+        .map(|v| *v as HANDLE)
+}
+
+static ADOPTED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<usize, usize>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 /// Validate a guest handle. Returns the object reference when live.
 ///
 /// # Safety
 /// Caller must not retain the reference beyond the call.
 pub(crate) unsafe fn handle_get(h: HANDLE) -> Option<&'static HostObject> {
     unsafe {
+        // Adopted bogus values resolve onto their real host object first.
+        let h = adopted_get(h).unwrap_or(h);
         let p = h as usize;
         if p == 0 || p == usize::MAX || p == usize::MAX - 1 {
             return None;
