@@ -167,24 +167,6 @@ fn main() {
         peek_state(&image, "init");
     }
 
-    // ── node 3: configuration mints the session objects ────────────────
-    let wctx = std::fs::read("/opt/data/il/variants/win_ctx.bin").expect("win_ctx container");
-    let wctxp = page(0x2000);
-    put(wctxp, 0, &wctx);
-    unsafe {
-        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
-        let c = ctx.cast::<u64>();
-        std::ptr::write(c.add(0), wctxp as u64);
-        std::ptr::write(c.add(1), 0x30); // len
-        std::ptr::write(c.add(2), 0x4); // flags
-        std::ptr::write(c.add(3), 0x00226564); // measured
-        std::ptr::write(c.add(4), 0x1); // measured
-        std::ptr::write(c.add(9), 0x2); // +0x48 measured
-        let r = f(0xcfe0b46a, ctx as u64, 0, 0);
-        println!("[cfg] rc={r:#x} ({r})");
-        peek_state(&image, "cfg");
-    }
-
     // ── node 3.5: the SECOND init (the live canon's Call 5) ────────────
     // The live cycle ran init AGAIN after the identity/path calls and
     // before the transform; on the Windows lane the identity/path ride in
@@ -213,6 +195,37 @@ fn main() {
         std::ptr::write(c.add(20), 0x30);
         let r = f(0xb0eda7af, ctx as u64, 0, 0);
         println!("[init2] rc={r:#x} ({r})");
+    }
+
+    // ── node 3.5: the canon's middle calls, even though they reject ────
+    // The live cycle ran SetPath (0xb23c691e) and SetID (0xc774d292)
+    // between the two inits and the transform. On the Windows dispatcher
+    // both return -45019 (unknownAdiFunction) -- but the measured
+    // inter-call dependency (the finish matrix re-keying the OTP's fold)
+    // says a call's SIDE EFFECT on the dispatcher cursor can matter more
+    // than its return code. Run both, in the live order, and read what
+    // the transform behind them does.
+    unsafe {
+        // Both calls with pkt_pass2's fold keys (bytes 3/7 = 1): without
+        // them the header fold rejects at -45018 BEFORE the selector, and
+        // the measurement is about the selector's own verdict.
+        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+        *pkt.cast::<u8>().add(3) = 1;
+        *pkt.cast::<u8>().add(7) = 1;
+        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+        let c = ctx.cast::<u64>();
+        std::ptr::write(c.add(0), pkt as u64);
+        std::ptr::write(c.add(1), 0x4000_0000_0010);
+        let r = f(0xb23c691e, ctx as u64, 0, 0);
+        println!("[setpath] rc={r:#x} ({r})");
+        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+        *pkt.cast::<u8>().add(3) = 1;
+        *pkt.cast::<u8>().add(7) = 1;
+        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+        std::ptr::write(c.add(0), pkt as u64);
+        std::ptr::write(c.add(1), 0x4000_0000_0014);
+        let r2 = f(0xc774d292, ctx as u64, 0, 0);
+        println!("[setid] rc={r2:#x} ({r2})");
     }
 
     // ── node 4: transform with the fresh SPIM ───────────────────────────
@@ -260,6 +273,50 @@ fn main() {
                 .map(|b| format!("{b:02x}"))
                 .collect::<String>()
         );
+    }
+
+    // ── node 3: configuration mints the session objects ────────────────
+    let wctx = std::fs::read("/opt/data/il/variants/win_ctx.bin").expect("win_ctx container");
+    let wctxp = page(0x2000);
+    put(wctxp, 0, &wctx);
+    unsafe {
+        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+        let c = ctx.cast::<u64>();
+        std::ptr::write(c.add(0), wctxp as u64);
+        std::ptr::write(c.add(1), 0x30); // len
+        std::ptr::write(c.add(2), 0x4); // flags
+        std::ptr::write(c.add(3), 0x00226564); // measured
+        std::ptr::write(c.add(4), 0x1); // measured
+        std::ptr::write(c.add(9), 0x2); // +0x48 measured
+        let r = f(0xcfe0b46a, ctx as u64, 0, 0);
+        println!("[cfg] rc={r:#x} ({r})");
+        peek_state(&image, "cfg");
+
+        // Configuration with a SYNTHESIZED 48-byte packet (the Windows
+        // lane's own data, no Android stands): bytes 3/7 carry the fold
+        // keys, the tail carries our own I-Client-Time string the live
+        // Call 8 had. The question: does a fold-passing packet let the
+        // configuration mints run on OUR session objects?
+        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+        *pkt.cast::<u8>().add(3) = 1; // fold key, word 0
+        *pkt.cast::<u8>().add(7) = 1; // fold key, word 1
+        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+        std::ptr::write(c.add(0), pkt as u64);
+        std::ptr::write(c.add(1), 0x4000_0000_0010); // len 0x10: the words only
+        std::ptr::write(c.add(3), 0x00226564); // measured
+        std::ptr::write(c.add(4), 0x1); // measured
+        std::ptr::write(c.add(9), 0x2); // +0x48 measured
+        let r2 = f(0xcfe0b46a, ctx as u64, 0, 0);
+        println!("[cfg:synth] rc={r2:#x} ({r2})");
+        let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 48);
+        println!(
+            "[cfg:synth] pkt[0..48] = {}",
+            pk[..48]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
+        peek_state(&image, "cfg_synth");
     }
 
     // ── node 5: the finish opcode probe (0x0b2b3196) ────────────────────

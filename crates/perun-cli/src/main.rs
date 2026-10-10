@@ -248,6 +248,11 @@ static mut R9_STOP: [u32; 8] = [0; 8];
 static mut R9_MARK: [u32; 8] = [0; 8];
 static mut VISIT_910BE: u32 = 0;
 static mut VISIT_905CA: u32 = 0;
+static mut VISIT_9150B: u32 = 0;
+static mut VISIT_900050: u32 = 0;
+static mut VISIT_900385: u32 = 0;
+static mut VISIT_9000DB: u32 = 0;
+static mut VISIT_9111B: u32 = 0;
 static mut R9_STOP_N: usize = 0;
 /// Window sniffer: every instruction in RVA 0x910be..0x91560 records the
 /// full register file, so the fork between the work cluster and the worker
@@ -388,10 +393,24 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
         }
     }
     unsafe {
-        if VISIT_910BE > 0 || VISIT_905CA > 0 {
+        if VISIT_910BE > 0
+            || VISIT_905CA > 0
+            || VISIT_9150B > 0
+            || VISIT_900050 > 0
+            || VISIT_900385 > 0
+            || VISIT_9000DB > 0
+            || VISIT_9111B > 0
+        {
             let a = VISIT_910BE;
             let b = VISIT_905CA;
-            println!("[route] 0x910be visits: {a}, 0x905ca visits: {b}");
+            let c = VISIT_9150B;
+            let d = VISIT_900050;
+            let e = VISIT_900385;
+            let f = VISIT_9000DB;
+            let g = VISIT_9111B;
+            println!(
+                "[route] 910be:{a} 905ca:{b} 9150b:{c} 900050:{d} 900385:{e} 9000db:{f} 9111b:{g}"
+            );
         }
     }
     unsafe {
@@ -805,6 +824,21 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             }
             if rva_here == 0x905ca && VISIT_905CA < 100 {
                 VISIT_905CA += 1;
+            }
+            if rva_here == 0x9150b && VISIT_9150B < 100 {
+                VISIT_9150B += 1;
+            }
+            if rva_here == 0x900050 && VISIT_900050 < 100 {
+                VISIT_900050 += 1;
+            }
+            if rva_here == 0x900385 && VISIT_900385 < 100 {
+                VISIT_900385 += 1;
+            }
+            if rva_here == 0x9000db && VISIT_9000DB < 100 {
+                VISIT_9000DB += 1;
+            }
+            if rva_here == 0x9111b && VISIT_9111B < 100 {
+                VISIT_9111B += 1;
             }
             STEP_ENTERED = true;
             let slot = STEP_IDX & (STEP_RING - 1);
