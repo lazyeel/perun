@@ -41,6 +41,18 @@ fn put(buf: *mut core::ffi::c_void, off: usize, bytes: &[u8]) {
     };
 }
 
+/// The guest's dispatcher-state register (RVA 0x161324): the low dword is
+/// the dispatch offset the 0x90exx cursor family indexes with, the high
+/// dword a counter. Watching it after every opcode shows which call
+/// advances the session state and by how much.
+fn peek_state(image: &Image, tag: &str) {
+    let base = image.base() as u64;
+    for rva in (0x16131cu64..=0x161334u64).step_by(6) {
+        let v = unsafe { std::ptr::read_volatile((base + rva) as *const u64) };
+        println!("[state:{tag}] RVA {rva:#x} = {v:#x}");
+    }
+}
+
 fn main() {
     let image_path = std::env::args().nth(1).unwrap_or_else(|| {
         "/opt/data/adi-pe/extracted/itunes_extracted/iTunes/CoreADI64.dll".into()
@@ -152,6 +164,7 @@ fn main() {
         std::ptr::write(c.add(20), 0x30); // +0xa0 size
         let r = f(0xb0eda7af, ctx as u64, 0, 0);
         println!("[init] rc={r:#x} ({r})");
+        peek_state(&image, "init");
     }
 
     // ── node 3: configuration mints the session objects ────────────────
@@ -169,6 +182,7 @@ fn main() {
         std::ptr::write(c.add(9), 0x2); // +0x48 measured
         let r = f(0xcfe0b46a, ctx as u64, 0, 0);
         println!("[cfg] rc={r:#x} ({r})");
+        peek_state(&image, "cfg");
     }
 
     // ── node 3.5: the SECOND init (the live canon's Call 5) ────────────
@@ -229,6 +243,7 @@ fn main() {
         std::ptr::write(c.add(16), out as u64); // +0x80
         let r = f(0x716bd86c, ctx as u64, 0xffff_ffff, 0);
         println!("[transform] rc={r:#x} ({r})");
+        peek_state(&image, "transform");
     }
 
     // What did transform write into the packet? The live run rewrote the
@@ -253,14 +268,24 @@ fn main() {
     // the transform shape to see the opcode's rejection class: whether it
     // even exists in the Windows dispatcher (not -45019) is the question.
     unsafe {
+        // The live finish packet was the 36-byte transform DIGEST
+        // (hdr 00 00 00 02 + 32B). Ours cannot come from a CPIM we do
+        // not have, but the packet header shape we CAN build: V2 +
+        // 32 bytes derived from OUR fresh SPIM. Whether the DLL reads
+        // the digest's content (session-bound) or only its shape is
+        // exactly what this probe measures.
         std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
-        *pkt.cast::<u8>().add(3) = 1;
-        *pkt.cast::<u8>().add(7) = 1;
+        *pkt.cast::<u32>() = 2; // hdr 00 00 00 02
+        let dg = &start.spim;
+        for i in 0..32usize {
+            *pkt.cast::<u8>().add(4 + i) = dg[dg.len() - 32 + i];
+        }
         std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
         let c = ctx.cast::<u64>();
+        let _ = c;
         std::ptr::write(c.add(0), pkt as u64);
-        std::ptr::write(c.add(1), 0x4000_0000_0034);
-        std::ptr::write(c.add(3), start.spim.len() as u64);
+        std::ptr::write(c.add(1), 0x4000_0000_0024); // len 0x24 | flags 4
+        std::ptr::write(c.add(3), 0x114); // 276, the live +0x18 word high
         std::ptr::write(c.add(6), spimp as u64);
         std::ptr::write(c.add(7), start.spim.len() as u64);
         std::ptr::write(c.add(10), olen as u64);
@@ -268,6 +293,15 @@ fn main() {
         std::ptr::write(c.add(16), out as u64);
         let r = f(0x0b2b3196, ctx as u64, 0, 0);
         println!("[finish] rc={r:#x} ({r})");
+        let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 48);
+        println!(
+            "[finish] pkt[0..48] = {}",
+            pk[..48]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
+        peek_state(&image, "finish");
     }
 
     // ── node 6: the post-finish canon (the live cycle's calls 8-10) ─────
@@ -298,6 +332,7 @@ fn main() {
         std::ptr::write(c.add(20), 0x30);
         let r = f(0xb0eda7af, ctx as u64, 0, 0);
         println!("[init3] rc={r:#x} ({r})");
+        peek_state(&image, "init3");
     }
     // transform-3: the state probe after finish.
     unsafe {
@@ -324,11 +359,16 @@ fn main() {
         std::ptr::write(c.add(16), out as u64);
         let r = f(0x716bd86c, ctx as u64, 0xffff_ffff, 0);
         println!("[transform3] rc={r:#x} ({r})");
+        peek_state(&image, "transform3");
     }
     // OTP after the full canon.
     unsafe {
         std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
-        *pkt.cast::<u8>().add(3) = 2; // the live OTP packet is V2-headed
+        // The fold algebra is opcode-universal (finish just proved it:
+        // V1 words pass, V2 words die at -45018). The live OTP envelope
+        // was V2-headed, but that stand was the Android lane; the
+        // Windows fold demands V1 words, so try both and read the verdicts.
+        *pkt.cast::<u8>().add(3) = 1; // V1 word: the fold gate key
         std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
         let c = ctx.cast::<u64>();
         std::ptr::write(c.add(0), pkt as u64);
