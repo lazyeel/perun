@@ -285,6 +285,15 @@ pub fn finish_provisioning(
     if !ec.is_empty() && ec != "0" {
         return Err(format!("finish: ec={ec}"));
     }
+    // The raw body is the outside oracle: whatever the offline chain
+    // produced, the server's answer names the binding it wants. Log it
+    // (bounded) before parsing, so an ec=0-with-no-ptm answer is as
+    // readable as a rejection.
+    eprintln!(
+        "[gsa] finish body ({} bytes): {}",
+        text.len(),
+        &text[..text.len().min(2048)]
+    );
     let ptm = b64_decode(&xml_value(&text, "ptm").ok_or("finish: no ptm")?)?;
     let tk = b64_decode(&xml_value(&text, "tk").ok_or("finish: no tk")?)?;
     Ok(Finish {

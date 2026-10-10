@@ -363,6 +363,33 @@ fn main() {
         );
     }
 
+    // ── node 4.5: the network finish -- close the loop ──────────────────
+    // The canon: transform writes the CPIM; the CPIM goes to
+    // finishMachineProvisioning; the server answers ptm/tk. Our
+    // transform's worker still reads -45001 (no session state), so the
+    // out buffer is empty -- send what we have and read the server's
+    // own verdict: it validates the CPIM's binding to this machine and
+    // answers ec=<code>. That ec is the FIRST outside oracle for the
+    // offline chain, and the shape of the answer tells whether the
+    // machine-binding lives in the CPIM at all.
+    let out_len = unsafe { std::ptr::read(olen.cast::<u64>()) } as usize;
+    let cpim =
+        unsafe { std::slice::from_raw_parts(out.cast::<u8>(), out_len.min(0x1000)) }.to_vec();
+    println!("[net] cpim candidate: {out_len} bytes (empty unless the worker minted)");
+    match perun_adi_win32::net::finish_provisioning(&id, &ep, &cpim, &start.ptxid) {
+        Ok(fin) => {
+            println!(
+                "[net] FINISH ec=0: ptm {} bytes, tk {} bytes, rinfo {}",
+                fin.ptm.len(),
+                fin.tk.len(),
+                fin.rinfo
+            );
+            std::fs::write("/opt/data/il/ptm.bin", &fin.ptm).expect("ptm");
+            std::fs::write("/opt/data/il/tk.bin", &fin.tk).expect("tk");
+        }
+        Err(e) => println!("[net] finish: {e}"),
+    }
+
     // ── node 3: configuration mints the session objects ────────────────
     let wctx = std::fs::read("/opt/data/il/variants/win_ctx.bin").expect("win_ctx container");
     let wctxp = page(0x2000);
@@ -379,6 +406,38 @@ fn main() {
         let r = f(0xcfe0b46a, ctx as u64, 0, 0);
         println!("[cfg] rc={r:#x} ({r})");
         peek_state(&image, "cfg");
+
+        // The cfg packet must be a 48-byte BLOB (the live cfg_pkt was
+        // hdr 00 00 00 02 | a4 4a 7d bb | 44B session data), not the
+        // container itself -- the container rides the envelope slot.
+        // Synthesize ours: V2 hdr + our fresh SPIM's tail as the data
+        // (this machine's own session material, no Android stands).
+        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+        *pkt.cast::<u32>() = 2; // hdr 00 00 00 02, the live cfg_pkt's
+        let sptail = &start.spim;
+        let n = sptail.len().min(44);
+        std::ptr::copy_nonoverlapping(
+            sptail[sptail.len() - n..].as_ptr(),
+            pkt.cast::<u8>().add(4),
+            n,
+        );
+        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+        std::ptr::write(c.add(0), pkt as u64);
+        std::ptr::write(c.add(1), 0x4000_0000_0030); // len 0x30 | flags 4
+        std::ptr::write(c.add(3), 0x00226564); // measured
+        std::ptr::write(c.add(4), 0x1); // measured
+        std::ptr::write(c.add(9), 0x2); // +0x48 measured
+        let r3 = f(0xcfe0b46a, ctx as u64, 0, 0);
+        println!("[cfg:blob] rc={r3:#x} ({r3})");
+        let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 48);
+        println!(
+            "[cfg:blob] pkt[0..48] = {}",
+            pk[..48]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
+        peek_state(&image, "cfg_blob");
 
         // Configuration with a SYNTHESIZED 48-byte packet (the Windows
         // lane's own data, no Android stands): bytes 3/7 carry the fold
