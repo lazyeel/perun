@@ -114,6 +114,23 @@ fn main() {
                 }
                 let r3 = unsafe { f(bufs[0], bufs[1], bufs[2], bufs[3]) };
                 println!("[corefp] fed call -> {r3:#x} ({r3})");
+                // The measured sequence: the zero-arg call flips an
+                // internal switch (answers -24487), the FIRST buffered
+                // call writes the {2|0xe|0x2e} envelope, and a SECOND
+                // buffered call is where the protocol continues. Run
+                // it: three calls, reading the buffers between each.
+                {
+                    let r3 = unsafe { f(bufs[0], bufs[1], bufs[2], bufs[3]) };
+                    println!("[corefp] 2nd buffered call -> {r3:#x} ({r3})");
+                    let pk = unsafe { std::slice::from_raw_parts(bufs[1] as *const u8, 64) };
+                    println!(
+                        "[corefp] buf1 after 2nd = {}",
+                        pk[..64]
+                            .iter()
+                            .map(|x| format!("{x:02x}"))
+                            .collect::<String>()
+                    );
+                }
                 for (i, b) in bufs.iter().enumerate() {
                     let pk = unsafe { std::slice::from_raw_parts(*b as *const u8, 128) };
                     let nz = pk.iter().filter(|x| **x != 0).count();
@@ -125,6 +142,23 @@ fn main() {
                             .collect::<String>()
                     );
                 }
+            }
+            // The measured sequence: the zero-arg call flips an
+            // internal switch (answers -24487), the FIRST buffered
+            // call writes the {2|0xe|0x2e} envelope, and a SECOND
+            // buffered call is where the protocol continues. Run
+            // it: three calls, reading the buffers between each.
+            {
+                let r3 = unsafe { f(bufs[0], bufs[1], bufs[2], bufs[3]) };
+                println!("[corefp] 2nd buffered call -> {r3:#x} ({r3})");
+                let pk = unsafe { std::slice::from_raw_parts(bufs[1] as *const u8, 64) };
+                println!(
+                    "[corefp] buf1 after 2nd = {}",
+                    pk[..64]
+                        .iter()
+                        .map(|x| format!("{x:02x}"))
+                        .collect::<String>()
+                );
             }
             for (i, b) in bufs.iter().enumerate() {
                 let pk = unsafe { std::slice::from_raw_parts(*b as *const u8, 64) };
