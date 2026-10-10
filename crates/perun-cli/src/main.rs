@@ -996,29 +996,53 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
                             std::ptr::write_volatile((rsp_g + 0x30) as *mut u64, spim);
                         }
                     }
-                    let mut found: Vec<(u64, u64)> = Vec::new();
-                    let is_spim = |p: u64| -> bool {
-                        if p < 0x1000 || (p & 7) != 0 {
-                            return false;
+                    // The deep route dereferences a descriptor at [rsp+0x250] whose
+                    // len|flags VALUE (0x4_0000_0000) must never be scanned
+                    // as a pointer -- the SPIM itself is found through the
+                    // ctx (+0x30), and the descriptor triple is dumped and,
+                    // with PERUN_FIX_DESC, rebuilt as {ptr, len, flags}
+                    // below. No stack pointer-scan: it faulted the handler
+                    // on len|flags and callback-shaped slots alike.
+
+                    // The descriptor triple the deep route dereferences:
+                    // print [rsp+0x240..0x268], and with PERUN_FIX_DESC
+                    // rebuild it as {ptr, len, flags} = {SPIM, 347, 4} --
+                    // the wrapper object the worker's deep route wants.
+                    {
+                        let mut d = [0u64; 6];
+                        for (i, v) in d.iter_mut().enumerate() {
+                            *v = std::ptr::read_volatile(
+                                (rsp_g + 0x240 + (i as u64) * 8) as *const u64,
+                            );
                         }
-                        let hdr = std::ptr::read_volatile(p as *const u32);
-                        let hdr2 = std::ptr::read_volatile((p + 4) as *const u32);
-                        hdr == 4 && hdr2 == 0xf0
-                    };
-                    for (name, v) in [("rcx", env), ("rdx", rdx_g), ("r8", r8_g), ("r9", r9_g)] {
-                        if is_spim(v) {
-                            found.push((1, v));
-                            println!("[wcal] SPIM in register {name}: {v:#x}");
+                        println!(
+                            "[wcal] desc[0x240..0x268] = {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}",
+                            d[0], d[1], d[2], d[3], d[4], d[5]
+                        );
+                        if std::env::var_os("PERUN_FIX_DESC").is_some() {
+                            let spim = std::ptr::read_volatile((rsp_g + 0x30) as *const u64);
+                            // The SPIM header is {be32 hdr=4, be32 0xf0}:
+                            // the length lives at the guest's envelope
+                            // +0x18 (347 for the GSA SPIM). A wrong length
+                            // was being shipped (0xF0000000 -- a shifted
+                            // read of the 0xf0 header dword); the guest
+                            // digested it anyway, but the descriptor
+                            // deserves the truth.
+                            let real_len: u64 =
+                                std::ptr::read_volatile((rsp_g + 0x80) as *const u64);
+                            let real_len = if real_len == 0 || real_len > 0x10000 {
+                                347
+                            } else {
+                                real_len
+                            };
+                            std::ptr::write_volatile((rsp_g + 0x248) as *mut u64, spim);
+                            std::ptr::write_volatile((rsp_g + 0x250) as *mut u64, real_len);
+                            std::ptr::write_volatile((rsp_g + 0x258) as *mut u64, 4);
+                            println!(
+                                "[wcal] fix_desc: {{ptr={spim:#x}, len={real_len}, flags=4}} at rsp+0x248"
+                            );
                         }
                     }
-                    for q in 0..0x200u64 {
-                        let slot = std::ptr::read_volatile((rsp_g + q * 8) as *const u64);
-                        if is_spim(slot) {
-                            found.push((2, slot));
-                            println!("[wcal] SPIM on stack [rsp+{:#x}] = {slot:#x}", q * 8);
-                        }
-                    }
-                    println!("[wcal] spim-pattern hits at the boundary: {}", found.len());
                     WCAL_TAKEN = true;
                 }
             }
@@ -1319,6 +1343,12 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
         push(&hex16(rsi), &mut out, &mut n);
         push(b"\n", &mut out, &mut n);
         libc::write(2, out.as_ptr().cast(), n);
+        // A crash is the ONE moment the ring matters most, and the
+        // walk's own exit paths never run. Dump the tail so every
+        // fault comes with its instruction history.
+        if let Some(p) = std::env::var_os("PERUN_TRACE_FILE") {
+            dump_ring(&p.to_string_lossy());
+        }
         libc::_exit(128 + sig);
     }
 }
