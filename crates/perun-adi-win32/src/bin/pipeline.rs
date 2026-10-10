@@ -231,6 +231,22 @@ fn main() {
         println!("[transform] rc={r:#x} ({r})");
     }
 
+    // What did transform write into the packet? The live run rewrote the
+    // packet in place with a status header; ours may differ and the diff
+    // tells which branch the worker took without needing any sniffers.
+    unsafe {
+        let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 64);
+        let nz = pk.iter().filter(|b| **b != 0).count();
+        println!("[pkt] nonzero in pkt[0..64]: {nz}");
+        println!(
+            "[pkt] pkt[0..48] = {}",
+            pk[..48]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
+    }
+
     // ── node 4.5: the SECOND transform (stateful retry) ────────────────
     unsafe {
         let c = ctx.cast::<u64>();
