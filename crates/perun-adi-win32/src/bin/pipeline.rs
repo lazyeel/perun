@@ -136,6 +136,11 @@ fn main() {
         println!("[env] ident={id_hex:?} path={path:?}");
     }
 
+    // Persist the FRESH GSA SPIM for the seq lane (its fold terms are
+    // what the dispatcher reads; a stale SPIM takes the passive exit).
+    std::fs::write("/opt/data/il/fresh_spim.bin", &start.spim).expect("save spim");
+    println!("[env] fresh spim saved: {} bytes", start.spim.len());
+
     // ── node 2: init with the live Call-1 shape ────────────────────────
     // The live stand carried: V1-word packet (pkt bytes 3 and 7 = 1),
     // len 0x10 with flags 4, a stack tag at +0x10, buffers at

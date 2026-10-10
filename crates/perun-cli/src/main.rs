@@ -840,6 +840,7 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             if rva_here == 0x9111b && VISIT_9111B < 100 {
                 VISIT_9111B += 1;
             }
+
             STEP_ENTERED = true;
             let slot = STEP_IDX & (STEP_RING - 1);
             STEP_RIP[slot] = rip;
