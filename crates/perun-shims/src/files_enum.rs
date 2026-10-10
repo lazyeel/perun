@@ -208,19 +208,13 @@ win32_api! {
             *fs_flags = 0;
         }
         if !serial.is_null() {
-            // Derived from the label this shim reports, so it is stable across
-            // runs and never zero, which is what a fingerprint expects. A
-            // Windows volume always has a serial; leaving the caller's pointer
-            // untouched hands the guest whatever was on its stack.
-            let mut h: u64 = 0x9e37_79b9_7f4a_7c15;
-            for b in label.iter() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-            h ^= h >> 31;
-            // Windows serials are 32-bit; the high bit must stay clear or the
-            // guest reads it as a negative value.
-            *serial = (h as u32) & 0x7fff_ffff | 0x1000_0000;
+            // ONE formula, shared with the request side (machine_id.rs):
+            // the network's X-Mme-Device-Id carries this serial as its
+            // vol4 component, so the server's SPIM is encrypted under
+            // exactly the key the guest rebuilds from this answer. The
+            // Windows serial is 32-bit; the high bit stays clear or the
+            // guest reads it as negative.
+            *serial = crate::machine_id::volume_serial();
         }
         TRUE
     }

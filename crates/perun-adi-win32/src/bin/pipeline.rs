@@ -241,34 +241,63 @@ fn main() {
         peek_state(&image, "init");
     }
 
-    // ── node 3.5: the SECOND init (the live canon's Call 5) ────────────
-    // The live cycle ran init AGAIN after the identity/path calls and
-    // before the transform; on the Windows lane the identity/path ride in
-    // the init envelope itself, so the re-init re-reads them with the
-    // session already established.
+    // ── node 3.5: the SECOND init -- the live Call-5 SHAPE ─────────────
+    // The live Call 5 is NOT a copy of Call 1: the layout differs slot
+    // by slot. Call 5's carries a TIME TAG at +0x10 (and doubled at
+    // +0x18), the identity string WITHOUT dashes at +0x28, the string
+    // "adi" at +0x30, "cannot persist " at +0x68, and the sizes at
+    // +0x80/+0x90/+0x98/+0xa0. This call is what arms the transform:
+    // it hands the guest the identity and the persistence strings the
+    // worker's inputs are built from.
     unsafe {
         std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
         *pkt.cast::<u8>().add(3) = 1;
         *pkt.cast::<u8>().add(7) = 1;
+        // The same 12-byte nonce-tail form the live packets carry
+        // (our zero-tail stand answered -45001 at the parameter gate).
+        let tail: [u8; 12] = [
+            0xc9, 0x34, 0x19, 0x2e, 0x14, 0xf2, 0xae, 0x3f, 0x98, 0x49, 0x66, 0xca,
+        ];
+        std::ptr::copy_nonoverlapping(tail.as_ptr(), pkt.cast::<u8>().add(4), 12);
         std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
         let c = ctx.cast::<u64>();
-        std::ptr::write(c.add(0), pkt as u64);
-        std::ptr::write(c.add(1), 0x0000_0004_0000_0010);
-        std::ptr::write(c.add(2), 0x0000_7fff_0000_0000);
-        std::ptr::write(c.add(3), aux[0] as u64);
-        std::ptr::write(c.add(4), 0x15);
-        std::ptr::write(c.add(5), aux[1] as u64);
-        std::ptr::write(c.add(6), aux[2] as u64);
-        std::ptr::write(c.add(7), 0x0000_7fff_0000_0000);
-        std::ptr::write(c.add(8), aux[3] as u64);
-        std::ptr::write(c.add(9), ident as u64);
-        std::ptr::write(c.add(13), pathb as u64);
-        std::ptr::write(c.add(16), 0x70);
-        std::ptr::write(c.add(18), 0xc2);
-        std::ptr::write(c.add(19), 0xf4);
-        std::ptr::write(c.add(20), 0x30);
+        // +0x10: the live time tag (0x618a2474 = the live stand's unix
+        // stamp doubled into +0x18). Ours: THIS machine's clock, the
+        // same construction.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0x618a_2474);
+        std::ptr::write(c.add(2), now << 32); // +0x10 tag<<32
+        std::ptr::write(c.add(3), (now << 32) | now); // +0x18 doubled
+        std::ptr::write(c.add(4), 0); // +0x20 the live had a code ptr; zeroed for now
+        std::ptr::write(c.add(5), ident as u64); // +0x28 identity, no dashes
+        std::ptr::write(c.add(6), 0); // +0x30 the live "adi" string ptr
+        std::ptr::write(c.add(8), 0); // +0x40
+        std::ptr::write(c.add(9), (0x64e8u64) << 32); // +0x48 the live tag
+        std::ptr::write(c.add(13), 0); // +0x68 "cannot persist" ptr
+        std::ptr::write(c.add(16), 0x70); // +0x80
+        std::ptr::write(c.add(18), 0xc2); // +0x90
+        std::ptr::write(c.add(19), 0xf4); // +0x98
+        std::ptr::write(c.add(20), 0x30); // +0xa0
+        // The envelope's buffer slots that need real strings:
+        put(aux[0], 0, b"adi\0");
+        put(aux[1], 0, b"cannot persist \0");
+        std::ptr::write(c.add(6), aux[0] as u64); // +0x30 "adi"
+        std::ptr::write(c.add(13), aux[1] as u64); // +0x68 the persist string
+        let c2 = ctx.cast::<u64>();
+        std::ptr::write(c2.add(0), pkt as u64);
+        std::ptr::write(c2.add(1), 0x0000_0004_0000_0010);
         let r = f(0xb0eda7af, ctx as u64, 0, 0);
         println!("[init2] rc={r:#x} ({r})");
+        let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 16);
+        println!(
+            "[init2] pkt[0..16] = {}",
+            pk[..16]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
     }
 
     // ── node 3.5: the canon's middle calls, even though they reject ────
@@ -345,6 +374,31 @@ fn main() {
         let r = f(0x716bd86c, ctx as u64, 0xffff_ffff, 0);
         println!("[transform] rc={r:#x} ({r})");
         peek_state(&image, "transform");
+        // The live transform had OLEN=0/OUT=0: the worker's CPIM (if
+        // any) would land IN the SPIM buffer (the envelope's only
+        // writable data slot, +0x30/+0x68 both point there). Diff the
+        // spim page around the SPIM body after the call.
+        let sp0 = std::slice::from_raw_parts(spimp.cast::<u8>(), 0x400);
+        let nz = sp0.iter().filter(|b| **b != 0).count();
+        println!("[spim] nonzero in spim page[0..1024] after transform: {nz}");
+        println!(
+            "[spim] spim[0..64] = {}",
+            sp0[..64]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
+        // The live Call-6 envelope had OLEN=0/OUT=0 -- the CPIM, if
+        // the worker mints one, lands in the SPIM buffer itself. The
+        // page is writable; read what changed past the SPIM body.
+        let n_after = start.spim.len();
+        let tail = std::slice::from_raw_parts(spimp.cast::<u8>().add(n_after), 0x200);
+        let tnz = tail.iter().filter(|b| **b != 0).count();
+        println!("[spim] nonzero in spim[{n_after}..{n_after}+512]: {tnz}");
+        if tnz > 0 {
+            std::fs::write("/opt/data/il/spim_tail_after_transform.bin", tail).unwrap();
+            println!("[spim] wrote /opt/data/il/spim_tail_after_transform.bin");
+        }
     }
 
     // What did transform write into the packet? The live run rewrote the

@@ -37,7 +37,15 @@ pub struct MachineInputs {
 pub fn collect_linux() -> MachineInputs {
     MachineInputs {
         mac: first_mac(),
-        vol4: vec![0; 4],
+        // The ONE source of truth for the volume serial: the shim's
+        // GetVolumeInformationW answers 0x10000000 | fnv32("PERUN"),
+        // and the guest rebuilds its machine key from exactly those
+        // four bytes. The network request must be encrypted under the
+        // SAME key, so vol4 here is the shim's serial verbatim (LE),
+        // not zeros. Any drift between the two halves splits the key:
+        // the server encrypts under one id, the guest decrypts with
+        // another, and every session verdict comes back empty.
+        vol4: volume_serial().to_le_bytes().to_vec(),
         product_id_ascii: std::fs::read("/etc/machine-id")
             .map(trim_nl)
             .unwrap_or_default(),
@@ -83,6 +91,20 @@ pub fn legacy_id(m: &MachineInputs) -> String {
         h32(&wide_from_ascii(&m.product_id_ascii), false),
     ]
     .concat()
+}
+
+/// The shim's GetVolumeInformationW serial, verbatim: one formula,
+/// shared by the request side (this crate) and the guest side
+/// (files_enum.rs answers the same value). Keep the two in lockstep.
+pub fn volume_serial() -> u32 {
+    let label = b"PERUN";
+    let mut h: u64 = 0x9e37_79b9_7f4a_7c15;
+    for b in label.iter() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h ^= h >> 31;
+    (h as u32) & 0x7fff_ffff | 0x1000_0000
 }
 
 fn h32(data: &[u8], upper: bool) -> String {
