@@ -247,15 +247,6 @@ fn main() {
         );
     }
 
-    // ── node 4.5: the SECOND transform (stateful retry) ────────────────
-    unsafe {
-        let c = ctx.cast::<u64>();
-        std::ptr::write(c.add(0), pkt as u64);
-        std::ptr::write(c.add(1), 0x4000_0000_0034);
-        let r = f(0x716bd86c, ctx as u64, 0xffff_ffff, 0);
-        println!("[transform2] rc={r:#x} ({r})");
-    }
-
     // ── node 5: the finish opcode probe (0x0b2b3196) ────────────────────
     // Its envelope shape is not yet decoded (the live Call-7 dump sits in
     // dumprun4 behind the same ctx-printing the others were). Probe with
@@ -277,6 +268,101 @@ fn main() {
         std::ptr::write(c.add(16), out as u64);
         let r = f(0x0b2b3196, ctx as u64, 0, 0);
         println!("[finish] rc={r:#x} ({r})");
+    }
+
+    // ── node 6: the post-finish canon (the live cycle's calls 8-10) ─────
+    // The live cycle ran init AGAIN, then Configuration, then OTP, all
+    // after finish. If finish -- even with the empty digest -- advanced the
+    // session state, the repeated calls read differently. This is the
+    // cheapest state probe there is: same envelopes, new state.
+    unsafe {
+        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+        *pkt.cast::<u8>().add(3) = 1;
+        *pkt.cast::<u8>().add(7) = 1;
+        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+        let c = ctx.cast::<u64>();
+        std::ptr::write(c.add(0), pkt as u64);
+        std::ptr::write(c.add(1), 0x0000_0004_0000_0010);
+        std::ptr::write(c.add(2), 0x0000_7fff_0000_0000);
+        std::ptr::write(c.add(3), aux[0] as u64);
+        std::ptr::write(c.add(4), 0x15);
+        std::ptr::write(c.add(5), aux[1] as u64);
+        std::ptr::write(c.add(6), aux[2] as u64);
+        std::ptr::write(c.add(7), 0x0000_7fff_0000_0000);
+        std::ptr::write(c.add(8), aux[3] as u64);
+        std::ptr::write(c.add(9), ident as u64);
+        std::ptr::write(c.add(13), pathb as u64);
+        std::ptr::write(c.add(16), 0x70);
+        std::ptr::write(c.add(18), 0xc2);
+        std::ptr::write(c.add(19), 0xf4);
+        std::ptr::write(c.add(20), 0x30);
+        let r = f(0xb0eda7af, ctx as u64, 0, 0);
+        println!("[init3] rc={r:#x} ({r})");
+    }
+    // transform-3: the state probe after finish.
+    unsafe {
+        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+        *pkt.cast::<u8>().add(3) = 1;
+        *pkt.cast::<u8>().add(7) = 1;
+        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+        let c = ctx.cast::<u64>();
+        std::ptr::write(c.add(0), pkt as u64);
+        std::ptr::write(c.add(1), 0x4000_0000_0034);
+        std::ptr::write(c.add(3), start.spim.len() as u64);
+        std::ptr::write(c.add(4), urlp as u64);
+        std::ptr::write(c.add(5), 2);
+        std::ptr::write(c.add(6), spimp as u64);
+        std::ptr::write(c.add(7), start.spim.len() as u64);
+        std::ptr::write(c.add(8), 4);
+        std::ptr::write(c.add(9), aux[4] as u64);
+        std::ptr::write(c.add(10), olen as u64);
+        std::ptr::write(c.add(11), start.spim.len() as u64);
+        std::ptr::write(c.add(12), 0);
+        std::ptr::write(c.add(13), spimp as u64);
+        std::ptr::write(c.add(14), 0x1d0);
+        std::ptr::write(c.add(15), urlp as u64);
+        std::ptr::write(c.add(16), out as u64);
+        let r = f(0x716bd86c, ctx as u64, 0xffff_ffff, 0);
+        println!("[transform3] rc={r:#x} ({r})");
+    }
+    // OTP after the full canon.
+    unsafe {
+        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+        *pkt.cast::<u8>().add(3) = 2; // the live OTP packet is V2-headed
+        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+        let c = ctx.cast::<u64>();
+        std::ptr::write(c.add(0), pkt as u64);
+        std::ptr::write(c.add(1), 0x0000_0004_0000_0010);
+        std::ptr::write(c.add(9), aux[5] as u64);
+        let r = f(0x3e58e7f9, ctx as u64, 0, 0);
+        println!("[otp] rc={r:#x} ({r})");
+        // The OTP result, if any, lands in the packet's in-place slot or the
+        // aux buffer; read both.
+        let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 64);
+        println!(
+            "[otp] pkt[0..32] = {}",
+            pk[..32]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
+    }
+
+    // ── the gate-object readout: what did each opcode leave behind? ──────
+    {
+        let base = image.base() as u64;
+        for rva in (0x19dda0u64..=0x19ddb0u64).step_by(8) {
+            let slot = unsafe { std::ptr::read_volatile((base + rva) as *const u64) };
+            println!("[slot] RVA {rva:#x} = {slot:#x}");
+            if slot > 0x1000 && slot < 0x8000_0000_0000 {
+                let mut line = String::new();
+                for off in (0u64..0x40).step_by(8) {
+                    let v = unsafe { std::ptr::read_volatile((slot + off) as *const u64) };
+                    line.push_str(&format!(" {v:016x}"));
+                }
+                println!("[obj]  +0x00..0x38 ={line}");
+            }
+        }
     }
 
     // ── the verdict: did the worker write a CPIM? ────────────────────────
