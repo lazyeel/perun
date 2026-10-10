@@ -142,6 +142,32 @@ fn main() {
     println!("[env] fresh spim saved: {} bytes", start.spim.len());
 
     // ── node 2: init with the live Call-1 shape ────────────────────────
+    // The live Call-1 packet was V2-HEADED with a 12-byte nonce tail
+    // (00 00 00 02 | c9 34 19 2e ...). Our V1-keyed stand passes the
+    // null-session fold but lands the -45001 verdict; the live shape
+    // (V2 header, live terms) is what walked to the -45061 state verdict.
+    // Probe the V2-header form with a zero nonce tail.
+    unsafe {
+        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+        *pkt.cast::<u32>() = 2; // hdr 00 00 00 02, the live Call-1 header
+        let c0 = ctx.cast::<u64>();
+        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+        std::ptr::write(c0.add(0), pkt as u64);
+        std::ptr::write(c0.add(1), 0x4000_0000_0010); // len 0x10 | flags 4
+        std::ptr::write(c0.add(3), 0x0022_6564);
+        std::ptr::write(c0.add(4), 0x1);
+        std::ptr::write(c0.add(9), 0x2);
+        let r = f(0xb0eda7af, ctx as u64, 0, 0);
+        println!("[init:v2] rc={r:#x} ({r})");
+        let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 16);
+        println!(
+            "[init:v2] pkt[0..16] = {}",
+            pk[..16]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
+    }
     // The live stand carried: V1-word packet (pkt bytes 3 and 7 = 1),
     // len 0x10 with flags 4, a stack tag at +0x10, buffers at
     // +0x18/+0x28/+0x30/+0x40, +0x20=21, +0x48 = the IDENTITY STRING,
@@ -150,6 +176,13 @@ fn main() {
         std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
         *pkt.cast::<u8>().add(3) = 1;
         *pkt.cast::<u8>().add(7) = 1;
+        // The live Call-1 packet's 12-byte tail (the wrapper's nonce
+        // terms) -- copied as DATA, a form probe: does the validator
+        // want a non-zero tail where our zeros read as invalid params?
+        let tail: [u8; 12] = [
+            0xc9, 0x34, 0x19, 0x2e, 0x14, 0xf2, 0xae, 0x3f, 0x98, 0x49, 0x66, 0xca,
+        ];
+        std::ptr::copy_nonoverlapping(tail.as_ptr(), pkt.cast::<u8>().add(4), 12);
         std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
         let c = ctx.cast::<u64>();
         std::ptr::write(c.add(0), pkt as u64);
@@ -162,13 +195,49 @@ fn main() {
         std::ptr::write(c.add(7), 0x0000_7fff_0000_0000);
         std::ptr::write(c.add(8), aux[3] as u64);
         std::ptr::write(c.add(9), ident as u64); // +0x48 identity
+        std::ptr::write(c.add(10), 0x40e8_976e_6bde_5309); // +0x50 the live VALUE slot
+        std::ptr::write(c.add(11), 0xbee2_365f_bf17_664b); // +0x58 the live VALUE slot
+        // The live Call-1 carried CODE pointers at +0x28/+0x30/+0x40/
+        // +0x70/+0xa8/+0xb8 (the Android wrapper's own CFF functions).
+        // Ours were zero -- the likely source of init's -45001 instead
+        // of the live -45061. Probe: point them at the DLL's own export
+        // (a valid guest code address) and read the verdict change.
+        let dll_code = image.base() as u64 + 0x5afc0; // vdfut768ig
+        std::ptr::write(c.add(5), dll_code); // +0x28
+        std::ptr::write(c.add(6), dll_code); // +0x30
+        std::ptr::write(c.add(8), dll_code); // +0x40
+        std::ptr::write(c.add(14), dll_code); // +0x70
+        std::ptr::write(c.add(21), dll_code); // +0xa8
+        std::ptr::write(c.add(22), dll_code); // +0xb0 live had a code ptr too
+        std::ptr::write(c.add(23), dll_code); // +0xb8
         std::ptr::write(c.add(13), pathb as u64); // +0x68 path
         std::ptr::write(c.add(16), 0x70); // +0x80 size
         std::ptr::write(c.add(18), 0xc2); // +0x90 size
         std::ptr::write(c.add(19), 0xf4); // +0x98 size
         std::ptr::write(c.add(20), 0x30); // +0xa0 size
-        let r = f(0xb0eda7af, ctx as u64, 0, 0);
-        println!("[init] rc={r:#x} ({r})");
+        // The live Call-1 carried arg3 = a pointer into the ANDROID
+        // wrapper's own CFF code (the wrapper's context). Ours passed
+        // 0 -- the guest dereferenced NULL or validated it missing and
+        // answered -45001 where the live run answered -45061. Probe:
+        // copy the live arg3 BYTES (not the pointer) into a buffer and
+        // hand the buffer's address as arg3.
+        let a3 = page(4096);
+        let a3bytes: [u8; 32] = [
+            0x41, 0x81, 0xc7, 0xea, 0x3b, 0x21, 0xcf, 0x44, 0x89, 0xff, 0x48, 0x8b, 0xb5, 0xe0,
+            0xfd, 0xff, 0xff, 0xff, 0x15, 0xed, 0x9a, 0x07, 0x00, 0x48, 0x8b, 0xbd, 0xb0, 0xfe,
+            0xff, 0xff, 0x89, 0xc1,
+        ];
+        std::ptr::copy_nonoverlapping(a3bytes.as_ptr(), a3.cast::<u8>(), 32);
+        // The live Call-1 envelope carried code pointers at +0x90/
+        // +0xa8/+0xb0/+0xb8 too (the wrapper's table, the same one
+        // SetID and transform showed). Probe them like the rest.
+        let dll_code = image.base() as u64 + 0x5afc0;
+        std::ptr::write(c.add(18), dll_code); // +0x90
+        std::ptr::write(c.add(21), dll_code); // +0xa8
+        std::ptr::write(c.add(22), dll_code); // +0xb0
+        std::ptr::write(c.add(23), dll_code); // +0xb8
+        let r = f(0xb0eda7af, ctx as u64, 0, a3 as u64);
+        println!("[init] rc={r:#x} ({r}) arg3={:p}", a3);
         peek_state(&image, "init");
     }
 
@@ -259,6 +328,20 @@ fn main() {
         std::ptr::write(c.add(14), 0x1d0); // +0x70
         std::ptr::write(c.add(15), urlp as u64); // +0x78
         std::ptr::write(c.add(16), out as u64); // +0x80
+        // The live Call-6 carried FIVE wrapper code pointers at
+        // +0x88..+0xa8 and the identity bytes at +0xb0/+0xb8; ours
+        // had neither. Probe: the DLL's own export as a valid guest
+        // code address, and our identity string inline.
+        let dll_code = image.base() as u64 + 0x5afc0;
+        std::ptr::write(c.add(17), dll_code); // +0x88
+        std::ptr::write(c.add(18), dll_code); // +0x90
+        std::ptr::write(c.add(19), dll_code); // +0x98
+        std::ptr::write(c.add(20), dll_code); // +0xa0
+        std::ptr::write(c.add(21), dll_code); // +0xa8
+        let idsrc = std::slice::from_raw_parts(ident.cast::<u8>(), 16);
+        for (i, b) in idsrc.iter().enumerate() {
+            std::ptr::write(ctx.cast::<u8>().add(0xb0 + i), *b);
+        }
         let r = f(0x716bd86c, ctx as u64, 0xffff_ffff, 0);
         println!("[transform] rc={r:#x} ({r})");
         peek_state(&image, "transform");

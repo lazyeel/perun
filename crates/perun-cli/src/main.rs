@@ -3212,6 +3212,37 @@ fn cmd_seq(args: &[String]) -> i32 {
             }
         }
     }
+    // The walker's sniffers fire inside seq too; report them here so the
+    // scripted lane gets the same worker-call telemetry the call lane has.
+    unsafe {
+        if WCAL_TAKEN {
+            let env = WCAL_ENV;
+            let target = WCAL_TARGET;
+            let rsp_g = WCAL_RSP;
+            let bytes = WCAL_ENV_BYTES;
+            println!(
+                "[wcal] worker call: target={target:#x} env={env:#x} rsp={rsp_g:#x} env_bytes={bytes:02x?}"
+            );
+        }
+        if WDEC_N > 0 {
+            let n = WDEC_N;
+            println!("[wdec] {n} rows in 0x900050..0x9000c9");
+            for w in 0..n {
+                println!(
+                    "[wdec] {w:2} rva={:#x} rax={:#x} rcx={:#x} rdx={:#x} rdi={:#x} r14={:#x} r15={:#x} rbx={:#x} rsp={:#x}",
+                    WDEC_RVAS[w],
+                    WDEC_ROWS[w][0],
+                    WDEC_ROWS[w][1],
+                    WDEC_ROWS[w][2],
+                    WDEC_ROWS[w][3],
+                    WDEC_ROWS[w][4],
+                    WDEC_ROWS[w][5],
+                    WDEC_ROWS[w][6],
+                    WDEC_ROWS[w][7]
+                );
+            }
+        }
+    }
     println!("[seq] done ({step} steps)");
     0
 }
