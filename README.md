@@ -174,7 +174,7 @@ perun seq    /path/to/CoreADI64.dll vdfut768ig --script=session.txt
 perun scaffold 'KERNEL32!FooBar(0x1, 0x0, 0x0, 0x0)'
 ```
 
-On Apple's `CoreADI64.dll` (iTunes for Windows, x86_64, static MSVC CRT) the image initializes with every import resolved — 111 Win32 APIs implemented — and the ADI dispatcher runs end-to-end up to its provisioning gate.
+On Apple's `CoreADI64.dll` (iTunes for Windows, x86_64, static MSVC CRT) the image initializes with every import resolved — 123 Win32 APIs implemented — and the ADI dispatcher runs end-to-end through the fold gates and into its session worker.
 
 `run` takes `--verbose`, `--trace` (log the instrumented Win32 call sites — partial coverage, not every shim), `--trace-file F` (redirect stderr to a file, where the trace lines land) and `--no-teb` (skip TEB initialization when reproducing a load that hangs before it).
 
@@ -182,11 +182,11 @@ On Apple's `CoreADI64.dll` (iTunes for Windows, x86_64, static MSVC CRT) the ima
 
 `seq` loads one image and runs `DllMain` once, then drives a script of export calls in the same process so guest state carries between them. One verb per line, `#` starts a comment: `load NAME FILE`, `poke TARGET VALUE`, `call [EXPORT] A0 A1 A2 A3` (arguments are tokens; the export defaults to `vdfut768ig`), `zero scratch|ctx`, and `dump` (every non-zero qword of scratch and ctx). Use it when each call in the session should differ — `PERUN_SEQ=N` covers the case where they are identical. Export names match the export table case-sensitively.
 
-**The provisioning gate is characterized, not bypassed** — and that is the actual result. The check is an in-memory provisioning-state flag consulted before command dispatch; the header validator behind the second failure exit is decoded down to its four byte-reads and OR-fold; and the outcome was shown to gate on missing provisioned state rather than on any forgeable input. Two-trampoline zeroing, a clean ZF flip, register canaries and live session content all leave the outcome unchanged, and a valid header is not obtainable offline. The real caller is CoreFP's eight-call session cluster rather than a single call, which is what `perun seq` exists to reproduce. The full analysis is [RESEARCH.md](RESEARCH.md) (§ 2.2, § 4.7, § 5.8, § 6.7).
+**The provisioning gates are solved, and the session loop is mapped** — that is the current result. The fold barrier's algebra is closed (`r9d = E + 0x4069D332`; the gate is a `00 00 00 01` packet word with zero accumulator terms), and with the canonical `pkt_pass2` envelope the transform passes it force-free and invokes the session worker, which publishes its verdict in place into the packet. The whole opcode canon (cvu, init, Configuration, transform, finish, OTP) runs natively in one force-free process (`pipeline.rs`): init and finish return 0, OTP generates its nonce content and stops only at the session-body check. What remains is a single arc — the network round-trip that mints the session flags (GSA finish against the digest of the first CPIM) — which is exactly the Phase-1 definition of done. The full analysis is [RESEARCH.md](RESEARCH.md) (§ 2.2, § 4.7, § 5.8, § 5.10, § 6.7).
 
 ### Research harnesses
 
-The ADI findings are reproduced by four example binaries, not only by hand:
+The ADI findings are reproduced by four example binaries and one end-to-end driver, not only by hand:
 
 | Example | What it establishes |
 |---|---|
@@ -194,8 +194,9 @@ The ADI findings are reproduced by four example binaries, not only by hand:
 | `examples/feed_spim.rs` | live spim fed through honest pointers across layout and command matrices, one child process per case |
 | `examples/fpdi_emul.rs` | the `fpdi` transport rules cell by cell, with local stub, live probe and self-checks |
 | `examples/watch.rs` | mprotect watchpoints attributing first touches to exact RVAs |
+| `adi-win32/src/bin/pipeline.rs` | the whole opcode canon force-free in one process: GSA start (live SPIM under this machine's device-id) → cvu → init → Configuration → transform → finish → init3 → transform3 → OTP, with the packet-publication, gate-object and dispatcher-state readouts |
 
-Run one with `cargo run --release --example chain`.
+Run one with `cargo run --release --example chain`; the pipeline is a bin — `cargo run --release -p perun-adi-win32 --bin pipeline`.
 
 ### Environment
 
@@ -236,7 +237,7 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
 
 | File | What it covers |
 |---|---|
-| [RESEARCH.md](RESEARCH.md) | The unified specification: the Mach-O/FairPlay SAP lane (binary map, entry points, memory invariants, protocol, benchmarks, prior-art credits) and the Win32/PE ADI lane (runtime invariants, provisioning-gate analysis, 20-row verification log — § 2.2, § 4.7, § 5.8, § 6.7) |
+| [RESEARCH.md](RESEARCH.md) | The unified specification: the Mach-O/FairPlay SAP lane (binary map, entry points, memory invariants, protocol, benchmarks, prior-art credits) and the Win32/PE ADI lane (runtime invariants, provisioning-gate analysis, 20-row verification log — § 2.2, § 4.7, § 5.8, § 5.10, § 6.7) |
 | [NOTICE](NOTICE) | Attribution for the code and for third-party components compiled into the binary |
 
 ## Obtaining guest binaries
