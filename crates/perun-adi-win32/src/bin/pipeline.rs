@@ -268,117 +268,73 @@ fn main() {
     // the transform shape to see the opcode's rejection class: whether it
     // even exists in the Windows dispatcher (not -45019) is the question.
     unsafe {
-        // The live finish packet was the 36-byte transform DIGEST
-        // (hdr 00 00 00 02 + 32B). Ours cannot come from a CPIM we do
-        // not have, but the packet header shape we CAN build: V2 +
-        // 32 bytes derived from OUR fresh SPIM. Whether the DLL reads
-        // the digest's content (session-bound) or only its shape is
-        // exactly what this probe measures.
-        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
-        *pkt.cast::<u32>() = 2; // hdr 00 00 00 02
         let dg = &start.spim;
-        for i in 0..32usize {
-            *pkt.cast::<u8>().add(4 + i) = dg[dg.len() - 32 + i];
+        // The finish matrix, ungated: the four double-V1 probes (each
+        // rc=0x0, each publishing the worker's -45001 verdict in place)
+        // are what shifts the dispatcher so the FOLLOWING OTP's dword-1|1
+        // packet passes its header fold (pipe17 measured: matrix then
+        // init3+transform3 then OTP = 0x0; without the matrix the OTP
+        // reads -45018, 5/5). The first measured inter-call dependency.
+        {
+            for (len, dname, dg_bytes) in [
+                (0x24u64, "z24", None),
+                (0x24, "s24", Some(dg)),
+                (0x34, "z34", None),
+                (0x34, "s34", Some(dg)),
+            ] {
+                std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+                *pkt.cast::<u8>().add(3) = 1;
+                *pkt.cast::<u8>().add(7) = 1;
+                if let Some(d) = dg_bytes {
+                    for i in 0..32usize {
+                        *pkt.cast::<u8>().add(8 + i) = d[d.len() - 32 + i];
+                    }
+                }
+                std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+                let c = ctx.cast::<u64>();
+                std::ptr::write(c.add(0), pkt as u64);
+                std::ptr::write(c.add(1), 0x4000_0000_0000 | len);
+                std::ptr::write(c.add(3), 0x114);
+                std::ptr::write(c.add(6), spimp as u64);
+                std::ptr::write(c.add(7), start.spim.len() as u64);
+                std::ptr::write(c.add(10), olen as u64);
+                std::ptr::write(c.add(13), spimp as u64);
+                std::ptr::write(c.add(16), out as u64);
+                let r = f(0x0b2b3196, ctx as u64, 0, 0);
+                println!("[finish:{dname}] rc={r:#x} ({r})");
+                let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 48);
+                println!(
+                    "[finish:{dname}] pkt[0..48] = {}",
+                    pk[..48]
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>()
+                );
+                peek_state(&image, &format!("finish_{dname}"));
+            }
         }
-        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
-        let c = ctx.cast::<u64>();
-        let _ = c;
-        std::ptr::write(c.add(0), pkt as u64);
-        std::ptr::write(c.add(1), 0x4000_0000_0024); // len 0x24 | flags 4
-        std::ptr::write(c.add(3), 0x114); // 276, the live +0x18 word high
-        std::ptr::write(c.add(6), spimp as u64);
-        std::ptr::write(c.add(7), start.spim.len() as u64);
-        std::ptr::write(c.add(10), olen as u64);
-        std::ptr::write(c.add(13), spimp as u64);
-        std::ptr::write(c.add(16), out as u64);
-        let r = f(0x0b2b3196, ctx as u64, 0, 0);
-        println!("[finish] rc={r:#x} ({r})");
-        let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 48);
-        println!(
-            "[finish] pkt[0..48] = {}",
-            pk[..48]
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        );
-        peek_state(&image, "finish");
     }
 
-    // ── node 6: the post-finish canon (the live cycle's calls 8-10) ─────
-    // The live cycle ran init AGAIN, then Configuration, then OTP, all
-    // after finish. If finish -- even with the empty digest -- advanced the
-    // session state, the repeated calls read differently. This is the
-    // cheapest state probe there is: same envelopes, new state.
+    // OTP, minimal null-session envelope: the fold runs on dword-1 words
+    // (pkt_pass2's shape) and returns 0 with the packet untouched -- the
+    // canon's verdict channel reports nothing to publish. The live-shaped
+    // 24-slot envelope (nested envelopes, writer buffers, the 60/487/28/24/16
+    // sizes) is decoded and wired, but on a null session the dispatcher
+    // rejects it at the header fold (-45018): richer slots demand the live
+    // session state. It is kept in the file's history for the day the flags
+    // exist; the minimal form is what a null session can run.
     unsafe {
         std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
-        *pkt.cast::<u8>().add(3) = 1;
-        *pkt.cast::<u8>().add(7) = 1;
+        *pkt.cast::<u8>().add(3) = 1; // byte 3 = 1: word 0's fold key
+        *pkt.cast::<u8>().add(7) = 1; // byte 7 = 1: word 1's fold key
         std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
         let c = ctx.cast::<u64>();
         std::ptr::write(c.add(0), pkt as u64);
-        std::ptr::write(c.add(1), 0x0000_0004_0000_0010);
-        std::ptr::write(c.add(2), 0x0000_7fff_0000_0000);
-        std::ptr::write(c.add(3), aux[0] as u64);
-        std::ptr::write(c.add(4), 0x15);
-        std::ptr::write(c.add(5), aux[1] as u64);
-        std::ptr::write(c.add(6), aux[2] as u64);
-        std::ptr::write(c.add(7), 0x0000_7fff_0000_0000);
-        std::ptr::write(c.add(8), aux[3] as u64);
-        std::ptr::write(c.add(9), ident as u64);
-        std::ptr::write(c.add(13), pathb as u64);
-        std::ptr::write(c.add(16), 0x70);
-        std::ptr::write(c.add(18), 0xc2);
-        std::ptr::write(c.add(19), 0xf4);
-        std::ptr::write(c.add(20), 0x30);
-        let r = f(0xb0eda7af, ctx as u64, 0, 0);
-        println!("[init3] rc={r:#x} ({r})");
-        peek_state(&image, "init3");
-    }
-    // transform-3: the state probe after finish.
-    unsafe {
-        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
-        *pkt.cast::<u8>().add(3) = 1;
-        *pkt.cast::<u8>().add(7) = 1;
-        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
-        let c = ctx.cast::<u64>();
-        std::ptr::write(c.add(0), pkt as u64);
-        std::ptr::write(c.add(1), 0x4000_0000_0034);
-        std::ptr::write(c.add(3), start.spim.len() as u64);
-        std::ptr::write(c.add(4), urlp as u64);
-        std::ptr::write(c.add(5), 2);
-        std::ptr::write(c.add(6), spimp as u64);
-        std::ptr::write(c.add(7), start.spim.len() as u64);
-        std::ptr::write(c.add(8), 4);
-        std::ptr::write(c.add(9), aux[4] as u64);
-        std::ptr::write(c.add(10), olen as u64);
-        std::ptr::write(c.add(11), start.spim.len() as u64);
-        std::ptr::write(c.add(12), 0);
-        std::ptr::write(c.add(13), spimp as u64);
-        std::ptr::write(c.add(14), 0x1d0);
-        std::ptr::write(c.add(15), urlp as u64);
-        std::ptr::write(c.add(16), out as u64);
-        let r = f(0x716bd86c, ctx as u64, 0xffff_ffff, 0);
-        println!("[transform3] rc={r:#x} ({r})");
-        peek_state(&image, "transform3");
-    }
-    // OTP after the full canon.
-    unsafe {
-        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
-        // The fold algebra is opcode-universal (finish just proved it:
-        // V1 words pass, V2 words die at -45018). The live OTP envelope
-        // was V2-headed, but that stand was the Android lane; the
-        // Windows fold demands V1 words, so try both and read the verdicts.
-        *pkt.cast::<u8>().add(3) = 1; // V1 word: the fold gate key
-        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
-        let c = ctx.cast::<u64>();
-        std::ptr::write(c.add(0), pkt as u64);
-        std::ptr::write(c.add(1), 0x0000_0004_0000_0010);
-        std::ptr::write(c.add(9), aux[5] as u64);
+        std::ptr::write(c.add(1), 0x4000_0000_0010); // len 0x10 | flags 4
+        std::ptr::write(c.add(9), aux[5] as u64); // +0x48 (the live had a buffer)
         let r = f(0x3e58e7f9, ctx as u64, 0, 0);
         println!("[otp] rc={r:#x} ({r})");
-        // The OTP result, if any, lands in the packet's in-place slot or the
-        // aux buffer; read both.
-        let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 64);
+        let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 32);
         println!(
             "[otp] pkt[0..32] = {}",
             pk[..32]
@@ -386,6 +342,7 @@ fn main() {
                 .map(|b| format!("{b:02x}"))
                 .collect::<String>()
         );
+        peek_state(&image, "otp");
     }
 
     // ── the gate-object readout: what did each opcode leave behind? ──────
