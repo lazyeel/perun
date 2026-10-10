@@ -303,6 +303,24 @@ win32_api! {
 }
 
 win32_api! {
+    /// HMODULE LoadLibraryA(LPCSTR);
+    unsafe extern "win64" fn LoadLibraryA(name: LPCSTR) -> HANDLE { unsafe {
+        let n = read_narrow(name);
+        let n = String::from_utf8_lossy(&n).into_owned();
+        eprintln!("[perun] LoadLibraryA({n:?})");
+        // Dependent guest DLLs are not loaded by the shim itself; the
+        // host registers their exports under 0xAD000000+ handles and
+        // GetProcAddress resolves from there. A stable per-name token
+        // keeps repeated calls returning the same module handle.
+        let mut h: u64 = 0xAD00_0001;
+        for b in n.bytes() {
+            h = h.wrapping_mul(31).wrapping_add(b as u64);
+        }
+        h as HANDLE
+    }}
+}
+
+win32_api! {
     /// HANDLE LoadLibraryExW(LPCWSTR, HANDLE, DWORD);
     unsafe extern "win64" fn LoadLibraryExW(
         name: LPCWSTR,

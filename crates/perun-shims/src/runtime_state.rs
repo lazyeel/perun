@@ -19,3 +19,12 @@ pub fn lookup_export(module: usize, name: &str) -> Option<*mut core::ffi::c_void
     g.as_ref()
         .and_then(|m| m.get(&(module, name.to_string())).map(|p| p.0))
 }
+
+/// Register an export under a module handle: a host that loaded a guest
+/// DLL can hand its exports to another guest's GetProcAddress calls.
+/// The handle space is the host's choice; perun reserves 0xAD000000+.
+pub fn register_export(module: usize, name: &str, ptr: *const core::ffi::c_void) {
+    let mut g = RUNTIME_EXPORTS.lock().unwrap();
+    g.get_or_insert_with(BTreeMap::new)
+        .insert((module, name.to_string()), SendPtr(ptr as *mut _));
+}
