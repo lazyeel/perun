@@ -265,6 +265,7 @@ static mut WCAL_ENV_BYTES: [u8; 8] = [0; 8];
 /// The walker itself records r9d on every visit to the barrier window.
 static mut R9_STOP: [u32; 8] = [0; 8];
 static mut R9_MARK: [u32; 8] = [0; 8];
+static mut STEPS_ON_COUNT: usize = 0;
 static mut VISIT_910BE: u32 = 0;
 static mut VISIT_905CA: u32 = 0;
 static mut VISIT_9150B: u32 = 0;
@@ -3184,7 +3185,13 @@ fn cmd_seq(args: &[String]) -> i32 {
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0);
-                if steps > 0 && unsafe { !STEP_ARMED } {
+                let arm_on: usize = std::env::var("PERUN_STEPS_ON")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1);
+                let this_call_idx = unsafe { STEPS_ON_COUNT };
+                unsafe { STEPS_ON_COUNT += 1 };
+                if steps > 0 && unsafe { !STEP_ARMED } && arm_on == this_call_idx + 1 {
                     unsafe {
                         STEP_DLL_LO = image.base() as u64;
                         STEP_DLL_HI = STEP_DLL_LO + 0x1A_5000;

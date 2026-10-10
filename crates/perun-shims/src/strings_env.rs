@@ -344,6 +344,14 @@ win32_api! {
         let n = String::from_utf8_lossy(&n);
         // 1. Explicitly registered runtime exports (per-module overrides).
         if let Some(p) = crate::runtime_state::lookup_export(module as usize, &n) {
+            // The spy lane: a watched name answers with the logging
+            // trampoline instead of the real export -- the wrapper's
+            // calls get fully dumped (args, ctx, packet, rc, after-
+            // state) while still forwarding to the genuine code.
+            if crate::runtime_state::spy_hits(&n) {
+                eprintln!("[perun] GetProcAddress({n:?}) -> SPY trampoline");
+                return crate::runtime_state::spy_trampoline_addr();
+            }
             return p;
         }
         // 2. Api-set DLLs (api-ms-win-*) are forwarders: the functions they

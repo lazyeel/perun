@@ -62,6 +62,14 @@ fn main() {
             "[corefp] CoreADI64 loaded @{:#x}; exports registered under {h:#x}",
             adi_base as usize
         );
+        // The spy: GetProcAddress('vdfut768ig') now answers the
+        // logging trampoline, which dumps args/ctx/packet before and
+        // after and forwards to the real dispatcher. CoreFP's first
+        // ADI call becomes a complete envelope specimen.
+        if let Some(ptr) = adi.get_export_by_name("vdfut768ig") {
+            perun_shims::runtime_state::install_spy("vdfut768ig", ptr as *mut core::ffi::c_void);
+            println!("[corefp] spy installed on vdfut768ig");
+        }
     }
     if let Ok(name) = std::env::var("PERUN_COREFP_CALL") {
         let p = image.get_export_by_name(&name).expect("export");
