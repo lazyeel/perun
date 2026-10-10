@@ -260,12 +260,19 @@ static mut WCAL_TARGET: u64 = 0;
 static mut WCAL_ENV: u64 = 0;
 static mut WCAL_RSP: u64 = 0;
 static mut WCAL_ENV_BYTES: [u8; 8] = [0; 8];
+static mut WCAL_RDX: u64 = 0;
+static mut WCAL_R8: u64 = 0;
+static mut WCAL_R9: u64 = 0;
+static mut WRET_TAKEN: bool = false;
+static mut WRET_RAX: u64 = 0;
+static mut WRET_RDX: u64 = 0;
 /// The second barrier (RVA 0x88fd68, `cmp $0x4069d333,%r9d`) is downstream
 /// of the fold bridge and gdb cannot watch it while the walk owns SIGTRAP.
 /// The walker itself records r9d on every visit to the barrier window.
 static mut R9_STOP: [u32; 8] = [0; 8];
 static mut R9_MARK: [u32; 8] = [0; 8];
 static mut STEPS_ON_COUNT: usize = 0;
+static mut SHIM_WAS_IN: bool = false;
 static mut VISIT_910BE: u32 = 0;
 static mut VISIT_905CA: u32 = 0;
 static mut VISIT_9150B: u32 = 0;
@@ -761,8 +768,28 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             // trap in the handler costs two stores, which is cheap enough to leave
             // TF on and simply not record the instructions that are not ours.
             if rip < STEP_DLL_LO || rip >= STEP_DLL_HI {
+                // Crossing into host code: log the shim's NAME once per
+                // crossing, so a crash inside a shim names the callee
+                // without a debugger (gdb breaks the walk's TRAP flow).
+                if !SHIM_WAS_IN {
+                    let table = ShimTable::collect();
+                    let mut name: &str = "?";
+                    for n in table.names() {
+                        if let Some(p) = table.get(n)
+                            && rip == p as u64
+                        {
+                            name = n;
+                            break;
+                        }
+                    }
+                    eprintln!("[shim] -> {name} rip={rip:#x}");
+                    SHIM_WAS_IN = true;
+                }
                 *regs.add(libc::REG_EFL as usize) = (flags | EFLAGS_TF) as i64;
                 return;
+            }
+            if SHIM_WAS_IN {
+                SHIM_WAS_IN = false;
             }
 
             // Forced registers, applied to the live context so the instruction at
@@ -881,6 +908,21 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             // Sniff the worker call site once: RVA 0x9150b is
             // `call *0x548(%rsp)`. The slot holds the worker address, and
             // rcx names the 8-byte mini-envelope the worker decodes.
+            // The worker's RETURN value: the first step at 0x91512
+            // (right after `call *0x548`) carries RAX as the worker
+            // left it -- the verdict BEFORE the post block decides
+            // what to publish.
+            if !WRET_TAKEN {
+                let rva = rip - STEP_DLL_LO;
+                if rva == 0x91512 {
+                    let wr_rax = rax;
+                    let wr_rdx = *regs.add(libc::REG_RDX as usize) as u64;
+                    WRET_RAX = wr_rax;
+                    WRET_RDX = wr_rdx;
+                    WRET_TAKEN = true;
+                    println!("[wret] worker returned: rax={wr_rax:#x} rdx={wr_rdx:#x}");
+                }
+            }
             if !WCAL_TAKEN {
                 let rva = rip - STEP_DLL_LO;
                 if rva == 0x9150b {
@@ -897,6 +939,86 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
                             std::ptr::read_volatile((env + i as u64) as *const u8),
                         );
                     }
+                    // The call-boundary slice: every register the
+                    // worker's contract can read, plus the stack window
+                    // [rsp .. rsp+0x600] qword-by-qword, each tested for
+                    // pointing at a 00-00-00-04-headed blob (our SPIM's
+                    // first bytes) -- the question "where is the SPIM
+                    // pointer at the boundary" answered by pattern, not
+                    // by a runtime address.
+                    let rdx_g = *regs.add(libc::REG_RDX as usize) as u64;
+                    let r8_g = *regs.add(libc::REG_R8 as usize) as u64;
+                    let r9_g = *regs.add(libc::REG_R9 as usize) as u64;
+                    println!(
+                        "[wcal] boundary @0x9150b: rcx={env:#x} rdx={rdx_g:#x} r8={r8_g:#x} r9={r9_g:#x} rsp={rsp_g:#x} target={target:#x}"
+                    );
+                    WCAL_RDX = rdx_g;
+                    WCAL_R8 = r8_g;
+                    WCAL_R9 = r9_g;
+                    // The envelope slots the worker's frame names:
+                    // +0x30 = the SPIM pointer per the transform
+                    // envelope, +0x548 = the worker target. Read both
+                    // explicitly -- the pattern scan answers "where",
+                    // the named slots answer "what the contract says".
+                    for q in 0..32u64 {
+                        let v = std::ptr::read_volatile((rsp_g + q * 8) as *const u64);
+                        println!("[wcal] frame[+{:#04x}] = {v:#x}", q * 8);
+                    }
+                    for (name, off) in [
+                        ("rsp+0x30", 0x30u64),
+                        ("rsp+0x68", 0x68),
+                        ("rsp+0x80", 0x80),
+                        ("rsp+0x548", 0x548),
+                        ("rsp-0x30", 0u64),
+                    ] {
+                        let v = if off == 0 {
+                            std::ptr::read_volatile((rsp_g - 0x30) as *const u64)
+                        } else {
+                            std::ptr::read_volatile((rsp_g + off) as *const u64)
+                        };
+                        println!("[wcal] slot {name} = {v:#x}");
+                    }
+                    // PERUN_FIX30CTX=<off>: the slot [rsp+off] holds
+                    // the transform ctx pointer; copy ctx[+0x30] (the
+                    // SPIM slot of the envelope) into [rsp+0x30] -- the
+                    // worker's frame slot measured EMPTY at the
+                    // boundary, and the SPIM entry is the worker's
+                    // first crypto input.
+                    if let Ok(o) = std::env::var("PERUN_FIX30CTX") {
+                        let off: u64 =
+                            u64::from_str_radix(o.trim_start_matches("0x"), 16).unwrap_or(0);
+                        if off > 0 {
+                            let ctxp = std::ptr::read_volatile((rsp_g + off) as *const u64);
+                            let spim = std::ptr::read_volatile((ctxp + 0x30) as *const u64);
+                            println!(
+                                "[wcal] fix30: ctx={ctxp:#x} ctx[+0x30]={spim:#x} -> [rsp+0x30]"
+                            );
+                            std::ptr::write_volatile((rsp_g + 0x30) as *mut u64, spim);
+                        }
+                    }
+                    let mut found: Vec<(u64, u64)> = Vec::new();
+                    let is_spim = |p: u64| -> bool {
+                        if p < 0x1000 || (p & 7) != 0 {
+                            return false;
+                        }
+                        let hdr = std::ptr::read_volatile(p as *const u32);
+                        let hdr2 = std::ptr::read_volatile((p + 4) as *const u32);
+                        hdr == 4 && hdr2 == 0xf0
+                    };
+                    for (name, v) in [("rcx", env), ("rdx", rdx_g), ("r8", r8_g), ("r9", r9_g)] {
+                        if is_spim(v) {
+                            found.push((1, v));
+                            println!("[wcal] SPIM in register {name}: {v:#x}");
+                        }
+                    }
+                    for q in 0..0x200u64 {
+                        let slot = std::ptr::read_volatile((rsp_g + q * 8) as *const u64);
+                        if is_spim(slot) {
+                            found.push((2, slot));
+                            println!("[wcal] SPIM on stack [rsp+{:#x}] = {slot:#x}", q * 8);
+                        }
+                    }
+                    println!("[wcal] spim-pattern hits at the boundary: {}", found.len());
                     WCAL_TAKEN = true;
                 }
             }

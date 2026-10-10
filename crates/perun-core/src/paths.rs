@@ -137,7 +137,18 @@ pub fn preflight() -> Result<(), BadDir> {
 }
 
 pub fn adi_cache() -> Result<PathBuf, BadDir> {
-    Ok(dir()?.join("adi"))
+    // The iTunes lane's own canon: the wrapper keeps its provisioning
+    // cache under Common/Apple Computer/iTunes/adi inside the profile
+    // appdata. Resolving inside the appdata root keeps the cache under
+    // the jail (openat2 RESOLVE_BENEATH) -- the guest's cache-lock
+    // handshake (clear READONLY, write, set READONLY) ran into err 5
+    // when the cache sat outside the jail root, killing the worker's
+    // deepest measured route at the adi.pb write.
+    Ok(appdata()?
+        .join("Common")
+        .join("Apple Computer")
+        .join("iTunes")
+        .join("adi"))
 }
 
 #[cfg(test)]
@@ -211,7 +222,10 @@ mod tests {
             assert_eq!(appdata().unwrap(), PathBuf::from("/srv/perun/appdata"));
             assert_eq!(state().unwrap(), PathBuf::from("/srv/perun/state"));
             assert_eq!(sap_cache().unwrap(), PathBuf::from("/srv/perun/cache/sap"));
-            assert_eq!(adi_cache().unwrap(), PathBuf::from("/srv/perun/adi"));
+            assert_eq!(
+                adi_cache().unwrap(),
+                PathBuf::from("/srv/perun/appdata/Common/Apple Computer/iTunes/adi")
+            );
         });
     }
 
