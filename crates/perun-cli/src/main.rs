@@ -92,6 +92,25 @@ fn main() {
         eprintln!("perun: {e}");
         std::process::exit(1);
     }
+    // Seed the synthetic registry the way the real Windows host would
+    // have it: the ADI-class guests probe ProductId (the wrapper's
+    // installer writes it under SOFTWARE\Apple Inc.\CoreADI, the
+    // key name the iTunes wrapper carries in its strings). The Linux
+    // stand for the machine certificate is /etc/machine-id.
+    {
+        let reg = perun_shims::registry::Registry::global();
+        if let Ok(pid) = std::fs::read_to_string("/etc/machine-id") {
+            let pid = pid.trim().to_string();
+            reg.set(
+                "ProductId",
+                perun_shims::registry::RegValue {
+                    data: format!("{pid}\0").into_bytes(),
+                    kind: perun_shims::registry::RegType::Sz,
+                },
+            );
+        }
+    }
+
     // Root guard. Every shim runs on the host's credentials: a `mkdir` or
     // `chmod` that would be a harmless permission error as the user becomes
     // a real filesystem change under sudo. The ADI stand is the one lane that

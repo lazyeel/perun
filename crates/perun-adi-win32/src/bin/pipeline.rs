@@ -51,6 +51,13 @@ fn cb_page() -> *mut core::ffi::c_void {
     page(4096)
 }
 
+/// The address of a win64 callback as a plain integer, the way the
+/// envelope's code slots want it (clippy: function items cast
+/// through their pointer type).
+fn cb_addr(f: unsafe extern "win64" fn(u64, u64, u64, u64) -> u64) -> u64 {
+    f as usize as u64
+}
+
 macro_rules! cb {
     ($name:ident) => {
         unsafe extern "win64" fn $name(a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
@@ -114,6 +121,24 @@ fn main() {
         start.spim.len(),
         start.ptxid
     );
+
+    // Seed the registry the Windows host would have: the ADI guests
+    // probe ProductId (the iTunes wrapper's key is SOFTWARE\Apple Inc.\
+    // CoreADI); the Linux stand for the machine certificate is
+    // /etc/machine-id.
+    {
+        let reg = perun_shims::registry::Registry::global();
+        if let Ok(pid) = std::fs::read_to_string("/etc/machine-id") {
+            let pid = pid.trim().to_string();
+            reg.set(
+                "ProductId",
+                perun_shims::registry::RegValue {
+                    data: format!("{pid}\0").into_bytes(),
+                    kind: perun_shims::registry::RegType::Sz,
+                },
+            );
+        }
+    }
 
     // ── the guest half: load once, DllMain once ─────────────────────────
     let bytes = std::fs::read(&image_path).expect("read image");
@@ -238,14 +263,14 @@ fn main() {
         // state. The DLL-export probe (wrong semantics) kept the
         // verdict; these LOGGING callbacks expose the real ABI on the
         // first call: which slot fires, with which register args.
-        std::ptr::write(c.add(5), cb_slot28 as u64); // +0x28
-        std::ptr::write(c.add(6), cb_slot30 as u64); // +0x30
-        std::ptr::write(c.add(8), cb_slot40 as u64); // +0x40
-        std::ptr::write(c.add(14), cb_slot70 as u64); // +0x70
-        std::ptr::write(c.add(18), cb_slot90 as u64); // +0x90
-        std::ptr::write(c.add(21), cb_slota0 as u64); // +0xa8
-        std::ptr::write(c.add(22), cb_slotb0 as u64); // +0xb0
-        std::ptr::write(c.add(23), cb_slotb8 as u64); // +0xb8
+        std::ptr::write(c.add(5), cb_addr(cb_slot28)); // +0x28
+        std::ptr::write(c.add(6), cb_addr(cb_slot30)); // +0x30
+        std::ptr::write(c.add(8), cb_addr(cb_slot40)); // +0x40
+        std::ptr::write(c.add(14), cb_addr(cb_slot70)); // +0x70
+        std::ptr::write(c.add(18), cb_addr(cb_slot90)); // +0x90
+        std::ptr::write(c.add(21), cb_addr(cb_slota0)); // +0xa8
+        std::ptr::write(c.add(22), cb_addr(cb_slotb0)); // +0xb0
+        std::ptr::write(c.add(23), cb_addr(cb_slotb8)); // +0xb8
         // arg3: the live Call-1 carried a wrapper code pointer there.
         let a3 = cb_page();
         let r = f(0xb0eda7af, ctx as u64, 0, a3 as u64);
@@ -282,10 +307,10 @@ fn main() {
             .unwrap_or(0x618a_2474);
         std::ptr::write(c.add(2), now << 32); // +0x10 tag<<32
         std::ptr::write(c.add(3), (now << 32) | now); // +0x18 doubled
-        std::ptr::write(c.add(4), 0); // +0x20 the live had a code ptr; zeroed for now
+        std::ptr::write(c.add(4), cb_addr(cb_slot48)); // +0x20 the live had a WRAPPER code ptr here
         std::ptr::write(c.add(5), ident as u64); // +0x28 identity, no dashes
-        std::ptr::write(c.add(6), 0); // +0x30 the live "adi" string ptr
-        std::ptr::write(c.add(8), 0); // +0x40
+        std::ptr::write(c.add(6), aux[0] as u64); // +0x30 the "adi" string
+        std::ptr::write(c.add(8), cb_addr(cb_slot40)); // +0x40 the live code ptr
         std::ptr::write(c.add(9), (0x64e8u64) << 32); // +0x48 the live tag
         std::ptr::write(c.add(13), 0); // +0x68 "cannot persist" ptr
         std::ptr::write(c.add(16), 0x70); // +0x80
@@ -457,7 +482,17 @@ fn main() {
     }
 
     // ── node 3: configuration mints the session objects ────────────────
-    let wctx = std::fs::read("/opt/data/il/variants/win_ctx.bin").expect("win_ctx container");
+    // The container the cfg reads: the Android stand (identity-bound,
+    // its blobs answer -45020) or OUR synthesis -- the same geometry
+    // (V2|4|0xf0 blob-1, pad, 0x34|4 blob-2) carrying this machine's
+    // fresh SPIM slices. PERUN_CFG_SYNTH switches to the synthesis.
+    let wctx_path = if std::env::var_os("PERUN_CFG_SYNTH").is_some() {
+        "/opt/data/il/variants/win_ctx_synth.bin"
+    } else {
+        "/opt/data/il/variants/win_ctx.bin"
+    };
+    let wctx = std::fs::read(wctx_path).expect("win_ctx container");
+    println!("[cfg] container: {wctx_path}");
     let wctxp = page(0x2000);
     put(wctxp, 0, &wctx);
     unsafe {
@@ -469,6 +504,22 @@ fn main() {
         std::ptr::write(c.add(3), 0x00226564); // measured
         std::ptr::write(c.add(4), 0x1); // measured
         std::ptr::write(c.add(9), 0x2); // +0x48 measured
+        // The live cfg envelope carried the wrapper's code table in
+        // its slots too (the handle-minting site 0x7c85b321 calls
+        // through the envelope's callback slots *0x708/*0x610). Our
+        // logging callbacks go in every code slot: if cfg ever gets
+        // past the body check and starts minting, the first fire
+        // names the contract's real ABI.
+        std::ptr::write(c.add(4), cb_addr(cb_slot48)); // +0x20
+        std::ptr::write(c.add(5), cb_addr(cb_slot28)); // +0x28
+        std::ptr::write(c.add(6), cb_addr(cb_slot30)); // +0x30
+        std::ptr::write(c.add(8), cb_addr(cb_slot40)); // +0x40
+        std::ptr::write(c.add(14), cb_addr(cb_slot70)); // +0x70
+        std::ptr::write(c.add(18), cb_addr(cb_slot90)); // +0x90
+        std::ptr::write(c.add(19), cb_addr(cb_slot98)); // +0x98
+        std::ptr::write(c.add(21), cb_addr(cb_slota0)); // +0xa8
+        std::ptr::write(c.add(22), cb_addr(cb_slotb0)); // +0xb0
+        std::ptr::write(c.add(23), cb_addr(cb_slotb8)); // +0xb8
         let r = f(0xcfe0b46a, ctx as u64, 0, 0);
         println!("[cfg] rc={r:#x} ({r})");
         peek_state(&image, "cfg");
