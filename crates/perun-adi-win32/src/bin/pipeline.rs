@@ -41,6 +41,40 @@ fn put(buf: *mut core::ffi::c_void, off: usize, bytes: &[u8]) {
     };
 }
 
+// Host callbacks for the envelope's code slots. The live envelopes
+// carried WRAPPER FUNCTIONS there (the guest calls them while minting
+// its session objects); ours carried the DLL export (wrong semantics)
+// or zero. Each callback logs its four register args and answers a
+// distinct fresh page, so the first run tells WHICH slot fires with
+// WHAT signature -- the empirical ABI of the wrapper contract.
+fn cb_page() -> *mut core::ffi::c_void {
+    page(4096)
+}
+
+macro_rules! cb {
+    ($name:ident) => {
+        unsafe extern "win64" fn $name(a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
+            let r = cb_page() as u64;
+            println!(
+                "[cb:{}] a0={a0:#x} a1={a1:#x} a2={a2:#x} a3={a3:#x} -> {r:#x}",
+                stringify!($name)
+            );
+            r
+        }
+    };
+}
+
+cb!(cb_slot28);
+cb!(cb_slot30);
+cb!(cb_slot40);
+cb!(cb_slot48);
+cb!(cb_slot70);
+cb!(cb_slot90);
+cb!(cb_slot98);
+cb!(cb_slota0);
+cb!(cb_slotb0);
+cb!(cb_slotb8);
+
 /// The guest's dispatcher-state register (RVA 0x161324): the low dword is
 /// the dispatch offset the 0x90exx cursor family indexes with, the high
 /// dword a counter. Watching it after every opcode shows which call
@@ -199,43 +233,21 @@ fn main() {
         std::ptr::write(c.add(11), 0xbee2_365f_bf17_664b); // +0x58 the live VALUE slot
         // The live Call-1 carried CODE pointers at +0x28/+0x30/+0x40/
         // +0x70/+0xa8/+0xb8 (the Android wrapper's own CFF functions).
-        // Ours were zero -- the likely source of init's -45001 instead
-        // of the live -45061. Probe: point them at the DLL's own export
-        // (a valid guest code address) and read the verdict change.
-        let dll_code = image.base() as u64 + 0x5afc0; // vdfut768ig
-        std::ptr::write(c.add(5), dll_code); // +0x28
-        std::ptr::write(c.add(6), dll_code); // +0x30
-        std::ptr::write(c.add(8), dll_code); // +0x40
-        std::ptr::write(c.add(14), dll_code); // +0x70
-        std::ptr::write(c.add(21), dll_code); // +0xa8
-        std::ptr::write(c.add(22), dll_code); // +0xb0 live had a code ptr too
-        std::ptr::write(c.add(23), dll_code); // +0xb8
-        std::ptr::write(c.add(13), pathb as u64); // +0x68 path
-        std::ptr::write(c.add(16), 0x70); // +0x80 size
-        std::ptr::write(c.add(18), 0xc2); // +0x90 size
-        std::ptr::write(c.add(19), 0xf4); // +0x98 size
-        std::ptr::write(c.add(20), 0x30); // +0xa0 size
-        // The live Call-1 carried arg3 = a pointer into the ANDROID
-        // wrapper's own CFF code (the wrapper's context). Ours passed
-        // 0 -- the guest dereferenced NULL or validated it missing and
-        // answered -45001 where the live run answered -45061. Probe:
-        // copy the live arg3 BYTES (not the pointer) into a buffer and
-        // hand the buffer's address as arg3.
-        let a3 = page(4096);
-        let a3bytes: [u8; 32] = [
-            0x41, 0x81, 0xc7, 0xea, 0x3b, 0x21, 0xcf, 0x44, 0x89, 0xff, 0x48, 0x8b, 0xb5, 0xe0,
-            0xfd, 0xff, 0xff, 0xff, 0x15, 0xed, 0x9a, 0x07, 0x00, 0x48, 0x8b, 0xbd, 0xb0, 0xfe,
-            0xff, 0xff, 0x89, 0xc1,
-        ];
-        std::ptr::copy_nonoverlapping(a3bytes.as_ptr(), a3.cast::<u8>(), 32);
-        // The live Call-1 envelope carried code pointers at +0x90/
-        // +0xa8/+0xb0/+0xb8 too (the wrapper's table, the same one
-        // SetID and transform showed). Probe them like the rest.
-        let dll_code = image.base() as u64 + 0x5afc0;
-        std::ptr::write(c.add(18), dll_code); // +0x90
-        std::ptr::write(c.add(21), dll_code); // +0xa8
-        std::ptr::write(c.add(22), dll_code); // +0xb0
-        std::ptr::write(c.add(23), dll_code); // +0xb8
+        // The live Call-1 carried the WRAPPER's own functions in every
+        // code slot -- the guest calls them while minting its session
+        // state. The DLL-export probe (wrong semantics) kept the
+        // verdict; these LOGGING callbacks expose the real ABI on the
+        // first call: which slot fires, with which register args.
+        std::ptr::write(c.add(5), cb_slot28 as u64); // +0x28
+        std::ptr::write(c.add(6), cb_slot30 as u64); // +0x30
+        std::ptr::write(c.add(8), cb_slot40 as u64); // +0x40
+        std::ptr::write(c.add(14), cb_slot70 as u64); // +0x70
+        std::ptr::write(c.add(18), cb_slot90 as u64); // +0x90
+        std::ptr::write(c.add(21), cb_slota0 as u64); // +0xa8
+        std::ptr::write(c.add(22), cb_slotb0 as u64); // +0xb0
+        std::ptr::write(c.add(23), cb_slotb8 as u64); // +0xb8
+        // arg3: the live Call-1 carried a wrapper code pointer there.
+        let a3 = cb_page();
         let r = f(0xb0eda7af, ctx as u64, 0, a3 as u64);
         println!("[init] rc={r:#x} ({r}) arg3={:p}", a3);
         peek_state(&image, "init");
