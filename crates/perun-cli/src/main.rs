@@ -3382,6 +3382,21 @@ fn cmd_seq(args: &[String]) -> i32 {
                 } else {
                     None
                 };
+                // 'CTX' names the seq lane's own context buffer (the
+                // live wrapper parks ITS envelope there); anything else
+                // resolves to a loaded buffer by name.
+                let seed_ctx_slot: Option<u64> = if seed_slot_on == this_iter {
+                    match std::env::var("PERUN_SEED_CTX_SLOT").ok().as_deref() {
+                        Some("CTX") => Some(ctx as u64),
+                        Some(name) => loads
+                            .iter()
+                            .find(|(n, _, _)| n == name)
+                            .map(|(_, addr, _)| addr as *const u64 as u64),
+                        None => None,
+                    }
+                } else {
+                    None
+                };
                 let r = unsafe {
                     match pe_stack {
                         Some(top) => {
@@ -3398,6 +3413,31 @@ fn cmd_seq(args: &[String]) -> i32 {
                                 std::ptr::write_volatile(slot_addr as *mut u64, spim);
                                 println!(
                                     "[seed-slot] {slot_addr:#x} = {spim:#x} (the wrapper's own slot)"
+                                );
+                            }
+                            // The [rsp+0x190] envelope cache: vdfut parks
+                            // arg1 deep in its frame (the slot 0x8c466
+                            // reads rax = [rsp+0x190] from), and its
+                            // zero-fill/string walks dereference through
+                            // it. On a pristine stack the slot reads 0 and
+                            // the init validator crashes at
+                            // [rdx+0xc] -> 0xb0eda7bb. The honest wrapper
+                            // parks the CONTEXT there pre-call: the
+                            // callee's [rsp+0x190] = our [rsp+0x188]
+                            // pre-push arithmetic => (top&-16)-40+0x190.
+                            if let Some(ctxp) = seed_ctx_slot {
+                                // The guest reads [rsp+0x190] AFTER its
+                                // prologue (push x8, sub rsp,0x16a8), so
+                                // the host address is deep INSIDE the
+                                // mapped stack, not above the entry rsp:
+                                // (top&-16) - 40 - 0x16a8 + 0x190.
+                                let slot_addr = (top & !15u64) - 40 - 0x16a8 + 0x190;
+                                std::ptr::write_volatile(
+                                    slot_addr as *mut u64,
+                                    ctxp as *const u64 as u64,
+                                );
+                                println!(
+                                    "[seed-ctx190] {slot_addr:#x} = {ctxp:#x} (the envelope cache)"
                                 );
                             }
                             perun_core::teb::call_on_stack(

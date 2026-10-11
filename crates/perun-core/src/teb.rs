@@ -249,8 +249,14 @@ core::arch::global_asm!(
     "  and  r10, -16",
     "  sub  r10, 32",  // Win64 shadow space
     "  mov  rsp, r10", // rsp % 16 == 0 here, as a call requires
-    "  mov  rdi, rdx",
-    "  mov  rsi, rcx",
+    // Win64 argument passing: rcx=a0, rdx=a1, r8=a2, r9=a3. The
+    // old body moved them into rdi/rsi (SysV slots) and LEFT the
+    // win64 registers holding host residue -- every PE-stack call
+    // in history entered the guest with a garbage opcode in rcx
+    // (and the guest's CFF decode ate it on the dirty host stack).
+    "  mov  rax, rdx", // a0
+    "  mov  rdx, rcx", // a1 -> rdx (rcx free now)
+    "  mov  rcx, rax", // a0 -> rcx
     "  call r13",
     "  mov  rsp, r12",
     "  lea  rsp, [rsp+8]",
