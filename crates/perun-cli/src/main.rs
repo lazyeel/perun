@@ -1343,6 +1343,29 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
         push(&hex16(rsi), &mut out, &mut n);
         push(b"\n", &mut out, &mut n);
         libc::write(2, out.as_ptr().cast(), n);
+        // If the crash rip sits at a shim's entry, NAME it: the
+        // table is live here, and a name beats an offset for the
+        // next round's reader.
+        {
+            let table = ShimTable::collect();
+            let mut name: &str = "?";
+            for n2 in table.names() {
+                if let Some(p) = table.get(n2)
+                    && rip == p as u64
+                {
+                    name = n2;
+                    break;
+                }
+            }
+            let mut o3: [u8; 96] = [0; 96];
+            let mut k3 = 0usize;
+            push(b"[crash-shim] rip=", &mut o3, &mut k3);
+            push(&hex16(rip), &mut o3, &mut k3);
+            push(b" -> ", &mut o3, &mut k3);
+            push(name.as_bytes(), &mut o3, &mut k3);
+            push(b"\n", &mut o3, &mut k3);
+            libc::write(2, o3.as_ptr().cast(), k3);
+        }
         // A crash is the ONE moment the ring matters most, and the
         // walk's own exit paths never run. Dump the tail so every
         // fault comes with its instruction history.

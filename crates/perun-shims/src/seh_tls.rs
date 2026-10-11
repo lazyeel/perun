@@ -229,21 +229,41 @@ win32_api! {
 // ── Process-level odds and ends ──────────────────────────────────────────
 
 win32_api! {
-    /// BOOL GetUserNameA(LPSTR, LPDWORD);
+    /// BOOL GetUserNameA(LPSTR lpBuffer, LPDWORD pcbBuffer);
     unsafe extern "win64" fn GetUserNameA(buf: LPSTR, size: *mut DWORD) -> BOOL { unsafe {
-        let user = std::env::var("USER").unwrap_or_else(|_| "perun".into());
-        let bytes = user.as_bytes();
-        let need = bytes.len() + 1;
-        let cap = if size.is_null() { 0 } else { *size as usize };
-        if !size.is_null() {
-            *size = need as DWORD;
-        }
-        if cap < need || buf.is_null() {
+        // The CoreADI caller passes the buffer's CAPACITY as a raw
+        // VALUE (measured on the pristine stack: rdx = 0x3c0 = 960,
+        // and the canonical dereference faults the null page). The
+        // canonical Win32 contract is a pointer; serve BOTH: a small
+        // value (< 0x10000) reads as the capacity itself, anything
+        // pointer-shaped dereferences as the length slot.
+        let raw = size as usize;
+        let size_is_value = raw < 0x10000;
+        eprintln!(
+            "[shim:GetUserNameA] buf={:?} raw={raw:#x} mode={}",
+            buf,
+            if size_is_value { "value" } else { "pointer" }
+        );
+        let cap = if size.is_null() {
+            0
+        } else if size_is_value {
+            raw
+        } else {
+            std::ptr::read_volatile(size) as usize
+        };
+        if buf.is_null() || cap < 1 {
             set_last_error(ERROR_INSUFFICIENT_BUFFER);
             return FALSE;
         }
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len());
-        *buf.add(bytes.len()) = 0;
+        let user = std::env::var("PERUN_GSA_USER")
+            .unwrap_or_else(|_| "admin".into());
+        let bytes = user.as_bytes();
+        let n = bytes.len().min(cap.saturating_sub(1));
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, n);
+        *buf.add(n) = 0;
+        if !size.is_null() && !size_is_value {
+            std::ptr::write_volatile(size, (n + 1) as DWORD);
+        }
         TRUE
     }}
 }
