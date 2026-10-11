@@ -3324,8 +3324,9 @@ fn cmd_seq(args: &[String]) -> i32 {
                         FORCE_AT = force_addr;
                     }
                     println!(
-                        "[seq] step {step}: forcing {} register(s) at {force_addr:#x}",
-                        force_pairs.len()
+                        "[seq] step {step}: forcing {} register(s) at {force_addr:#x} (image base {:#x})",
+                        force_pairs.len(),
+                        image.base() as u64
                     );
                     force_addr = 0; // arm once; later calls keep the statics
                 }
