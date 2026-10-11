@@ -275,6 +275,14 @@ pub fn finish_provisioning(
     );
     let mut resp = r.send(body.as_str()).map_err(|e| format!("finish: {e}"))?;
     if resp.status() != 200 {
+        // The error body carries Apple's own diagnostics (ec and the
+        // plist notes); losing it turns a 433 into a bare "unknown".
+        let text = resp.body_mut().read_to_string().unwrap_or_default();
+        eprintln!(
+            "[gsa] finish error body ({} bytes): {}",
+            text.len(),
+            &text[..text.len().min(1024)]
+        );
         return Err(format!("finish: HTTP {}", resp.status()));
     }
     let text = resp

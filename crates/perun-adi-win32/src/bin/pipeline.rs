@@ -510,9 +510,26 @@ fn main() {
     // offline chain, and the shape of the answer tells whether the
     // machine-binding lives in the CPIM at all.
     let out_len = unsafe { std::ptr::read(olen.cast::<u64>()) } as usize;
-    let cpim =
+    let mut cpim =
         unsafe { std::slice::from_raw_parts(out.cast::<u8>(), out_len.min(0x1000)) }.to_vec();
     println!("[net] cpim candidate: {out_len} bytes (empty unless the worker minted)");
+    // PERUN_FINISH_CPIM=<path>: override the CPIM sent to the server --
+    // the probe lane for testing how the server binds the finish
+    // request (an external artifact against a fresh ptxid, etc.).
+    // The answer's ec is the outside oracle for the whole offline chain.
+    if let Some(f) = std::env::var_os("PERUN_FINISH_CPIM") {
+        match std::fs::read(f.to_string_lossy().as_ref()) {
+            Ok(bytes) => {
+                println!(
+                    "[net] PERUN_FINISH_CPIM override: {} bytes from {}",
+                    bytes.len(),
+                    f.to_string_lossy()
+                );
+                cpim = bytes;
+            }
+            Err(e) => println!("[net] PERUN_FINISH_CPIM unreadable: {e}"),
+        }
+    }
     match perun_adi_win32::net::finish_provisioning(&id, &ep, &cpim, &start.ptxid) {
         Ok(fin) => {
             println!(
