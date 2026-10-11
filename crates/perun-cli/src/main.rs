@@ -3421,6 +3421,14 @@ fn cmd_seq(args: &[String]) -> i32 {
             }
         }
     }
+    // The seq lane's walks end without the call lane's report
+    // path, so a TRACE_FILE request silently wrote nothing here
+    // (fixed once for crashes; the same fix for the normal end).
+    if let Some(path) = std::env::var_os("PERUN_TRACE_FILE")
+        && unsafe { STEP_COUNT } > 0
+    {
+        dump_ring(&path.to_string_lossy());
+    }
     println!("[seq] done ({step} steps)");
     0
 }
