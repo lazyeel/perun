@@ -138,6 +138,28 @@ fn main() {
                 },
             );
         }
+        // The wrapper's own registry footprint (the strings inside
+        // iTunes.exe carry this key): the ADI provisioning state
+        // lives under SOFTWARE\Apple Inc.\CoreADI. Seeding the
+        // key with our canonical InstallDir gives the guest the
+        // environment a real Windows host would show (the
+        // RegQueryValueExA store was empty and the key simply did
+        // not exist -- ERROR_FILE_NOT_FOUND -- on every probe).
+        let inst = format!(
+            "{}/Common/Apple Computer/iTunes/adi\0",
+            std::env::var("PERUN_APPDATA")
+                .unwrap_or_else(|_| "/opt/data/home/.perun/appdata".into())
+        );
+        for (name, data) in [("InstallDir", inst.clone()), ("InstallDirW", String::new())] {
+            reg.set(
+                name,
+                perun_shims::registry::RegValue {
+                    data: data.into_bytes(),
+                    kind: perun_shims::registry::RegType::Sz,
+                },
+            );
+        }
+        println!("[reg] CoreADI InstallDir seeded");
     }
 
     // ── the guest half: load once, DllMain once ─────────────────────────
@@ -235,13 +257,12 @@ fn main() {
         std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
         *pkt.cast::<u8>().add(3) = 1;
         *pkt.cast::<u8>().add(7) = 1;
-        // The live Call-1 packet's 12-byte tail (the wrapper's nonce
-        // terms) -- copied as DATA, a form probe: does the validator
-        // want a non-zero tail where our zeros read as invalid params?
-        let tail: [u8; 12] = [
-            0xc9, 0x34, 0x19, 0x2e, 0x14, 0xf2, 0xae, 0x3f, 0x98, 0x49, 0x66, 0xca,
-        ];
-        std::ptr::copy_nonoverlapping(tail.as_ptr(), pkt.cast::<u8>().add(4), 12);
+        // The init packet's tail stays ZERO. The measured matrix
+        // (after the jail move): zero tail -> -45061 notProvisioned
+        // (the LIVE verdict, byte for byte); the live Android nonce
+        // tail -> -45020 (the body validator reads a FOREIGN nonce
+        // and answers 'invalid data' -- the wrapper's nonce is
+        // session material, not transportable).
         std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
         let c = ctx.cast::<u64>();
         std::ptr::write(c.add(0), pkt as u64);
@@ -275,6 +296,14 @@ fn main() {
         let a3 = cb_page();
         let r = f(0xb0eda7af, ctx as u64, 0, a3 as u64);
         println!("[init] rc={r:#x} ({r}) arg3={:p}", a3);
+        let ipk = std::slice::from_raw_parts(pkt.cast::<u8>(), 16);
+        println!(
+            "[init] pkt[0..16] = {}",
+            ipk[..16]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
         peek_state(&image, "init");
     }
 
@@ -290,12 +319,9 @@ fn main() {
         std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
         *pkt.cast::<u8>().add(3) = 1;
         *pkt.cast::<u8>().add(7) = 1;
-        // The same 12-byte nonce-tail form the live packets carry
-        // (our zero-tail stand answered -45001 at the parameter gate).
-        let tail: [u8; 12] = [
-            0xc9, 0x34, 0x19, 0x2e, 0x14, 0xf2, 0xae, 0x3f, 0x98, 0x49, 0x66, 0xca,
-        ];
-        std::ptr::copy_nonoverlapping(tail.as_ptr(), pkt.cast::<u8>().add(4), 12);
+        // Zero tail, the same healed form as init-1's packet: the
+        // live nonce is session material and reads as FOREIGN data
+        // (-45020); the zero tail answers the -45061 family.
         std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
         let c = ctx.cast::<u64>();
         // +0x10: the live time tag (0x618a2474 = the live stand's unix
@@ -335,6 +361,26 @@ fn main() {
                 .map(|b| format!("{b:02x}"))
                 .collect::<String>()
         );
+        // The worker's early-exit fork decoded from the ring: it
+        // loads the session object through the [0x19ddb0] slot and
+        // tests THE OBJECT'S +4 FIELD -- zero takes the early exit
+        // (cache check -> ReleaseMutex -> epilogue), nonzero would
+        // take the crypto route. PERUN_SESS4 seeds that field right
+        // after init-2, the same field the live wrapper's init
+        // chain leaves populated.
+        if let Some(v) = std::env::var("PERUN_SESS4")
+            .ok()
+            .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        {
+            let slot_ptr = image.base() as u64 + 0x19ddb0;
+            let obj = std::ptr::read_volatile(slot_ptr as *const u64);
+            if obj > 0x1000 {
+                std::ptr::write_volatile((obj + 4) as *mut u64, v);
+                println!("[sess4] [{obj:#x}+4] = {v:#x} (the fork's field)");
+            } else {
+                println!("[sess4] slot 0x19ddb0 = {obj:#x}: no object to seed");
+            }
+        }
     }
 
     // ── node 3.5: the canon's middle calls, even though they reject ────
