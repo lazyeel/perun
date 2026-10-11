@@ -3368,13 +3368,44 @@ fn cmd_seq(args: &[String]) -> i32 {
                     argv[3],
                     if force_live { ", force live" } else { "" }
                 );
+                let seed_slot_on: usize = std::env::var("PERUN_SEED_SPIM_SLOT_ON")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                let seed_slot = if seed_slot_on == this_iter {
+                    std::env::var("PERUN_SEED_SPIM_SLOT").ok().and_then(|name| {
+                        loads
+                            .iter()
+                            .find(|(n, _, _)| *n == name)
+                            .map(|(_, addr, _)| *addr)
+                    })
+                } else {
+                    None
+                };
                 let r = unsafe {
                     match pe_stack {
-                        Some(top) => perun_core::teb::call_on_stack(
-                            f,
-                            top,
-                            [argv[0], argv[1], argv[2], argv[3]],
-                        ),
+                        Some(top) => {
+                            // The honest wrapper's construction: the SPIM
+                            // pointer parked in the caller's stack slot
+                            // that the callee's entry reads as ITS
+                            // [rsp+0x30] (pe_call_on_stack: rsp =
+                            // (top&-16)-32, call pushes ret (-8), so the
+                            // slot = (top&-16) - 40 + 0x30). vdfut itself
+                            // never writes the slot (the only write in the
+                            // whole function is a zero-fill off-route).
+                            if let Some(spim) = seed_slot {
+                                let slot_addr = (top & !15u64) - 0x10;
+                                std::ptr::write_volatile(slot_addr as *mut u64, spim);
+                                println!(
+                                    "[seed-slot] {slot_addr:#x} = {spim:#x} (the wrapper's own slot)"
+                                );
+                            }
+                            perun_core::teb::call_on_stack(
+                                f,
+                                top,
+                                [argv[0], argv[1], argv[2], argv[3]],
+                            )
+                        }
                         None => f(argv[0], argv[1], argv[2], argv[3]),
                     }
                 };

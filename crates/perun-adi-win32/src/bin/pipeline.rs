@@ -22,6 +22,44 @@
 use perun_core::loader::{DLL_PROCESS_ATTACH, Image};
 use perun_shims::table::ShimTable;
 
+// The HONEST WRAPPER (asm): vdfut NEVER writes [rsp+0x30] in
+// its own body -- the ONLY write in the whole function is a
+// pxor/movdqu ZERO-FILL at RVA 0x8c30c, off the transform route.
+// The SPIM pointer in the worker's frame is the CALLER'S OWN
+// stack slot: parked pre-call at [rsp+0x38], which the callee's
+// entry (rsp = ours - 8) reads as ITS [rsp+0x30]. This shim
+// reproduces the live wrapper's construction with no external
+// poke. SysV args: rdi=f, rsi=a0, rdx=a1, rcx=a2, r8=spim.
+core::arch::global_asm! {
+    ".text",
+    ".globl perun_honest_wrapper",
+    "perun_honest_wrapper:",
+    "push rbx",
+    "mov rbx, rdi",          // f
+    "sub rsp, 0x1000",       // a frame; the callee's rsp+0x30 lives inside it
+    "mov QWORD PTR [rsp+0x28], r8",  // SPIM: call pushes ret (-8), the callee reads its [rsp+0x30] = our [rsp+0x28]
+    "mov rcx, rsi",           // win64 a0
+    "mov rdx, rdx",           // win64 a1 (unchanged)
+    "xor r8, r8",             // win64 a2
+    "xor r9, r9",             // win64 a3
+    "mov r12, QWORD PTR [rsp+0x28]",   // witness: the slot still holds SPIM after the call
+    "call rbx",
+    "mov QWORD PTR [rsp+0xF00], r12",  // park the witness for the caller
+    "add rsp, 0x1000",
+    "pop rbx",
+    "ret",
+}
+
+unsafe extern "sysv64" {
+    fn perun_honest_wrapper(
+        f: unsafe extern "win64" fn(u64, u64, u64, u64) -> u64,
+        a0: u64,
+        a1: u64,
+        a2: u64,
+        spim: u64,
+    ) -> u64;
+}
+
 fn page(len: usize) -> *mut core::ffi::c_void {
     unsafe {
         libc::mmap(
@@ -495,7 +533,16 @@ fn main() {
         for (i, b) in idsrc.iter().enumerate() {
             std::ptr::write(ctx.cast::<u8>().add(0xb0 + i), *b);
         }
-        let r = f(0x716bd86c, ctx as u64, 0xffff_ffff, 0);
+        // PERUN_HONEST=1: call the transform through the honest
+        // wrapper -- the SPIM pointer parked in the caller's own
+        // frame slot, the construction the live wrapper used; no
+        // external FIX30CTX poke. The library provably never
+        // writes the slot itself.
+        let r = if std::env::var_os("PERUN_HONEST").is_some() {
+            perun_honest_wrapper(f, 0x716bd86c, ctx as u64, 0xffff_ffff, spimp as u64)
+        } else {
+            f(0x716bd86c, ctx as u64, 0xffff_ffff, 0)
+        };
         println!("[transform] rc={r:#x} ({r})");
         peek_state(&image, "transform");
         // The live transform had OLEN=0/OUT=0: the worker's CPIM (if
