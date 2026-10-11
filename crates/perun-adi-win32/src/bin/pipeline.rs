@@ -94,6 +94,27 @@ fn peek_state(image: &Image, tag: &str) {
     }
 }
 
+/// The session-object slots ([0x19dda0..0x19ddb0]): the family the
+/// worker dereferences (rsi = [[0x19ddb0]] and the fork's [+4] field).
+/// Dumping after EVERY call shows WHICH opcode mints which object --
+/// the map of the wrapper's session construction.
+fn peek_slots(image: &Image, tag: &str) {
+    let base = image.base() as u64;
+    for rva in (0x19dda0u64..=0x19ddb0u64).step_by(8) {
+        let v = unsafe { std::ptr::read_volatile((base + rva) as *const u64) };
+        println!("[slot:{tag}] RVA {rva:#x} = {v:#x}");
+        if v > 0x1000 && v < 0x8000_0000_0000 {
+            let obj = v;
+            let mut line = String::new();
+            for off in (0u64..0x40).step_by(8) {
+                let f = unsafe { std::ptr::read_volatile((obj + off) as *const u64) };
+                line.push_str(&format!(" {f:016x}"));
+            }
+            println!("[obj:{tag}] +0x00..0x38 ={line}");
+        }
+    }
+}
+
 fn main() {
     let image_path = std::env::args().nth(1).unwrap_or_else(|| {
         "/opt/data/adi-pe/extracted/itunes_extracted/iTunes/CoreADI64.dll".into()
@@ -174,14 +195,32 @@ fn main() {
     let f: unsafe extern "win64" fn(u64, u64, u64, u64) -> u64 =
         unsafe { std::mem::transmute(image.get_export_by_name("vdfut768ig").expect("vdfut")) };
 
-    // cvu with the fold triple in the state page.
+    // cvu8io98wun, the SECOND export: the initializer the iTunes
+    // wrapper calls with the provisioning PATH (the PE lane's own
+    // constructor -- the Android library never had it, which is why
+    // the live dump shows no cvu call). The old run passed it the
+    // fold-triple state page; the real contract takes the path in
+    // rcx. PERUN_CVU_MODE picks: "state" (the historical triple),
+    // "path" (the initializer contract -- the wrapper's own session
+    // construction, the missing SetID equivalent on Windows).
     let state = page(4096);
     unsafe {
         *state.cast::<u64>() = 0x2000000001;
         *state.cast::<u8>().add(6) = 0;
         *state.cast::<u8>().add(7) = 1;
-        let r = cvu(state as u64, 0x2000000001, 0, 0);
-        println!("[cvu] rc={r}");
+        let mode = std::env::var("PERUN_CVU_MODE").unwrap_or_else(|_| "state".into());
+        let (r, desc) = match mode.as_str() {
+            "path" => {
+                let path = std::env::var("PERUN_APPDATA")
+                    .unwrap_or_else(|_| "/opt/data/home/.perun/appdata/Common".into());
+                let pathb = page(4096);
+                std::ptr::copy_nonoverlapping(path.as_ptr(), pathb.cast::<u8>(), path.len());
+                (cvu(pathb as u64, 0, 0, 0), format!("path {path:?}"))
+            }
+            _ => (cvu(state as u64, 0x2000000001, 0, 0), "state triple".into()),
+        };
+        println!("[cvu] rc={r} ({desc})");
+        peek_slots(&image, "after_cvu");
     }
 
     // Shared envelope buffers.
@@ -295,6 +334,7 @@ fn main() {
         // arg3: the live Call-1 carried a wrapper code pointer there.
         let a3 = cb_page();
         let r = f(0xb0eda7af, ctx as u64, 0, a3 as u64);
+        peek_slots(&image, "after_init");
         println!("[init] rc={r:#x} ({r}) arg3={:p}", a3);
         let ipk = std::slice::from_raw_parts(pkt.cast::<u8>(), 16);
         println!(
@@ -352,6 +392,7 @@ fn main() {
         std::ptr::write(c2.add(0), pkt as u64);
         std::ptr::write(c2.add(1), 0x0000_0004_0000_0010);
         let r = f(0xb0eda7af, ctx as u64, 0, 0);
+        peek_slots(&image, "after_init2");
         println!("[init2] rc={r:#x} ({r})");
         let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 16);
         println!(
