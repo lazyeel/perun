@@ -3407,8 +3407,10 @@ fn cmd_seq(args: &[String]) -> i32 {
                 };
                 // 'CTX' names the seq lane's own context buffer (the
                 // live wrapper parks ITS envelope there); anything else
-                // resolves to a loaded buffer by name.
-                let seed_ctx_slot: Option<u64> = if seed_slot_on == this_iter {
+                // resolves to a loaded buffer by name. The envelope
+                // cache rides EVERY call (each call's frame parks its
+                // own envelope there), so it is ungated by design.
+                let seed_ctx_slot: Option<u64> =
                     match std::env::var("PERUN_SEED_CTX_SLOT").ok().as_deref() {
                         Some("CTX") => Some(ctx as u64),
                         Some(name) => loads
@@ -3416,10 +3418,7 @@ fn cmd_seq(args: &[String]) -> i32 {
                             .find(|(n, _, _)| n == name)
                             .map(|(_, addr, _)| addr as *const u64 as u64),
                         None => None,
-                    }
-                } else {
-                    None
-                };
+                    };
                 let r = unsafe {
                     match pe_stack {
                         Some(top) => {
