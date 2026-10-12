@@ -649,8 +649,32 @@ fn main() {
         for (k, b) in srcs.iter().enumerate() {
             std::ptr::write(ctx.cast::<u8>().add(0xa0 + k), *b);
         }
-        let r2 = f(0xc774d292, ctx as u64, 0, 0);
-        println!("[setid] rc={r2:#x} ({r2})");
+        // The LIVE call carried a CODE POINTER in R9 (arg3 =
+        // 0x7680ae906d1c, the wrapper's own frame); ours was NULL.
+        // The selector's r9d gate masks the argument -- pass a real
+        // guest code address, the DLL's own export.
+        let dll_code = image.base() as u64 + 0x5afc0;
+        // The LIVE canon called SetID TWICE (dumprun4: the '1a7d'
+        // short-string fail first, then the full form's success). The
+        // selector's slot container at [rsp+0x340] INHERITS between
+        // vdfut calls through the uncleaned frame -- the second call
+        // reads what the first wrote. Run it twice, exactly like the
+        // live sequence.
+        let r2 = f(0xc774d292, ctx as u64, 0, dll_code);
+        println!("[setid#1] rc={r2:#x} ({r2})");
+        // Rebuild the envelope: the first call rewrote the packet.
+        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+        *pkt.cast::<u8>().add(0) = 2;
+        {
+            let mut b = [0u8; 12];
+            let mut fh = std::fs::File::open("/dev/urandom").unwrap();
+            use std::io::Read as _;
+            fh.read_exact(&mut b).unwrap();
+            std::ptr::copy_nonoverlapping(b.as_ptr(), pkt.cast::<u8>().add(4), 12);
+        }
+        std::ptr::write(c.add(0), pkt as u64);
+        let r3 = f(0xc774d292, ctx as u64, 0, dll_code);
+        println!("[setid#2] rc={r3:#x} ({r3})");
     }
 
     // ── node 2.6: THE GSA REQUEST + the identity re-mint ──────────────
