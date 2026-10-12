@@ -149,6 +149,28 @@ fn peek_slots(image: &Image, tag: &str) {
                 line.push_str(&format!(" {f:016x}"));
             }
             println!("[obj:{tag}] +0x00..0x38 ={line}");
+            // Identity hunt: dereference every pointer field and print
+            // ASCII-able content -- the guest GENERATES its identity via
+            // CryptGenRandom at init and parks it somewhere; the wrapper
+            // reads it back for the GSA headers. Find the string.
+            for off in (0x18u64..=0x38).step_by(8) {
+                #[allow(clippy::collapsible_if)]
+                let f = unsafe { std::ptr::read_volatile((obj + off) as *const u64) };
+                if f > 0x1000 && f < 0x8000_0000_0000 {
+                    let bytes = unsafe { std::slice::from_raw_parts(f as *const u8, 48) };
+                    let printable: String = bytes
+                        .iter()
+                        .map(|b| {
+                            if b.is_ascii_graphic() || *b == 0 {
+                                *b as char
+                            } else {
+                                '.'
+                            }
+                        })
+                        .collect();
+                    println!("[obj:{tag}] +{off:#x} -> {f:#x} : {printable:?}");
+                }
+            }
         }
     }
 }
