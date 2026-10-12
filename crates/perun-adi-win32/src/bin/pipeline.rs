@@ -987,13 +987,53 @@ fn main() {
 
     // ── node 4: transform with the fresh SPIM ───────────────────────────
     let url = b"https://gsa.apple.com/grandslam/MidService/startMachineProvisioning\0";
+    // PERUN_TR_FLAGS=1: seed the gate object's session flags before
+    // the call -- the measured flag experiment ([0x19dda8]+0x8/+0xc)
+    // opened the worker's SUCCESS branch, which then died reading an
+    // event handle from a garbage slot. The live wrapper's init chain
+    // leaves these set; with the live packet now carrying the real
+    // fold coefficients, the flags may complete the route.
+    if std::env::var_os("PERUN_TR_FLAGS").is_some() {
+        unsafe {
+            let slot_ptr = image.base() as u64 + 0x19dda8;
+            let obj = std::ptr::read_volatile(slot_ptr as *const u64);
+            if obj > 0x1000 {
+                std::ptr::write_volatile((obj + 8) as *mut u64, 1);
+                std::ptr::write_volatile((obj + 0xc) as *mut u64, 1);
+                println!("[tr-flags] [{obj:#x}+8]=1 [+0xc]=1 seeded");
+            } else {
+                println!("[tr-flags] slot 0x19dda8 = {obj:#x}: no object");
+            }
+            let slot_b = image.base() as u64 + 0x19ddb0;
+            let objb = std::ptr::read_volatile(slot_b as *const u64);
+            if objb > 0x1000 {
+                std::ptr::write_volatile((objb + 4) as *mut u64, 1);
+                println!("[tr-flags] [{objb:#x}+4]=1 seeded (the fork's field)");
+            }
+        }
+    }
     unsafe {
         std::ptr::copy_nonoverlapping(start.spim.as_ptr(), spimp.cast::<u8>(), start.spim.len());
         std::ptr::copy_nonoverlapping(url.as_ptr(), urlp.cast::<u8>(), url.len());
         std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+        // The LIVE Call-6 packet (52 bytes, decoded byte-for-byte from
+        // dumprun4): V2 header + the wrapper's nonce-tail that keys the
+        // selector's fold. Zero tails died at -45018 before the body
+        // ever ran; the live bytes carry the fold coefficients.
         *pkt.cast::<u8>().add(3) = 1;
         *pkt.cast::<u8>().add(7) = 1;
+        // PERUN_TR_LIVE_PKT=<path>: replace the synthetic packet with
+        // the live 52-byte Call-6 body (decoded from dumprun4) -- the
+        // wrapper's nonce-tail keys the selector's fold; a zero tail
+        // died at -45018 before the body ever ran.
+        if let Some(live) = std::env::var("PERUN_TR_LIVE_PKT")
+            .ok()
+            .and_then(|f| std::fs::read(f).ok())
+        {
+            std::ptr::copy_nonoverlapping(live.as_ptr(), pkt.cast::<u8>(), live.len().min(52));
+        }
         std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+        let dll_code = image.base() as u64 + 0x5afc0;
         let c = ctx.cast::<u64>();
         std::ptr::write(c.add(0), pkt as u64);
         std::ptr::write(c.add(1), 0x4000_0000_0034);
@@ -1003,24 +1043,28 @@ fn main() {
         std::ptr::write(c.add(6), spimp as u64); // +0x30
         std::ptr::write(c.add(7), start.spim.len() as u64); // +0x38
         std::ptr::write(c.add(8), 4); // +0x40
-        std::ptr::write(c.add(9), aux[4] as u64); // +0x48 heap-ish
-        std::ptr::write(c.add(10), olen as u64); // +0x50
+        std::ptr::write(c.add(9), cb_addr(cb_slot48)); // +0x48 = the live wrapper code slot
+        std::ptr::write(c.add(10), 0); // +0x50 = the live INLINE length slot (the worker writes 0x114 here)
         std::ptr::write(c.add(11), start.spim.len() as u64); // +0x58
         std::ptr::write(c.add(12), 0); // +0x60
         std::ptr::write(c.add(13), spimp as u64); // +0x68
         std::ptr::write(c.add(14), 0x1d0); // +0x70
         std::ptr::write(c.add(15), urlp as u64); // +0x78
-        std::ptr::write(c.add(16), out as u64); // +0x80
+        // The LIVE after-diff: +0x80 came back as the worker's OWN
+        // heap pointer (0x7680aece17c0), not the caller's buffer.
+        // The envelope slot is INLINE -- the worker allocates and
+        // writes the CPIM address there. Same for +0x50 (the 0x114
+        // length). Keep the out page only as a fallback probe.
+        std::ptr::write(c.add(16), 0); // +0x80 = the worker's CPIM slot
         // The live Call-6 carried FIVE wrapper code pointers at
         // +0x88..+0xa8 and the identity bytes at +0xb0/+0xb8; ours
         // had neither. Probe: the DLL's own export as a valid guest
         // code address, and our identity string inline.
-        let dll_code = image.base() as u64 + 0x5afc0;
-        std::ptr::write(c.add(17), dll_code); // +0x88
-        std::ptr::write(c.add(18), dll_code); // +0x90
-        std::ptr::write(c.add(19), dll_code); // +0x98
-        std::ptr::write(c.add(20), dll_code); // +0xa0
-        std::ptr::write(c.add(21), dll_code); // +0xa8
+        std::ptr::write(c.add(17), cb_addr(cb_slot98)); // +0x88 (live wrapper code)
+        std::ptr::write(c.add(18), cb_addr(cb_slota0)); // +0x90
+        std::ptr::write(c.add(19), cb_addr(cb_slotb0)); // +0x98
+        std::ptr::write(c.add(20), cb_addr(cb_slotb8)); // +0xa0
+        std::ptr::write(c.add(21), cb_addr(cb_slot70)); // +0xa8
         let idsrc = std::slice::from_raw_parts(ident.cast::<u8>(), 16);
         for (i, b) in idsrc.iter().enumerate() {
             std::ptr::write(ctx.cast::<u8>().add(0xb0 + i), *b);
@@ -1033,10 +1077,41 @@ fn main() {
         let r = if std::env::var_os("PERUN_HONEST").is_some() {
             perun_honest_wrapper(f, 0x716bd86c, ctx as u64, 0xffff_ffff, spimp as u64)
         } else {
-            f(0x716bd86c, ctx as u64, 0xffff_ffff, 0)
+            // The live Call-6 carried arg3 = a CODE POINTER (the
+            // wrapper's own callback frame); ours was NULL. Probe:
+            // the DLL's own export as a valid guest code address.
+            // The live arg3 was the wrapper's frame pointer with
+            // low bytes 0xae906d1c; if the fold mixes r9d into E as
+            // a TERM, the exact live low-dword matters. PERUN_TR_R9
+            // overrides; the default keeps the DLL code address.
+            let r9v = std::env::var("PERUN_TR_R9")
+                .ok()
+                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+                .unwrap_or(dll_code);
+            f(0x716bd86c, ctx as u64, 0xffff_ffff, r9v)
         };
         println!("[transform] rc={r:#x} ({r})");
         peek_state(&image, "transform");
+        // The live contract: the worker writes the CPIM pointer at
+        // +0x80, the length 0x114 at +0x50, the session id at +0x60.
+        // Read all three slots back -- plus whatever pages the
+        // callbacks handed out.
+        let cpim_ptr = std::ptr::read_volatile((ctx as u64 + 0x80) as *const u64);
+        let cpim_len = std::ptr::read_volatile((ctx as u64 + 0x50) as *const u64);
+        let session = std::ptr::read_volatile((ctx as u64 + 0x60) as *const u64);
+        println!(
+            "[tr-out] ctx[+0x80]={cpim_ptr:#x} ctx[+0x50]={cpim_len:#x} ctx[+0x60]={session:#x}"
+        );
+        if cpim_ptr > 0x1000 && cpim_len > 0 {
+            let n = cpim_len.min(0x400) as usize;
+            let bytes = std::slice::from_raw_parts(cpim_ptr as *const u8, n);
+            println!(
+                "[tr-out] first {n} bytes: {}",
+                bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            );
+            std::fs::write("/opt/data/il/tr_cpim_live.bin", bytes).ok();
+            println!("[tr-out] wrote /opt/data/il/tr_cpim_live.bin");
+        }
         // The live transform had OLEN=0/OUT=0: the worker's CPIM (if
         // any) would land IN the SPIM buffer (the envelope's only
         // writable data slot, +0x30/+0x68 both point there). Diff the
