@@ -149,15 +149,21 @@ fn peek_slots(image: &Image, tag: &str) {
                 line.push_str(&format!(" {f:016x}"));
             }
             println!("[obj:{tag}] +0x00..0x38 ={line}");
-            // Identity hunt: dereference every pointer field and print
-            // ASCII-able content -- the guest GENERATES its identity via
-            // CryptGenRandom at init and parks it somewhere; the wrapper
-            // reads it back for the GSA headers. Find the string.
+            // Identity hunt (PERUN_OBJHUNT=1 only): print the pointer
+            // fields' content in hex+ASCII. The read is page-safe (the
+            // buffers are heap blocks far from edges in practice).
+            if std::env::var_os("PERUN_OBJHUNT").is_none() {
+                continue;
+            }
             for off in (0x18u64..=0x38).step_by(8) {
                 #[allow(clippy::collapsible_if)]
                 let f = unsafe { std::ptr::read_volatile((obj + off) as *const u64) };
-                if f > 0x1000 && f < 0x8000_0000_0000 {
-                    let bytes = unsafe { std::slice::from_raw_parts(f as *const u8, 48) };
+                if f > 0x1000 && f < 0x8000_0000_0000 && (f & 7) == 0 {
+                    let mut bytes = [0u8; 64];
+                    for (k, slot) in bytes.iter_mut().enumerate() {
+                        *slot = unsafe { std::ptr::read_volatile((f + k as u64) as *const u8) };
+                    }
+                    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
                     let printable: String = bytes
                         .iter()
                         .map(|b| {
@@ -168,7 +174,9 @@ fn peek_slots(image: &Image, tag: &str) {
                             }
                         })
                         .collect();
-                    println!("[obj:{tag}] +{off:#x} -> {f:#x} : {printable:?}");
+                    println!("[obj:{tag}] +{off:#x} -> {f:#x}");
+                    println!("[obj:{tag}] hex64 = {hex}");
+                    println!("[obj:{tag}] asc64 = {printable:?}");
                 }
             }
         }
@@ -181,27 +189,45 @@ fn main() {
     });
 
     // ── node 1: the network half, a live SPIM for this machine ──────────
-    let id = perun_adi_win32::net::identity();
-    println!("[id] device-id {} lu {}", id.device_id, id.lu);
-    let ep = match perun_adi_win32::net::lookup(&id) {
-        Ok(e) => e,
-        Err(e) => {
-            println!("[net] lookup failed: {e}");
-            return;
-        }
-    };
-    let start = match perun_adi_win32::net::start_provisioning(&id, &ep) {
-        Ok(s) => s,
-        Err(e) => {
-            println!("[net] start failed: {e}");
-            return;
-        }
-    };
-    println!(
-        "[net] spim {} bytes, ptxid {}",
-        start.spim.len(),
-        start.ptxid
-    );
+    // The GSA request MOVED to node 2.6 (after init-2): the SPIM must be
+    // minted under the identity that exists AFTER the guest has built its
+    // session transport. PERUN_GUEST_ID=1 makes 2.6 read the GUEST'S OWN
+    // generated material from the session object and mint the id from IT
+    // (the live wrapper's architecture: one generated value into both the
+    // guest and the GSA headers). The default falls back to collect_linux.
+    let guest_mode = std::env::var("PERUN_GUEST_ID").unwrap_or_default();
+    let guest_active = !guest_mode.is_empty();
+    let mut id = perun_adi_win32::net::identity(); // re-minted in 2.6
+    let mut ep: Option<perun_adi_win32::net::Endpoints> = None;
+    let mut start: Option<perun_adi_win32::net::Start> = None;
+    println!("[id] (pre-init) device-id {} lu {}", id.device_id, id.lu);
+    if guest_mode == "3" {
+        // Mode 3: the measured pipe74 conditions -- the network half
+        // BEFORE init (the session buffer only fills when the guest has
+        // real server data), then the re-mint under the read material.
+        ep = Some(match perun_adi_win32::net::lookup(&id) {
+            Ok(e) => e,
+            Err(e) => {
+                println!("[net] lookup failed: {e}");
+                return;
+            }
+        });
+        start = Some(
+            match perun_adi_win32::net::start_provisioning(&id, ep.as_ref().unwrap()) {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("[net] start failed: {e}");
+                    return;
+                }
+            },
+        );
+        let s = start.as_ref().unwrap();
+        println!(
+            "[net] (prime) spim {} bytes, ptxid {}",
+            s.spim.len(),
+            s.ptxid
+        );
+    }
 
     // Seed the registry the Windows host would have: the ADI guests
     // probe ProductId (the iTunes wrapper's key is SOFTWARE\Apple Inc.\
@@ -316,10 +342,7 @@ fn main() {
         println!("[env] ident={id_hex:?} path={path:?}");
     }
 
-    // Persist the FRESH GSA SPIM for the seq lane (its fold terms are
-    // what the dispatcher reads; a stale SPIM takes the passive exit).
-    std::fs::write("/opt/data/il/fresh_spim.bin", &start.spim).expect("save spim");
-    println!("[env] fresh spim saved: {} bytes", start.spim.len());
+    // (The SPIM is minted in node 2.6, post-init-2; the persist lives there.)
 
     // ── node 2: init with the live Call-1 shape ────────────────────────
     // The live Call-1 packet was V2-HEADED with a 12-byte nonce tail
@@ -373,7 +396,53 @@ fn main() {
         std::ptr::write(c.add(6), aux[2] as u64);
         std::ptr::write(c.add(7), 0x0000_7fff_0000_0000);
         std::ptr::write(c.add(8), aux[3] as u64);
-        std::ptr::write(c.add(9), ident as u64); // +0x48 identity
+        // +0x48: the live Call-1 carried the FULL dashed UUID string
+        // ('1A7DC030-8887-C2D8-F470-E2EA813C70C1', 36 chars). Ours by
+        // default is the 16-char ident buffer; PERUN_INIT_UUID points
+        // the slot at a full 36-char string built from the guest's
+        // material (mode 4 reads it back after init-1 and re-inits).
+        let uuid36: Option<String> = match std::env::var("PERUN_INIT_UUID") {
+            Ok(u) => Some(u),
+            Err(_)
+                if std::env::var("PERUN_GUEST_ID")
+                    .map(|v| v == "5")
+                    .unwrap_or(false) =>
+            {
+                // Mode 5: ONE wrapper-owned identity string everywhere
+                // (the live dump's architecture): the dashed UUID form
+                // of our own device id feeds init's +0x48, the GSA
+                // headers, SetID, and the envelope slots.
+                let segs: Vec<String> = perun_adi_win32::net::identity()
+                    .device_id
+                    .split('.')
+                    .map(|s| s.to_string())
+                    .collect();
+                // The live X-Mme shape: the first FOUR 8-hex segments
+                // dash-mapped 8-4-4-4-12 ('1A7DC030'+'8887C2D8'+
+                // 'F470E2EA'+'813C70C1' -> 1A7DC030-8887-C2D8-F470-
+                // E2EA813C70C1). Ours: s1..s4 the same mapping.
+                let hex32: String = segs.iter().take(4).cloned().collect::<String>();
+                Some(format!(
+                    "{}-{}-{}-{}-{}",
+                    &hex32[0..8],
+                    &hex32[8..12],
+                    &hex32[12..16],
+                    &hex32[16..20],
+                    &hex32[20..32]
+                ))
+            }
+            Err(_) => None,
+        };
+        match uuid36 {
+            Some(u) => {
+                put(aux[4], 0, u.as_bytes());
+                put(aux[4], u.len(), b"\0");
+                std::ptr::write(c.add(9), aux[4] as u64); // +0x48 the full form
+            }
+            None => {
+                std::ptr::write(c.add(9), ident as u64); // +0x48 identity
+            }
+        }
         std::ptr::write(c.add(10), 0x40e8_976e_6bde_5309); // +0x50 the live VALUE slot
         std::ptr::write(c.add(11), 0xbee2_365f_bf17_664b); // +0x58 the live VALUE slot
         // The live Call-1 carried CODE pointers at +0x28/+0x30/+0x40/
@@ -406,6 +475,414 @@ fn main() {
         );
         peek_state(&image, "init");
     }
+
+    // ── node 3.5: the canon's middle calls, even though they reject ────
+    // The live cycle ran SetPath (0xb23c691e) and SetID (0xc774d292)
+    // between the two inits and the transform. On the Windows dispatcher
+    // both return -45019 (unknownAdiFunction) -- but the measured
+    // inter-call dependency (the finish matrix re-keying the OTP's fold)
+    // says a call's SIDE EFFECT on the dispatcher cursor can matter more
+    // than its return code. Run both, in the live order, and read what
+    // the transform behind them does.
+    unsafe {
+        // The LIVE SetPath (dumprun4): a V2-HEADED packet with a fresh
+        // 12-byte nonce, NO time tag at +0x10, a fresh nonce at +0x18,
+        // the SELF-pointer at +0x20, and the {len, flags} pair repeated
+        // at +0x28 -- the double-nested envelope. Heap/code slots after.
+        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+        *pkt.cast::<u32>() = 2; // V2 header, the live form
+        {
+            let mut b = [0u8; 12];
+            let mut fh = std::fs::File::open("/dev/urandom").unwrap();
+            use std::io::Read as _;
+            fh.read_exact(&mut b).unwrap();
+            std::ptr::copy_nonoverlapping(b.as_ptr(), pkt.cast::<u8>().add(4), 12);
+        }
+        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+        let c = ctx.cast::<u64>();
+        std::ptr::write(c.add(0), pkt as u64);
+        std::ptr::write(c.add(1), 0x4000_0000_0010);
+        std::ptr::write(c.add(2), 0); // +0x10 no tag (the live form)
+        {
+            let mut b = [0u8; 8];
+            let mut fh = std::fs::File::open("/dev/urandom").unwrap();
+            use std::io::Read as _;
+            fh.read_exact(&mut b).unwrap();
+            std::ptr::copy_nonoverlapping(b.as_ptr(), ctx.cast::<u8>().add(0x18), 8);
+        }
+        std::ptr::write(c.add(4), ctx as u64); // +0x20 SELF
+        std::ptr::write(c.add(5), 0x4000_0000_0010); // +0x28 len|flags again
+        let r = f(0xb23c691e, ctx as u64, 0, 0);
+        println!("[setpath] rc={r:#x} ({r})");
+        // The LIVE SetID envelope (decoded from dumprun4): a V2-headed
+        // 20-byte packet, the len/flags pair 0x400000014, the arg1
+        // buffer {int32 20, int32 20} (the DLL rewrites the second
+        // length), and the identity as a 24-char hex string at
+        // +0xa0..+0xb8 (the live: '1A7DC030' '8887C2D8' '4700E2EA').
+        // Ours: the guest's hex16 plus an 8-hex tail derived from the
+        // re-minted tails -- the X-Mme full id's shape.
+        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+        *pkt.cast::<u8>().add(0) = 2; // V2 header, the live form
+        {
+            // The live SetID packet carried a FRESH 12-byte wrapper
+            // nonce; the copied Android tail answered -45020.
+            let mut b = [0u8; 12];
+            let mut fh = std::fs::File::open("/dev/urandom").unwrap();
+            use std::io::Read as _;
+            fh.read_exact(&mut b).unwrap();
+            std::ptr::copy_nonoverlapping(b.as_ptr(), pkt.cast::<u8>().add(4), 12);
+        }
+        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+        // The LIVE SetID envelope, slot for slot: the time tag (the
+        // same tag<<32 construction as init-2), the wrapper nonce, the
+        // SELF-pointer at +0x20, the 'cannot persist' string, the
+        // wrapper code pointers, and the size trio -- the validator
+        // walks the envelope as a container and empty slots fault it
+        // into the session-class rejects.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0x64e8);
+        let nonce = {
+            let mut b = [0u8; 8];
+            let mut fh = std::fs::File::open("/dev/urandom").unwrap();
+            use std::io::Read as _;
+            fh.read_exact(&mut b).unwrap();
+            u64::from_le_bytes(b)
+        };
+        std::ptr::write(c.add(0), pkt as u64);
+        std::ptr::write(c.add(1), 0x4000_0000_0014);
+        std::ptr::write(c.add(2), now << 32); // +0x10 tag<<32
+        std::ptr::write(c.add(3), nonce); // +0x18
+        std::ptr::write(c.add(4), ctx as u64 + 0x20); // +0x20 self-ptr
+        std::ptr::write(c.add(5), 0xffff_5037); // +0x28 the live error marker
+        put(aux[1], 0, b"cannot persist \0");
+        std::ptr::write(c.add(6), aux[1] as u64); // +0x30
+        let dll_code = image.base() as u64 + 0x5afc0;
+        std::ptr::write(c.add(7), dll_code); // +0x38 code ptr
+        std::ptr::write(c.add(8), 0); // +0x40
+        std::ptr::write(c.add(9), 0x70); // +0x48
+        std::ptr::write(c.add(10), 0); // +0x50
+        std::ptr::write(c.add(11), 0xc2); // +0x58
+        std::ptr::write(c.add(12), 0xf4); // +0x60
+        std::ptr::write(c.add(13), 0x30); // +0x68
+        std::ptr::write(c.add(14), 0); // +0x70
+        std::ptr::write(c.add(15), dll_code); // +0x78
+        std::ptr::write(c.add(16), dll_code); // +0x80
+        std::ptr::write(c.add(17), dll_code); // +0x88
+        std::ptr::write(c.add(18), dll_code); // +0x90
+        std::ptr::write(c.add(19), dll_code); // +0x98
+        put(aux[2], 0, &{
+            let mut v = [0u8; 32];
+            let idb = std::slice::from_raw_parts(ident.cast::<u8>(), 16);
+            for (k, b) in idb.iter().take(16).enumerate() {
+                v[k] = *b;
+            }
+            // The 8-hex tail: from the re-minted identity's own
+            // segments, the X-Mme full-id shape.
+            let tail_hex = id
+                .device_id
+                .split('.')
+                .nth(1)
+                .unwrap_or("00000000")
+                .to_uppercase();
+            for (k, b) in tail_hex.bytes().take(8).enumerate() {
+                v[16 + k] = b;
+            }
+            v
+        });
+        // The live arg1 descriptor read {20, 4} before the call -- the
+        // DLL rewrote the second field to 20 on success. The live
+        // envelope pointed +0x20 at the descriptor AND at itself
+        // through the same slot family; ours keeps the descriptor.
+        // The live +0x20 slot pointed at the envelope ITSELF (self);
+        // the {20,4} descriptor lived INSIDE the packet's tail, not
+        // in a separate slot.
+        std::ptr::write(aux[3] as *mut u32, 20);
+        std::ptr::write((aux[3] as *mut u32).add(1), 4);
+        std::ptr::write(c.add(4), ctx as u64 + 0x20); // +0x20 SELF-PTR
+        // The live envelope's identity span: a 24-char hex string at
+        // +0xa0..+0xb8 with a NUL after char 24, then one more 8-hex
+        // group at +0xb8. Ours: the guest's hex16 (16) + the re-minted
+        // identity's first tail (8) = 24 chars, NUL, then the second
+        // tail (8) -- the X-Mme full-id's exact 32-hex span.
+        // Mode 5 parks the full 32-hex span in aux[2]; the default
+        // (modes 3/4) composes hex16 + the device-id's tails.
+        let idb: Vec<u8> = if std::env::var("PERUN_GUEST_ID")
+            .map(|v| v == "5")
+            .unwrap_or(false)
+        {
+            std::slice::from_raw_parts(aux[2].cast::<u8>(), 32).to_vec()
+        } else {
+            std::slice::from_raw_parts(ident.cast::<u8>(), 16).to_vec()
+        };
+        let tail1: [u8; 8] = id
+            .device_id
+            .split('.')
+            .nth(1)
+            .unwrap_or("00000000")
+            .as_bytes()[..8]
+            .try_into()
+            .unwrap();
+        let tail2: [u8; 8] = id
+            .device_id
+            .split('.')
+            .nth(2)
+            .unwrap_or("00000000")
+            .as_bytes()[..8]
+            .try_into()
+            .unwrap();
+        // PERUN_SETID_SPAN: 24 (live 24-char span) | 16 (hex16 only)
+        let span = std::env::var("PERUN_SETID_SPAN").unwrap_or_else(|_| "24".into());
+        let span: usize = span.parse().unwrap_or(24);
+        let mut srcs: Vec<u8> = Vec::new();
+        srcs.extend_from_slice(&idb);
+        if span >= 24 {
+            srcs.extend_from_slice(&tail1);
+            srcs.push(0);
+            for (k, b) in tail2.iter().enumerate() {
+                std::ptr::write(ctx.cast::<u8>().add(0xb8 + k), *b);
+            }
+        } else {
+            srcs.push(0);
+        }
+        for (k, b) in srcs.iter().enumerate() {
+            std::ptr::write(ctx.cast::<u8>().add(0xa0 + k), *b);
+        }
+        let r2 = f(0xc774d292, ctx as u64, 0, 0);
+        println!("[setid] rc={r2:#x} ({r2})");
+    }
+
+    // ── node 2.6: THE GSA REQUEST + the identity re-mint ──────────────
+    // Mode 3 (PERUN_GUEST_ID=3): the pipe74 conditions -- the network
+    // ran BEFORE init (the session object's buffer only fills with real
+    // server data), so read the GUEST'S material at [obj+0x20] -> +0x20
+    // and RE-MINT the GSA request under it: a second start under the
+    // guest's own id, fresh SPIM onto the page, a second init-2
+    // transplant, then transform. Modes 1/2 keep the deferred network.
+    let guest_ident: Option<String> = if guest_active {
+        let slot_ptr = image.base() as u64 + 0x19ddb0;
+        let obj = unsafe { std::ptr::read_volatile(slot_ptr as *const u64) };
+        let mid = if obj > 0x1000 {
+            unsafe { std::ptr::read_volatile((obj + 0x20) as *const u64) }
+        } else {
+            0
+        };
+        if mid > 0x1000 && (mid & 7) == 0 {
+            let b = unsafe { std::slice::from_raw_parts((mid + 0x20) as *const u8, 8) };
+            Some(b.iter().map(|x| format!("{x:02X}")).collect())
+        } else {
+            println!("[guest-id] object chain missing; fallback");
+            None
+        }
+    } else {
+        None
+    };
+    println!("[guest-id] material -> {guest_ident:?}");
+    if guest_mode == "5" {
+        // Mode 5: ONE wrapper-owned identity string everywhere. No
+        // material reads, no re-mint: the collect_linux id IS the
+        // session's id -- init carried its uuid36 at +0x48, the GSA
+        // request rides it, SetID's span and the envelope slots follow.
+        let segs: Vec<String> = id.device_id.split('.').map(|s| s.to_string()).collect();
+        let hex32: String = segs.iter().take(4).cloned().collect::<String>();
+        let hex16: String = segs.iter().take(2).cloned().collect::<String>();
+        // ident = hex16 (the envelope slots' live form, no dashes).
+        put(ident, 0, hex16.as_bytes());
+        put(ident, hex16.len(), b"\0");
+        println!("[env] ident={hex16:?}");
+        // Park the 32-hex span for the SetID call below.
+        put(aux[2], 0, hex32.as_bytes());
+        put(aux[2], hex32.len(), b"\0");
+        println!("[env] setid-span={hex32:?}");
+    }
+    if guest_mode == "4" {
+        // Mode 4: the material is random per run (measured), so the
+        // ONLY way to hand init the identity the guest itself minted
+        // is a SECOND init-1 pass inside the same process: read the
+        // material, build the full dashed UUID from it (the live
+        // Call-1 carried the 36-char form), and re-init with it.
+        if let Some(h) = &guest_ident {
+            let tail1: String = id
+                .device_id
+                .split('.')
+                .nth(1)
+                .unwrap_or("00000000")
+                .to_uppercase();
+            let tail2: String = id
+                .device_id
+                .split('.')
+                .nth(2)
+                .unwrap_or("00000000")
+                .to_uppercase();
+            let mut hex32: String = h.clone();
+            hex32.push_str(&tail1);
+            hex32.push_str(&tail2);
+            let uuid36 = format!(
+                "{}-{}-{}-{}-{}",
+                &hex32[0..8],
+                &hex32[8..12],
+                &hex32[12..16],
+                &hex32[16..20],
+                &hex32[20..32]
+            );
+            println!("[guest-id] mode4 uuid36 = {uuid36:?}");
+            // Re-run init-1 with the UUID in +0x48.
+            // (set_var not needed: the UUID is written directly below.)
+            unsafe {
+                std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+                *pkt.cast::<u8>().add(3) = 1;
+                *pkt.cast::<u8>().add(7) = 1;
+                std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+                let c = ctx.cast::<u64>();
+                std::ptr::write(c.add(0), pkt as u64);
+                std::ptr::write(c.add(1), 0x0000_0004_0000_0010);
+                std::ptr::write(c.add(2), 0x0000_7fff_0000_0000);
+                std::ptr::write(c.add(3), aux[0] as u64);
+                std::ptr::write(c.add(4), 0x15);
+                std::ptr::write(c.add(5), cb_addr(cb_slot28));
+                std::ptr::write(c.add(6), cb_addr(cb_slot30));
+                std::ptr::write(c.add(7), 0x0000_7fff_0000_0000);
+                std::ptr::write(c.add(8), cb_addr(cb_slot40));
+                put(aux[4], 0, uuid36.as_bytes());
+                put(aux[4], uuid36.len(), b"\0");
+                std::ptr::write(c.add(9), aux[4] as u64); // +0x48 the full UUID
+                std::ptr::write(c.add(10), 0x40e8_976e_6bde_5309);
+                std::ptr::write(c.add(11), 0xbee2_365f_bf17_664b);
+                std::ptr::write(c.add(14), cb_addr(cb_slot70));
+                std::ptr::write(c.add(18), cb_addr(cb_slot90));
+                std::ptr::write(c.add(21), cb_addr(cb_slota0));
+                std::ptr::write(c.add(22), cb_addr(cb_slotb0));
+                std::ptr::write(c.add(23), cb_addr(cb_slotb8));
+                let a3 = cb_page();
+                let r = f(0xb0eda7af, ctx as u64, 0, a3 as u64);
+                println!("[init#2pass] rc={r:#x} ({r})");
+                peek_slots(&image, "after_reinit");
+                // The material object the second pass minted:
+                let slot_ptr = image.base() as u64 + 0x19ddb0;
+                let obj = std::ptr::read_volatile(slot_ptr as *const u64);
+                let mid = if obj > 0x1000 {
+                    std::ptr::read_volatile((obj + 0x20) as *const u64)
+                } else {
+                    0
+                };
+                if mid > 0x1000 && (mid & 7) == 0 {
+                    let b = std::slice::from_raw_parts((mid + 0x20) as *const u8, 8);
+                    let m2: String = b.iter().map(|x| format!("{x:02X}")).collect();
+                    println!("[guest-id] material after re-init -> {m2:?}");
+                }
+                // ident buffer follows the guest's minted identity now.
+                let idb = uuid36
+                    .chars()
+                    .filter(|c| *c != '-')
+                    .take(16)
+                    .collect::<String>();
+                put(ident, 0, idb.as_bytes());
+                put(ident, idb.len(), b"\0");
+                println!("[env] ident={idb:?}");
+            }
+            // (remove_var not needed: nothing was set.)
+        }
+    }
+    if guest_mode == "3"
+        && let Some(h) = &guest_ident
+    {
+        id = perun_adi_win32::net::identity_overridden(h);
+        println!(
+            "[guest-id] re-minted device-id {} lu {}",
+            id.device_id, id.lu
+        );
+        ep = Some(match perun_adi_win32::net::lookup(&id) {
+            Ok(e) => e,
+            Err(e) => {
+                println!("[net] re-mint lookup failed: {e}");
+                return;
+            }
+        });
+        start = Some(
+            match perun_adi_win32::net::start_provisioning(&id, ep.as_ref().unwrap()) {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("[net] re-mint start failed: {e}");
+                    return;
+                }
+            },
+        );
+        let s = start.as_ref().unwrap();
+        println!(
+            "[net] (re-mint) spim {} bytes, ptxid {}",
+            s.spim.len(),
+            s.ptxid
+        );
+        unsafe {
+            std::ptr::copy_nonoverlapping(s.spim.as_ptr(), spimp.cast::<u8>(), s.spim.len());
+        }
+        // The ident buffer follows the re-minted identity.
+        // PERUN_IDENT_FULL=1 probes the FULL X-Mme-Device-Id form
+        // (the 36-char dashed UUID shape) in the envelope slots;
+        // the live dump carried the 16-char no-dash form.
+        let id_hex: String = h.clone();
+        let id_put: String = if std::env::var_os("PERUN_IDENT_FULL").is_some() {
+            format!(
+                "{id_hex}-{}/{}/{}",
+                id.device_id.split('.').nth(1).unwrap_or("00000000"),
+                id.device_id.split('.').nth(2).unwrap_or("00000000"),
+                id.lu.trim_start_matches('X')
+            )
+        } else {
+            id_hex.clone()
+        };
+        put(ident, 0, id_put.as_bytes());
+        put(ident, id_put.len(), b"\0");
+        println!("[env] ident={id_put:?}");
+        std::fs::write("/opt/data/il/fresh_spim.bin", &s.spim).expect("save spim");
+        println!("[env] fresh spim saved: {} bytes", s.spim.len());
+    }
+    if guest_active && guest_mode != "3" && guest_mode != "5" {
+        id = match &guest_ident {
+            Some(h) => perun_adi_win32::net::identity_overridden(h),
+            None => perun_adi_win32::net::identity(),
+        };
+        println!("[guest-id] device-id {} lu {}", id.device_id, id.lu);
+    }
+    if ep.is_none() {
+        ep = Some(match perun_adi_win32::net::lookup(&id) {
+            Ok(e) => e,
+            Err(e) => {
+                println!("[net] lookup failed: {e}");
+                return;
+            }
+        });
+    }
+    if start.is_none() {
+        start = Some(
+            match perun_adi_win32::net::start_provisioning(&id, ep.as_ref().unwrap()) {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("[net] start failed: {e}");
+                    return;
+                }
+            },
+        );
+    }
+    {
+        let start = start.as_ref().unwrap();
+        println!(
+            "[net] spim {} bytes, ptxid {}",
+            start.spim.len(),
+            start.ptxid
+        );
+    }
+    // Shadow the Options with the resolved values for the rest of the
+    // pipeline: everything downstream reads the minted bindings.
+    let ep = match ep {
+        Some(e) => e,
+        None => return,
+    };
+    let start = match start {
+        Some(s) => s,
+        None => return,
+    };
 
     // ── node 3.5: the SECOND init -- the live Call-5 SHAPE ─────────────
     // The live Call 5 is NOT a copy of Call 1: the layout differs slot
@@ -482,37 +959,6 @@ fn main() {
                 println!("[sess4] slot 0x19ddb0 = {obj:#x}: no object to seed");
             }
         }
-    }
-
-    // ── node 3.5: the canon's middle calls, even though they reject ────
-    // The live cycle ran SetPath (0xb23c691e) and SetID (0xc774d292)
-    // between the two inits and the transform. On the Windows dispatcher
-    // both return -45019 (unknownAdiFunction) -- but the measured
-    // inter-call dependency (the finish matrix re-keying the OTP's fold)
-    // says a call's SIDE EFFECT on the dispatcher cursor can matter more
-    // than its return code. Run both, in the live order, and read what
-    // the transform behind them does.
-    unsafe {
-        // Both calls with pkt_pass2's fold keys (bytes 3/7 = 1): without
-        // them the header fold rejects at -45018 BEFORE the selector, and
-        // the measurement is about the selector's own verdict.
-        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
-        *pkt.cast::<u8>().add(3) = 1;
-        *pkt.cast::<u8>().add(7) = 1;
-        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
-        let c = ctx.cast::<u64>();
-        std::ptr::write(c.add(0), pkt as u64);
-        std::ptr::write(c.add(1), 0x4000_0000_0010);
-        let r = f(0xb23c691e, ctx as u64, 0, 0);
-        println!("[setpath] rc={r:#x} ({r})");
-        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
-        *pkt.cast::<u8>().add(3) = 1;
-        *pkt.cast::<u8>().add(7) = 1;
-        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
-        std::ptr::write(c.add(0), pkt as u64);
-        std::ptr::write(c.add(1), 0x4000_0000_0014);
-        let r2 = f(0xc774d292, ctx as u64, 0, 0);
-        println!("[setid] rc={r2:#x} ({r2})");
     }
 
     // ── node 4: transform with the fresh SPIM ───────────────────────────

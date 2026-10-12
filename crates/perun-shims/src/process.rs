@@ -100,6 +100,27 @@ win32_api! {
 }
 
 win32_api! {
+    /// ULONGLONG GetTickCount64(void) -- the host's real uptime in
+    /// milliseconds. The ADI guest renders the machine-state buffers
+    /// ('000.00:00.0' days.hh:mm.s) from this; a zero uptime leaves
+    /// the state family (-45024/-45025/-45026) unanswered.
+    unsafe extern "win64" fn GetTickCount64() -> u64 {
+        unsafe {
+            let mut ts: libc::timespec = std::mem::zeroed();
+            libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts);
+            (ts.tv_sec as u64) * 1000 + (ts.tv_nsec / 1_000_000) as u64
+        }
+    }
+}
+
+win32_api! {
+    /// DWORD GetTickCount(void) -- the low 32 bits of the uptime.
+    unsafe extern "win64" fn GetTickCount() -> u32 {
+        unsafe { GetTickCount64() as u32 }
+    }
+}
+
+win32_api! {
     /// BOOL QueryPerformanceCounter(LARGE_INTEGER*);
     unsafe extern "win64" fn QueryPerformanceCounter(counter: *mut i64) -> BOOL {
     unsafe {

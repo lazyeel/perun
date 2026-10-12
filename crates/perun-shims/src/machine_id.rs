@@ -255,7 +255,7 @@ const K: [u32; 64] = [
     0xeb_86_d3_91,
 ];
 
-fn md5(msg: &[u8]) -> [u8; 16] {
+pub fn md5(msg: &[u8]) -> [u8; 16] {
     let mut a0: u32 = 0x67_45_23_01;
     let mut b0: u32 = 0xef_cd_ab_89;
     let mut c0: u32 = 0x98_ba_dc_fe;

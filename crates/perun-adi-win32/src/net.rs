@@ -100,13 +100,95 @@ pub fn identity() -> Identity {
     }
 }
 
+/// The guest's OWN generated identity: the wrapper feeds ONE value into
+/// both the guest and the GSA headers (the live dump's SetID line). The
+/// hex16 from the guest's session blob becomes the FIRST segment of the
+/// device id; the remaining segments stay machine-stable so only the
+/// guest's segment decides the binding.
+pub fn identity_overridden(hex16: &str) -> Identity {
+    let mut lu = String::from("X");
+    let mut f = [0u8; 8];
+    if let Ok(mut fh) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read as _;
+        if fh.read_exact(&mut f).is_ok() {
+            for b in &mut f {
+                lu.push_str(&format!("{b:02X}"));
+            }
+        }
+    }
+    let inputs = collect_linux();
+    let tail = [
+        tail_seg(&inputs.product_id_ascii),
+        tail_seg(&inputs.cpu_ascii),
+        tail_seg(&inputs.bios_ascii),
+        tail_seg(&inputs.machine_wide),
+        tail_seg(&inputs.hwguid_wide),
+        tail_seg(&inputs.product_id_ascii),
+    ];
+    let device_id = std::iter::once(hex16.to_uppercase())
+        .chain(tail.iter().map(|s| s.to_string()))
+        .collect::<Vec<_>>()
+        .join(".");
+    Identity { device_id, lu }
+}
+
+fn tail_seg(data: &[u8]) -> String {
+    let s = String::from_utf8_lossy(data).to_string();
+    let d = perun_shims::machine_id::md5(s.as_bytes());
+    let v = u32::from_be_bytes([d[4], d[5], d[6], d[7]]);
+    format!("{v:08X}")
+}
+
 impl Identity {
+    /// The dashed X-Mme form: the first four 8-hex segments of the
+    /// dotted id mapped 8-4-4-4-12 -- the live dump's exact shape
+    /// ('1A7DC030-8887-C2D8-F470-E2EA813C70C1').
+    pub fn uuid36(&self) -> String {
+        let hex32: String = self
+            .device_id
+            .split('.')
+            .take(4)
+            .collect::<String>()
+            .to_uppercase();
+        if hex32.len() < 32 {
+            return self.device_id.clone();
+        }
+        format!(
+            "{}-{}-{}-{}-{}",
+            &hex32[0..8],
+            &hex32[8..12],
+            &hex32[12..16],
+            &hex32[16..20],
+            &hex32[20..32]
+        )
+    }
+
+    /// The LIVE MD-LU form (dumprun4: 'C0308887C2D8F470'): the id's
+    /// own hex span [4..20] -- NOT random. The formula keeps the LU
+    /// bound to the same identity the headers speak.
+    pub fn lu_from_id(&self) -> String {
+        let hex32: String = self
+            .device_id
+            .split('.')
+            .take(4)
+            .collect::<String>()
+            .to_uppercase();
+        if hex32.len() < 32 {
+            return self.lu.clone();
+        }
+        hex32[4..20].to_string()
+    }
+
     fn headers(&self) -> Vec<(String, String)> {
         vec![
             ("User-Agent".into(), UA.into()),
-            ("X-Mme-Device-Id".into(), self.device_id.clone()),
+            // The LIVE X-Mme form (dumprun4): the DASHED UUID shape,
+            // not the dotted components -- '1A7DC030-8887-C2D8-F470-
+            // E2EA813C70C1'. Ours: the first four 8-hex segments
+            // dash-mapped 8-4-4-4-12.
+            ("X-Mme-Device-Id".into(), self.uuid36()),
             ("X-Mme-Client-Info".into(), CLIENT_INFO.into()),
-            ("X-Apple-I-MD-LU".into(), self.lu.clone()),
+            ("X-Apple-I-MD-LU".into(), self.lu_from_id()),
             ("X-Apple-Client-App-Name".into(), APP_NAME.into()),
             ("X-Apple-I-SRL-NO".into(), "0".into()),
         ]
