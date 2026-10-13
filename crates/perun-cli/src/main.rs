@@ -402,6 +402,23 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
         println!(
             "[stop] frame slots: [rsp+0x78]={s78:#x} [rsp+0x80]={s80:#x} [rsp+0x88]={s88:#x} [rsp+0x90]={s90:#x} [rsp+0xe0]={se0:#x} [rsp+0x6f8]={s6f8:#x} [rsp+0x700]={s700:#x} [rsp+0x6e8]={s6e8:#x} [rsp+0xc10]={sc10:#x} [rsp+0xa04]={sa04:#x}"
         );
+        // The fork is edx-dominated: the session tables ([rsp+0x6f8]
+        // and [rsp+0x700] bases) are what the body folds into edx_in.
+        // Dump the first 0x100 bytes of each table at the stop so the
+        // shallow-init and deep-init variants can be diffed.
+        for (name, base) in [("tbl6f8", s6f8), ("tbl700", s700)] {
+            if base > 0x1000 && base < 0x8000_0000_0000 {
+                let words: Vec<u64> = (0..32)
+                    .map(|k| unsafe { std::ptr::read_volatile((base + k * 8) as *const u64) })
+                    .collect();
+                let hexs: String = words
+                    .iter()
+                    .map(|w| format!("{w:016x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                println!("[stop] {name}[0..0x100] = {hexs}");
+            }
+        }
     }
     unsafe {
         if WDEC_N > 0 {
