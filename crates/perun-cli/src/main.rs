@@ -2957,10 +2957,10 @@ fn cmd_seq(args: &[String]) -> i32 {
     // PERUN_STEP_UNTIL in sequences: the address-stop the walk
     // handler already understands (STEP_STOP_RVA). Without this
     // parse the address-stop silently never arms in a sequence.
-    if let Ok(v) = std::env::var("PERUN_STEP_UNTIL") {
-        if let Some(rva) = u64::from_str_radix(v.trim_start_matches("0x"), 16).ok() {
-            unsafe { SEQ_STEP_UNTIL_RVA = rva };
-        }
+    if let Ok(v) = std::env::var("PERUN_STEP_UNTIL")
+        && let Ok(rva) = u64::from_str_radix(v.trim_start_matches("0x"), 16)
+    {
+        unsafe { SEQ_STEP_UNTIL_RVA = rva };
     }
     // PERUN_FORCE_AT_ON_ITER in a sequence: apply the armed force only on
     // the Nth export call (0-based) rather than on every one. The fold force
