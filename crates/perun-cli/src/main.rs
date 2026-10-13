@@ -396,8 +396,11 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
         let se0 = unsafe { std::ptr::read_volatile((rsp + 0xe0) as *const u64) };
         let s6f8 = unsafe { std::ptr::read_volatile((rsp + 0x6f8) as *const u64) };
         let s700 = unsafe { std::ptr::read_volatile((rsp + 0x700) as *const u64) };
+        let s6e8 = unsafe { std::ptr::read_volatile((rsp + 0x6e8) as *const u64) };
+        let sc10 = unsafe { std::ptr::read_volatile((rsp + 0xc10) as *const u64) };
+        let sa04 = unsafe { std::ptr::read_volatile((rsp + 0xa04) as *const u64) };
         println!(
-            "[stop] frame slots: [rsp+0x78]={s78:#x} [rsp+0x80]={s80:#x} [rsp+0x88]={s88:#x} [rsp+0x90]={s90:#x} [rsp+0xe0]={se0:#x} [rsp+0x6f8]={s6f8:#x} [rsp+0x700]={s700:#x}"
+            "[stop] frame slots: [rsp+0x78]={s78:#x} [rsp+0x80]={s80:#x} [rsp+0x88]={s88:#x} [rsp+0x90]={s90:#x} [rsp+0xe0]={se0:#x} [rsp+0x6f8]={s6f8:#x} [rsp+0x700]={s700:#x} [rsp+0x6e8]={s6e8:#x} [rsp+0xc10]={sc10:#x} [rsp+0xa04]={sa04:#x}"
         );
     }
     unsafe {
