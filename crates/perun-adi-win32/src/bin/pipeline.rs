@@ -379,12 +379,18 @@ fn main() {
         std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
         *pkt.cast::<u8>().add(3) = 1;
         *pkt.cast::<u8>().add(7) = 1;
-        // The init packet's tail stays ZERO. The measured matrix
-        // (after the jail move): zero tail -> -45061 notProvisioned
-        // (the LIVE verdict, byte for byte); the live Android nonce
-        // tail -> -45020 (the body validator reads a FOREIGN nonce
-        // and answers 'invalid data' -- the wrapper's nonce is
-        // session material, not transportable).
+        // PERUN_INIT_LIVE_PKT=<path>: the live Call-1 packet (V2 +
+        // the wrapper's 12-byte nonce). The zero tail answers the
+        // -45061 family; the LIVE nonce bytes are fold coefficients
+        // (the SetID/transform rounds proved the mechanism) -- with
+        // them the init body's fold accumulates the table the way
+        // the live chain's first body did.
+        if let Some(live) = std::env::var("PERUN_INIT_LIVE_PKT")
+            .ok()
+            .and_then(|f| std::fs::read(f).ok())
+        {
+            std::ptr::copy_nonoverlapping(live.as_ptr(), pkt.cast::<u8>(), live.len().min(16));
+        }
         std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
         let c = ctx.cast::<u64>();
         std::ptr::write(c.add(0), pkt as u64);
@@ -491,12 +497,22 @@ fn main() {
         // at +0x28 -- the double-nested envelope. Heap/code slots after.
         std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
         *pkt.cast::<u32>() = 2; // V2 header, the live form
-        {
-            let mut b = [0u8; 12];
-            let mut fh = std::fs::File::open("/dev/urandom").unwrap();
-            use std::io::Read as _;
-            fh.read_exact(&mut b).unwrap();
-            std::ptr::copy_nonoverlapping(b.as_ptr(), pkt.cast::<u8>().add(4), 12);
+        // PERUN_SETPATH_LIVE_PKT=<path>: the live packet's 12-byte tail
+        // is the fold's coefficients; urandom tails die at -45018.
+        let setpath_live = std::env::var("PERUN_SETPATH_LIVE_PKT")
+            .ok()
+            .and_then(|f| std::fs::read(f).ok());
+        match setpath_live {
+            Some(live) => {
+                std::ptr::copy_nonoverlapping(live.as_ptr(), pkt.cast::<u8>(), live.len().min(16));
+            }
+            None => {
+                let mut b = [0u8; 12];
+                let mut fh = std::fs::File::open("/dev/urandom").unwrap();
+                use std::io::Read as _;
+                fh.read_exact(&mut b).unwrap();
+                std::ptr::copy_nonoverlapping(b.as_ptr(), pkt.cast::<u8>().add(4), 12);
+            }
         }
         std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
         let c = ctx.cast::<u64>();
@@ -523,14 +539,21 @@ fn main() {
         // re-minted tails -- the X-Mme full id's shape.
         std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
         *pkt.cast::<u8>().add(0) = 2; // V2 header, the live form
-        // PERUN_SETID_LIVE_PKT=<path>: the measured live packet keys
+        // PERUN_SETID_LIVE_PKT=<path>[,<path2>]: the live packets key
         // the selector's fold past -45018 (the wrapper's nonce-tail
-        // bytes are fold COEFFICIENTS, not entropy); a fresh urandom
-        // tail cannot reproduce them.
-        let setid_live = std::env::var("PERUN_SETID_LIVE_PKT")
-            .ok()
-            .and_then(|f| std::fs::read(f).ok());
-        match setid_live {
+        // bytes are fold COEFFICIENTS, not entropy). TWO paths = the
+        // live PAIR: call #1 gets the first (the '1a7d' fail packet,
+        // whose body still RUNS and contributes to the fold table),
+        // call #2 gets the success packet. The live numbering is the
+        // measured canon; swapping them answers -45019.
+        let setid_live_pair: Vec<Vec<u8>> = std::env::var("PERUN_SETID_LIVE_PKT")
+            .map(|spec| {
+                spec.split(',')
+                    .filter_map(|f| std::fs::read(f.trim()).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        match setid_live_pair.first() {
             Some(live) => {
                 std::ptr::copy_nonoverlapping(live.as_ptr(), pkt.cast::<u8>(), live.len().min(16));
             }
@@ -667,22 +690,35 @@ fn main() {
             .as_bytes()[..8]
             .try_into()
             .unwrap();
-        // PERUN_SETID_SPAN: 24 (live 24-char span) | 16 (hex16 only)
+        // PERUN_SETID_SPAN: 24 (live 24-char span) | 16 (hex16 only).
+        // PERUN_SETID_LIVE_SPAN=<path>: the EXACT live 32-byte span
+        // ('1A7DC0308887C2D8' + NUL + '470E2EA813C70C1') -- the
+        // measured live form, byte for byte.
         let span = std::env::var("PERUN_SETID_SPAN").unwrap_or_else(|_| "24".into());
         let span: usize = span.parse().unwrap_or(24);
+        let live_span = std::env::var("PERUN_SETID_LIVE_SPAN")
+            .ok()
+            .and_then(|f| std::fs::read(f).ok());
         let mut srcs: Vec<u8> = Vec::new();
-        srcs.extend_from_slice(&idb);
-        if span >= 24 {
-            srcs.extend_from_slice(&tail1);
-            srcs.push(0);
-            for (k, b) in tail2.iter().enumerate() {
-                std::ptr::write(ctx.cast::<u8>().add(0xb8 + k), *b);
+        if let Some(ls) = live_span {
+            // The live span wins: 32 bytes at +0xa0..+0xb8.
+            for (k, b) in ls.iter().take(32).enumerate() {
+                std::ptr::write(ctx.cast::<u8>().add(0xa0 + k), *b);
             }
         } else {
-            srcs.push(0);
-        }
-        for (k, b) in srcs.iter().enumerate() {
-            std::ptr::write(ctx.cast::<u8>().add(0xa0 + k), *b);
+            srcs.extend_from_slice(&idb);
+            if span >= 24 {
+                srcs.extend_from_slice(&tail1);
+                srcs.push(0);
+                for (k, b) in tail2.iter().enumerate() {
+                    std::ptr::write(ctx.cast::<u8>().add(0xb8 + k), *b);
+                }
+            } else {
+                srcs.push(0);
+            }
+            for (k, b) in srcs.iter().enumerate() {
+                std::ptr::write(ctx.cast::<u8>().add(0xa0 + k), *b);
+            }
         }
         // The LIVE call carried a CODE POINTER in R9 (arg3 =
         // 0x7680ae906d1c, the wrapper's own frame); ours was NULL.
@@ -698,14 +734,25 @@ fn main() {
         let r2 = f(0xc774d292, ctx as u64, 0, dll_code);
         println!("[setid#1] rc={r2:#x} ({r2})");
         // Rebuild the envelope: the first call rewrote the packet.
+        // The live canon's call #2 carried ITS OWN packet (the
+        // success one); the pair's second path supplies it.
         std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
         *pkt.cast::<u8>().add(0) = 2;
-        {
-            let mut b = [0u8; 12];
-            let mut fh = std::fs::File::open("/dev/urandom").unwrap();
-            use std::io::Read as _;
-            fh.read_exact(&mut b).unwrap();
-            std::ptr::copy_nonoverlapping(b.as_ptr(), pkt.cast::<u8>().add(4), 12);
+        match setid_live_pair.get(1) {
+            Some(live2) => {
+                std::ptr::copy_nonoverlapping(
+                    live2.as_ptr(),
+                    pkt.cast::<u8>(),
+                    live2.len().min(16),
+                );
+            }
+            None => {
+                let mut b = [0u8; 12];
+                let mut fh = std::fs::File::open("/dev/urandom").unwrap();
+                use std::io::Read as _;
+                fh.read_exact(&mut b).unwrap();
+                std::ptr::copy_nonoverlapping(b.as_ptr(), pkt.cast::<u8>().add(4), 12);
+            }
         }
         std::ptr::write(c.add(0), pkt as u64);
         let r3 = f(0xc774d292, ctx as u64, 0, dll_code);
