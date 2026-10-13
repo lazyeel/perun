@@ -523,14 +523,24 @@ fn main() {
         // re-minted tails -- the X-Mme full id's shape.
         std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
         *pkt.cast::<u8>().add(0) = 2; // V2 header, the live form
-        {
-            // The live SetID packet carried a FRESH 12-byte wrapper
-            // nonce; the copied Android tail answered -45020.
-            let mut b = [0u8; 12];
-            let mut fh = std::fs::File::open("/dev/urandom").unwrap();
-            use std::io::Read as _;
-            fh.read_exact(&mut b).unwrap();
-            std::ptr::copy_nonoverlapping(b.as_ptr(), pkt.cast::<u8>().add(4), 12);
+        // PERUN_SETID_LIVE_PKT=<path>: the measured live packet keys
+        // the selector's fold past -45018 (the wrapper's nonce-tail
+        // bytes are fold COEFFICIENTS, not entropy); a fresh urandom
+        // tail cannot reproduce them.
+        let setid_live = std::env::var("PERUN_SETID_LIVE_PKT")
+            .ok()
+            .and_then(|f| std::fs::read(f).ok());
+        match setid_live {
+            Some(live) => {
+                std::ptr::copy_nonoverlapping(live.as_ptr(), pkt.cast::<u8>(), live.len().min(16));
+            }
+            None => {
+                let mut b = [0u8; 12];
+                let mut fh = std::fs::File::open("/dev/urandom").unwrap();
+                use std::io::Read as _;
+                fh.read_exact(&mut b).unwrap();
+                std::ptr::copy_nonoverlapping(b.as_ptr(), pkt.cast::<u8>().add(4), 12);
+            }
         }
         std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
         // The LIVE SetID envelope, slot for slot: the time tag (the
@@ -554,7 +564,32 @@ fn main() {
         std::ptr::write(c.add(1), 0x4000_0000_0014);
         std::ptr::write(c.add(2), now << 32); // +0x10 tag<<32
         std::ptr::write(c.add(3), nonce); // +0x18
-        std::ptr::write(c.add(4), ctx as u64 + 0x20); // +0x20 self-ptr
+        // The live envelope carried +0x20 = a SECOND envelope
+        // (arg1 in the dump points at its own struct; the deep dump
+        // derefs it as the outer, and the inner holds the
+        // {ptr,len} descriptor family). PERUN_SETID_INNER=1 builds
+        // the inner struct as a real page and hands its address.
+        let inner: *mut core::ffi::c_void = if std::env::var_os("PERUN_SETID_INNER").is_some() {
+            let ip = page(0x100);
+            let ci = ip.cast::<u64>();
+            std::ptr::write(ci.add(0), pkt as u64);
+            std::ptr::write(ci.add(1), 0x0000_0004_0000_0014);
+            std::ptr::write(ci.add(2), now << 32);
+            std::ptr::write(ci.add(3), nonce);
+            std::ptr::write(ci.add(4), ip as u64); // self
+            std::ptr::write(ci.add(5), 0xffff_5037);
+            std::ptr::write(ci.add(6), aux[1] as u64);
+            std::ptr::write(ci.add(7), cb_addr(cb_slot48));
+            ip
+        } else {
+            std::ptr::null_mut()
+        };
+        let slot20: u64 = if std::env::var_os("PERUN_SETID_INNER").is_some() {
+            inner as u64
+        } else {
+            ctx as u64 + 0x20
+        };
+        std::ptr::write(c.add(4), slot20); // +0x20 the live inner envelope
         std::ptr::write(c.add(5), 0xffff_5037); // +0x28 the live error marker
         put(aux[1], 0, b"cannot persist \0");
         std::ptr::write(c.add(6), aux[1] as u64); // +0x30
@@ -684,7 +719,13 @@ fn main() {
     // and RE-MINT the GSA request under it: a second start under the
     // guest's own id, fresh SPIM onto the page, a second init-2
     // transplant, then transform. Modes 1/2 keep the deferred network.
-    let guest_ident: Option<String> = if guest_active {
+    let guest_ident: Option<String> = if guest_mode == "live" {
+        // Mode "live": the measurement probe -- the WHOLE chain rides
+        // the live dump's identity string (the fold table's seed and
+        // the live packet's coefficients come from the same session).
+        // Purely diagnostic: proves or kills the coherence hypothesis.
+        Some("1A7DC0308887C2D8".to_string())
+    } else if guest_active {
         let slot_ptr = image.base() as u64 + 0x19ddb0;
         let obj = unsafe { std::ptr::read_volatile(slot_ptr as *const u64) };
         let mid = if obj > 0x1000 {
@@ -708,9 +749,12 @@ fn main() {
         // material reads, no re-mint: the collect_linux id IS the
         // session's id -- init carried its uuid36 at +0x48, the GSA
         // request rides it, SetID's span and the envelope slots follow.
+        // PERUN_IDENT overrides the hex16 (a measurement probe: align
+        // the fold table's seed with the live packet's coefficients).
         let segs: Vec<String> = id.device_id.split('.').map(|s| s.to_string()).collect();
         let hex32: String = segs.iter().take(4).cloned().collect::<String>();
-        let hex16: String = segs.iter().take(2).cloned().collect::<String>();
+        let hex16: String = std::env::var("PERUN_IDENT")
+            .unwrap_or_else(|_| segs.iter().take(2).cloned().collect::<String>());
         // ident = hex16 (the envelope slots' live form, no dashes).
         put(ident, 0, hex16.as_bytes());
         put(ident, hex16.len(), b"\0");

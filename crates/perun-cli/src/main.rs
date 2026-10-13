@@ -377,6 +377,20 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
             words
         );
     }
+    // The frame-inheritance slots the CFF tests right after the
+    // -45025 publisher (cmpq $0x0, 0x80(%rsp) at 0x7c8b5b56): the
+    // inter-call session marker. Reading them at the stop tells
+    // whether the previous vdfut call left its output descriptor
+    // behind in the shared frame region.
+    {
+        let s78 = unsafe { std::ptr::read_volatile((rsp + 0x78) as *const u64) };
+        let s80 = unsafe { std::ptr::read_volatile((rsp + 0x80) as *const u64) };
+        let s88 = unsafe { std::ptr::read_volatile((rsp + 0x88) as *const u64) };
+        let s90 = unsafe { std::ptr::read_volatile((rsp + 0x90) as *const u64) };
+        println!(
+            "[stop] frame slots: [rsp+0x78]={s78:#x} [rsp+0x80]={s80:#x} [rsp+0x88]={s88:#x} [rsp+0x90]={s90:#x}"
+        );
+    }
     unsafe {
         if WDEC_N > 0 {
             let n = WDEC_N;
