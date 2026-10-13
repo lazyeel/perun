@@ -2878,6 +2878,9 @@ fn cmd_call(args: &[String]) -> i32 {
 /// Resolve a token to a guest-visible address: loaded buffer name, scratch/ctx
 /// (optionally +OFF), or a plain number.
 static mut SEQ_EXPORT_ADDR: u64 = 0;
+/// PERUN_STEP_UNTIL as parsed by cmd_seq: armed as STEP_STOP_RVA
+/// when the walk turns on (see the PERUN_STEPS arm site).
+static mut SEQ_STEP_UNTIL_RVA: u64 = 0;
 
 fn resolve_token(tok: &str, scratch: u64, ctx: u64, loads: &[(String, u64, usize)]) -> Option<u64> {
     if tok == "EXPORT" {
@@ -2949,6 +2952,14 @@ fn cmd_seq(args: &[String]) -> i32 {
         };
         if let Some(code) = parsed {
             unsafe { STEP_STOP_CODE = code };
+        }
+    }
+    // PERUN_STEP_UNTIL in sequences: the address-stop the walk
+    // handler already understands (STEP_STOP_RVA). Without this
+    // parse the address-stop silently never arms in a sequence.
+    if let Ok(v) = std::env::var("PERUN_STEP_UNTIL") {
+        if let Some(rva) = u64::from_str_radix(v.trim_start_matches("0x"), 16).ok() {
+            unsafe { SEQ_STEP_UNTIL_RVA = rva };
         }
     }
     // PERUN_FORCE_AT_ON_ITER in a sequence: apply the armed force only on
@@ -3508,6 +3519,11 @@ fn cmd_seq(args: &[String]) -> i32 {
                     unsafe {
                         STEP_DLL_LO = image.base() as u64;
                         STEP_DLL_HI = STEP_DLL_LO + 0x1A_5000;
+                        STEP_STOP_RVA = if SEQ_STEP_UNTIL_RVA != 0 {
+                            STEP_DLL_LO + SEQ_STEP_UNTIL_RVA
+                        } else {
+                            0
+                        };
                         arm_steps(steps);
                         libc::raise(libc::SIGTRAP);
                     }
