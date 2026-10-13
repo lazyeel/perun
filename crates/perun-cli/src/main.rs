@@ -180,6 +180,9 @@ static mut FORCE2_AT: u64 = 0;
 static mut FORCE2_REGS: [(i32, u64); 6] = [(0, 0); 6];
 static mut FORCE2_N: usize = 0;
 static mut FORCE2_ON_ITER: Option<usize> = None;
+/// PERUN_FORCE_CFG_R9=1: seed r9d=0x4069d333 at every cfg-zone
+/// cmp against that constant (the -45028 publishers' shared gate).
+static mut FORCE_CFG_R9_ON: bool = false;
 static mut STEP_PRIMED: bool = false;
 static mut STEP_ENTERED: bool = false;
 static mut STEP_COUNT: u64 = 0;
@@ -387,8 +390,14 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
         let s80 = unsafe { std::ptr::read_volatile((rsp + 0x80) as *const u64) };
         let s88 = unsafe { std::ptr::read_volatile((rsp + 0x88) as *const u64) };
         let s90 = unsafe { std::ptr::read_volatile((rsp + 0x90) as *const u64) };
+        // The transform body's machinery slots: [rsp+0xe0] = the
+        // CALLBACK the body calls (*0xe0(%rsp) at 0x7c86bddf);
+        // [rsp+0x6f8]/[rsp+0x700] = the fold-table bases (r9/r14).
+        let se0 = unsafe { std::ptr::read_volatile((rsp + 0xe0) as *const u64) };
+        let s6f8 = unsafe { std::ptr::read_volatile((rsp + 0x6f8) as *const u64) };
+        let s700 = unsafe { std::ptr::read_volatile((rsp + 0x700) as *const u64) };
         println!(
-            "[stop] frame slots: [rsp+0x78]={s78:#x} [rsp+0x80]={s80:#x} [rsp+0x88]={s88:#x} [rsp+0x90]={s90:#x}"
+            "[stop] frame slots: [rsp+0x78]={s78:#x} [rsp+0x80]={s80:#x} [rsp+0x88]={s88:#x} [rsp+0x90]={s90:#x} [rsp+0xe0]={se0:#x} [rsp+0x6f8]={s6f8:#x} [rsp+0x700]={s700:#x}"
         );
     }
     unsafe {
@@ -833,6 +842,34 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
                 }
             }
 
+            // PERUN_FORCE_CFG_R9=1: the cfg-zone's -45028 publishers
+            // all test r9d == 0x4069d333 (the E==1 gate, 14+ sites in
+            // 0x8f6f0..0x90b60). Instead of one force per site, seed
+            // r9d at EVERY cmp in that zone whose displacement matches
+            // the gate constant's instruction encoding (81 f9 33 d3
+            // 69 40): the walk then carries the E==1 state through
+            // whichever site the route actually takes.
+            if FORCE_CFG_R9_ON {
+                let rva_now = rip - STEP_DLL_LO;
+                if (0x8f6f0..=0x90b60).contains(&rva_now) {
+                    // Read the six instruction bytes at rip: cmp
+                    // $imm32,%r9d encodes 41 81 f9 <imm32 LE>.
+                    let b0 = std::ptr::read_volatile(rip as *const u8);
+                    let b1 = std::ptr::read_volatile((rip + 1) as *const u8);
+                    let b2 = std::ptr::read_volatile((rip + 2) as *const u8);
+                    if b0 == 0x41 && b1 == 0x81 && b2 == 0xf9 {
+                        let imm = u32::from_le_bytes([
+                            std::ptr::read_volatile((rip + 3) as *const u8),
+                            std::ptr::read_volatile((rip + 4) as *const u8),
+                            std::ptr::read_volatile((rip + 5) as *const u8),
+                            std::ptr::read_volatile((rip + 6) as *const u8),
+                        ]);
+                        if imm == 0x4069d333 {
+                            *regs.add(libc::REG_R9 as usize) = 0x4069d333;
+                        }
+                    }
+                }
+            }
             let rva_here = rip - STEP_DLL_LO;
             if ((0x900050..=0x900110).contains(&rva_here)
                 || (0x9150c..=0x91530).contains(&rva_here))
@@ -1816,6 +1853,9 @@ fn cmd_call(args: &[String]) -> i32 {
         return 1;
     };
     println!("[perun] export {export_name} @ {:#x}", export_ptr as usize);
+    // The EXPORT token in scripts resolves here: the envelope's
+    // callback slots need a REAL guest code address.
+    unsafe { SEQ_EXPORT_ADDR = export_ptr as usize as u64 };
 
     // Scratch page for pointer-backed arguments / output capture.
     let scratch = unsafe {
@@ -2834,7 +2874,14 @@ fn cmd_call(args: &[String]) -> i32 {
 
 /// Resolve a token to a guest-visible address: loaded buffer name, scratch/ctx
 /// (optionally +OFF), or a plain number.
+static mut SEQ_EXPORT_ADDR: u64 = 0;
+
 fn resolve_token(tok: &str, scratch: u64, ctx: u64, loads: &[(String, u64, usize)]) -> Option<u64> {
+    if tok == "EXPORT" {
+        // The loaded image's driven export (vdfut768ig): a VALID
+        // guest code address for the envelope's callback slots.
+        return Some(unsafe { SEQ_EXPORT_ADDR });
+    }
     if let Some((_, addr, _)) = loads.iter().find(|(n, _, _)| n == tok) {
         return Some(*addr);
     }
@@ -2959,6 +3006,9 @@ fn cmd_seq(args: &[String]) -> i32 {
         return 1;
     };
     println!("[perun] export {export_name} @ {:#x}", export_ptr as usize);
+    // The EXPORT token in scripts resolves here: the envelope's
+    // callback slots need a REAL guest code address.
+    unsafe { SEQ_EXPORT_ADDR = export_ptr as usize as u64 };
 
     // Same as `cmd_call`: when PERUN_PE_STACK is set the guest runs on a
     // dedicated mapping, and every call in the sequence must be switched onto
@@ -3103,6 +3153,61 @@ fn cmd_seq(args: &[String]) -> i32 {
             return 2;
         }
         force_addr = image.base() as u64 + addr;
+    }
+    // PERUN_FORCE2_AT in sequences: a second, independent force
+    // point (the -45019 tail gates come in cascades -- one force
+    // per gate is not enough to walk them all).
+    let mut force2_pairs: Vec<(i32, u64)> = Vec::new();
+    let mut force2_addr = 0u64;
+    if std::env::var_os("PERUN_FORCE_CFG_R9").is_some() {
+        // Enabled before the walk arms; the trap handler reads it.
+        unsafe { FORCE_CFG_R9_ON = true };
+    }
+    if let Ok(spec2) = std::env::var("PERUN_FORCE2_AT") {
+        let Some((addr_s, rest)) = spec2.split_once(':') else {
+            eprintln!("[seq] PERUN_FORCE2_AT needs <rva>:<reg>=<v>,...");
+            return 2;
+        };
+        let Ok(addr) = u64::from_str_radix(addr_s.trim_start_matches("0x"), 16) else {
+            eprintln!("[seq] PERUN_FORCE2_AT address is not hex: {addr_s:?}");
+            return 2;
+        };
+        for item in rest.split(',').filter(|s| !s.trim().is_empty()) {
+            let Some((rname, vname)) = item.split_once('=') else {
+                continue;
+            };
+            let idx = match rname.trim() {
+                "rax" | "eax" => libc::REG_RAX,
+                "rbx" | "ebx" => libc::REG_RBX,
+                "rcx" | "ecx" => libc::REG_RCX,
+                "rdx" | "edx" => libc::REG_RDX,
+                "rsi" | "esi" => libc::REG_RSI,
+                "rdi" | "edi" => libc::REG_RDI,
+                "r8" => libc::REG_R8,
+                "r9" => libc::REG_R9,
+                "r10" => libc::REG_R10,
+                "r11" => libc::REG_R11,
+                "r12" => libc::REG_R12,
+                "r13" => libc::REG_R13,
+                "r14" => libc::REG_R14,
+                "r15" => libc::REG_R15,
+                "rbp" => libc::REG_RBP,
+                _ => {
+                    eprintln!(
+                        "[seq] PERUN_FORCE2_AT: unknown register {other:?}",
+                        other = rname.trim()
+                    );
+                    continue;
+                }
+            };
+            let tok = vname.trim().to_string();
+            if let Ok(v) = u64::from_str_radix(tok.trim_start_matches("0x"), 16) {
+                force2_pairs.push((idx, v));
+            }
+        }
+        if !force2_pairs.is_empty() && force2_pairs.len() <= 6 {
+            force2_addr = image.base() as u64 + addr;
+        }
     }
     let script = match std::fs::read_to_string(&script_path) {
         Ok(s) => s,
@@ -3366,6 +3471,21 @@ fn cmd_seq(args: &[String]) -> i32 {
                         image.base() as u64
                     );
                     force_addr = 0; // arm once; later calls keep the statics
+                }
+                // Arm the second force point the same way.
+                if force2_addr != 0 {
+                    unsafe {
+                        for (k, pr) in force2_pairs.iter().enumerate() {
+                            FORCE2_REGS[k] = *pr;
+                        }
+                        FORCE2_N = force2_pairs.len();
+                        FORCE2_AT = force2_addr;
+                    }
+                    println!(
+                        "[seq] step {step}: forcing#2 {} register(s) at {force2_addr:#x}",
+                        force2_pairs.len()
+                    );
+                    force2_addr = 0;
                 }
                 // A walk is worth arming even without a force: it is the only
                 // way to watch a route (r9/window/stop handlers) in a sequence,
