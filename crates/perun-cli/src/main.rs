@@ -3553,6 +3553,56 @@ fn cmd_seq(args: &[String]) -> i32 {
             // The load buffers live in guest memory only; without this verb a
             // run that writes into them (a CPIM out-buffer) cannot be observed
             // from outside the process, because the mmap copy is not the file.
+            "objdump" => {
+                // objdump RVA FILE -- the session-object interior
+                // probe: read the pointer at [base+RVA], then dump
+                // the object's first 0x40 bytes plus the three
+                // pointer fields' targets (+0x18/+0x20/+0x28),
+                // 0x40 bytes each, into FILE as one blob. This is
+                // the instrument for the last unmeasured surface:
+                // what init's chain writes into the session
+                // objects between canon calls.
+                if toks.len() < 3 {
+                    eprintln!("[seq] step {step}: objdump RVA FILE");
+                    return 2;
+                }
+                let Ok(rva) = u64::from_str_radix(toks[1].trim_start_matches("0x"), 16) else {
+                    eprintln!("[seq] step {step}: objdump RVA is not hex");
+                    return 2;
+                };
+                let base = image.base() as u64;
+                let slot = base.wrapping_add(rva);
+                let obj = unsafe { std::ptr::read_volatile(slot as *const u64) };
+                if obj < 0x1000 {
+                    println!(
+                        "[seq] step {step}: objdump {:#x}: slot holds {obj:#x} (null-ish)",
+                        rva
+                    );
+                    continue;
+                }
+                let mut blob: Vec<u8> = Vec::new();
+                let hdr = unsafe { std::slice::from_raw_parts(obj as *const u8, 0x40) };
+                blob.extend_from_slice(hdr);
+                for off in [0x18u64, 0x20, 0x28] {
+                    let p = unsafe { std::ptr::read_volatile((obj + off) as *const u64) };
+                    if p > 0x1000 && p < 0x8000_0000_0000 {
+                        let b = unsafe { std::slice::from_raw_parts(p as *const u8, 0x40) };
+                        blob.extend_from_slice(&(off as u64).to_le_bytes());
+                        blob.extend_from_slice(b);
+                    }
+                }
+                if let Err(e) = std::fs::write(toks[2], &blob) {
+                    eprintln!("[seq] step {step}: objdump write: {e}");
+                    return 2;
+                }
+                println!(
+                    "[seq] step {step}: objdump {:#x} -> {:#x} ({} bytes) -> {}",
+                    rva,
+                    obj,
+                    blob.len(),
+                    toks[2]
+                );
+            }
             "save" => {
                 if toks.len() < 3 {
                     eprintln!("[seq] step {step}: save NAME FILE");
