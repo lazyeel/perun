@@ -183,6 +183,12 @@ static mut FORCE2_ON_ITER: Option<usize> = None;
 /// PERUN_FORCE_CFG_R9=1: seed r9d=0x4069d333 at every cfg-zone
 /// cmp against that constant (the -45028 publishers' shared gate).
 static mut FORCE_CFG_R9_ON: bool = false;
+/// PERUN_FOLD_REC=1: record the accumulator registers at every
+/// CFF dispatch (the 0x95fc90 table loads) -- the fold term's
+/// complete lineage in one run.
+static mut PERUN_FOLD_REC: bool = false;
+static mut FOLD_REC_N: usize = 0;
+static mut FOLD_REC_ROWS: [[u64; 7]; 4096] = [[0; 7]; 4096];
 static mut STEP_PRIMED: bool = false;
 static mut STEP_ENTERED: bool = false;
 static mut STEP_COUNT: u64 = 0;
@@ -406,6 +412,51 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
         // and [rsp+0x700] bases) are what the body folds into edx_in.
         // Dump the first 0x100 bytes of each table at the stop so the
         // shallow-init and deep-init variants can be diffed.
+        // The SIMD seed pages: r14/r15 at the stop carry the two
+        // heap pages the 256-round cycles read (r9d = the 'SEED'
+        // string VALUE was read FROM one of them). SIG_CTX holds
+        // the full register file -- read r14/r15 through it.
+        let sig = unsafe { SIG_CTX };
+        for (name, base) in [("r14pg", sig[8]), ("r15pg", sig[9]), ("r9pg", sig[3])] {
+            let _ = name;
+            if base > 0x1000 && base < 0x8000_0000_0000 {
+                let words: Vec<u64> = (0..32)
+                    .map(|k| unsafe { std::ptr::read_volatile((base + k * 8) as *const u64) })
+                    .collect();
+                let hexs: String = words
+                    .iter()
+                    .map(|w| format!("{w:016x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                println!("[stop] {name}[0..0x100] = {hexs}");
+                let bytes = unsafe { std::slice::from_raw_parts(base as *const u8, 0x100) };
+                let printable: String = bytes
+                    .iter()
+                    .map(|b| {
+                        if b.is_ascii_graphic() || *b == 0 {
+                            *b as char
+                        } else {
+                            '.'
+                        }
+                    })
+                    .collect();
+                println!("[stop] {name} ascii = {printable:?}");
+                // The 'SEED' scan: the second SIMD cycle read the
+                // value 0x444545535f4554 ('TE_SEED\0') from its
+                // table -- find where on the page (and beyond the
+                // first 0x100) the string lives.
+                for off in (0..0x800).step_by(8) {
+                    let v = unsafe { std::ptr::read_volatile((base + off) as *const u64) };
+                    if v & 0xffff_ffff_ffff == 0x444545535f4554 {
+                        println!("[stop] {name}+{off:#x} = TE_SEED");
+                    }
+                    // Any word whose low bytes spell SEED:
+                    if (v & 0xffff_ffff) == 0x4445_4553 {
+                        println!("[stop] {name}+{off:#x} = ...SEED ({v:#x})");
+                    }
+                }
+            }
+        }
         for (name, base) in [("tbl6f8", s6f8), ("tbl700", s700)] {
             if base > 0x1000 && base < 0x8000_0000_0000 {
                 let words: Vec<u64> = (0..32)
@@ -417,6 +468,22 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
                     .collect::<Vec<_>>()
                     .join(" ");
                 println!("[stop] {name}[0..0x100] = {hexs}");
+            }
+        }
+    }
+    // The fold recorder's lineage: every CFF dispatch with the
+    // accumulator registers, oldest first. This IS the term's
+    // data-flow history for the run.
+    unsafe {
+        let n = FOLD_REC_N;
+        if PERUN_FOLD_REC && n > 0 {
+            println!("[frec] {n} dispatch rows:");
+            for k in 0..n {
+                let row = FOLD_REC_ROWS[k];
+                println!(
+                    "[frec] rva={:#x} ebx={:#x} ebp={:#x} edx={:#x} r9d={:#x} rax={:#x} rcx={:#x}",
+                    row[0], row[1], row[2], row[3], row[4], row[5], row[6]
+                );
             }
         }
     }
@@ -862,6 +929,45 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
                 }
             }
 
+            // The fold-term recorder: every CFF dispatch loads the
+            // table 0x95fc90 and indexes it with a computed term.
+            // Dump the four accumulator registers at each such
+            // dispatch -- one run yields the term's full lineage,
+            // turning the remaining hunt into data-flow analysis.
+            if PERUN_FOLD_REC && FOLD_REC_N < 4096 {
+                let rva_now = rip - STEP_DLL_LO;
+                if rva_now >= 0x5afc0 && rva_now <= 0xb5c98 {
+                    let bytes = [
+                        std::ptr::read_volatile(rip as *const u8),
+                        std::ptr::read_volatile((rip + 1) as *const u8),
+                        std::ptr::read_volatile((rip + 2) as *const u8),
+                        std::ptr::read_volatile((rip + 3) as *const u8),
+                    ];
+                    // lea rel32(%rip) encoding: 48 8d 0d/15/2d/35/3d
+                    if bytes[0] == 0x48 && bytes[1] == 0x8d && (bytes[2] & 0xC7) == 0x05 {
+                        let rel = i32::from_le_bytes([
+                            bytes[3],
+                            std::ptr::read_volatile((rip + 4) as *const u8),
+                            std::ptr::read_volatile((rip + 5) as *const u8),
+                            std::ptr::read_volatile((rip + 6) as *const u8),
+                        ]);
+                        let tgt = (rip as i64 + 7 + rel as i64) as u64;
+                        if tgt == 0x7c95fc90 {
+                            let fr = [
+                                *regs.add(libc::REG_RBX as usize) as u64,
+                                *regs.add(libc::REG_RBP as usize) as u64,
+                                *regs.add(libc::REG_RDX as usize) as u64,
+                                *regs.add(libc::REG_R9 as usize) as u64,
+                                *regs.add(libc::REG_RAX as usize) as u64,
+                                *regs.add(libc::REG_RCX as usize) as u64,
+                            ];
+                            FOLD_REC_ROWS[FOLD_REC_N] =
+                                [rva_now, fr[0], fr[1], fr[2], fr[3], fr[4], fr[5]];
+                            FOLD_REC_N += 1;
+                        }
+                    }
+                }
+            }
             // PERUN_FORCE_CFG_R9=1: the cfg-zone's -45028 publishers
             // all test r9d == 0x4069d333 (the E==1 gate, 14+ sites in
             // 0x8f6f0..0x90b60). Instead of one force per site, seed
@@ -3193,6 +3299,9 @@ fn cmd_seq(args: &[String]) -> i32 {
     if std::env::var_os("PERUN_FORCE_CFG_R9").is_some() {
         // Enabled before the walk arms; the trap handler reads it.
         unsafe { FORCE_CFG_R9_ON = true };
+    }
+    if std::env::var_os("PERUN_FOLD_REC").is_some() {
+        unsafe { PERUN_FOLD_REC = true };
     }
     if let Ok(spec2) = std::env::var("PERUN_FORCE2_AT") {
         let Some((addr_s, rest)) = spec2.split_once(':') else {
