@@ -447,7 +447,7 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
                 // first 0x100) the string lives.
                 for off in (0..0x800).step_by(8) {
                     let v = unsafe { std::ptr::read_volatile((base + off) as *const u64) };
-                    if v & 0xffff_ffff_ffff == 0x444545535f4554 {
+                    if v == 0x444545535f4554 {
                         println!("[stop] {name}+{off:#x} = TE_SEED");
                     }
                     // Any word whose low bytes spell SEED:
@@ -478,6 +478,7 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
         let n = FOLD_REC_N;
         if PERUN_FOLD_REC && n > 0 {
             println!("[frec] {n} dispatch rows:");
+            #[allow(clippy::needless_range_loop)]
             for k in 0..n {
                 let row = FOLD_REC_ROWS[k];
                 println!(
@@ -936,7 +937,7 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             // turning the remaining hunt into data-flow analysis.
             if PERUN_FOLD_REC && FOLD_REC_N < 4096 {
                 let rva_now = rip - STEP_DLL_LO;
-                if rva_now >= 0x5afc0 && rva_now <= 0xb5c98 {
+                if (0x5afc0..=0xb5c98).contains(&rva_now) {
                     let bytes = [
                         std::ptr::read_volatile(rip as *const u8),
                         std::ptr::read_volatile((rip + 1) as *const u8),
