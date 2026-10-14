@@ -365,6 +365,12 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
     println!("[perun] walk stopped: {why}");
     println!("[perun] instructions: {}", unsafe { STEP_COUNT });
     println!(
+        "[perun] diag: fold_rec={} frec_n={} armed={}",
+        unsafe { PERUN_FOLD_REC },
+        unsafe { FOLD_REC_N },
+        unsafe { STEP_ARMED }
+    );
+    println!(
         "[stop] rip={rip:#018x} edi={edi:#x} rax={rax:#018x} rbx={rbx:#018x} rcx={rcx:#x} rsp={rsp:#018x}"
     );
     println!(
@@ -417,7 +423,11 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
         // string VALUE was read FROM one of them). SIG_CTX holds
         // the full register file -- read r14/r15 through it.
         let sig = unsafe { SIG_CTX };
-        for (name, base) in [("r14pg", sig[8]), ("r15pg", sig[9]), ("r9pg", sig[3])] {
+        // NOTE: r9 at a stop is usually a fold TERM (e.g.
+        // 0x2b9eae59), not a page -- dumping through it faults and
+        // kills the rest of the report (a live bug this round);
+        // only r14/r15 (the measured page bases) are dumped.
+        for (name, base) in [("r14pg", sig[8]), ("r15pg", sig[9])] {
             let _ = name;
             if base > 0x1000 && base < 0x8000_0000_0000 {
                 let words: Vec<u64> = (0..32)
