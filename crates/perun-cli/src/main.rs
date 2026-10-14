@@ -3587,7 +3587,7 @@ fn cmd_seq(args: &[String]) -> i32 {
                     let p = unsafe { std::ptr::read_volatile((obj + off) as *const u64) };
                     if p > 0x1000 && p < 0x8000_0000_0000 {
                         let b = unsafe { std::slice::from_raw_parts(p as *const u8, 0x40) };
-                        blob.extend_from_slice(&(off as u64).to_le_bytes());
+                        blob.extend_from_slice(&off.to_le_bytes());
                         blob.extend_from_slice(b);
                     }
                 }
