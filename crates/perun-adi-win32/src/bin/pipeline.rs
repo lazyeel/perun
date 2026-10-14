@@ -731,7 +731,15 @@ fn main() {
         // vdfut calls through the uncleaned frame -- the second call
         // reads what the first wrote. Run it twice, exactly like the
         // live sequence.
-        let r2 = f(0xc774d292, ctx as u64, 0, dll_code);
+        // PERUN_SETID_CB=1: arg3 = a LIGHT host callback (the live
+        // call passed the wrapper's own code pointer; our vdfut-as-
+        // arg3 was a heavy recursive hazard -- the validator's
+        // counter exploded through it).
+        let r2 = if std::env::var_os("PERUN_SETID_CB").is_some() {
+            f(0xc774d292, ctx as u64, 0, cb_addr(cb_slot48))
+        } else {
+            f(0xc774d292, ctx as u64, 0, dll_code)
+        };
         println!("[setid#1] rc={r2:#x} ({r2})");
         // Rebuild the envelope: the first call rewrote the packet.
         // The live canon's call #2 carried ITS OWN packet (the
@@ -755,7 +763,11 @@ fn main() {
             }
         }
         std::ptr::write(c.add(0), pkt as u64);
-        let r3 = f(0xc774d292, ctx as u64, 0, dll_code);
+        let r3 = if std::env::var_os("PERUN_SETID_CB").is_some() {
+            f(0xc774d292, ctx as u64, 0, cb_addr(cb_slot48))
+        } else {
+            f(0xc774d292, ctx as u64, 0, dll_code)
+        };
         println!("[setid#2] rc={r3:#x} ({r3})");
     }
 
