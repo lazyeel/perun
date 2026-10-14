@@ -65,10 +65,40 @@ fn hex_of(p: *const u8, n: usize) -> String {
     s.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+static mut SPY_CALL_N: u32 = 0;
+
 unsafe extern "win64" fn spy_trampoline(a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
-    // ctx = a1 for the vdfut dispatcher (opcode, ctx, ...) -- but log
-    // BOTH register orders; the wrapper's ABI is what we are measuring.
-    println!("[spy] vdfut called: a0={a0:#x} a1={a1:#x} a2={a2:#x} a3={a3:#x}");
+    // The caller's return address: [rsp] at entry. This is the RVA of
+    // CoreFP's OWN call site -- the packet generator's address, the
+    // single most valuable datum the spy can lift.
+    let (rsp_now, stack16) = {
+        let mut sp: u64;
+        let mut s = [0u64; 16];
+        unsafe {
+            core::arch::asm!(
+                "movq %rsp, {sp}",
+                sp = out(reg) sp,
+                options(nostack, att_syntax)
+            );
+            let base = sp as *const u64;
+            for (k, slot) in s.iter_mut().enumerate() {
+                if base.wrapping_add(k + 4).read_volatile() as usize > 0x10000 {
+                    *slot = base.add(k + 4).read_volatile();
+                }
+            }
+        }
+        (sp, s)
+    };
+    let ra = stack16[0]; // first survivor above the frame; the dump disambiguates
+    println!(
+        "[spy] entry rsp={rsp_now:#x} stack[0..16]={:016x?}",
+        stack16
+    );
+    let n = unsafe { SPY_CALL_N };
+    unsafe { SPY_CALL_N += 1 };
+    println!(
+        "[spy#{n}] vdfut called: a0={a0:#x} a1={a1:#x} a2={a2:#x} a3={a3:#x} ra_candidate={ra:#x}",
+    );
     let ctx = a1 as *const u8;
     if !ctx.is_null() {
         println!("[spy] ctx[0..128] = {}", hex_of(ctx, 128));

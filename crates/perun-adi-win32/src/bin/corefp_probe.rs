@@ -80,6 +80,52 @@ fn main() {
         // buffers, and a buffer-backed call answers a code instead.
         let r = unsafe { f(0, 0, 0, 0) };
         println!("[corefp] call {name}(0,0,0,0) -> {r:#x} ({r})");
+        // PERUN_COREFP_ARGS=a,b,c,d: FILE paths loaded into the four
+        // call buffers (comma list; empty entries stay zero pages).
+        // This is the scalable input probe: the wrapper's services
+        // are context-driven, and this feeds real guest data (the
+        // ident string, a fresh SPIM, a V1 packet) as the argument
+        // slots the DIALOG rounds left as blank pages.
+        if let Ok(spec) = std::env::var("PERUN_COREFP_ARGS") {
+            fn page() -> u64 {
+                unsafe {
+                    libc::mmap(
+                        std::ptr::null_mut(),
+                        0x1_0000,
+                        libc::PROT_READ | libc::PROT_WRITE,
+                        libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                        -1,
+                        0,
+                    ) as u64
+                }
+            }
+            let ab: [u64; 4] = [page(), page(), page(), page()];
+            for (slot, path) in spec.split(',').enumerate().take(4) {
+                if let Ok(data) = std::fs::read(path.trim()) {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            data.as_ptr(),
+                            ab[slot] as *mut u8,
+                            data.len().min(0x1_0000),
+                        );
+                    };
+                    println!("[corefp] args[{slot}] <- {path} ({} bytes)", data.len());
+                }
+            }
+            let r = unsafe { f(ab[0], ab[1], ab[2], ab[3]) };
+            println!("[corefp] args call -> {r:#x} ({r}) | bufs after:");
+            for (slot, b) in ab.iter().enumerate() {
+                let pk = unsafe { std::slice::from_raw_parts(*b as *const u8, 64) };
+                let nz = pk.iter().filter(|x| **x != 0).count();
+                println!(
+                    "[corefp] abuf{slot}[0..64] = {} (nz {nz})",
+                    pk[..64]
+                        .iter()
+                        .map(|x| format!("{x:02x}"))
+                        .collect::<String>()
+                );
+            }
+        }
         if std::env::var_os("PERUN_COREFP_BUF").is_some() {
             // Real writable pages, not magic numbers: the guest writes
             // its OUTPUT PACKET into the buffer the envelope names
@@ -178,6 +224,72 @@ fn main() {
                         .map(|x| format!("{x:02x}"))
                         .collect::<String>()
                 );
+            }
+            // PERUN_COREFP_DIALOG=1: the machine's buf1 dialogue.
+            // Round 3: feed the LIVE transform packet's 48-byte tail
+            // (the fold coefficients) into the packet body and call;
+            // round 4: the live SetID#2 packet; each round prints the
+            // machine's reply. The buf1 channel is the protocol.
+            if std::env::var_os("PERUN_COREFP_DIALOG").is_some() {
+                let rounds: &[(&str, &str)] = &[
+                    ("tr52", "/opt/data/il/live_tr_pkt52.bin"),
+                    ("setid2", "/opt/data/il/live_setid_pkt2.bin"),
+                    ("setid1", "/opt/data/il/live_setid_pkt1.bin"),
+                    ("setpath", "/opt/data/il/live_setpath_pkt16.bin"),
+                ];
+                for (tag, path) in rounds {
+                    if let Ok(live) = std::fs::read(path) {
+                        let p1 = bufs[1] as *mut u8;
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                live.as_ptr(),
+                                p1,
+                                live.len().min(0x10000),
+                            );
+                        }
+                        let r = unsafe { f(bufs[0], bufs[1], bufs[2], bufs[3]) };
+                        let pk = unsafe { std::slice::from_raw_parts(bufs[1] as *const u8, 64) };
+                        println!(
+                            "[corefp] dialog {tag} -> {r:#x} ({r}) | buf1 = {}",
+                            pk[..64]
+                                .iter()
+                                .map(|x| format!("{x:02x}"))
+                                .collect::<String>()
+                        );
+                    }
+                }
+                // PERUN_COREFP_ROUND2=<export>: after the fdjk
+                // dialogue, a SECOND export with the SAME buffers --
+                // the wrapper's other services consume what fdjk
+                // queued; the spy watches for the vdfut pull.
+                if let Ok(second) = std::env::var("PERUN_COREFP_ROUND2")
+                    && let Some(p2) = image.get_export_by_name(&second)
+                {
+                    let f2: unsafe extern "win64" fn(u64, u64, u64, u64) -> u64 =
+                        unsafe { std::mem::transmute(p2) };
+                    for (tag, path) in rounds {
+                        if let Ok(live) = std::fs::read(path) {
+                            let p1 = bufs[1] as *mut u8;
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(
+                                    live.as_ptr(),
+                                    p1,
+                                    live.len().min(0x10000),
+                                );
+                            }
+                            let r = unsafe { f2(bufs[0], bufs[1], bufs[2], bufs[3]) };
+                            let pk =
+                                unsafe { std::slice::from_raw_parts(bufs[1] as *const u8, 64) };
+                            println!(
+                                "[corefp] round2 {second} {tag} -> {r:#x} ({r}) | buf1 = {}",
+                                pk[..64]
+                                    .iter()
+                                    .map(|x| format!("{x:02x}"))
+                                    .collect::<String>()
+                            );
+                        }
+                    }
+                }
             }
         }
     }
