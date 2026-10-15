@@ -311,17 +311,30 @@ fn session_director_once(ready: HANDLE, done: HANDLE) {
         std::thread::spawn(move || unsafe {
             let ready = ready as HANDLE;
             let done = done as HANDLE;
-            if std::env::var_os("PERUN_TRACE_SYNC").is_some() {
-                eprintln!("[sync] session director: waiting ready {ready:?}");
+            // PERUN_DIRECTOR_LOOP=1: the post-worker chain is a real
+            // producer-consumer loop -- it signals ready and waits on done
+            // more than once (measured: wret twice, then a second
+            // SignalObjectAndWait). A one-shot director serves only the
+            // first round and the second wait parks the single-threaded
+            // host forever. With the loop switch the thread stays alive
+            // and serves every round until the process ends.
+            let looping = std::env::var_os("PERUN_DIRECTOR_LOOP").is_some();
+            loop {
+                if std::env::var_os("PERUN_TRACE_SYNC").is_some() {
+                    eprintln!("[sync] session director: waiting ready {ready:?}");
+                }
+                // Wait for the guest's "work ready" signal. The handle kinds were
+                // validated by the caller; unknown ready-handles fall through the
+                // shim's unknown-object fiction and the wait returns at once.
+                let _ = WaitForSingleObject(ready, INFINITE);
+                if std::env::var_os("PERUN_TRACE_SYNC").is_some() {
+                    eprintln!("[sync] session director: ready seen, setting done {done:?}");
+                }
+                let _ = SetEvent(done);
+                if !looping {
+                    break;
+                }
             }
-            // Wait for the guest's "work ready" signal. The handle kinds were
-            // validated by the caller; unknown ready-handles fall through the
-            // shim's unknown-object fiction and the wait returns at once.
-            let _ = WaitForSingleObject(ready, INFINITE);
-            if std::env::var_os("PERUN_TRACE_SYNC").is_some() {
-                eprintln!("[sync] session director: ready seen, setting done {done:?}");
-            }
-            let _ = SetEvent(done);
         });
     });
 }

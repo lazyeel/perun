@@ -180,6 +180,13 @@ static mut FORCE2_AT: u64 = 0;
 static mut FORCE2_REGS: [(i32, u64); 6] = [(0, 0); 6];
 static mut FORCE2_N: usize = 0;
 static mut FORCE2_ON_ITER: Option<usize> = None;
+static mut FORCE3_AT: u64 = 0;
+static mut FORCE3_REGS: [(i32, u64); 6] = [(0, 0); 6];
+static mut FORCE3_N: usize = 0;
+static mut FMAP_AT: [u64; 16] = [0; 16];
+static mut FMAP_REGS: [[(i32, u64); 4]; 16] = [[(0, 0); 4]; 16];
+static mut FMAP_N: [usize; 16] = [0; 16];
+static mut FMAP_SLOTS: usize = 0;
 /// PERUN_FORCE_CFG_R9=1: seed r9d=0x4069d333 at every cfg-zone
 /// cmp against that constant (the -45028 publishers' shared gate).
 static mut FORCE_CFG_R9_ON: bool = false;
@@ -919,6 +926,33 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             {
                 let (at, n) = (FORCE_AT, FORCE_N);
                 let (at2, n2) = (FORCE2_AT, FORCE2_N);
+                let (mslots,) = (FMAP_SLOTS,);
+                if mslots > 0 {
+                    #[allow(clippy::needless_range_loop)]
+                    for k in 0..mslots {
+                        let at_m = FMAP_AT[k];
+                        if at_m != 0 && rip == at_m && FMAP_N[k] > 0 {
+                            #[allow(clippy::needless_range_loop)]
+                            for j in 0..FMAP_N[k] {
+                                let (idx, val) = FMAP_REGS[k][j];
+                                *regs.add(idx as usize) = val as i64;
+                            }
+                            eprintln!(
+                                "[perun] fmap applied {n_m} reg(s) at rip={rip:#x}",
+                                n_m = FMAP_N[k]
+                            );
+                        }
+                    }
+                }
+                let (at3, n3) = (FORCE3_AT, FORCE3_N);
+                if at3 != 0 && rip == at3 && n3 > 0 {
+                    #[allow(clippy::needless_range_loop)]
+                    for k in 0..n3 {
+                        let (idx, val) = FORCE3_REGS[k];
+                        *regs.add(idx as usize) = val as i64;
+                    }
+                    eprintln!("[perun] force3 applied {n3} reg(s) at rip={rip:#x}");
+                }
                 if at2 != 0 && rip == at2 && n2 > 0 {
                     #[allow(clippy::needless_range_loop)]
                     for k in 0..n2 {
@@ -3360,6 +3394,90 @@ fn cmd_seq(args: &[String]) -> i32 {
             force2_addr = image.base() as u64 + addr;
         }
     }
+    // PERUN_FORCE_MAP: the general form -- a semicolon list of
+    // rva:reg=val[,reg=val] points, every point its own station.
+    // The post-worker chain dies at several NULL stations in
+    // sequence, and three fixed slots are not enough.
+    let mut force_map: Vec<(u64, Vec<(i32, u64)>)> = Vec::new();
+    if let Ok(spec_map) = std::env::var("PERUN_FORCE_MAP") {
+        for point in spec_map.split(';').filter(|s| !s.trim().is_empty()) {
+            if let Some((addr_s, rest)) = point.split_once(':') {
+                let Ok(addr) = u64::from_str_radix(addr_s.trim().trim_start_matches("0x"), 16)
+                else {
+                    continue;
+                };
+                let mut pairs: Vec<(i32, u64)> = Vec::new();
+                for item in rest.split(',').filter(|s| !s.trim().is_empty()) {
+                    if let Some((rname, vname)) = item.split_once('=') {
+                        let idx = match rname.trim() {
+                            "rax" | "eax" => libc::REG_RAX,
+                            "rbx" | "ebx" => libc::REG_RBX,
+                            "rcx" | "ecx" => libc::REG_RCX,
+                            "rdx" | "edx" => libc::REG_RDX,
+                            "rsi" | "esi" => libc::REG_RSI,
+                            "rdi" | "edi" => libc::REG_RDI,
+                            "r8" => libc::REG_R8,
+                            "r9" => libc::REG_R9,
+                            "r10" => libc::REG_R10,
+                            "r11" => libc::REG_R11,
+                            "r12" => libc::REG_R12,
+                            "r13" => libc::REG_R13,
+                            "r14" => libc::REG_R14,
+                            "r15" => libc::REG_R15,
+                            "rbp" => libc::REG_RBP,
+                            _ => continue,
+                        };
+                        if let Ok(v) =
+                            u64::from_str_radix(vname.trim().trim_start_matches("0x"), 16)
+                        {
+                            pairs.push((idx, v));
+                        }
+                    }
+                }
+                if !pairs.is_empty() {
+                    force_map.push((image.base() as u64 + addr, pairs));
+                }
+            }
+        }
+    }
+    // PERUN_FORCE3_AT: a third independent force point (the
+    // seeded post-block chain dies at multiple stations in
+    // sequence; one point per experiment is not enough).
+    let mut force3_pairs: Vec<(i32, u64)> = Vec::new();
+    let mut force3_addr = 0u64;
+    if let Ok(spec3) = std::env::var("PERUN_FORCE3_AT")
+        && let Some((addr_s, rest)) = spec3.split_once(':')
+        && let Ok(addr) = u64::from_str_radix(addr_s.trim_start_matches("0x"), 16)
+    {
+        for item in rest.split(',').filter(|s| !s.trim().is_empty()) {
+            if let Some((rname, vname)) = item.split_once('=') {
+                let idx = match rname.trim() {
+                    "rax" | "eax" => libc::REG_RAX,
+                    "rbx" | "ebx" => libc::REG_RBX,
+                    "rcx" | "ecx" => libc::REG_RCX,
+                    "rdx" | "edx" => libc::REG_RDX,
+                    "rsi" | "esi" => libc::REG_RSI,
+                    "rdi" | "edi" => libc::REG_RDI,
+                    "r8" => libc::REG_R8,
+                    "r9" => libc::REG_R9,
+                    "r10" => libc::REG_R10,
+                    "r11" => libc::REG_R11,
+                    "r12" => libc::REG_R12,
+                    "r13" => libc::REG_R13,
+                    "r14" => libc::REG_R14,
+                    "r15" => libc::REG_R15,
+                    "rbp" => libc::REG_RBP,
+                    _ => continue,
+                };
+                if let Ok(v) = u64::from_str_radix(vname.trim().trim_start_matches("0x"), 16) {
+                    force3_pairs.push((idx, v));
+                }
+            }
+        }
+        if !force3_pairs.is_empty() && force3_pairs.len() <= 6 {
+            force3_addr = image.base() as u64 + addr;
+        }
+    }
     let script = match std::fs::read_to_string(&script_path) {
         Ok(s) => s,
         Err(e) => {
@@ -3553,6 +3671,19 @@ fn cmd_seq(args: &[String]) -> i32 {
             // The load buffers live in guest memory only; without this verb a
             // run that writes into them (a CPIM out-buffer) cannot be observed
             // from outside the process, because the mmap copy is not the file.
+            "seedobj4" => {
+                // seedobj4 -- the worker's fork field: write 1 at
+                // [[base+0x19ddb0]+4] so the transform worker takes
+                // its CRYPTO route instead of the early exit.
+                let slot_ptr = image.base() as u64 + 0x19ddb0;
+                let obj = unsafe { std::ptr::read_volatile(slot_ptr as *const u64) };
+                if obj > 0x1000 {
+                    unsafe { std::ptr::write_volatile((obj + 4) as *mut u64, 1) };
+                    println!("[seq] step {step}: seedobj4 [{obj:#x}+4] = 1 (the crypto fork)");
+                } else {
+                    println!("[seq] step {step}: seedobj4 slot 0x19ddb0 = {obj:#x} (null-ish)");
+                }
+            }
             "objdump" => {
                 // objdump RVA FILE -- the session-object interior
                 // probe: read the pointer at [base+RVA], then dump
@@ -3687,6 +3818,37 @@ fn cmd_seq(args: &[String]) -> i32 {
                         force2_pairs.len()
                     );
                     force2_addr = 0;
+                }
+                if !force_map.is_empty() && force_map.len() <= 16 {
+                    unsafe {
+                        FMAP_SLOTS = force_map.len();
+                        for (k, (addr, pairs)) in force_map.iter().enumerate() {
+                            FMAP_AT[k] = *addr;
+                            FMAP_N[k] = pairs.len().min(4);
+                            for (j, pr) in pairs.iter().take(4).enumerate() {
+                                FMAP_REGS[k][j] = *pr;
+                            }
+                        }
+                    }
+                    println!(
+                        "[seq] step {step}: forcing-map {} station(s)",
+                        force_map.len()
+                    );
+                    force_map.clear();
+                }
+                if force3_addr != 0 {
+                    unsafe {
+                        for (k, pr) in force3_pairs.iter().enumerate() {
+                            FORCE3_REGS[k] = *pr;
+                        }
+                        FORCE3_N = force3_pairs.len();
+                        FORCE3_AT = force3_addr;
+                    }
+                    println!(
+                        "[seq] step {step}: forcing#3 {} register(s) at {force3_addr:#x}",
+                        force3_pairs.len()
+                    );
+                    force3_addr = 0;
                 }
                 // A walk is worth arming even without a force: it is the only
                 // way to watch a route (r9/window/stop handlers) in a sequence,
