@@ -36,17 +36,51 @@ win32_api! {
         // HeapFree, it returns FALSE; glibc does abort, and a guest that frees
         // a decoded field rather than a pointer took the process down with rc=134
         // before it could write anything. See `heap_tag`.
-        let ptr = if flags & HEAP_ZERO_MEMORY != 0 {
-            libc::calloc(size + HEAP_HDR_SIZE, 1)
+        // PERUN_HEAP_GUARD=1: every guest block sits in its own mmap
+        // arena with a PROT_NONE page on its tail. The open post-worker
+        // branch computes addresses from fold terms, and a bad term has
+        // been shown to write past the block and corrupt the host heap
+        // ("malloc(): corrupted top size", abort before any report).
+        // With the guard the same write dies as a guest SEGV whose
+        // rip/addr the crash shim prints -- the offender named by the
+        // hardware instead of a heap abort at some later malloc.
+        let guard = std::env::var_os("PERUN_HEAP_GUARD").is_some();
+        let (raw, ptr) = if guard {
+            let pg = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+            let total = size + HEAP_HDR_SIZE;
+            let pages = total.div_ceil(pg) + 1;
+            let m = libc::mmap(
+                std::ptr::null_mut(),
+                pages * pg,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            );
+            if m == libc::MAP_FAILED {
+                return std::ptr::null_mut();
+            }
+            if flags & HEAP_ZERO_MEMORY != 0 {
+                std::ptr::write_bytes(m.cast::<u8>(), 0, total);
+            }
+            (m.cast::<u8>(), m.cast::<u8>().add(HEAP_HDR_SIZE))
         } else {
-            libc::malloc(size + HEAP_HDR_SIZE)
+            let raw = if flags & HEAP_ZERO_MEMORY != 0 {
+                libc::calloc(size + HEAP_HDR_SIZE, 1)
+            } else {
+                libc::malloc(size + HEAP_HDR_SIZE)
+            };
+            if raw.is_null() {
+                return raw as LPVOID;
+            }
+            (raw.cast::<u8>(), raw.cast::<u8>().add(HEAP_HDR_SIZE))
         };
+        let ptr = ptr as *mut libc::c_void;
         if ptr.is_null() {
-            return ptr as LPVOID;
+            return ptr;
         }
-        (ptr as *mut usize).write(HEAP_TAG);
-        (ptr as *mut usize).add(1).write(size as usize);
-        let ptr = (ptr as *mut u8).add(HEAP_HDR_SIZE) as *mut libc::c_void;
+        (raw as *mut usize).write(HEAP_TAG);
+        (raw as *mut usize).add(1).write(size as usize);
         // The memory shims are not covered by the other traced shims, so a
         // run could not previously say whether a block came from here at all.
         // That mattered: the gate object is installed by a `lock cmpxchg` from
@@ -173,6 +207,17 @@ win32_api! {
         // Clear the tag first, so a double free of the same block is caught by
         // the check above instead of by glibc.
         (hdr as *mut usize).write_volatile(0);
+        // Guard-arena blocks are mmap'ed (PERUN_HEAP_GUARD): free()
+        // would abort. munmap the whole arena; the page count is
+        // recomputed from the stored size exactly as at alloc time.
+        if std::env::var_os("PERUN_HEAP_GUARD").is_some() {
+            let size = (hdr as *const usize).add(1).read_volatile();
+            let pg = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+            let total = size + HEAP_HDR_SIZE;
+            let pages = total.div_ceil(pg) + 1;
+            libc::munmap(hdr.cast::<libc::c_void>(), pages * pg);
+            return TRUE;
+        }
         libc::free(hdr.cast::<libc::c_void>());
         TRUE
     }}

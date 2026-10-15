@@ -187,6 +187,10 @@ static mut FMAP_AT: [u64; 16] = [0; 16];
 static mut FMAP_REGS: [[(i32, u64); 4]; 16] = [[(0, 0); 4]; 16];
 static mut FMAP_N: [usize; 16] = [0; 16];
 static mut FMAP_SLOTS: usize = 0;
+static mut MEMSEED_AT: [u64; 16] = [0; 16];
+static mut MEMSEED_OFF: [u64; 16] = [0; 16];
+static mut MEMSEED_VAL: [u32; 16] = [0; 16];
+static mut MEMSEED_N: usize = 0;
 /// PERUN_FORCE_CFG_R9=1: seed r9d=0x4069d333 at every cfg-zone
 /// cmp against that constant (the -45028 publishers' shared gate).
 static mut FORCE_CFG_R9_ON: bool = false;
@@ -928,7 +932,36 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
                             break;
                         }
                     }
-                    eprintln!("[shim] -> {name} rip={rip:#x}");
+                    if name == "?" {
+                        // Unknown off-DLL rip: the walk is executing
+                        // an address class we never mapped (a heap thunk?).
+                        // Dump the head bytes there ONCE so the
+                        // disassembler can name it offline.
+                        static mut DUMPED_RIPS: [u64; 8] = [0; 8];
+                        let mut slot: isize = -1;
+                        {
+                            let arr = std::ptr::addr_of_mut!(DUMPED_RIPS);
+                            for k in 0..8 {
+                                let r = std::ptr::read_volatile((*arr).as_ptr().add(k));
+                                if r == rip {
+                                    slot = -1;
+                                    break;
+                                }
+                                if r == 0 && slot < 0 {
+                                    slot = k as isize;
+                                }
+                            }
+                            if slot >= 0 {
+                                std::ptr::write_volatile(
+                                    (*arr).as_mut_ptr().add(slot as usize),
+                                    rip,
+                                );
+                                let bytes: [u8; 16] = std::ptr::read(rip as *const [u8; 16]);
+                                eprintln!("[shim] UNKNOWN rip={rip:#x} bytes={:02x?}", bytes);
+                            }
+                        }
+                        eprintln!("[shim] -> {name} rip={rip:#x}");
+                    }
                     SHIM_WAS_IN = true;
                 }
                 *regs.add(libc::REG_EFL as usize) = (flags | EFLAGS_TF) as i64;
@@ -944,6 +977,21 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             {
                 let (at, n) = (FORCE_AT, FORCE_N);
                 let (at2, n2) = (FORCE2_AT, FORCE2_N);
+                let mn = MEMSEED_N;
+                if mn > 0 {
+                    #[allow(clippy::needless_range_loop)]
+                    for k in 0..mn {
+                        if MEMSEED_AT[k] == rip {
+                            let rcx_v = *regs.add(libc::REG_RCX as usize) as u64;
+                            let dst = (rcx_v + MEMSEED_OFF[k]) as *mut u32;
+                            std::ptr::write_volatile(dst, MEMSEED_VAL[k]);
+                            eprintln!(
+                                "[perun] memseed wrote {:#010x} at [rcx={:#x}+{:#x}] rip={rip:#x}",
+                                MEMSEED_VAL[k], rcx_v, MEMSEED_OFF[k]
+                            );
+                        }
+                    }
+                }
                 let (mslots,) = (FMAP_SLOTS,);
                 if mslots > 0 {
                     #[allow(clippy::needless_range_loop)]
@@ -3417,6 +3465,7 @@ fn cmd_seq(args: &[String]) -> i32 {
     // The post-worker chain dies at several NULL stations in
     // sequence, and three fixed slots are not enough.
     let mut force_map: Vec<(u64, Vec<(i32, u64)>)> = Vec::new();
+    let mut force_mem_seeds: Vec<(u64, u64, u32)> = Vec::new();
     if let Ok(spec_map) = std::env::var("PERUN_FORCE_MAP") {
         for point in spec_map.split(';').filter(|s| !s.trim().is_empty()) {
             if let Some((addr_s, rest)) = point.split_once(':') {
@@ -3454,6 +3503,24 @@ fn cmd_seq(args: &[String]) -> i32 {
                 }
                 if !pairs.is_empty() {
                     force_map.push((image.base() as u64 + addr, pairs));
+                }
+                // Memory-seed stations: items of the form mem@off=HEX write
+                // raw bytes at [rcx + off] when the walk reaches this rva.
+                // The tail-gate folds the packet word the WORKER wrote into
+                // its verdict; seeding the word the live machine carries
+                // (00000001) right before the gate's read is the honest
+                // experiment: same path, same registers, different data.
+                for mitem in rest.split(',').filter(|s| !s.trim().is_empty()) {
+                    let mitem = mitem.trim();
+                    if let Some(v) = mitem.strip_prefix("mem@")
+                        && let Some((off_s, hex)) = v.split_once('=')
+                        && let (Ok(off), Ok(word)) = (
+                            u64::from_str_radix(off_s.trim_start_matches("0x"), 16),
+                            u32::from_str_radix(hex.trim_start_matches("0x"), 16),
+                        )
+                    {
+                        force_mem_seeds.push((image.base() as u64 + addr, off, word));
+                    }
                 }
             }
         }
@@ -3589,7 +3656,15 @@ fn cmd_seq(args: &[String]) -> i32 {
                         eprintln!("[seq] step {step}: bad poke value {:?}", toks[2]);
                         return 2;
                     };
-                let (dst, label) = if let Some(off_s) = tgt.strip_prefix("scratch+") {
+                let (dst, label) = if let Some((name, off_s)) = tgt.split_once('+')
+                    && let Some(l) = loads.iter().find(|(n, _, _)| n == name)
+                {
+                    // poke NAME+off -- write into a loaded image region;
+                    // the envelope-building scripts need byte-granular
+                    // control over packet pages (the double-V1 seeds).
+                    let off = parse_num(off_s).unwrap_or(0);
+                    (l.1.wrapping_add(off), format!("{name}[{off:#x}]"))
+                } else if let Some(off_s) = tgt.strip_prefix("scratch+") {
                     let off = parse_num(off_s).unwrap();
                     (
                         (scratch as u64).wrapping_add(off),
@@ -3836,6 +3911,21 @@ fn cmd_seq(args: &[String]) -> i32 {
                         force2_pairs.len()
                     );
                     force2_addr = 0;
+                }
+                if !force_mem_seeds.is_empty() && force_mem_seeds.len() <= 16 {
+                    unsafe {
+                        MEMSEED_N = force_mem_seeds.len();
+                        for (k, (at, off, w)) in force_mem_seeds.iter().enumerate() {
+                            MEMSEED_AT[k] = *at;
+                            MEMSEED_OFF[k] = *off;
+                            MEMSEED_VAL[k] = *w;
+                        }
+                    }
+                    println!(
+                        "[seq] step {step}: mem-seed {} station(s)",
+                        force_mem_seeds.len()
+                    );
+                    force_mem_seeds.clear();
                 }
                 if !force_map.is_empty() && force_map.len() <= 16 {
                     unsafe {
