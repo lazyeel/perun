@@ -434,6 +434,24 @@ fn report_stop(why: &str, rip: u64, edi: u64, rax: u64, rbx: u64, rcx: u64, rsp:
         // 0x2b9eae59), not a page -- dumping through it faults and
         // kills the rest of the report (a live bug this round);
         // only r14/r15 (the measured page bases) are dumped.
+        // The term-birth block (0x7c8b1517) reads three bytes off
+        // the rcx page ([rcx+0], [rcx+1], [rcx+3] with rax =
+        // 0x16ca8af3): the transform's tail-gate term is a function
+        // of THIS page's head. Dump it at every stop.
+        {
+            let rcx_base = sig[1];
+            if rcx_base > 0x1000 && rcx_base < 0x8000_0000_0000 {
+                let words: Vec<u64> = (0..8)
+                    .map(|k| unsafe { std::ptr::read_volatile((rcx_base + k * 8) as *const u64) })
+                    .collect();
+                let hexs: String = words
+                    .iter()
+                    .map(|w| format!("{w:016x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                println!("[stop] rcxpg[0..0x40] = {hexs}");
+            }
+        }
         for (name, base) in [("r14pg", sig[8]), ("r15pg", sig[9])] {
             let _ = name;
             if base > 0x1000 && base < 0x8000_0000_0000 {

@@ -179,6 +179,15 @@ win32_api! {
     }}
 }
 
+thread_local! {
+    // The session director thread does REAL waits (it is the
+    // stand-in for the host's second thread); PERUN_EVENT_NOBLOCK
+    // stays a guest-thread-only fiction. Without this split a
+    // NOBLOCK environment makes the director loop spin hot,
+    // hammering SetEvent(done) thousands of times per second.
+    static DIRECTOR_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn wait_on_event(e: &EventState, timeout_ms: DWORD) -> DWORD {
     // PERUN_EVENT_NOBLOCK=1: single-threaded seq runs have no second thread
     // to SetEvent the object the guest parks on, so an unsignaled event
@@ -186,7 +195,8 @@ fn wait_on_event(e: &EventState, timeout_ms: DWORD) -> DWORD {
     // [r14+0x18] never returns). With the switch, the shim answers
     // WAIT_OBJECT_0 at once — the same fiction an unknown handle gets —
     // and the run advances to the next real gate.
-    if std::env::var_os("PERUN_EVENT_NOBLOCK").is_some() {
+    let director = DIRECTOR_THREAD.with(|c| c.get());
+    if std::env::var_os("PERUN_EVENT_NOBLOCK").is_some() && !director {
         return WAIT_OBJECT_0;
     }
     let deadline = if timeout_ms == INFINITE {
@@ -309,6 +319,7 @@ fn session_director_once(ready: HANDLE, done: HANDLE) {
         let ready = ready as usize;
         let done = done as usize;
         std::thread::spawn(move || unsafe {
+            DIRECTOR_THREAD.with(|c| c.set(true));
             let ready = ready as HANDLE;
             let done = done as HANDLE;
             // PERUN_DIRECTOR_LOOP=1: the post-worker chain is a real
