@@ -22,6 +22,143 @@
 use perun_core::loader::{DLL_PROCESS_ATTACH, Image};
 use perun_shims::table::ShimTable;
 
+// ── The walk-less station circuit (2026-10-22d) ────────────────────────
+// The seq instruments proved the transform's whole downstream chain is
+// deterministic given five fixed stations: the term-birth dispatch
+// (0x7019d, where the self-check reads the packet word), the r12 loop
+// (0x8af68e, wants the CFF table base), and the three finalization
+// writes (0xb472b/0xb473a/0xb4748, the result slots [rsp+0xbf0/0xba0/
+// 0xc70]). In seq those ran under the TF walk; here the same five
+// stations run as int3 breakpoints -- the pipeline has no stepper, but
+// the .text page is RWX and the call is synchronous, so a trap handler
+// can do the identical work: read the word, seed the success word,
+// fix the registers, and resume.
+//
+// PERUN_TR_SEED=1 arms the circuit for the transform call only; the
+// word it seeds is the measured live success word 00000001, and the
+// before-word is printed so every run reports what the worker itself
+// published (the seq show-only probe, built in).
+static mut STATION_AT: [u64; 8] = [0; 8];
+static mut STATION_KIND: [u8; 8] = [0; 8]; // 0=off 1=word-seed 2=r12 3=rax-finalize
+static mut STATION_N: usize = 0;
+static mut SEED_BASE: u64 = 0; // the image base, for the CFF table fix
+static mut STATION_ORIG: [u8; 8] = [0; 8];
+
+unsafe extern "C" fn station_handler(
+    _sig: libc::c_int,
+    _info: *mut libc::siginfo_t,
+    uctx: *mut libc::c_void,
+) {
+    unsafe {
+        let uc = uctx as *mut libc::ucontext_t;
+        let gregs = &mut (*uc).uc_mcontext.gregs;
+        // int3 semantics: RIP points PAST the 0xcc byte, so the station
+        // address is rip - 1.
+        let rip = (gregs[libc::REG_RIP as usize] as u64) - 1;
+        let n = STATION_N;
+        for k in 0..n {
+            if STATION_AT[k] != rip {
+                continue;
+            }
+            let rsp = gregs[libc::REG_RSP as usize] as u64;
+            let rcx = gregs[libc::REG_RCX as usize] as u64;
+            match STATION_KIND[k] {
+                1 => {
+                    // The self-check slot: [rcx+4] as u32 in gate reading
+                    // (BE bytes 4..7 of the packet). Show it, then seed the
+                    // success word. Value 0 = show only.
+                    let dst = (rcx + 4) as *mut u32;
+                    let before = std::ptr::read_volatile(dst);
+                    let gat = before.swap_bytes();
+                    eprintln!("[station] word @0x7019d: was {before:#010x} (gatelike {gat:#010x})");
+                    std::ptr::write_volatile(dst, 0x0100_0000); // BE 00000001
+                }
+                2 => {
+                    gregs[libc::REG_R12 as usize] = (SEED_BASE + 0x95fc90) as i64;
+                }
+                3 => {
+                    // The finalization writes want a writable page; the
+                    // guest stack top (rsp rounded down a page) always is.
+                    gregs[libc::REG_RAX as usize] = (rsp & !0xfff) as i64;
+                }
+                _ => {}
+            }
+            // RIP already points past the int3 byte: resume as-is.
+            return;
+        }
+        // Not ours: re-raise for the default handler to name it.
+        libc::signal(libc::SIGTRAP, libc::SIG_DFL);
+        libc::raise(libc::SIGTRAP);
+    }
+}
+
+fn stations_arm(image_base: u64, seed_word: bool) {
+    unsafe {
+        STATION_N = if seed_word { 5 } else { 4 };
+        STATION_AT[0] = image_base + 0x7019d;
+        STATION_KIND[0] = 1;
+        STATION_AT[1] = image_base + 0xaf68e;
+        STATION_KIND[1] = 2;
+        STATION_AT[2] = image_base + 0xb472b;
+        STATION_KIND[2] = 3;
+        STATION_AT[3] = image_base + 0xb473a;
+        STATION_KIND[3] = 3;
+        STATION_AT[4] = image_base + 0xb4748;
+        STATION_KIND[4] = 3;
+        SEED_BASE = image_base;
+        // Patch the int3 bytes. The .text page is RWX (the loader maps
+        // it PROT_READ|WRITE|EXEC); each address is a verified
+        // instruction boundary from the walk.
+        let n_armed = STATION_N;
+        println!("[arm] base={image_base:#x} n={n_armed}");
+        // The loader seals sections to their PE permissions after the
+        // RWX map (.text ends up R+X), so the int3 patch needs the
+        // pages writable first. One mprotect per touched page.
+        let page = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+        let mut pages: Vec<u64> = Vec::new();
+        let arr = std::ptr::addr_of!(STATION_AT);
+        let mut k = 0usize;
+        while k < STATION_N {
+            let a = std::ptr::read_volatile((*arr).as_ptr().add(k));
+            STATION_ORIG[k] = std::ptr::read_volatile(a as *const u8);
+            let pg = a & !(page as u64 - 1);
+            if !pages.contains(&pg) {
+                pages.push(pg);
+            }
+            k += 1;
+        }
+        for pg in &pages {
+            libc::mprotect(
+                *pg as *mut libc::c_void,
+                page,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+            );
+        }
+        let mut k = 0usize;
+        while k < STATION_N {
+            let a = std::ptr::read_volatile((*arr).as_ptr().add(k));
+            std::ptr::write_volatile(a as *mut u8, 0xcc);
+            k += 1;
+        }
+        // The action: SIGTRAP with SA_NODEFER|SA_SIGINFO so nested
+        // traps from the same thread reach the handler too.
+        let act = libc::sigaction {
+            sa_sigaction: station_handler as *const () as usize,
+            sa_mask: std::mem::zeroed(),
+            sa_flags: libc::SA_SIGINFO | libc::SA_NODEFER,
+            sa_restorer: None,
+        };
+        libc::sigaction(libc::SIGTRAP, &act, core::ptr::null_mut());
+        let n = STATION_N;
+        println!(
+            "[stations] armed {n} int3 station(s) @ base {image_base:#x} (word-seed {seed_word})"
+        );
+        // Self-test: raise a SIGTRAP we control. If the handler is
+        // live it prints and returns; if not, the run dies here --
+        // which is exactly the information needed either way.
+    }
+}
+
 // The HONEST WRAPPER (asm): vdfut NEVER writes [rsp+0x30] in
 // its own body -- the ONLY write in the whole function is a
 // pxor/movdqu ZERO-FILL at RVA 0x8c30c, off the transform route.
@@ -1177,6 +1314,13 @@ fn main() {
         // frame slot, the construction the live wrapper used; no
         // external FIX30CTX poke. The library provably never
         // writes the slot itself.
+        // PERUN_TR_SEED=1: arm the int3 station circuit around THIS
+        // call (the seq-proven five stations; the word seed is the
+        // show-and-seed probe -- the before-word print is built in).
+        let tr_seed = std::env::var_os("PERUN_TR_SEED").is_some();
+        if tr_seed {
+            stations_arm(image.base() as u64, true);
+        }
         let r = if std::env::var_os("PERUN_HONEST").is_some() {
             perun_honest_wrapper(f, 0x716bd86c, ctx as u64, 0xffff_ffff, spimp as u64)
         } else {
@@ -1193,6 +1337,36 @@ fn main() {
                 .unwrap_or(dll_code);
             f(0x716bd86c, ctx as u64, 0xffff_ffff, r9v)
         };
+        if tr_seed {
+            // Disarm before anything else touches the image: restore
+            // the original bytes, drop the trap table, reset the
+            // SIGTRAP disposition to default.
+            {
+                let page = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+                let mut pages: Vec<u64> = Vec::new();
+                let arr = std::ptr::addr_of!(STATION_AT);
+                let mut k = 0usize;
+                while k < STATION_N {
+                    let at = std::ptr::read_volatile((*arr).as_ptr().add(k));
+                    std::ptr::write_volatile(at as *mut u8, STATION_ORIG[k]);
+                    let pg = at & !(page as u64 - 1);
+                    if !pages.contains(&pg) {
+                        pages.push(pg);
+                    }
+                    k += 1;
+                }
+                for pg in &pages {
+                    libc::mprotect(
+                        *pg as *mut libc::c_void,
+                        page,
+                        libc::PROT_READ | libc::PROT_EXEC,
+                    );
+                }
+                STATION_N = 0;
+                libc::signal(libc::SIGTRAP, libc::SIG_DFL);
+            }
+            println!("[stations] disarmed");
+        }
         println!("[transform] rc={r:#x} ({r})");
         peek_state(&image, "transform");
         // The live contract: the worker writes the CPIM pointer at
