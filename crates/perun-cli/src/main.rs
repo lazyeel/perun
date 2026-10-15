@@ -984,10 +984,21 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
                         if MEMSEED_AT[k] == rip {
                             let rcx_v = *regs.add(libc::REG_RCX as usize) as u64;
                             let dst = (rcx_v + MEMSEED_OFF[k]) as *mut u32;
-                            std::ptr::write_volatile(dst, MEMSEED_VAL[k]);
+                            // Show the word the WORKER left there first: the
+                            // self-check reads exactly this slot, so its
+                            // pre-seed content IS the worker's published
+                            // verdict for this run.
+                            let before = std::ptr::read_volatile(dst);
+                            if MEMSEED_VAL[k] != 0 {
+                                std::ptr::write_volatile(dst, MEMSEED_VAL[k]);
+                            }
+                            // The gate's term block concatenates the four
+                            // page bytes BIG-ENDIAN, so its eaxm is
+                            // bswap32 of this LE u32 read.
+                            let gat = before.swap_bytes();
                             eprintln!(
-                                "[perun] memseed wrote {:#010x} at [rcx={:#x}+{:#x}] rip={rip:#x}",
-                                MEMSEED_VAL[k], rcx_v, MEMSEED_OFF[k]
+                                "[perun] memseed rip={rip:#x} [rcx={:#x}+{:#x}]: was {:#010x} (gatelike {:#010x}) -> seeded {:#010x}",
+                                rcx_v, MEMSEED_OFF[k], before, gat, MEMSEED_VAL[k]
                             );
                         }
                     }
@@ -3775,6 +3786,27 @@ fn cmd_seq(args: &[String]) -> i32 {
                     println!("[seq] step {step}: seedobj4 [{obj:#x}+4] = 1 (the crypto fork)");
                 } else {
                     println!("[seq] step {step}: seedobj4 slot 0x19ddb0 = {obj:#x} (null-ish)");
+                }
+            }
+            "seedgatef" => {
+                // seedgatef VAL -- the worker's fail branch reads the
+                // session flags at [[base+0x19dda8]+0x8] and +0xc; only
+                // a legitimate finish mints them. Seed both with VAL so
+                // the worker takes the route it takes on a session that
+                // finished provisioning.
+                let slot_ptr = image.base() as u64 + 0x19dda8;
+                let obj = unsafe { std::ptr::read_volatile(slot_ptr as *const u64) };
+                let val = toks.get(1).and_then(|v| parse_num(v)).unwrap_or(1);
+                if obj > 0x1000 {
+                    unsafe {
+                        std::ptr::write_volatile((obj + 0x8) as *mut u64, val);
+                        std::ptr::write_volatile((obj + 0xc) as *mut u64, val);
+                    }
+                    println!(
+                        "[seq] step {step}: seedgatef [{obj:#x}]+0x8/+0xc = {val:#x} (the session flags)"
+                    );
+                } else {
+                    println!("[seq] step {step}: seedgatef slot 0x19dda8 = {obj:#x} (null-ish)");
                 }
             }
             "objdump" => {
