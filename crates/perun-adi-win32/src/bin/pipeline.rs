@@ -38,11 +38,11 @@ use perun_shims::table::ShimTable;
 // word it seeds is the measured live success word 00000001, and the
 // before-word is printed so every run reports what the worker itself
 // published (the seq show-only probe, built in).
-static mut STATION_AT: [u64; 16] = [0; 16];
-static mut STATION_KIND: [u8; 16] = [0; 16]; // 0=off 1=word-seed 2=r12 3=rax-finalize
+static mut STATION_AT: [u64; 32] = [0; 32];
+static mut STATION_KIND: [u8; 32] = [0; 32]; // 0=off 1=word-seed 2=r12 3=rax-finalize
 static mut STATION_N: usize = 0;
 static mut SEED_BASE: u64 = 0; // the image base, for the CFF table fix
-static mut STATION_ORIG: [u8; 16] = [0; 16];
+static mut STATION_ORIG: [u8; 32] = [0; 32];
 static mut REARM_AT: u64 = 0;
 #[allow(dead_code)]
 static mut REARM_ORIG: u8 = 0;
@@ -168,6 +168,34 @@ fn stations_arm(image_base: u64, seed_word: bool) {
     stations_arm_mode(image_base, seed_word, false)
 }
 
+fn disarm_stations() {
+    unsafe {
+        let page = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+        let arr = std::ptr::addr_of!(STATION_AT);
+        let mut pages: Vec<u64> = Vec::new();
+        let mut k = 0usize;
+        while k < STATION_N {
+            let at = std::ptr::read_volatile((*arr).as_ptr().add(k));
+            std::ptr::write_volatile(at as *mut u8, STATION_ORIG[k]);
+            let pg = at & !(page as u64 - 1);
+            if !pages.contains(&pg) {
+                pages.push(pg);
+            }
+            k += 1;
+        }
+        for pg in &pages {
+            libc::mprotect(
+                *pg as *mut libc::c_void,
+                page,
+                libc::PROT_READ | libc::PROT_EXEC,
+            );
+        }
+        STATION_N = 0;
+        libc::signal(libc::SIGTRAP, libc::SIG_DFL);
+    }
+    println!("[stations] disarmed");
+}
+
 /// mode observers_only: arm ONLY the observer stations (kinds 4/6) --
 /// the SetPath/SetID watch must not carry the transform's action
 /// stations (the r12/rax seeds) into the session selectors.
@@ -204,7 +232,18 @@ fn stations_arm_mode(image_base: u64, seed_word: bool, observers_only: bool) {
             // names the fold-term the body accumulated.
             STATION_AT[7] = image_base + 0x8feaa;
             STATION_KIND[7] = 4;
-            STATION_N = 8;
+            // Every cmp $0x4069d333 site in the image (16 found in the
+            // disassembly): watching which one the init body takes and
+            // what register value dies there.
+            let gates = [
+                0x66d14u64, 0x66d5e, 0x8f6fa, 0x8f945, 0x8fb62, 0x8fd6c, 0x8fee2, 0x900a5, 0x90275,
+                0x9041b, 0x9059a, 0x90758, 0x908e2, 0x90a6f, 0x90b38, 0xb4665,
+            ];
+            for (gi, gr) in gates.iter().enumerate() {
+                STATION_AT[8 + gi] = image_base + gr;
+                STATION_KIND[8 + gi] = 6;
+            }
+            STATION_N = 8 + 16;
             SEED_BASE = image_base;
         } else {
             STATION_N = if seed_word { 10 } else { 9 };
@@ -627,26 +666,32 @@ fn main() {
     // null-session fold but lands the -45001 verdict; the live shape
     // (V2 header, live terms) is what walked to the -45061 state verdict.
     // Probe the V2-header form with a zero nonce tail.
-    unsafe {
-        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
-        *pkt.cast::<u32>() = 2; // hdr 00 00 00 02, the live Call-1 header
-        let c0 = ctx.cast::<u64>();
-        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
-        std::ptr::write(c0.add(0), pkt as u64);
-        std::ptr::write(c0.add(1), 0x4000_0000_0010); // len 0x10 | flags 4
-        std::ptr::write(c0.add(3), 0x0022_6564);
-        std::ptr::write(c0.add(4), 0x1);
-        std::ptr::write(c0.add(9), 0x2);
-        let r = f(0xb0eda7af, ctx as u64, 0, 0);
-        println!("[init:v2] rc={r:#x} ({r})");
-        let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 16);
-        println!(
-            "[init:v2] pkt[0..16] = {}",
-            pk[..16]
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        );
+    // PERUN_NO_INITV2=1 skips this probe: the gate at 0x66d14 reads
+    // a PHASE counter through [rsp+0x6c0] (E = counter + 0x4069d332),
+    // and every init call advances it -- the probe leaves the main
+    // init arriving as E=2 where the gate wants the first phase.
+    if std::env::var_os("PERUN_NO_INITV2").is_none() {
+        unsafe {
+            std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+            *pkt.cast::<u32>() = 2; // hdr 00 00 00 02, the live Call-1 header
+            let c0 = ctx.cast::<u64>();
+            std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+            std::ptr::write(c0.add(0), pkt as u64);
+            std::ptr::write(c0.add(1), 0x4000_0000_0010); // len 0x10 | flags 4
+            std::ptr::write(c0.add(3), 0x0022_6564);
+            std::ptr::write(c0.add(4), 0x1);
+            std::ptr::write(c0.add(9), 0x2);
+            let r = f(0xb0eda7af, ctx as u64, 0, 0);
+            println!("[init:v2] rc={r:#x} ({r})");
+            let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 16);
+            println!(
+                "[init:v2] pkt[0..16] = {}",
+                pk[..16]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            );
+        }
     }
     // The live stand carried: V1-word packet (pkt bytes 3 and 7 = 1),
     // len 0x10 with flags 4, a stack tag at +0x10, buffers at
@@ -672,12 +717,19 @@ fn main() {
         let c = ctx.cast::<u64>();
         std::ptr::write(c.add(0), pkt as u64);
         std::ptr::write(c.add(1), 0x0000_0004_0000_0010); // len 0x10 | flags 4
-        std::ptr::write(c.add(2), 0x0000_7fff_0000_0000); // stack-ish tag
+        // +0x10: the LIVE Call-1 carried 0x0000768000000000 (the
+        // wrapper's own address-space tag, NOT the 7fff stack form).
+        // PERUN_INIT_TAG3 overrides for the diff experiment.
+        let tag3: u64 = std::env::var("PERUN_INIT_TAG3")
+            .ok()
+            .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+            .unwrap_or(0x0000_7fff_0000_0000);
+        std::ptr::write(c.add(2), tag3); // stack-ish tag (live: 7680 form)
         std::ptr::write(c.add(3), aux[0] as u64);
         std::ptr::write(c.add(4), 0x15); // 21, measured
         std::ptr::write(c.add(5), aux[1] as u64);
         std::ptr::write(c.add(6), aux[2] as u64);
-        std::ptr::write(c.add(7), 0x0000_7fff_0000_0000);
+        std::ptr::write(c.add(7), tag3);
         std::ptr::write(c.add(8), aux[3] as u64);
         // +0x48: the live Call-1 carried the FULL dashed UUID string
         // ('1A7DC030-8887-C2D8-F470-E2EA813C70C1', 36 chars). Ours by
@@ -1369,7 +1421,17 @@ fn main() {
         let c2 = ctx.cast::<u64>();
         std::ptr::write(c2.add(0), pkt as u64);
         std::ptr::write(c2.add(1), 0x0000_0004_0000_0010);
+        // PERUN_SESS_ARM around the MAIN init too: the -45020-family
+        // self-check gate may sit on this body's route, and the
+        // word-seed station is the honest probe of that hypothesis.
+        let sess_arm = std::env::var_os("PERUN_SESS_ARM").is_some();
+        if sess_arm {
+            stations_arm(image.base() as u64, true);
+        }
         let r = f(0xb0eda7af, ctx as u64, 0, 0);
+        if sess_arm {
+            disarm_stations();
+        }
         peek_slots(&image, "after_init2");
         println!("[init2] rc={r:#x} ({r})");
         let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 32);
