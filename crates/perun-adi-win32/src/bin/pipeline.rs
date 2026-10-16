@@ -425,6 +425,34 @@ fn cb_page() -> *mut core::ffi::c_void {
 /// The address of a win64 callback as a plain integer, the way the
 /// envelope's code slots want it (clippy: function items cast
 /// through their pointer type).
+/// Call the guest through perun's PE-stack trampoline -- the seq
+/// instruments invoke every export this way and the only canon that
+/// answers rc=0 on the live nonce (s195) is a seq run: the direct
+/// f() call leaves the guest's frame slots on a Rust stack, and the
+/// init body's deep cascade reads them differently (measured:
+/// direct -> -45020 digest profile, trampoline -> rc=0 verdict
+/// profile on the SAME envelope and nonce). PERUN_NO_PE_STACK=1
+/// keeps the direct call for the A/B control.
+fn guest_call(
+    f: unsafe extern "win64" fn(u64, u64, u64, u64) -> u64,
+    a0: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+) -> u64 {
+    static PE_STACK: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    if std::env::var_os("PERUN_NO_PE_STACK").is_some() {
+        return unsafe { f(a0, a1, a2, a3) };
+    }
+    let top = *PE_STACK.get_or_init(|| unsafe {
+        let (limit, base) = perun_core::teb::alloc_pe_stack(perun_core::teb::PE_STACK_SIZE)
+            .expect("pe stack alloc");
+        perun_core::teb::set_pe_stack_bounds(limit, base);
+        base
+    });
+    unsafe { perun_core::teb::call_on_stack(f, top, [a0, a1, a2, a3]) }
+}
+
 fn cb_addr(f: unsafe extern "win64" fn(u64, u64, u64, u64) -> u64) -> u64 {
     f as usize as u64
 }
@@ -565,8 +593,9 @@ fn main() {
     // Seed the registry the Windows host would have: the ADI guests
     // probe ProductId (the iTunes wrapper's key is SOFTWARE\Apple Inc.\
     // CoreADI); the Linux stand for the machine certificate is
-    // /etc/machine-id.
-    {
+    // /etc/machine-id. PERUN_NO_REGISTRY=1 skips it: the s195 canon
+    // (rc=0 on the live nonce) runs on an EMPTY registry.
+    if std::env::var_os("PERUN_NO_REGISTRY").is_none() {
         let reg = perun_shims::registry::Registry::global();
         if let Ok(pid) = std::fs::read_to_string("/etc/machine-id") {
             let pid = pid.trim().to_string();
@@ -622,24 +651,33 @@ fn main() {
     // rcx. PERUN_CVU_MODE picks: "state" (the historical triple),
     // "path" (the initializer contract -- the wrapper's own session
     // construction, the missing SetID equivalent on Windows).
+    // PERUN_NO_CVU=1 skips the cvu call entirely: the s195 canon (and
+    // the Mach-O live reference) never calls the second export before
+    // init, and the cvu-minted session objects change the init body's
+    // route -- the diff experiment measures whether the object's
+    // existence (not its contents) is the fork.
     let state = page(4096);
-    unsafe {
-        *state.cast::<u64>() = 0x2000000001;
-        *state.cast::<u8>().add(6) = 0;
-        *state.cast::<u8>().add(7) = 1;
-        let mode = std::env::var("PERUN_CVU_MODE").unwrap_or_else(|_| "state".into());
-        let (r, desc) = match mode.as_str() {
-            "path" => {
-                let path = std::env::var("PERUN_APPDATA")
-                    .unwrap_or_else(|_| "/opt/data/home/.perun/appdata/Common".into());
-                let pathb = page(4096);
-                std::ptr::copy_nonoverlapping(path.as_ptr(), pathb.cast::<u8>(), path.len());
-                (cvu(pathb as u64, 0, 0, 0), format!("path {path:?}"))
-            }
-            _ => (cvu(state as u64, 0x2000000001, 0, 0), "state triple".into()),
-        };
-        println!("[cvu] rc={r} ({desc})");
-        peek_slots(&image, "after_cvu");
+    if std::env::var_os("PERUN_NO_CVU").is_none() {
+        unsafe {
+            *state.cast::<u64>() = 0x2000000001;
+            *state.cast::<u8>().add(6) = 0;
+            *state.cast::<u8>().add(7) = 1;
+            let mode = std::env::var("PERUN_CVU_MODE").unwrap_or_else(|_| "state".into());
+            let (r, desc) = match mode.as_str() {
+                "path" => {
+                    let path = std::env::var("PERUN_APPDATA")
+                        .unwrap_or_else(|_| "/opt/data/home/.perun/appdata/Common".into());
+                    let pathb = page(4096);
+                    std::ptr::copy_nonoverlapping(path.as_ptr(), pathb.cast::<u8>(), path.len());
+                    (cvu(pathb as u64, 0, 0, 0), format!("path {path:?}"))
+                }
+                _ => (cvu(state as u64, 0x2000000001, 0, 0), "state triple".into()),
+            };
+            println!("[cvu] rc={r} ({desc})");
+            peek_slots(&image, "after_cvu");
+        }
+    } else {
+        println!("[cvu] skipped (PERUN_NO_CVU)");
     }
 
     // Shared envelope buffers.
@@ -698,7 +736,7 @@ fn main() {
             std::ptr::write(c0.add(3), 0x0022_6564);
             std::ptr::write(c0.add(4), 0x1);
             std::ptr::write(c0.add(9), 0x2);
-            let r = f(0xb0eda7af, ctx as u64, 0, 0);
+            let r = guest_call(f, 0xb0eda7af, ctx as u64, 0, 0);
             println!("[init:v2] rc={r:#x} ({r})");
             let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 16);
             println!(
@@ -834,8 +872,10 @@ fn main() {
                 std::ptr::write(c.add(9), ident as u64); // +0x48 identity
             }
         }
-        std::ptr::write(c.add(10), 0x40e8_976e_6bde_5309); // +0x50 the live VALUE slot
-        std::ptr::write(c.add(11), 0xbee2_365f_bf17_664b); // +0x58 the live VALUE slot
+        if std::env::var_os("PERUN_INIT_CB").is_some() {
+            std::ptr::write(c.add(10), 0x40e8_976e_6bde_5309); // +0x50
+            std::ptr::write(c.add(11), 0xbee2_365f_bf17_664b); // +0x58
+        }
         // The live Call-1 carried CODE pointers at +0x28/+0x30/+0x40/
         // +0x70/+0xa8/+0xb8 (the Android wrapper's own CFF functions).
         // The live Call-1 carried the WRAPPER's own functions in every
@@ -843,19 +883,43 @@ fn main() {
         // state. The DLL-export probe (wrong semantics) kept the
         // verdict; these LOGGING callbacks expose the real ABI on the
         // first call: which slot fires, with which register args.
-        std::ptr::write(c.add(5), cb_addr(cb_slot28)); // +0x28
-        std::ptr::write(c.add(6), cb_addr(cb_slot30)); // +0x30
-        std::ptr::write(c.add(8), cb_addr(cb_slot40)); // +0x40
-        std::ptr::write(c.add(14), cb_addr(cb_slot70)); // +0x70
-        std::ptr::write(c.add(18), cb_addr(cb_slot90)); // +0x90
-        std::ptr::write(c.add(21), cb_addr(cb_slota0)); // +0xa8
-        std::ptr::write(c.add(22), cb_addr(cb_slotb0)); // +0xb0
-        std::ptr::write(c.add(23), cb_addr(cb_slotb8)); // +0xb8
-        // arg3: the live Call-1 carried a wrapper code pointer there.
-        let a3 = cb_page();
-        let r = f(0xb0eda7af, ctx as u64, 0, a3 as u64);
+        // The s195 canon (the only envelope that answers rc=0 on
+        // the live nonce) carries ZEROED AUX PAGES at +0x28/+0x30/
+        // +0x40 -- not code pointers. PERUN_INIT_CB=1 restores the
+        // callback experiment.
+        if std::env::var_os("PERUN_INIT_CB").is_some() {
+            std::ptr::write(c.add(5), cb_addr(cb_slot28)); // +0x28
+            std::ptr::write(c.add(6), cb_addr(cb_slot30)); // +0x30
+            std::ptr::write(c.add(8), cb_addr(cb_slot40)); // +0x40
+        } else {
+            std::ptr::write(c.add(5), aux[1] as u64); // +0x28 a zero page
+            std::ptr::write(c.add(6), aux[2] as u64); // +0x30 a zero page
+            std::ptr::write(c.add(8), aux[3] as u64); // +0x40 a zero page
+        }
+        // The live Call-1 and the s195 canon carry SIZE CONSTANTS at
+        // +0x80/+0x90/+0x98/+0xa0 (0x70/0xc2/0xf4/0x30 -- descriptor
+        // magics), NOT code pointers: with the live nonce the init
+        // body dives into the deep cascade and READS these as
+        // descriptor sizes; the cb addresses corrupted it to -45020.
+        std::ptr::write(c.add(16), 0x70); // +0x80 the live SIZE constant
+        std::ptr::write(c.add(18), 0xc2); // +0x90 the live SIZE constant
+        std::ptr::write(c.add(19), 0xf4); // +0x98 the live SIZE constant
+        std::ptr::write(c.add(20), 0x30); // +0xa0 the live SIZE constant
+        if std::env::var_os("PERUN_INIT_CB").is_some() {
+            std::ptr::write(c.add(21), cb_addr(cb_slota0)); // +0xa8
+            std::ptr::write(c.add(22), cb_addr(cb_slotb0)); // +0xb0
+            std::ptr::write(c.add(23), cb_addr(cb_slotb8)); // +0xb8
+        }
+        // arg3: the live Call-1 carried a wrapper code pointer there;
+        // the s195 canon (the canon that answers rc=0 on the live
+        // nonce) passes ZERO -- PERUN_INIT_ARG3=0 reproduces it.
+        let a3: u64 = match std::env::var("PERUN_INIT_ARG3") {
+            Ok(v) => v.trim().parse().unwrap_or(0),
+            Err(_) => cb_page() as u64,
+        };
+        let r = guest_call(f, 0xb0eda7af, ctx as u64, 0, a3);
         peek_slots(&image, "after_init");
-        println!("[init] rc={r:#x} ({r}) arg3={:p}", a3);
+        println!("[init] rc={r:#x} ({r}) arg3={a3:#x}");
         let ipk = std::slice::from_raw_parts(pkt.cast::<u8>(), 32);
         println!(
             "[init] pkt[0..32] = {}",
@@ -920,7 +984,7 @@ fn main() {
         if sess_arm {
             stations_arm_mode(image.base() as u64, false, true);
         }
-        let r = f(0xb23c691e, ctx as u64, 0, 0);
+        let r = guest_call(f, 0xb23c691e, ctx as u64, 0, 0);
         println!("[setpath] rc={r:#x} ({r})");
         // The LIVE SetID envelope (decoded from dumprun4): a V2-headed
         // 20-byte packet, the len/flags pair 0x400000014, the arg1
@@ -1128,9 +1192,9 @@ fn main() {
         // arg3 was a heavy recursive hazard -- the validator's
         // counter exploded through it).
         let r2 = if std::env::var_os("PERUN_SETID_CB").is_some() {
-            f(0xc774d292, ctx as u64, 0, cb_addr(cb_slot48))
+            guest_call(f, 0xc774d292, ctx as u64, 0, cb_addr(cb_slot48))
         } else {
-            f(0xc774d292, ctx as u64, 0, dll_code)
+            guest_call(f, 0xc774d292, ctx as u64, 0, dll_code)
         };
         println!("[setid#1] rc={r2:#x} ({r2})");
         // Rebuild the envelope: the first call rewrote the packet.
@@ -1156,9 +1220,9 @@ fn main() {
         }
         std::ptr::write(c.add(0), pkt as u64);
         let r3 = if std::env::var_os("PERUN_SETID_CB").is_some() {
-            f(0xc774d292, ctx as u64, 0, cb_addr(cb_slot48))
+            guest_call(f, 0xc774d292, ctx as u64, 0, cb_addr(cb_slot48))
         } else {
-            f(0xc774d292, ctx as u64, 0, dll_code)
+            guest_call(f, 0xc774d292, ctx as u64, 0, dll_code)
         };
         println!("[setid#2] rc={r3:#x} ({r3})");
         if sess_arm {
@@ -1304,7 +1368,7 @@ fn main() {
                 std::ptr::write(c.add(22), cb_addr(cb_slotb0));
                 std::ptr::write(c.add(23), cb_addr(cb_slotb8));
                 let a3 = cb_page();
-                let r = f(0xb0eda7af, ctx as u64, 0, a3 as u64);
+                let r = guest_call(f, 0xb0eda7af, ctx as u64, 0, a3 as u64);
                 println!("[init#2pass] rc={r:#x} ({r})");
                 peek_slots(&image, "after_reinit");
                 // The material object the second pass minted:
@@ -1490,7 +1554,7 @@ fn main() {
             // 0x4269d332 instead of the clean 0x4069d334).
             stations_arm_mode(image.base() as u64, true, true);
         }
-        let r = f(0xb0eda7af, ctx as u64, 0, 0);
+        let r = guest_call(f, 0xb0eda7af, ctx as u64, 0, 0);
         if sess_arm {
             disarm_stations();
         }
@@ -1636,7 +1700,7 @@ fn main() {
                 .ok()
                 .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
                 .unwrap_or(dll_code);
-            f(0x716bd86c, ctx as u64, 0xffff_ffff, r9v)
+            guest_call(f, 0x716bd86c, ctx as u64, 0xffff_ffff, r9v)
         };
         if tr_seed {
             // Disarm before anything else touches the image: restore
@@ -1807,16 +1871,28 @@ fn main() {
         // past the body check and starts minting, the first fire
         // names the contract's real ABI.
         std::ptr::write(c.add(4), cb_addr(cb_slot48)); // +0x20
-        std::ptr::write(c.add(5), cb_addr(cb_slot28)); // +0x28
-        std::ptr::write(c.add(6), cb_addr(cb_slot30)); // +0x30
-        std::ptr::write(c.add(8), cb_addr(cb_slot40)); // +0x40
+        // The s195 canon (the only envelope that answers rc=0 on
+        // the live nonce) carries ZEROED AUX PAGES at +0x28/+0x30/
+        // +0x40 -- not code pointers. PERUN_INIT_CB=1 restores the
+        // callback experiment.
+        if std::env::var_os("PERUN_INIT_CB").is_some() {
+            std::ptr::write(c.add(5), cb_addr(cb_slot28)); // +0x28
+            std::ptr::write(c.add(6), cb_addr(cb_slot30)); // +0x30
+            std::ptr::write(c.add(8), cb_addr(cb_slot40)); // +0x40
+        } else {
+            std::ptr::write(c.add(5), aux[1] as u64); // +0x28 a zero page
+            std::ptr::write(c.add(6), aux[2] as u64); // +0x30 a zero page
+            std::ptr::write(c.add(8), aux[3] as u64); // +0x40 a zero page
+        }
         std::ptr::write(c.add(14), cb_addr(cb_slot70)); // +0x70
         std::ptr::write(c.add(18), cb_addr(cb_slot90)); // +0x90
         std::ptr::write(c.add(19), cb_addr(cb_slot98)); // +0x98
-        std::ptr::write(c.add(21), cb_addr(cb_slota0)); // +0xa8
-        std::ptr::write(c.add(22), cb_addr(cb_slotb0)); // +0xb0
-        std::ptr::write(c.add(23), cb_addr(cb_slotb8)); // +0xb8
-        let r = f(0xcfe0b46a, ctx as u64, 0, 0);
+        if std::env::var_os("PERUN_INIT_CB").is_some() {
+            std::ptr::write(c.add(21), cb_addr(cb_slota0)); // +0xa8
+            std::ptr::write(c.add(22), cb_addr(cb_slotb0)); // +0xb0
+            std::ptr::write(c.add(23), cb_addr(cb_slotb8)); // +0xb8
+        }
+        let r = guest_call(f, 0xcfe0b46a, ctx as u64, 0, 0);
         println!("[cfg] rc={r:#x} ({r})");
         peek_state(&image, "cfg");
 
@@ -1840,7 +1916,7 @@ fn main() {
         std::ptr::write(c.add(3), 0x00226564); // measured
         std::ptr::write(c.add(4), 0x1); // measured
         std::ptr::write(c.add(9), 0x2); // +0x48 measured
-        let r3 = f(0xcfe0b46a, ctx as u64, 0, 0);
+        let r3 = guest_call(f, 0xcfe0b46a, ctx as u64, 0, 0);
         println!("[cfg:blob] rc={r3:#x} ({r3})");
         let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 48);
         println!(
@@ -1866,7 +1942,7 @@ fn main() {
         std::ptr::write(c.add(3), 0x00226564); // measured
         std::ptr::write(c.add(4), 0x1); // measured
         std::ptr::write(c.add(9), 0x2); // +0x48 measured
-        let r2 = f(0xcfe0b46a, ctx as u64, 0, 0);
+        let r2 = guest_call(f, 0xcfe0b46a, ctx as u64, 0, 0);
         println!("[cfg:synth] rc={r2:#x} ({r2})");
         let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 48);
         println!(
@@ -1917,7 +1993,7 @@ fn main() {
                 std::ptr::write(c.add(10), olen as u64);
                 std::ptr::write(c.add(13), spimp as u64);
                 std::ptr::write(c.add(16), out as u64);
-                let r = f(0x0b2b3196, ctx as u64, 0, 0);
+                let r = guest_call(f, 0x0b2b3196, ctx as u64, 0, 0);
                 println!("[finish:{dname}] rc={r:#x} ({r})");
                 let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 48);
                 println!(
@@ -1949,7 +2025,7 @@ fn main() {
         std::ptr::write(c.add(0), pkt as u64);
         std::ptr::write(c.add(1), 0x4000_0000_0010); // len 0x10 | flags 4
         std::ptr::write(c.add(9), aux[5] as u64); // +0x48 (the live had a buffer)
-        let r = f(0x3e58e7f9, ctx as u64, 0, 0);
+        let r = guest_call(f, 0x3e58e7f9, ctx as u64, 0, 0);
         println!("[otp] rc={r:#x} ({r})");
         let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 32);
         println!(
