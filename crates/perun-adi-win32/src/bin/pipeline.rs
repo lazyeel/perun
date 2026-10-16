@@ -117,11 +117,11 @@ unsafe extern "C" fn station_handler(
                     // the E it folds to, and the frame slots the gate
                     // reads. NO writes.
                     let r9d = gregs[libc::REG_R9 as usize] as u32;
+                    let edx = gregs[libc::REG_RDX as usize] as u32;
                     eprintln!(
-                        "[station] gate-45026 rip={rip:#x} r9d={r9d:#x} (E={:#x}, pass={} {}) rdi={:#x} rsp={rsp:#x}",
-                        r9d.wrapping_sub(0x4069_d332),
-                        r9d == 0x4069_d333,
-                        r9d == 0x4069_d332,
+                        "[station] gate rip={rip:#x} edx={edx:#x} (E={:#x}, pass {}) r9d={r9d:#x} rdi={:#x}",
+                        edx.wrapping_sub(0x4069_d332),
+                        edx == 0x4069_d333,
                         gregs[libc::REG_RDI as usize] as u64
                     );
                 }
@@ -243,7 +243,14 @@ fn stations_arm_mode(image_base: u64, seed_word: bool, observers_only: bool) {
                 STATION_AT[8 + gi] = image_base + gr;
                 STATION_KIND[8 + gi] = 6;
             }
-            STATION_N = 8 + 16;
+            // The E-bit cmovne nodes feeding the gate slot: the
+            // and-$1,%bl idiom picks between two fold results, and
+            // 0x83ba87 is the very writer of [rsp+0x6c0].
+            STATION_AT[24] = image_base + 0x40812;
+            STATION_KIND[24] = 4;
+            STATION_AT[25] = image_base + 0x40a2a;
+            STATION_KIND[25] = 4;
+            STATION_N = 26;
             SEED_BASE = image_base;
         } else {
             STATION_N = if seed_word { 10 } else { 9 };
@@ -691,6 +698,24 @@ fn main() {
                     .map(|b| format!("{b:02x}"))
                     .collect::<String>()
             );
+        }
+    }
+    // PERUN_SESS_FLAGS_EARLY=1: seed the session flags BEFORE the
+    // main init -- the live wrapper's init ran on a machine whose
+    // adi.pb persisted (the flags set), and E at the init gate may
+    // read them. Measured on this round: our body folds E=2 at
+    // 0x66d14 while the live verdict profile implies E=1's branch.
+    if std::env::var_os("PERUN_SESS_FLAGS_EARLY").is_some() {
+        unsafe {
+            let slot_ptr = image.base() as u64 + 0x19dda8;
+            let obj = std::ptr::read_volatile(slot_ptr as *const u64);
+            if obj > 0x1000 {
+                std::ptr::write_volatile((obj + 8) as *mut u64, 1);
+                std::ptr::write_volatile((obj + 0xc) as *mut u64, 1);
+                println!("[sess-flags-early] [{obj:#x}+8]/[+0xc] = 1");
+            } else {
+                println!("[sess-flags-early] slot 0x19dda8 = {obj:#x}: no object yet");
+            }
         }
     }
     // The live stand carried: V1-word packet (pkt bytes 3 and 7 = 1),
