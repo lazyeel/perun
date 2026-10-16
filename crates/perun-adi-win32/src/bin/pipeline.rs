@@ -38,11 +38,27 @@ use perun_shims::table::ShimTable;
 // word it seeds is the measured live success word 00000001, and the
 // before-word is printed so every run reports what the worker itself
 // published (the seq show-only probe, built in).
-static mut STATION_AT: [u64; 8] = [0; 8];
-static mut STATION_KIND: [u8; 8] = [0; 8]; // 0=off 1=word-seed 2=r12 3=rax-finalize
+static mut STATION_AT: [u64; 16] = [0; 16];
+static mut STATION_KIND: [u8; 16] = [0; 16]; // 0=off 1=word-seed 2=r12 3=rax-finalize
 static mut STATION_N: usize = 0;
 static mut SEED_BASE: u64 = 0; // the image base, for the CFF table fix
-static mut STATION_ORIG: [u8; 8] = [0; 8];
+static mut STATION_ORIG: [u8; 16] = [0; 16];
+static mut REARM_AT: u64 = 0;
+#[allow(dead_code)]
+static mut REARM_ORIG: u8 = 0;
+
+unsafe extern "C" fn segv_namer(
+    _sig: libc::c_int,
+    _info: *mut libc::siginfo_t,
+    uctx: *mut libc::c_void,
+) {
+    unsafe {
+        let uc = uctx as *mut libc::ucontext_t;
+        let rip = (*uc).uc_mcontext.gregs[libc::REG_RIP as usize] as u64;
+        eprintln!("[segv-namer] guest SEGV rip={rip:#x} -- naming and dying");
+        libc::_exit(139);
+    }
+}
 
 unsafe extern "C" fn station_handler(
     _sig: libc::c_int,
@@ -54,7 +70,21 @@ unsafe extern "C" fn station_handler(
         let gregs = &mut (*uc).uc_mcontext.gregs;
         // int3 semantics: RIP points PAST the 0xcc byte, so the station
         // address is rip - 1.
-        let rip = (gregs[libc::REG_RIP as usize] as u64) - 1;
+        let rip_raw = gregs[libc::REG_RIP as usize] as u64;
+        // The re-arm step: the previous trap restored the original
+        // byte and single-stepped the WHOLE instruction; this trap is
+        // that TF step (the landing rip is instruction start + length,
+        // which we cannot know in advance -- so the pending flag, not
+        // an address match, identifies it). Put the 0xcc back at the
+        // station and clear TF.
+        if REARM_AT != 0 {
+            std::ptr::write_volatile(REARM_AT as *mut u8, 0xcc);
+            let flags = gregs[libc::REG_EFL as usize] as u64;
+            gregs[libc::REG_EFL as usize] = (flags & !0x100) as i64;
+            REARM_AT = 0;
+            return;
+        }
+        let rip = rip_raw - 1;
         let n = STATION_N;
         for k in 0..n {
             if STATION_AT[k] != rip {
@@ -81,9 +111,37 @@ unsafe extern "C" fn station_handler(
                     // guest stack top (rsp rounded down a page) always is.
                     gregs[libc::REG_RAX as usize] = (rsp & !0xfff) as i64;
                 }
+                4 => {
+                    // Observer: name the station and dump the contract
+                    // registers; at the fork also read [rsi+4] -- the
+                    // field that picks the crypto route.
+                    let rsi = gregs[libc::REG_RSI as usize] as u64;
+                    let mut fork = String::new();
+                    if rip == SEED_BASE + 0x131577 && rsi > 0x1000 && rsi < 0x8000_0000_0000 {
+                        let f4 = std::ptr::read_volatile((rsi + 4) as *const u32);
+                        fork = format!(" [rsi+4]={f4:#x}");
+                    }
+                    eprintln!(
+                        "[station] observer rip={rip:#x} rax={:#x} rdi={:#x} rsi={:#x} r9={:#x} rbp={:#x}{fork}",
+                        gregs[libc::REG_RAX as usize] as u64,
+                        gregs[libc::REG_RDI as usize] as u64,
+                        rsi,
+                        gregs[libc::REG_R9 as usize] as u64,
+                        gregs[libc::REG_RBP as usize] as u64
+                    );
+                }
                 _ => {}
             }
-            // RIP already points past the int3 byte: resume as-is.
+            // Resume semantics for a station whose instruction is
+            // longer than the int3 byte: restore the original byte,
+            // rewind RIP to the instruction start, single-step it,
+            // and let the next trap (the TF step, rip past the whole
+            // instruction) re-arm the 0xcc and clear TF.
+            std::ptr::write_volatile(rip as *mut u8, STATION_ORIG[k]);
+            REARM_AT = rip;
+            gregs[libc::REG_RIP as usize] = rip as i64;
+            let flags = gregs[libc::REG_EFL as usize] as u64;
+            gregs[libc::REG_EFL as usize] = (flags | 0x100) as i64; // TF
             return;
         }
         // Not ours: re-raise for the default handler to name it.
@@ -94,7 +152,12 @@ unsafe extern "C" fn station_handler(
 
 fn stations_arm(image_base: u64, seed_word: bool) {
     unsafe {
-        STATION_N = if seed_word { 5 } else { 4 };
+        // Five action stations plus observers over the worker's own
+        // route: entry (0x100050), return into the boundary block
+        // (0x91512 -- rax = the worker's verdict), the post-check
+        // contract (0x9154e), the epilogue (0x131620), the crypto
+        // fork (0x131577).
+        STATION_N = if seed_word { 10 } else { 9 };
         STATION_AT[0] = image_base + 0x7019d;
         STATION_KIND[0] = 1;
         STATION_AT[1] = image_base + 0xaf68e;
@@ -105,6 +168,16 @@ fn stations_arm(image_base: u64, seed_word: bool) {
         STATION_KIND[3] = 3;
         STATION_AT[4] = image_base + 0xb4748;
         STATION_KIND[4] = 3;
+        STATION_AT[5] = image_base + 0x100050;
+        STATION_KIND[5] = 4;
+        STATION_AT[6] = image_base + 0x91512;
+        STATION_KIND[6] = 4;
+        STATION_AT[7] = image_base + 0x9154e;
+        STATION_KIND[7] = 4;
+        STATION_AT[8] = image_base + 0x131620;
+        STATION_KIND[8] = 4;
+        STATION_AT[9] = image_base + 0x131577;
+        STATION_KIND[9] = 4;
         SEED_BASE = image_base;
         // Patch the int3 bytes. The .text page is RWX (the loader maps
         // it PROT_READ|WRITE|EXEC); each address is a verified
@@ -149,6 +222,16 @@ fn stations_arm(image_base: u64, seed_word: bool) {
             sa_restorer: None,
         };
         libc::sigaction(libc::SIGTRAP, &act, core::ptr::null_mut());
+        // Name any guest SEGV that hits while the circuit is armed:
+        // the worker's crypto branch dies somewhere past the fork,
+        // and the crash rip is the next station candidate.
+        let segv_act = libc::sigaction {
+            sa_sigaction: segv_namer as *const () as usize,
+            sa_mask: std::mem::zeroed(),
+            sa_flags: libc::SA_SIGINFO,
+            sa_restorer: None,
+        };
+        libc::sigaction(libc::SIGSEGV, &segv_act, core::ptr::null_mut());
         let n = STATION_N;
         println!(
             "[stations] armed {n} int3 station(s) @ base {image_base:#x} (word-seed {seed_word})"
