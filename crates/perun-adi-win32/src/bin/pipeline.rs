@@ -246,11 +246,21 @@ fn stations_arm_mode(image_base: u64, seed_word: bool, observers_only: bool) {
             // The E-bit cmovne nodes feeding the gate slot: the
             // and-$1,%bl idiom picks between two fold results, and
             // 0x83ba87 is the very writer of [rsp+0x6c0].
-            STATION_AT[24] = image_base + 0x40812;
-            STATION_KIND[24] = 4;
-            STATION_AT[25] = image_base + 0x40a2a;
-            STATION_KIND[25] = 4;
-            STATION_N = 26;
+            // NOTE: the 0x3ba72/0x3ba87 and 0x40812/0x40a2a probe
+            // stations are REMOVED -- an int3 landing inside a
+            // multi-byte instruction the body executes (not at its
+            // head) corrupts the decoder WITHOUT ever firing the
+            // station, and it polluted the init gate's fold term
+            // across two whole runs (r9d 0x4269d332 instead of the
+            // clean 0x4069d334). Observers must sit on CONFIRMED
+            // instruction heads only.
+            //
+            // For the INIT watch only the confirmed head 0x66d14:
+            // the other fifteen gate sites are NOT verified as
+            // instruction heads for this body's route.
+            STATION_AT[24] = image_base + 0x66d14;
+            STATION_KIND[24] = 6;
+            STATION_N = 25;
             SEED_BASE = image_base;
         } else {
             STATION_N = if seed_word { 10 } else { 9 };
@@ -756,6 +766,27 @@ fn main() {
         std::ptr::write(c.add(6), aux[2] as u64);
         std::ptr::write(c.add(7), tag3);
         std::ptr::write(c.add(8), aux[3] as u64);
+        // PERUN_INIT_LIVE_CTX=1: fill the still-untested slots with the
+        // LIVE Call-1 forms -- +0x60 (a heap pointer), +0x68 (the live
+        // provisioning PATH '/opt/data/perun/'), +0x70 (a nanosec
+        // address) -- the bounded diffs behind the init's fold.
+        if std::env::var_os("PERUN_INIT_LIVE_CTX").is_some() {
+            let p60 = page(64);
+            std::ptr::write(c.add(12), p60 as u64); // +0x60 heap ptr
+            put(pathb, 0, b"/opt/data/perun/");
+            put(pathb, 16, b"\0");
+            std::ptr::write(c.add(13), pathb as u64); // +0x68 the live path
+            // +0x70: the live was a NANOSEC-carrying address (a
+            // wrapper time source), not a callback -- a fresh page
+            // with a nanosec timestamp answers both readings.
+            let nsp = page(64);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64;
+            std::ptr::write_volatile(nsp as *mut u64, now);
+            std::ptr::write(c.add(14), nsp as u64); // +0x70 the nanosec page
+        }
         // +0x48: the live Call-1 carried the FULL dashed UUID string
         // ('1A7DC030-8887-C2D8-F470-E2EA813C70C1', 36 chars). Ours by
         // default is the 16-char ident buffer; PERUN_INIT_UUID points
@@ -1451,7 +1482,13 @@ fn main() {
         // word-seed station is the honest probe of that hypothesis.
         let sess_arm = std::env::var_os("PERUN_SESS_ARM").is_some();
         if sess_arm {
-            stations_arm(image.base() as u64, true);
+            // Around the MAIN INIT only the CONFIRMED-HEAD gate
+            // observer rides: the full 16-gate table puts int3 bytes
+            // at sites the init body crosses mid-instruction (a 0xcc
+            // inside an executing instruction silently corrupts the
+            // decoder and POLLUTES the fold term -- measured: r9d
+            // 0x4269d332 instead of the clean 0x4069d334).
+            stations_arm_mode(image.base() as u64, true, true);
         }
         let r = f(0xb0eda7af, ctx as u64, 0, 0);
         if sess_arm {
