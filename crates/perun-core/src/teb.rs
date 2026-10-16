@@ -188,10 +188,21 @@ pub const PE_STACK_SIZE: usize = 8 << 20;
 /// and the guest must not write outside it.
 pub unsafe fn alloc_pe_stack(size: usize) -> Option<(u64, u64)> {
     unsafe {
+        // The guest prologue writes frame slots ABOVE its entry rsp
+        // (movdqa [rsp+0x6d0] at RVA 0x802480 -- the measured head),
+        // and the trampoline enters the callee at (top&-16)-40: the
+        // write lands at top+0x6a8, PAST the mapping's end. Every run
+        // whose top sat at the want address crashed there (the SEGV
+        // at 0x7ff7d0000000 in every walk-on-init); runs that missed
+        // the want (the kernel picked a neighbour) survived by acci-
+        // dent. Fix: map an OVERFLOW GUARD above the stack and report
+        // the top as the guard's start, so the prologue's above-rsp
+        // writes stay inside live memory.
         let want = 0x7FF7_CF80_0000u64;
+        let guard = 0x1_0000usize;
         let p = libc::mmap(
             want as *mut libc::c_void,
-            size,
+            size + guard,
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED_NOREPLACE,
             -1,
@@ -203,7 +214,7 @@ pub unsafe fn alloc_pe_stack(size: usize) -> Option<(u64, u64)> {
         let base = p as u64 + size as u64;
         // The kernel already zeroed it; make that a property rather than a
         // hope, since everything above depends on it.
-        std::ptr::write_bytes(p, 0, size);
+        std::ptr::write_bytes(p, 0, size + guard);
         Some((p as u64, base))
     }
 }
