@@ -111,6 +111,20 @@ unsafe extern "C" fn station_handler(
                     // guest stack top (rsp rounded down a page) always is.
                     gregs[libc::REG_RAX as usize] = (rsp & !0xfff) as i64;
                 }
+                6 => {
+                    // The -45026 gate observer: the E-gate at 0x8b05c7
+                    // (cmp r9d, 0x4069d332) -- print the incoming r9d,
+                    // the E it folds to, and the frame slots the gate
+                    // reads. NO writes.
+                    let r9d = gregs[libc::REG_R9 as usize] as u32;
+                    eprintln!(
+                        "[station] gate-45026 rip={rip:#x} r9d={r9d:#x} (E={:#x}, pass={} {}) rdi={:#x} rsp={rsp:#x}",
+                        r9d.wrapping_sub(0x4069_d332),
+                        r9d == 0x4069_d333,
+                        r9d == 0x4069_d332,
+                        gregs[libc::REG_RDI as usize] as u64
+                    );
+                }
                 4 => {
                     // Observer: name the station and dump the contract
                     // registers; at the fork also read [rsi+4] -- the
@@ -151,33 +165,76 @@ unsafe extern "C" fn station_handler(
 }
 
 fn stations_arm(image_base: u64, seed_word: bool) {
+    stations_arm_mode(image_base, seed_word, false)
+}
+
+/// mode observers_only: arm ONLY the observer stations (kinds 4/6) --
+/// the SetPath/SetID watch must not carry the transform's action
+/// stations (the r12/rax seeds) into the session selectors.
+#[allow(clippy::too_many_arguments)]
+fn stations_arm_mode(image_base: u64, seed_word: bool, observers_only: bool) {
     unsafe {
         // Five action stations plus observers over the worker's own
         // route: entry (0x100050), return into the boundary block
         // (0x91512 -- rax = the worker's verdict), the post-check
         // contract (0x9154e), the epilogue (0x131620), the crypto
         // fork (0x131577).
-        STATION_N = if seed_word { 10 } else { 9 };
-        STATION_AT[0] = image_base + 0x7019d;
-        STATION_KIND[0] = 1;
-        STATION_AT[1] = image_base + 0xaf68e;
-        STATION_KIND[1] = 2;
-        STATION_AT[2] = image_base + 0xb472b;
-        STATION_KIND[2] = 3;
-        STATION_AT[3] = image_base + 0xb473a;
-        STATION_KIND[3] = 3;
-        STATION_AT[4] = image_base + 0xb4748;
-        STATION_KIND[4] = 3;
-        STATION_AT[5] = image_base + 0x100050;
-        STATION_KIND[5] = 4;
-        STATION_AT[6] = image_base + 0x91512;
-        STATION_KIND[6] = 4;
-        STATION_AT[7] = image_base + 0x9154e;
-        STATION_KIND[7] = 4;
-        STATION_AT[8] = image_base + 0x131620;
-        STATION_KIND[8] = 4;
-        STATION_AT[9] = image_base + 0x131577;
-        STATION_KIND[9] = 4;
+        if observers_only {
+            // 5..=8 are the worker observers, 9 the fork, 10 the gate.
+            STATION_AT[0] = image_base + 0x100050;
+            STATION_KIND[0] = 4;
+            STATION_AT[1] = image_base + 0x91512;
+            STATION_KIND[1] = 4;
+            STATION_AT[2] = image_base + 0x9154e;
+            STATION_KIND[2] = 4;
+            STATION_AT[3] = image_base + 0x131620;
+            STATION_KIND[3] = 4;
+            STATION_AT[4] = image_base + 0x131577;
+            STATION_KIND[4] = 4;
+            STATION_AT[5] = image_base + 0xb05c7;
+            STATION_KIND[5] = 6;
+            // The -45026 publisher site and the tail-gate cascade's
+            // two-threshold block (the SetPath tail) -- watching what
+            // the session selectors actually visit.
+            STATION_AT[6] = image_base + 0xb05f5;
+            STATION_KIND[6] = 4;
+            // The SetPath tail-gate cascade's FINAL gate (cmp
+            // $0x9005d7c2, the INIT opcode term): the place the
+            // session bodies die at -45019. Watching edi here
+            // names the fold-term the body accumulated.
+            STATION_AT[7] = image_base + 0x8feaa;
+            STATION_KIND[7] = 4;
+            STATION_N = 8;
+            SEED_BASE = image_base;
+        } else {
+            STATION_N = if seed_word { 10 } else { 9 };
+            // The 45026-gate observer rides along on every arming (it
+            // never writes; observing SetPath needs the whole table).
+            // NOTE: armed only around transform by default; PERUN_SESS_ARM
+            // arms the same table around SetPath/SetID instead.
+            STATION_AT[0] = image_base + 0x7019d;
+            STATION_KIND[0] = 1;
+            STATION_AT[1] = image_base + 0xaf68e;
+            STATION_KIND[1] = 2;
+            STATION_AT[2] = image_base + 0xb472b;
+            STATION_KIND[2] = 3;
+            STATION_AT[3] = image_base + 0xb473a;
+            STATION_KIND[3] = 3;
+            STATION_AT[4] = image_base + 0xb4748;
+            STATION_KIND[4] = 3;
+            STATION_AT[5] = image_base + 0x100050;
+            STATION_KIND[5] = 4;
+            STATION_AT[6] = image_base + 0x91512;
+            STATION_KIND[6] = 4;
+            STATION_AT[7] = image_base + 0x9154e;
+            STATION_KIND[7] = 4;
+            STATION_AT[8] = image_base + 0x131620;
+            STATION_KIND[8] = 4;
+            STATION_AT[9] = image_base + 0x131577;
+            STATION_KIND[9] = 4;
+            STATION_AT[10] = image_base + 0xb05c7;
+            STATION_KIND[10] = 6;
+        }
         SEED_BASE = image_base;
         // Patch the int3 bytes. The .text page is RWX (the loader maps
         // it PROT_READ|WRITE|EXEC); each address is a verified
@@ -691,9 +748,9 @@ fn main() {
         let r = f(0xb0eda7af, ctx as u64, 0, a3 as u64);
         peek_slots(&image, "after_init");
         println!("[init] rc={r:#x} ({r}) arg3={:p}", a3);
-        let ipk = std::slice::from_raw_parts(pkt.cast::<u8>(), 16);
+        let ipk = std::slice::from_raw_parts(pkt.cast::<u8>(), 32);
         println!(
-            "[init] pkt[0..16] = {}",
+            "[init] pkt[0..32] = {}",
             ipk[..16]
                 .iter()
                 .map(|b| format!("{b:02x}"))
@@ -748,6 +805,13 @@ fn main() {
         }
         std::ptr::write(c.add(4), ctx as u64); // +0x20 SELF
         std::ptr::write(c.add(5), 0x4000_0000_0010); // +0x28 len|flags again
+        // PERUN_SESS_ARM=1: arm the observer table around the
+        // SetPath/SetID pair (the gate-45026 station names what the
+        // session selectors fold; the transform stations stay cold).
+        let sess_arm = std::env::var_os("PERUN_SESS_ARM").is_some();
+        if sess_arm {
+            stations_arm_mode(image.base() as u64, false, true);
+        }
         let r = f(0xb23c691e, ctx as u64, 0, 0);
         println!("[setpath] rc={r:#x} ({r})");
         // The LIVE SetID envelope (decoded from dumprun4): a V2-headed
@@ -989,6 +1053,36 @@ fn main() {
             f(0xc774d292, ctx as u64, 0, dll_code)
         };
         println!("[setid#2] rc={r3:#x} ({r3})");
+        if sess_arm {
+            // Disarm the session observers: the page re-seal, the byte
+            // restores, and the SIGTRAP disposition reset. The transform
+            // arming later (if any) reopens what it needs.
+            {
+                let page = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+                let arr = std::ptr::addr_of!(STATION_AT);
+                let mut pages: Vec<u64> = Vec::new();
+                let mut k = 0usize;
+                while k < STATION_N {
+                    let at = std::ptr::read_volatile((*arr).as_ptr().add(k));
+                    std::ptr::write_volatile(at as *mut u8, STATION_ORIG[k]);
+                    let pg = at & !(page as u64 - 1);
+                    if !pages.contains(&pg) {
+                        pages.push(pg);
+                    }
+                    k += 1;
+                }
+                for pg in &pages {
+                    libc::mprotect(
+                        *pg as *mut libc::c_void,
+                        page,
+                        libc::PROT_READ | libc::PROT_EXEC,
+                    );
+                }
+                STATION_N = 0;
+                libc::signal(libc::SIGTRAP, libc::SIG_DFL);
+            }
+            println!("[stations] session observers disarmed");
+        }
     }
 
     // ── node 2.6: THE GSA REQUEST + the identity re-mint ──────────────
@@ -1278,10 +1372,10 @@ fn main() {
         let r = f(0xb0eda7af, ctx as u64, 0, 0);
         peek_slots(&image, "after_init2");
         println!("[init2] rc={r:#x} ({r})");
-        let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 16);
+        let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 32);
         println!(
-            "[init2] pkt[0..16] = {}",
-            pk[..16]
+            "[init2] pkt[0..32] = {}",
+            pk[..32]
                 .iter()
                 .map(|b| format!("{b:02x}"))
                 .collect::<String>()
