@@ -1152,8 +1152,8 @@ unsafe fn crash_handler(sig: i32, info: *mut libc::siginfo_t, ctx: *mut libc::c_
             // fanned out across the flattened body, and which copy a route
             // visits is itself route data.
             const R9_SITES: [u32; 16] = [
-                0x66d14, 0x66d5e, 0x88f6fa, 0x88f945, 0x88fb62, 0x88fd6c, 0x88fee2, 0x8900a5,
-                0x890275, 0x89041b, 0x89059a, 0x890758, 0x8b4665, 0x905c7, 0x906e4, 0x90758,
+                0x66d14, 0x66d5e, 0x8f6fa, 0x8f945, 0x8fb62, 0x8fd6c, 0x8fee2, 0x900a5, 0x90275,
+                0x9041b, 0x9059a, 0x90758, 0x908e2, 0x90a6f, 0x90b38, 0xb4665,
             ];
             for (si, srva) in R9_SITES.iter().enumerate() {
                 let lo = srva & !7u32;
