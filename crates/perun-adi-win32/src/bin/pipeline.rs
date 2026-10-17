@@ -1016,6 +1016,105 @@ fn main() {
         peek_state(&image, "init");
     }
 
+    // ── node 2.9 (the honest Windows chain, step between init and
+    // configuration): ADISetIDMSRouting (0x85fe63b0) -- a RECOGNISED
+    // Windows opcode, never tried in this campaign. The §5.8 evidence
+    // it targets: the guest's own scratch carries the ENVIRONMENT ID
+    // adjacent to the version (scratch[0] = 0xfffffffe01000000 -- the
+    // env id 0xfffffffe = Production written next to the version word),
+    // and the dispatcher's third invocation -- the one that feeds the
+    // -45020 compare -- reads that scratch at offsets 6/7; the §5.8
+    // success (rc=0 x5, byte6=0x00 byte7=0x01) was the hand-seeded
+    // imitation of exactly this state. The honest question: does the
+    // REAL routing call establish it? PERUN_IDMS=0 skips the call;
+    // PERUN_IDMS=<hex> overrides the value (default Production -2).
+    if std::env::var("PERUN_IDMS")
+        .map(|v| v != "0")
+        .unwrap_or(true)
+    {
+        let env_id = std::env::var("PERUN_IDMS")
+            .ok()
+            .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+            .unwrap_or(0xffff_fffe); // -2: IdMS Production
+        unsafe {
+            // PERUN_IDMS_MODE selects the call's shape:
+            //   "pkt"  the envelope form (a packet under ctx[0])
+            //   "arg"  the direct form -- a2 = the env value itself
+            //   "ctx"  the ctx form -- the value written at ctx[0]
+            let idms_mode = std::env::var("PERUN_IDMS_MODE").unwrap_or_else(|_| "arg".into());
+            let r = match idms_mode.as_str() {
+                "pkt" => {
+                    std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+                    *pkt.cast::<u32>() = 1; // the version-1 header
+                    *pkt.cast::<u32>().add(1) = env_id;
+                    std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+                    let c = ctx.cast::<u64>();
+                    std::ptr::write(c.add(0), pkt as u64);
+                    std::ptr::write(c.add(1), 0x4000_0000_0010);
+                    guest_call(f, 0x85fe63b0, ctx as u64, 0, 0)
+                }
+                "ctx" => {
+                    std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+                    std::ptr::write(ctx.cast::<u32>(), env_id);
+                    guest_call(f, 0x85fe63b0, ctx as u64, 0, 0)
+                }
+                "flat" => {
+                    // §5.8 row 2991's geometry: rdx = the buffer ITSELF
+                    // (a flat argument block, not a ctx pointing at it).
+                    std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+                    *pkt.cast::<u32>() = 1; // the version-1 word
+                    *pkt.cast::<u32>().add(1) = env_id;
+                    guest_call(f, 0x85fe63b0, pkt as u64, 0, 0)
+                }
+                "adiauth" => {
+                    // The FULL ADI argument-block form (RESEARCH 2988:
+                    // "arguments pointer, input size, output size, flags";
+                    // the size check at 0x66bfc is input_size >=
+                    // output_size + 4): the version word, the routing
+                    // value, then the sizes the body validates.
+                    std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+                    let b = pkt.cast::<u32>();
+                    *b.add(0) = 1; // version-1
+                    *b.add(1) = env_id; // the routing value (input)
+                    *b.add(2) = 8; // input size
+                    *b.add(3) = 4; // output size (the routing result)
+                    guest_call(f, 0x85fe63b0, pkt as u64, 0, 0)
+                }
+                _ => guest_call(f, 0x85fe63b0, u64::from(env_id), 0, 0),
+            };
+            println!("[set-idms] rc={r:#x} ({r}) (env {env_id:#x}, mode {idms_mode})");
+            // The mirror read: what does GetIDMSRouting answer now?
+            // Same shape as the set (flat for the flat modes).
+            let rg = if idms_mode == "pkt" {
+                std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+                *pkt.cast::<u32>() = 1;
+                std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+                let c2 = ctx.cast::<u64>();
+                std::ptr::write(c2.add(0), pkt as u64);
+                std::ptr::write(c2.add(1), 0x4000_0000_0010);
+                guest_call(f, 0x632b8d6e, ctx as u64, 0, 0)
+            } else if idms_mode == "adiauth" {
+                std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+                let b = pkt.cast::<u32>();
+                *b.add(0) = 1;
+                *b.add(2) = 4; // input size
+                *b.add(3) = 4; // output size
+                guest_call(f, 0x632b8d6e, pkt as u64, 0, 0)
+            } else {
+                std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+                *pkt.cast::<u32>() = 1;
+                *pkt.cast::<u32>().add(1) = env_id;
+                guest_call(f, 0x632b8d6e, pkt as u64, 0, 0)
+            };
+            println!("[get-idms] rc={rg:#x} ({rg})");
+            let pk32 = std::slice::from_raw_parts(pkt.cast::<u8>(), 16);
+            println!(
+                "[idms] pkt[0..16] = {}",
+                pk32.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            );
+        }
+    }
+
     // ── node 3 (the honest Windows chain, step 3): configuration
     // (0xcfe0b46a) -- a RECOGNISED Windows opcode (table 24).
     // ── node 3: configuration mints the session objects ────────────────
@@ -1023,6 +1122,39 @@ fn main() {
     // its blobs answer -45020) or OUR synthesis -- the same geometry
     // (V2|4|0xf0 blob-1, pad, 0x34|4 blob-2) carrying this machine's
     // fresh SPIM slices. PERUN_CFG_SYNTH switches to the synthesis.
+    // PERUN_CFG_58=1: the §5.8 SUCCESS FORM of the configuration
+    // call -- the exact geometry that returned rc=0 five runs of
+    // five on this same DLL (RESEARCH 5.8, "The barrier is
+    // passed"): ctx = {+0: a SCRATCH page (the buffer itself, NOT
+    // a packet), +8: input_size=0x10, +0xc: output_size=0}, the
+    // scratch seeded {byte3=0x02 (the provisioning route), byte6=
+    // 0x00, byte7=0x01 (the gate's third-invocation flag bytes)},
+    // and the guest global at 0x19db98 pointed at the same
+    // scratch page. The default keeps the container form.
+    if std::env::var_os("PERUN_CFG_58").is_some() {
+        unsafe {
+            let sp58 = page(0x1000);
+            let sb = sp58.cast::<u8>();
+            *sb.add(3) = 0x02; // byte3: the provisioning route
+            *sb.add(6) = 0x00; // byte6: the gate flag (edi term)
+            *sb.add(7) = 0x01; // byte7: the gate flag (lea term)
+            std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+            let c = ctx.cast::<u64>();
+            std::ptr::write(c.add(0), sp58 as u64); // +0: the buffer page
+            std::ptr::write(c.add(1), 0x10); // +8: input size 16
+            std::ptr::write(c.add(2), 0x0); // +0xc: output size 0
+            // The guest global the §5.8 run poked: 0x19db98.
+            std::ptr::write_volatile((image.base() as u64 + 0x19db98) as *mut u64, sp58 as u64);
+            let r58 = guest_call(f, 0xcfe0b46a, ctx as u64, 0, 0);
+            println!("[cfg:58] rc={r58:#x} ({r58})");
+            let sb58 = std::slice::from_raw_parts(sb, 0x40);
+            println!(
+                "[cfg:58] scratch[0..0x40] = {}",
+                sb58.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            );
+            peek_state(&image, "cfg58");
+        }
+    }
     let wctx_path = if std::env::var_os("PERUN_CFG_SYNTH").is_some() {
         "/opt/data/il/variants/win_ctx_synth.bin"
     } else {
