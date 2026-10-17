@@ -3070,6 +3070,8 @@ Neither requires perun to disclose its own source or to relicence its code, and 
 | 2026-10-13b | **The identity round: one string everywhere, and the SetID/SetPath envelopes.** The full live identity architecture decoded from the dump: the wrapper LOADED a persisted id ("[id] loaded existing device identifier"), the dashed uuid36 is the X-Mme form (`net.rs` now sends it and derives the LU from the id's own hex span [4..20], the live MD-LU formula), init `+0x48` carries the full dashed string, SetID's envelope carries the identity span at `+0xa0..+0xb8`, and the net lane runs the whole chain under one string (`PERUN_GUEST_ID=live`). The SetID/SetPath envelopes decoded slot for slot (the live packets extracted byte-exact: SetPath `000000026ba248ee…`, SetID#1 `00000002aa1117f1…`, SetID#2 `000000022d54c6df…`); with them every selector passes the fold gate and runs its body (SetPath `-45019`, SetID×2 `-45019`, both 114k-instruction bodies). Identity-string coherence killed by measurement: the whole chain under the live string changes nothing anywhere. |
 | 2026-10-13c | **The tail-gate cascade decoded; PERUN_STEP_UNTIL armed in seq.** SetID's tail: gate A `cmp $0xef08c407` (the CFG term), gate B `cmp $0xb691a4d8` — solved to its unique opcode preimage `0x9679d4b5` (bit-DP over the MBA), so no canon opcode can pass it and the live route never visits our fork. The cfg zone's `-45028` publishers (14 sites) share `cmp $0x4069d333,%r9d` — `PERUN_FORCE_CFG_R9` seeds it at every gate; with the init-term seed at `0x8feaa` **SetPath answers rc=0**, the first non-init selector success. New tools: `PERUN_FORCE2_AT` in seq, the `EXPORT` script token, frame-slot reads (`[rsp+0xe0]` = the allocator callback, `[rsp+0x6f8]/[rsp+0x700]` = the fold-table bases). The seeded transform dives past `-45001` into the session-object branch (dies on a NULL `[r15+rbp+0x10]`). |
 | 2026-10-14 | **The fold recorder closes the loop; the SEED scare; CoreFP closed as FairPlay; the exclusion theorem.** `PERUN_FOLD_REC` dumps ebx/ebp/edx/r9d at every CFF dispatch (1561 rows in one SetID run): the verdict term's complete lineage — cycle 1 (256 rounds, page A) → the r15 output block (32 crypto words) → cycle 2 (256 rounds, page B) → final words → term birth `0x70a` → fork → publisher. The `TE_SEED` string was a pseudorandom coincidence (the cycle's last movd output), killed by the page scanner. CoreFP.dll is FairPlay (the embedded certificate-authority strings), not the ADI wrapper — zero GSA strings in the whole iTunes extraction; fdjk is a rolling 46-byte packet journal (ROT4 verified synthetically); Track B closed with a clean negative. The verdict chain disassembled end to end (E-validation → fold series → segment cascade → fork), the E-cursor decoded (`movzbl (%r12,(r9d|8),1)` — E is a packet-reading cursor; the MSB flip-matrix moves it everywhere), and the **zero-packet verdict** lands the theorem: the packet, the envelope (live-vs-live), the identity, the LU slots (the measured formula `+0x48=LU[7]`), the call order, the inheritance, arg3, the object interiors (`objdump RVA FILE` — the change matrix across the canon is empty), the deep-init rewrite, the rbp entry and TLS are all measured non-causal. `-45019/-45028` is a stable characteristic of the release DLL in this environment; the remaining Windows-native path is reproducing the fold cascade in Rust with the measured constants. The Android stand re-armed cold as the measurement instrument: the full cold canon captured (CPIM 276 B, live headers), the warm canon is `C1→SetPath→SetID×2→C5→cfg→OTP×2`. |
+| 2026-10-21a→v | **The late-October marathon: the unified self-check and the instrument traps.** The tail-gate solved algebraically (`(x^K)+2(x&K)=x+K` collapses it to the packet word); the memory-seed stations (show-only and seed forms) read each body's published WORD (`init 0x4145a051`, SetPath `0x3884e34c`, SetID per-call digests) and proved the word non-affine; the int3 station circuit (re-arm cycle, mid-instruction pollution) and the PE-stack guard (`[rsp+0x6d0]` above the entry rsp — every want-mapped stack died at `0x7ff7d0000000`) were built; the caller hunt (iCloudSetup/AAS64 dissected) found NO Windows caller module in any classic distribution — the dumprun4 caller is the Android x86 wrapper. |
+| 2026-10-22a→u | **The corrections arc, ending in the fundamental one.** The E=2 story was an instrument artifact (the gate kind printed r9d while cmp reads edx); the s222 "rc=0 on the live nonce" was a one-load-line diff (a V1-header packet — the phantom exorcised); the honest SetPath route mapped (0x8feaa is NOT on it); the no-injection doctrine adopted (a call counts at rc=0 on a clean run — the clean baseline re-measured); the sequence error fixed (the honest init contract IS the V1 form: rc=0 with the -45061 not-provisioned verdict in the packet, exactly the live Call-1); and the FUNDAMENTAL correction: table 24 (2026-09-28!) already proved SetPath/SetID are Android-only opcodes — unknownAdiFunction on the Windows build — and the Android opcodes (with 0x716bd86c transform and 0x0b2b3196 finish) are PURGED behind `PERUN_LEGACY_ANDROID`. **The pipeline now runs the honest Windows canon: net (GSA start) → cvu8io98wun → init 0 → Configuration 0xcfe0b46a (-45020, the body runs) → OTP 0; the remaining barrier is ONE call (Configuration), with GetIDMSRouting/SetIDMSRouting (recognised, never tried) the adjacent unexplored surface.** |
 
 *Apple, macOS, OS X, StoreKit, FairPlay, iTunes and related marks are trademarks of Apple Inc. This independent research project is not affiliated with, endorsed by, or sponsored by Apple Inc. All binary images referenced are obtained by users directly from Apple's public distribution servers and are never redistributed with this project.**`f` is a full-avalanching block transform.** Sixteen runs, base packet from
 the Android engine, one input byte raised by one each time:
@@ -3542,6 +3544,91 @@ The second half of October ran the pipeline against **live session material** an
 **The exclusion theorem.** Two live `rc=0` sessions (the Android dump and the re-armed cold-stand capture) cross-compared: the transform envelopes differ **only** in pointers, time tag, and identity span — every structural slot byte-identical, so the envelope is not the key (proven live-vs-live). Then, each with a control: the packet (zero-packet verdict), the identity string (the whole chain under the live identity's exact form), the **LU-slot formula** (a measured law of the envelope: `+0x48 = LU[7]`, `+0x58 = LU[4]`, `+0x60 = LU[6]`, `+0x68 = LU[1]`, where LU = identity bytes 2..10 — verified on two independent sessions), the call order (the full live sequence, every live packet), the envelope inheritance (the `{20,4}→{20,20}` arg1 rewrite, ctx reused verbatim), arg3 (a light host callback vs the recursive vdfut hazard), the object interiors (a new `objdump RVA FILE` seq verb snapshots all three objects' buffers after every canon call — the change matrix is **empty**, the objects are frozen after init), the deep init's table rewrite (the masked blob in `tbl6f8[0..0x40]` — the fork is deaf to it), the rbp entry (four probes through the prologue's magic fold), and TLS (absent from the IAT).
 
 **The verdict, stated plainly.** The `-45019/-45028` family is a stable characteristic of the release Windows DLL in the perun environment: every stage of the cascade that computes it is disassembled, and every external input is either equalized or proven non-causal. The DLL mints `rc=0` under its real host wrapper (AuthKit — which ships with iCloud for Windows, not the iTunes installer, and is absent from every available extraction). The remaining Windows-native engineering path is to reproduce the fold cascade in Rust — both SIMD cycles' round functions, the `0x6caXX` mixers, the term arithmetic, all measured — and emit the CPIM directly; every constant needed is on the table.
+
+#### The late-October rounds: the unified self-check, the traps, and the honest Windows canon (2026-10-20 → 2026-10-22)
+
+The campaign's third week dismantled the previous picture layer by layer and
+rebuilt it into the shape the code runs today. The chronicle below is the
+short form; the round-by-round detail lives in `FINDINGS.md` (2026-10-21a
+through 2026-10-22u).
+
+**The unified self-check.** Every selector's body writes a verdict WORD into
+its own packet at `[PKT+4..8]` and the shared term block `0x8b1517` (entered
+via the `0x7019d` dispatch, offsets 4/5/7/8 under `rax=0x16ca8af7`) folds it:
+the four page bytes OR-ed through MBA chains collapse by `(x^K)+2(x&K)=x+K`
+to `r9d = BE32(pkt[4..8]) + 0x4069d332`, and the gate family checks for
+`00000001`. The bodies publish DIGESTS (init: `0x4145a051`, SetPath:
+`0x3884e34c`, SetID: `0xeb34db27`/`0xe600f69e` — per-call, not constant);
+the live machines publish `00000001` (the live init's and SetPath's
+post-packets both show `{hdr=0, word=1, tail}`). The word is measured
+NOT bitwise-affine (a 32-probe GF(2) model inverts consistently to a
+verification failure) and its tail-dependent — no [4..8]-only inverse exists.
+
+**The instrument traps, all caught by measurement.** (1) The digit trap,
+FIVE catches: RVAs only ever by subtraction — `0x7c8b05c7-0x7c800000` is
+`0xb05c7`, `0x7c88fee2-0x7c800000` is `0x8fee2`; the VMA-truncation
+"RVAs" put stations in dead space and half the R9_SITES list was wrong.
+(2) int3 in a mid-instruction byte corrupts the decoder SILENTLY (the
+station never fires and the fold term shifts — two runs polluted). (3) An
+int3 over a multi-byte instruction needs the re-arm cycle (restore byte,
+rewind RIP, TF step, re-patch; match by pending flag, never by address).
+(4) The PE-stack guard: the guest prologue writes `[rsp+0x6d0]` ABOVE its
+entry rsp; every want-mapped stack died at exactly `0x7ff7d0000000` —
+`alloc_pe_stack` now maps a 0x10000 overflow guard. (5) The
+`PERUN_EVENT_NOBLOCK` spin: the looping session director hammered SetEvent —
+the director now does real waits.
+
+**The extractions that mattered.** The live transform's whole post-packet
+is a RESULT ENVELOPE (hdr=0, word=1, `-2`, stack pointers — the before-image
+IS our captured `live_tr_pkt52.bin`, cross-validating the capture). The
+second export `cvu8io98wun` takes the provisioning PATH (the initializer the
+Android library never had). The official iCloudSetup bootstrapper was pulled
+and dissected: AAS64 carries a CoreADI64.dll of the SAME 2018-02-20 build as
+our iTunes copy, ASL.dll is Apple System Logging (not a caller), and NOTHING
+in any classic distribution imports CoreADI64 — the Windows host's wrapper
+ships only in the MSIX/Store packages. The dumprun4 caller is the Android
+x86 wrapper's own frame; its `arg3` values and address-space tags are
+**Android stand residue, not Windows semantics** (the arg3-trampoline myth
+is dead by user ruling).
+
+**THE FUNDAMENTAL CORRECTION (the one that matters most).** Table 24 —
+measured on 2026-09-28, a month before — already proved that
+`0xb23c691e` (SetPath) and `0xc774d292` (SetID, literally ADISetAndroidID)
+answer **-45019 unknownAdiFunction on the Windows build**, that the Android
+and Windows opcode sets differ, and that "the Android call order does not
+transfer as a sequence". The late-October rounds ignored that proof and
+dissected "sorters" and "tail-gates" of bodies that never ran. The same
+taint covers `0x716bd86c` (the "transform") and `0x0b2b3196` (the "finish")
+— Android opcodes outside the Windows-recognised set. All of it is now
+purged from the default chain and kept behind `PERUN_LEGACY_ANDROID=1` for
+instrument comparisons only. The lesson is recorded in the skill in caps:
+**the old measurements in this file are the highest-authority data in the
+project; re-read them before any new dissection.**
+
+**The honest init contract.** The live Call-1's post-packet is
+`{ffff4ffb, 00000001, ff..fe}` — and `0xffff4ffb` IS the -45061
+"not provisioned" VERDICT WRITTEN INTO THE PACKET: the packet is the
+verdict channel, and the live init's honest answer is "call succeeded,
+session not provisioned — go provision". The V1-header init reproduces
+exactly that (rc=0, `{ffff4ffb, 1, 0, 0}`); the V2-live-nonce runs were
+a deeper route the live wrapper never took as Call-1. The honest Windows
+chain therefore runs the V1 init.
+
+**The honest Windows canon (the pipeline's default today).** With the
+Android opcodes gone, the chain is:
+
+    [net]      GSA lookup + start (a fresh SPIM for THIS machine;
+               PERUN_NET=0 disables)
+    -> cvu8io98wun (the path export — the Windows way to set the path)
+    -> init (0xb0eda7af)          rc=0  (the honest 'not provisioned')
+    -> Configuration (0xcfe0b46a) -45020 (the body runs; the gate)
+    -> OTP (0x3e58e7f9)           rc=0
+
+measured clean on the first run (`pipe_canon3.log`: net 347 B spim, cvu 0,
+init 0, cfg -45020, otp 0). The remaining honest barrier is ONE call —
+Configuration at -45020 — and the adjacent unexplored surface is the
+recognised-but-never-tried pair `0x632b8d6e` (GetIDMSRouting) and
+`0x85fe63b0` (SetIDMSRouting): the Windows SetID-analog likely lives there.
 
 #### The Android lane as an instrument (2026-10-14)
 
