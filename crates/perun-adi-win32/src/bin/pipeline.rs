@@ -168,6 +168,57 @@ fn stations_arm(image_base: u64, seed_word: bool) {
     stations_arm_mode(image_base, seed_word, false)
 }
 
+fn stations_arm_init(image_base: u64) {
+    unsafe {
+        // The init watch: the word-seed station (kind 1, [rcx+4] =
+        // the packet word) plus the single confirmed gate observer.
+        // PERUN_INIT_WORD_SEED=0 drops the seed (honest control).
+        let seed = std::env::var("PERUN_INIT_WORD_SEED")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        STATION_N = if seed { 2 } else { 1 };
+        STATION_AT[0] = image_base + 0x7019d;
+        STATION_KIND[0] = 1;
+        STATION_AT[1] = image_base + 0x66d14;
+        STATION_KIND[1] = 6;
+        SEED_BASE = image_base;
+        let page = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+        let arr = std::ptr::addr_of!(STATION_AT);
+        let mut pages: Vec<u64> = Vec::new();
+        let mut k = 0usize;
+        while k < STATION_N {
+            let a = std::ptr::read_volatile((*arr).as_ptr().add(k));
+            STATION_ORIG[k] = std::ptr::read_volatile(a as *const u8);
+            let pg = a & !(page as u64 - 1);
+            if !pages.contains(&pg) {
+                pages.push(pg);
+            }
+            k += 1;
+        }
+        for pg in &pages {
+            libc::mprotect(
+                *pg as *mut libc::c_void,
+                page,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+            );
+        }
+        k = 0;
+        while k < STATION_N {
+            let a = std::ptr::read_volatile((*arr).as_ptr().add(k));
+            std::ptr::write_volatile(a as *mut u8, 0xcc);
+            k += 1;
+        }
+        let act = libc::sigaction {
+            sa_sigaction: station_handler as *const () as usize,
+            sa_mask: std::mem::zeroed(),
+            sa_flags: libc::SA_SIGINFO | libc::SA_NODEFER,
+            sa_restorer: None,
+        };
+        libc::sigaction(libc::SIGTRAP, &act, core::ptr::null_mut());
+        println!("[stations] init watch armed (word-seed {seed})");
+    }
+}
+
 fn disarm_stations() {
     unsafe {
         let page = libc::sysconf(libc::_SC_PAGESIZE) as usize;
@@ -917,7 +968,21 @@ fn main() {
             Ok(v) => v.trim().parse().unwrap_or(0),
             Err(_) => cb_page() as u64,
         };
+        // PERUN_SESS_ARM around the MAIN init: the unified self-check
+        // (decoded this campaign) has the init body writing its verdict
+        // word into [PKT+4..8] (ours: the digest 0x4145a051), and the
+        // 0x7019d dispatch's af7 route folds it -- success needs
+        // 00000001 there, exactly the transform's mechanism. The seed
+        // station writes the live success word; PERUN_INIT_WORD_SEED=0
+        // is the honest control.
+        let init_arm = std::env::var_os("PERUN_SESS_ARM").is_some();
+        if init_arm {
+            stations_arm_init(image.base() as u64);
+        }
         let r = guest_call(f, 0xb0eda7af, ctx as u64, 0, a3);
+        if init_arm {
+            disarm_stations();
+        }
         peek_slots(&image, "after_init");
         println!("[init] rc={r:#x} ({r}) arg3={a3:#x}");
         let ipk = std::slice::from_raw_parts(pkt.cast::<u8>(), 32);
@@ -1541,23 +1606,7 @@ fn main() {
         let c2 = ctx.cast::<u64>();
         std::ptr::write(c2.add(0), pkt as u64);
         std::ptr::write(c2.add(1), 0x0000_0004_0000_0010);
-        // PERUN_SESS_ARM around the MAIN init too: the -45020-family
-        // self-check gate may sit on this body's route, and the
-        // word-seed station is the honest probe of that hypothesis.
-        let sess_arm = std::env::var_os("PERUN_SESS_ARM").is_some();
-        if sess_arm {
-            // Around the MAIN INIT only the CONFIRMED-HEAD gate
-            // observer rides: the full 16-gate table puts int3 bytes
-            // at sites the init body crosses mid-instruction (a 0xcc
-            // inside an executing instruction silently corrupts the
-            // decoder and POLLUTES the fold term -- measured: r9d
-            // 0x4269d332 instead of the clean 0x4069d334).
-            stations_arm_mode(image.base() as u64, true, true);
-        }
         let r = guest_call(f, 0xb0eda7af, ctx as u64, 0, 0);
-        if sess_arm {
-            disarm_stations();
-        }
         peek_slots(&image, "after_init2");
         println!("[init2] rc={r:#x} ({r})");
         let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 32);
