@@ -595,10 +595,15 @@ fn main() {
     let mut ep: Option<perun_adi_win32::net::Endpoints> = None;
     let mut start: Option<perun_adi_win32::net::Start> = None;
     println!("[id] (pre-init) device-id {} lu {}", id.device_id, id.lu);
-    if guest_mode == "3" {
-        // Mode 3: the measured pipe74 conditions -- the network half
-        // BEFORE init (the session buffer only fills when the guest has
-        // real server data), then the re-mint under the read material.
+    // The honest Windows chain needs the network BEFORE
+    // configuration: the cfg packet carries the machine's own fresh
+    // SPIM slices (start_provisioning's answer). PERUN_NET=0 disables
+    // (offline instrument runs); guest_mode=3 keeps the old probe path.
+    let net_on = std::env::var("PERUN_NET").map(|v| v != "0").unwrap_or(true);
+    // The honest Windows chain mints the SPIM BEFORE configuration
+    // (the cfg packet carries it). guest_mode=3 keeps its own probe
+    // path; the default (empty) runs the plain honest network half.
+    if net_on && (guest_mode == "3" || guest_mode.is_empty()) {
         ep = Some(match perun_adi_win32::net::lookup(&id) {
             Ok(e) => e,
             Err(e) => {
@@ -1011,988 +1016,8 @@ fn main() {
         peek_state(&image, "init");
     }
 
-    // ── node 3.5: the canon's middle calls, even though they reject ────
-    // The live cycle ran SetPath (0xb23c691e) and SetID (0xc774d292)
-    // between the two inits and the transform. On the Windows dispatcher
-    // both return -45019 (unknownAdiFunction) -- but the measured
-    // inter-call dependency (the finish matrix re-keying the OTP's fold)
-    // says a call's SIDE EFFECT on the dispatcher cursor can matter more
-    // than its return code. Run both, in the live order, and read what
-    // the transform behind them does.
-    unsafe {
-        // The LIVE SetPath (dumprun4): a V2-HEADED packet with a fresh
-        // 12-byte nonce, NO time tag at +0x10, a fresh nonce at +0x18,
-        // the SELF-pointer at +0x20, and the {len, flags} pair repeated
-        // at +0x28 -- the double-nested envelope. Heap/code slots after.
-        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
-        *pkt.cast::<u32>() = 2; // V2 header, the live form
-        // PERUN_SETPATH_LIVE_PKT=<path>: the live packet's 12-byte tail
-        // is the fold's coefficients; urandom tails die at -45018.
-        let setpath_live = std::env::var("PERUN_SETPATH_LIVE_PKT")
-            .ok()
-            .and_then(|f| std::fs::read(f).ok());
-        match setpath_live {
-            Some(live) => {
-                std::ptr::copy_nonoverlapping(live.as_ptr(), pkt.cast::<u8>(), live.len().min(16));
-            }
-            None => {
-                let mut b = [0u8; 12];
-                let mut fh = std::fs::File::open("/dev/urandom").unwrap();
-                use std::io::Read as _;
-                fh.read_exact(&mut b).unwrap();
-                std::ptr::copy_nonoverlapping(b.as_ptr(), pkt.cast::<u8>().add(4), 12);
-            }
-        }
-        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
-        let c = ctx.cast::<u64>();
-        std::ptr::write(c.add(0), pkt as u64);
-        std::ptr::write(c.add(1), 0x4000_0000_0010);
-        std::ptr::write(c.add(2), 0); // +0x10 no tag (the live form)
-        // +0x18: the LIVE SetPath carried a NANOSEC TIME TAG here
-        // (0xe2720690ff56d95e -- the same shifted-nanosecond class
-        // as the init slots), not a random nonce. The previous runs
-        // wrote urandom bytes into a TIME slot. Honest fix: a real
-        // nanosecond timestamp, both +0x18 and +0x38 (the live had
-        // a second time tag at +0x38).
-        {
-            let now_ns = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos() as u64;
-            std::ptr::write(ctx.cast::<u64>().add(3), now_ns); // +0x18 time tag
-        }
-        std::ptr::write(c.add(4), ctx as u64); // +0x20 SELF
-        std::ptr::write(c.add(5), 0x4000_0000_0010); // +0x28 len|flags again
-        // +0x38: the live SetPath's SECOND time tag (0x618974abaf043478
-        // in the dump). Ours was zero -- a real nanosecond timestamp.
-        {
-            let now_ns2 = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos() as u64;
-            std::ptr::write(c.add(7), now_ns2); // +0x38 the second time tag
-        }
-        // SetPath's own contract: ctx[+0x80] = A PATH STRING
-        // (the live dump shows '/opt/data/adi-mnt/stage/adi-data'
-        // as ASCII there -- the working provisioning dir the call
-        // SETS; init's +0x68 carried the ROOT '/opt/data/perun/').
-        // The honest Windows stand-in: our real adi dir, ALWAYS.
-        // PERUN_SP_PATH_UTF16=1 writes it as UTF-16LE (the wchar
-        // form Windows APIs take; cvu8io98wun's name says wchar).
-        {
-            let adi_dir = format!(
-                "{}/adi\0",
-                std::env::var("PERUN_APPDATA").unwrap_or_else(|_| {
-                    "/opt/data/home/.perun/appdata/Common/Apple Computer/iTunes".into()
-                })
-            );
-            let p80 = page(0x1000);
-            if std::env::var_os("PERUN_SP_PATH_UTF16").is_some() {
-                let mut wide: Vec<u16> = adi_dir.trim_end_matches('\0').encode_utf16().collect();
-                wide.push(0);
-                for (i, w) in wide.iter().enumerate() {
-                    std::ptr::write_volatile((p80 as *mut u16).add(i), *w);
-                }
-            } else {
-                put(p80, 0, adi_dir.as_bytes());
-            }
-            std::ptr::write(c.add(16), p80 as u64); // +0x80 the path string, ALWAYS
-        }
-        // The dumprun4 SetPath ctx was captured on the ANDROID stand:
-        // its VALUES are Android address-space artifacts (the 0x7680_
-        // heap prefix is the stand's own region -- the same class of
-        // residue as the arg3 stack garbage), NOT Windows semantics.
-        // What transfers is the STRUCTURE: +0x38 a time tag,
-        // +0x40/+0x48/+0x50/+0x60 code pointers the body may CALL
-        // while folding (the term-collapse hypothesis: our zeros mean
-        // no calls happen and the raw opcode term rides to the tail),
-        // +0x68 a string, +0x80 the provisioning path. PERUN_SP_LIVE_
-        // CTX=1 tests that structure with OUR OWN stand-ins.
-        if std::env::var_os("PERUN_SP_LIVE_CTX").is_some() {
-            std::ptr::write(c.add(6), 0x0000_7fff_0000_0000); // +0x30 our stack-space tag
-            let now_ns = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos() as u64;
-            std::ptr::write(c.add(7), now_ns); // +0x38 a real time tag
-            std::ptr::write(c.add(8), cb_addr(cb_slot40)); // +0x40 callable code
-            std::ptr::write(c.add(9), cb_addr(cb_slot48)); // +0x48
-            std::ptr::write(c.add(10), cb_addr(cb_slot50)); // +0x50
-            std::ptr::write(c.add(12), cb_addr(cb_slot70)); // +0x60
-            std::ptr::write(c.add(13), aux[4] as u64); // +0x68 a string page
-            put(aux[4], 0, b"cannot persist ");
-            std::ptr::write(c.add(16), pathb as u64); // +0x80 the provisioning path
-        }
-        // PERUN_SESS_ARM=1: arm the observer table around the
-        // SetPath/SetID pair (the gate-45026 station names what the
-        // session selectors fold; the transform stations stay cold).
-        let sess_arm = std::env::var_os("PERUN_SESS_ARM").is_some();
-        if sess_arm {
-            stations_arm_mode(image.base() as u64, false, true);
-        }
-        let r = guest_call(f, 0xb23c691e, ctx as u64, 0, 0);
-        println!("[setpath] rc={r:#x} ({r})");
-        // The LIVE SetID envelope (decoded from dumprun4): a V2-headed
-        // 20-byte packet, the len/flags pair 0x400000014, the arg1
-        // buffer {int32 20, int32 20} (the DLL rewrites the second
-        // length), and the identity as a 24-char hex string at
-        // +0xa0..+0xb8 (the live: '1A7DC030' '8887C2D8' '4700E2EA').
-        // Ours: the guest's hex16 plus an 8-hex tail derived from the
-        // re-minted tails -- the X-Mme full id's shape.
-        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
-        *pkt.cast::<u8>().add(0) = 2; // V2 header, the live form
-        // PERUN_SETID_LIVE_PKT=<path>[,<path2>]: the live packets key
-        // the selector's fold past -45018 (the wrapper's nonce-tail
-        // bytes are fold COEFFICIENTS, not entropy). TWO paths = the
-        // live PAIR: call #1 gets the first (the '1a7d' fail packet,
-        // whose body still RUNS and contributes to the fold table),
-        // call #2 gets the success packet. The live numbering is the
-        // measured canon; swapping them answers -45019.
-        let setid_live_pair: Vec<Vec<u8>> = std::env::var("PERUN_SETID_LIVE_PKT")
-            .map(|spec| {
-                spec.split(',')
-                    .filter_map(|f| std::fs::read(f.trim()).ok())
-                    .collect()
-            })
-            .unwrap_or_default();
-        match setid_live_pair.first() {
-            Some(live) => {
-                std::ptr::copy_nonoverlapping(live.as_ptr(), pkt.cast::<u8>(), live.len().min(16));
-            }
-            None => {
-                let mut b = [0u8; 12];
-                let mut fh = std::fs::File::open("/dev/urandom").unwrap();
-                use std::io::Read as _;
-                fh.read_exact(&mut b).unwrap();
-                std::ptr::copy_nonoverlapping(b.as_ptr(), pkt.cast::<u8>().add(4), 12);
-            }
-        }
-        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
-        // The LIVE SetID envelope, slot for slot: the time tag (the
-        // same tag<<32 construction as init-2), the wrapper nonce, the
-        // SELF-pointer at +0x20, the 'cannot persist' string, the
-        // wrapper code pointers, and the size trio -- the validator
-        // walks the envelope as a container and empty slots fault it
-        // into the session-class rejects.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0x64e8);
-        let nonce = {
-            let mut b = [0u8; 8];
-            let mut fh = std::fs::File::open("/dev/urandom").unwrap();
-            use std::io::Read as _;
-            fh.read_exact(&mut b).unwrap();
-            u64::from_le_bytes(b)
-        };
-        std::ptr::write(c.add(0), pkt as u64);
-        std::ptr::write(c.add(1), 0x4000_0000_0014);
-        std::ptr::write(c.add(2), now << 32); // +0x10 tag<<32
-        std::ptr::write(c.add(3), nonce); // +0x18
-        // The live envelope carried +0x20 = a SECOND envelope
-        // (arg1 in the dump points at its own struct; the deep dump
-        // derefs it as the outer, and the inner holds the
-        // {ptr,len} descriptor family). PERUN_SETID_INNER=1 builds
-        // the inner struct as a real page and hands its address.
-        let inner: *mut core::ffi::c_void = if std::env::var_os("PERUN_SETID_INNER").is_some() {
-            let ip = page(0x100);
-            let ci = ip.cast::<u64>();
-            std::ptr::write(ci.add(0), pkt as u64);
-            std::ptr::write(ci.add(1), 0x0000_0004_0000_0014);
-            std::ptr::write(ci.add(2), now << 32);
-            std::ptr::write(ci.add(3), nonce);
-            std::ptr::write(ci.add(4), ip as u64); // self
-            std::ptr::write(ci.add(5), 0xffff_5037);
-            std::ptr::write(ci.add(6), aux[1] as u64);
-            std::ptr::write(ci.add(7), cb_addr(cb_slot48));
-            ip
-        } else {
-            std::ptr::null_mut()
-        };
-        let slot20: u64 = if std::env::var_os("PERUN_SETID_INNER").is_some() {
-            inner as u64
-        } else {
-            ctx as u64 + 0x20
-        };
-        std::ptr::write(c.add(4), slot20); // +0x20 the live inner envelope
-        std::ptr::write(c.add(5), 0xffff_5037); // +0x28 the live error marker
-        put(aux[1], 0, b"cannot persist \0");
-        std::ptr::write(c.add(6), aux[1] as u64); // +0x30
-        let dll_code = image.base() as u64 + 0x5afc0;
-        std::ptr::write(c.add(7), dll_code); // +0x38 code ptr
-        std::ptr::write(c.add(8), 0); // +0x40
-        std::ptr::write(c.add(9), 0x70); // +0x48
-        std::ptr::write(c.add(10), 0); // +0x50
-        std::ptr::write(c.add(11), 0xc2); // +0x58
-        std::ptr::write(c.add(12), 0xf4); // +0x60
-        std::ptr::write(c.add(13), 0x30); // +0x68
-        std::ptr::write(c.add(14), 0); // +0x70
-        std::ptr::write(c.add(15), dll_code); // +0x78
-        std::ptr::write(c.add(16), dll_code); // +0x80
-        std::ptr::write(c.add(17), dll_code); // +0x88
-        std::ptr::write(c.add(18), dll_code); // +0x90
-        std::ptr::write(c.add(19), dll_code); // +0x98
-        put(aux[2], 0, &{
-            let mut v = [0u8; 32];
-            let idb = std::slice::from_raw_parts(ident.cast::<u8>(), 16);
-            for (k, b) in idb.iter().take(16).enumerate() {
-                v[k] = *b;
-            }
-            // The 8-hex tail: from the re-minted identity's own
-            // segments, the X-Mme full-id shape.
-            let tail_hex = id
-                .device_id
-                .split('.')
-                .nth(1)
-                .unwrap_or("00000000")
-                .to_uppercase();
-            for (k, b) in tail_hex.bytes().take(8).enumerate() {
-                v[16 + k] = b;
-            }
-            v
-        });
-        // The live arg1 descriptor read {20, 4} before the call -- the
-        // DLL rewrote the second field to 20 on success. The live
-        // envelope pointed +0x20 at the descriptor AND at itself
-        // through the same slot family; ours keeps the descriptor.
-        // The live +0x20 slot pointed at the envelope ITSELF (self);
-        // the {20,4} descriptor lived INSIDE the packet's tail, not
-        // in a separate slot.
-        std::ptr::write(aux[3] as *mut u32, 20);
-        std::ptr::write((aux[3] as *mut u32).add(1), 4);
-        std::ptr::write(c.add(4), ctx as u64 + 0x20); // +0x20 SELF-PTR
-        // The live envelope's identity span: a 24-char hex string at
-        // +0xa0..+0xb8 with a NUL after char 24, then one more 8-hex
-        // group at +0xb8. Ours: the guest's hex16 (16) + the re-minted
-        // identity's first tail (8) = 24 chars, NUL, then the second
-        // tail (8) -- the X-Mme full-id's exact 32-hex span.
-        // Mode 5 parks the full 32-hex span in aux[2]; the default
-        // (modes 3/4) composes hex16 + the device-id's tails.
-        let idb: Vec<u8> = if std::env::var("PERUN_GUEST_ID")
-            .map(|v| v == "5")
-            .unwrap_or(false)
-        {
-            std::slice::from_raw_parts(aux[2].cast::<u8>(), 32).to_vec()
-        } else {
-            std::slice::from_raw_parts(ident.cast::<u8>(), 16).to_vec()
-        };
-        let tail1: [u8; 8] = id
-            .device_id
-            .split('.')
-            .nth(1)
-            .unwrap_or("00000000")
-            .as_bytes()[..8]
-            .try_into()
-            .unwrap();
-        let tail2: [u8; 8] = id
-            .device_id
-            .split('.')
-            .nth(2)
-            .unwrap_or("00000000")
-            .as_bytes()[..8]
-            .try_into()
-            .unwrap();
-        // PERUN_SETID_SPAN: 24 (live 24-char span) | 16 (hex16 only).
-        // PERUN_SETID_LIVE_SPAN=<path>: the EXACT live 32-byte span
-        // ('1A7DC0308887C2D8' + NUL + '470E2EA813C70C1') -- the
-        // measured live form, byte for byte.
-        let span = std::env::var("PERUN_SETID_SPAN").unwrap_or_else(|_| "24".into());
-        let span: usize = span.parse().unwrap_or(24);
-        let live_span = std::env::var("PERUN_SETID_LIVE_SPAN")
-            .ok()
-            .and_then(|f| std::fs::read(f).ok());
-        let mut srcs: Vec<u8> = Vec::new();
-        if let Some(ls) = live_span {
-            // The live span wins: 32 bytes at +0xa0..+0xb8.
-            for (k, b) in ls.iter().take(32).enumerate() {
-                std::ptr::write(ctx.cast::<u8>().add(0xa0 + k), *b);
-            }
-        } else {
-            srcs.extend_from_slice(&idb);
-            if span >= 24 {
-                srcs.extend_from_slice(&tail1);
-                srcs.push(0);
-                for (k, b) in tail2.iter().enumerate() {
-                    std::ptr::write(ctx.cast::<u8>().add(0xb8 + k), *b);
-                }
-            } else {
-                srcs.push(0);
-            }
-            for (k, b) in srcs.iter().enumerate() {
-                std::ptr::write(ctx.cast::<u8>().add(0xa0 + k), *b);
-            }
-        }
-        // The LIVE call carried a CODE POINTER in R9 (arg3 =
-        // 0x7680ae906d1c, the wrapper's own frame); ours was NULL.
-        // The selector's r9d gate masks the argument -- pass a real
-        // guest code address, the DLL's own export.
-        let dll_code = image.base() as u64 + 0x5afc0;
-        // The LIVE canon called SetID TWICE (dumprun4: the '1a7d'
-        // short-string fail first, then the full form's success). The
-        // selector's slot container at [rsp+0x340] INHERITS between
-        // vdfut calls through the uncleaned frame -- the second call
-        // reads what the first wrote. Run it twice, exactly like the
-        // live sequence.
-        // PERUN_SETID_CB=1: arg3 = a LIGHT host callback (the live
-        // call passed the wrapper's own code pointer; our vdfut-as-
-        // arg3 was a heavy recursive hazard -- the validator's
-        // counter exploded through it).
-        let r2 = if std::env::var_os("PERUN_SETID_CB").is_some() {
-            guest_call(f, 0xc774d292, ctx as u64, 0, cb_addr(cb_slot48))
-        } else {
-            guest_call(f, 0xc774d292, ctx as u64, 0, dll_code)
-        };
-        println!("[setid#1] rc={r2:#x} ({r2})");
-        // Rebuild the envelope: the first call rewrote the packet.
-        // The live canon's call #2 carried ITS OWN packet (the
-        // success one); the pair's second path supplies it.
-        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
-        *pkt.cast::<u8>().add(0) = 2;
-        match setid_live_pair.get(1) {
-            Some(live2) => {
-                std::ptr::copy_nonoverlapping(
-                    live2.as_ptr(),
-                    pkt.cast::<u8>(),
-                    live2.len().min(16),
-                );
-            }
-            None => {
-                let mut b = [0u8; 12];
-                let mut fh = std::fs::File::open("/dev/urandom").unwrap();
-                use std::io::Read as _;
-                fh.read_exact(&mut b).unwrap();
-                std::ptr::copy_nonoverlapping(b.as_ptr(), pkt.cast::<u8>().add(4), 12);
-            }
-        }
-        std::ptr::write(c.add(0), pkt as u64);
-        let r3 = if std::env::var_os("PERUN_SETID_CB").is_some() {
-            guest_call(f, 0xc774d292, ctx as u64, 0, cb_addr(cb_slot48))
-        } else {
-            guest_call(f, 0xc774d292, ctx as u64, 0, dll_code)
-        };
-        println!("[setid#2] rc={r3:#x} ({r3})");
-        if sess_arm {
-            // Disarm the session observers: the page re-seal, the byte
-            // restores, and the SIGTRAP disposition reset. The transform
-            // arming later (if any) reopens what it needs.
-            {
-                let page = libc::sysconf(libc::_SC_PAGESIZE) as usize;
-                let arr = std::ptr::addr_of!(STATION_AT);
-                let mut pages: Vec<u64> = Vec::new();
-                let mut k = 0usize;
-                while k < STATION_N {
-                    let at = std::ptr::read_volatile((*arr).as_ptr().add(k));
-                    std::ptr::write_volatile(at as *mut u8, STATION_ORIG[k]);
-                    let pg = at & !(page as u64 - 1);
-                    if !pages.contains(&pg) {
-                        pages.push(pg);
-                    }
-                    k += 1;
-                }
-                for pg in &pages {
-                    libc::mprotect(
-                        *pg as *mut libc::c_void,
-                        page,
-                        libc::PROT_READ | libc::PROT_EXEC,
-                    );
-                }
-                STATION_N = 0;
-                libc::signal(libc::SIGTRAP, libc::SIG_DFL);
-            }
-            println!("[stations] session observers disarmed");
-        }
-    }
-
-    // ── node 2.6: THE GSA REQUEST + the identity re-mint ──────────────
-    // Mode 3 (PERUN_GUEST_ID=3): the pipe74 conditions -- the network
-    // ran BEFORE init (the session object's buffer only fills with real
-    // server data), so read the GUEST'S material at [obj+0x20] -> +0x20
-    // and RE-MINT the GSA request under it: a second start under the
-    // guest's own id, fresh SPIM onto the page, a second init-2
-    // transplant, then transform. Modes 1/2 keep the deferred network.
-    let guest_ident: Option<String> = if guest_mode == "live" {
-        // Mode "live": the measurement probe -- the WHOLE chain rides
-        // the live dump's identity string (the fold table's seed and
-        // the live packet's coefficients come from the same session).
-        // Purely diagnostic: proves or kills the coherence hypothesis.
-        Some("1A7DC0308887C2D8".to_string())
-    } else if guest_active {
-        let slot_ptr = image.base() as u64 + 0x19ddb0;
-        let obj = unsafe { std::ptr::read_volatile(slot_ptr as *const u64) };
-        let mid = if obj > 0x1000 {
-            unsafe { std::ptr::read_volatile((obj + 0x20) as *const u64) }
-        } else {
-            0
-        };
-        if mid > 0x1000 && (mid & 7) == 0 {
-            let b = unsafe { std::slice::from_raw_parts((mid + 0x20) as *const u8, 8) };
-            Some(b.iter().map(|x| format!("{x:02X}")).collect())
-        } else {
-            println!("[guest-id] object chain missing; fallback");
-            None
-        }
-    } else {
-        None
-    };
-    println!("[guest-id] material -> {guest_ident:?}");
-    if guest_mode == "5" {
-        // Mode 5: ONE wrapper-owned identity string everywhere. No
-        // material reads, no re-mint: the collect_linux id IS the
-        // session's id -- init carried its uuid36 at +0x48, the GSA
-        // request rides it, SetID's span and the envelope slots follow.
-        // PERUN_IDENT overrides the hex16 (a measurement probe: align
-        // the fold table's seed with the live packet's coefficients).
-        let segs: Vec<String> = id.device_id.split('.').map(|s| s.to_string()).collect();
-        let hex32: String = segs.iter().take(4).cloned().collect::<String>();
-        let hex16: String = std::env::var("PERUN_IDENT")
-            .unwrap_or_else(|_| segs.iter().take(2).cloned().collect::<String>());
-        // ident = hex16 (the envelope slots' live form, no dashes).
-        put(ident, 0, hex16.as_bytes());
-        put(ident, hex16.len(), b"\0");
-        println!("[env] ident={hex16:?}");
-        // Park the 32-hex span for the SetID call below.
-        put(aux[2], 0, hex32.as_bytes());
-        put(aux[2], hex32.len(), b"\0");
-        println!("[env] setid-span={hex32:?}");
-    }
-    if guest_mode == "4" {
-        // Mode 4: the material is random per run (measured), so the
-        // ONLY way to hand init the identity the guest itself minted
-        // is a SECOND init-1 pass inside the same process: read the
-        // material, build the full dashed UUID from it (the live
-        // Call-1 carried the 36-char form), and re-init with it.
-        if let Some(h) = &guest_ident {
-            let tail1: String = id
-                .device_id
-                .split('.')
-                .nth(1)
-                .unwrap_or("00000000")
-                .to_uppercase();
-            let tail2: String = id
-                .device_id
-                .split('.')
-                .nth(2)
-                .unwrap_or("00000000")
-                .to_uppercase();
-            let mut hex32: String = h.clone();
-            hex32.push_str(&tail1);
-            hex32.push_str(&tail2);
-            let uuid36 = format!(
-                "{}-{}-{}-{}-{}",
-                &hex32[0..8],
-                &hex32[8..12],
-                &hex32[12..16],
-                &hex32[16..20],
-                &hex32[20..32]
-            );
-            println!("[guest-id] mode4 uuid36 = {uuid36:?}");
-            // Re-run init-1 with the UUID in +0x48.
-            // (set_var not needed: the UUID is written directly below.)
-            unsafe {
-                std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
-                *pkt.cast::<u8>().add(3) = 1;
-                *pkt.cast::<u8>().add(7) = 1;
-                std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
-                let c = ctx.cast::<u64>();
-                std::ptr::write(c.add(0), pkt as u64);
-                std::ptr::write(c.add(1), 0x0000_0004_0000_0010);
-                std::ptr::write(c.add(2), 0x0000_7fff_0000_0000);
-                // +0x18: the live Call-1 carried a CONTAINER POINTER
-                // ({0x7680aecd4151, 0xe8b<<32} = {buffer ptr, len<<32} --
-                // the len form matches the DLL's own len-shifted slots).
-                // Our honest stand-in: a container page holding {our ident
-                // buffer, its length <<32}. PERUN_INIT_CONT=0 reverts to
-                // the bare zero page (the old baseline).
-                let cont18 = page(64);
-                {
-                    let ident_len = 0x40u64; // the ident page's readable span
-                    std::ptr::write_volatile(cont18 as *mut u64, ident as u64);
-                    std::ptr::write_volatile(cont18.add(8) as *mut u64, ident_len << 32);
-                }
-                let use_cont = std::env::var("PERUN_INIT_CONT")
-                    .map(|v| v != "0")
-                    .unwrap_or(true);
-                std::ptr::write(
-                    c.add(3),
-                    if use_cont {
-                        cont18 as u64
-                    } else {
-                        aux[0] as u64
-                    },
-                );
-                std::ptr::write(c.add(4), 0x15);
-                std::ptr::write(c.add(5), cb_addr(cb_slot28));
-                std::ptr::write(c.add(6), cb_addr(cb_slot30));
-                std::ptr::write(c.add(7), 0x0000_7fff_0000_0000);
-                std::ptr::write(c.add(8), cb_addr(cb_slot40));
-                put(aux[4], 0, uuid36.as_bytes());
-                put(aux[4], uuid36.len(), b"\0");
-                std::ptr::write(c.add(9), aux[4] as u64); // +0x48 the full UUID
-                std::ptr::write(c.add(10), 0x40e8_976e_6bde_5309);
-                std::ptr::write(c.add(11), 0xbee2_365f_bf17_664b);
-                std::ptr::write(c.add(14), cb_addr(cb_slot70));
-                std::ptr::write(c.add(18), cb_addr(cb_slot90));
-                std::ptr::write(c.add(21), cb_addr(cb_slota0));
-                std::ptr::write(c.add(22), cb_addr(cb_slotb0));
-                std::ptr::write(c.add(23), cb_addr(cb_slotb8));
-                let a3 = cb_page();
-                let r = guest_call(f, 0xb0eda7af, ctx as u64, 0, a3 as u64);
-                println!("[init#2pass] rc={r:#x} ({r})");
-                peek_slots(&image, "after_reinit");
-                // The material object the second pass minted:
-                let slot_ptr = image.base() as u64 + 0x19ddb0;
-                let obj = std::ptr::read_volatile(slot_ptr as *const u64);
-                let mid = if obj > 0x1000 {
-                    std::ptr::read_volatile((obj + 0x20) as *const u64)
-                } else {
-                    0
-                };
-                if mid > 0x1000 && (mid & 7) == 0 {
-                    let b = std::slice::from_raw_parts((mid + 0x20) as *const u8, 8);
-                    let m2: String = b.iter().map(|x| format!("{x:02X}")).collect();
-                    println!("[guest-id] material after re-init -> {m2:?}");
-                }
-                // ident buffer follows the guest's minted identity now.
-                let idb = uuid36
-                    .chars()
-                    .filter(|c| *c != '-')
-                    .take(16)
-                    .collect::<String>();
-                put(ident, 0, idb.as_bytes());
-                put(ident, idb.len(), b"\0");
-                println!("[env] ident={idb:?}");
-            }
-            // (remove_var not needed: nothing was set.)
-        }
-    }
-    if guest_mode == "3"
-        && let Some(h) = &guest_ident
-    {
-        id = perun_adi_win32::net::identity_overridden(h);
-        println!(
-            "[guest-id] re-minted device-id {} lu {}",
-            id.device_id, id.lu
-        );
-        ep = Some(match perun_adi_win32::net::lookup(&id) {
-            Ok(e) => e,
-            Err(e) => {
-                println!("[net] re-mint lookup failed: {e}");
-                return;
-            }
-        });
-        start = Some(
-            match perun_adi_win32::net::start_provisioning(&id, ep.as_ref().unwrap()) {
-                Ok(s) => s,
-                Err(e) => {
-                    println!("[net] re-mint start failed: {e}");
-                    return;
-                }
-            },
-        );
-        let s = start.as_ref().unwrap();
-        println!(
-            "[net] (re-mint) spim {} bytes, ptxid {}",
-            s.spim.len(),
-            s.ptxid
-        );
-        unsafe {
-            std::ptr::copy_nonoverlapping(s.spim.as_ptr(), spimp.cast::<u8>(), s.spim.len());
-        }
-        // The ident buffer follows the re-minted identity.
-        // PERUN_IDENT_FULL=1 probes the FULL X-Mme-Device-Id form
-        // (the 36-char dashed UUID shape) in the envelope slots;
-        // the live dump carried the 16-char no-dash form.
-        let id_hex: String = h.clone();
-        let id_put: String = if std::env::var_os("PERUN_IDENT_FULL").is_some() {
-            format!(
-                "{id_hex}-{}/{}/{}",
-                id.device_id.split('.').nth(1).unwrap_or("00000000"),
-                id.device_id.split('.').nth(2).unwrap_or("00000000"),
-                id.lu.trim_start_matches('X')
-            )
-        } else {
-            id_hex.clone()
-        };
-        put(ident, 0, id_put.as_bytes());
-        put(ident, id_put.len(), b"\0");
-        println!("[env] ident={id_put:?}");
-        std::fs::write("/opt/data/il/fresh_spim.bin", &s.spim).expect("save spim");
-        println!("[env] fresh spim saved: {} bytes", s.spim.len());
-    }
-    if guest_active && guest_mode != "3" && guest_mode != "5" {
-        id = match &guest_ident {
-            Some(h) => perun_adi_win32::net::identity_overridden(h),
-            None => perun_adi_win32::net::identity(),
-        };
-        println!("[guest-id] device-id {} lu {}", id.device_id, id.lu);
-    }
-    if ep.is_none() {
-        ep = Some(match perun_adi_win32::net::lookup(&id) {
-            Ok(e) => e,
-            Err(e) => {
-                println!("[net] lookup failed: {e}");
-                return;
-            }
-        });
-    }
-    if start.is_none() {
-        start = Some(
-            match perun_adi_win32::net::start_provisioning(&id, ep.as_ref().unwrap()) {
-                Ok(s) => s,
-                Err(e) => {
-                    println!("[net] start failed: {e}");
-                    return;
-                }
-            },
-        );
-    }
-    {
-        let start = start.as_ref().unwrap();
-        println!(
-            "[net] spim {} bytes, ptxid {}",
-            start.spim.len(),
-            start.ptxid
-        );
-    }
-    // Shadow the Options with the resolved values for the rest of the
-    // pipeline: everything downstream reads the minted bindings.
-    let ep = match ep {
-        Some(e) => e,
-        None => return,
-    };
-    let start = match start {
-        Some(s) => s,
-        None => return,
-    };
-
-    // ── node 3.5: the SECOND init -- the live Call-5 SHAPE ─────────────
-    // The live Call 5 is NOT a copy of Call 1: the layout differs slot
-    // by slot. Call 5's carries a TIME TAG at +0x10 (and doubled at
-    // +0x18), the identity string WITHOUT dashes at +0x28, the string
-    // "adi" at +0x30, "cannot persist " at +0x68, and the sizes at
-    // +0x80/+0x90/+0x98/+0xa0. This call is what arms the transform:
-    // it hands the guest the identity and the persistence strings the
-    // worker's inputs are built from.
-    unsafe {
-        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
-        *pkt.cast::<u8>().add(3) = 1;
-        *pkt.cast::<u8>().add(7) = 1;
-        // Zero tail, the same healed form as init-1's packet: the
-        // live nonce is session material and reads as FOREIGN data
-        // (-45020); the zero tail answers the -45061 family.
-        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
-        let c = ctx.cast::<u64>();
-        // +0x10: the live time tag (0x618a2474 = the live stand's unix
-        // stamp doubled into +0x18). Ours: THIS machine's clock, the
-        // same construction.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0x618a_2474);
-        std::ptr::write(c.add(2), now << 32); // +0x10 tag<<32
-        std::ptr::write(c.add(3), (now << 32) | now); // +0x18 doubled
-        std::ptr::write(c.add(4), cb_addr(cb_slot48)); // +0x20 the live had a WRAPPER code ptr here
-        std::ptr::write(c.add(5), ident as u64); // +0x28 identity, no dashes
-        std::ptr::write(c.add(6), aux[0] as u64); // +0x30 the "adi" string
-        std::ptr::write(c.add(8), cb_addr(cb_slot40)); // +0x40 the live code ptr
-        std::ptr::write(c.add(9), (0x64e8u64) << 32); // +0x48 the live tag
-        std::ptr::write(c.add(13), 0); // +0x68 "cannot persist" ptr
-        std::ptr::write(c.add(16), 0x70); // +0x80
-        std::ptr::write(c.add(18), 0xc2); // +0x90
-        std::ptr::write(c.add(19), 0xf4); // +0x98
-        std::ptr::write(c.add(20), 0x30); // +0xa0
-        // The envelope's buffer slots that need real strings:
-        put(aux[0], 0, b"adi\0");
-        put(aux[1], 0, b"cannot persist \0");
-        std::ptr::write(c.add(6), aux[0] as u64); // +0x30 "adi"
-        std::ptr::write(c.add(13), aux[1] as u64); // +0x68 the persist string
-        let c2 = ctx.cast::<u64>();
-        std::ptr::write(c2.add(0), pkt as u64);
-        std::ptr::write(c2.add(1), 0x0000_0004_0000_0010);
-        let r = guest_call(f, 0xb0eda7af, ctx as u64, 0, 0);
-        peek_slots(&image, "after_init2");
-        println!("[init2] rc={r:#x} ({r})");
-        let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 32);
-        println!(
-            "[init2] pkt[0..32] = {}",
-            pk[..32]
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        );
-        // The worker's early-exit fork decoded from the ring: it
-        // loads the session object through the [0x19ddb0] slot and
-        // tests THE OBJECT'S +4 FIELD -- zero takes the early exit
-        // (cache check -> ReleaseMutex -> epilogue), nonzero would
-        // take the crypto route. PERUN_SESS4 seeds that field right
-        // after init-2, the same field the live wrapper's init
-        // chain leaves populated.
-        if let Some(v) = std::env::var("PERUN_SESS4")
-            .ok()
-            .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-        {
-            let slot_ptr = image.base() as u64 + 0x19ddb0;
-            let obj = std::ptr::read_volatile(slot_ptr as *const u64);
-            if obj > 0x1000 {
-                std::ptr::write_volatile((obj + 4) as *mut u64, v);
-                println!("[sess4] [{obj:#x}+4] = {v:#x} (the fork's field)");
-            } else {
-                println!("[sess4] slot 0x19ddb0 = {obj:#x}: no object to seed");
-            }
-        }
-    }
-
-    // ── node 4: transform with the fresh SPIM ───────────────────────────
-    let url = b"https://gsa.apple.com/grandslam/MidService/startMachineProvisioning\0";
-    // PERUN_TR_FLAGS=1: seed the gate object's session flags before
-    // the call -- the measured flag experiment ([0x19dda8]+0x8/+0xc)
-    // opened the worker's SUCCESS branch, which then died reading an
-    // event handle from a garbage slot. The live wrapper's init chain
-    // leaves these set; with the live packet now carrying the real
-    // fold coefficients, the flags may complete the route.
-    if std::env::var_os("PERUN_TR_FLAGS").is_some() {
-        unsafe {
-            let slot_ptr = image.base() as u64 + 0x19dda8;
-            let obj = std::ptr::read_volatile(slot_ptr as *const u64);
-            if obj > 0x1000 {
-                std::ptr::write_volatile((obj + 8) as *mut u64, 1);
-                std::ptr::write_volatile((obj + 0xc) as *mut u64, 1);
-                println!("[tr-flags] [{obj:#x}+8]=1 [+0xc]=1 seeded");
-            } else {
-                println!("[tr-flags] slot 0x19dda8 = {obj:#x}: no object");
-            }
-            let slot_b = image.base() as u64 + 0x19ddb0;
-            let objb = std::ptr::read_volatile(slot_b as *const u64);
-            if objb > 0x1000 {
-                std::ptr::write_volatile((objb + 4) as *mut u64, 1);
-                println!("[tr-flags] [{objb:#x}+4]=1 seeded (the fork's field)");
-            }
-        }
-    }
-    unsafe {
-        std::ptr::copy_nonoverlapping(start.spim.as_ptr(), spimp.cast::<u8>(), start.spim.len());
-        std::ptr::copy_nonoverlapping(url.as_ptr(), urlp.cast::<u8>(), url.len());
-        std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
-        // The LIVE Call-6 packet (52 bytes, decoded byte-for-byte from
-        // dumprun4): V2 header + the wrapper's nonce-tail that keys the
-        // selector's fold. Zero tails died at -45018 before the body
-        // ever ran; the live bytes carry the fold coefficients.
-        *pkt.cast::<u8>().add(3) = 1;
-        *pkt.cast::<u8>().add(7) = 1;
-        // PERUN_TR_LIVE_PKT=<path>: replace the synthetic packet with
-        // the live 52-byte Call-6 body (decoded from dumprun4) -- the
-        // wrapper's nonce-tail keys the selector's fold; a zero tail
-        // died at -45018 before the body ever ran.
-        if let Some(live) = std::env::var("PERUN_TR_LIVE_PKT")
-            .ok()
-            .and_then(|f| std::fs::read(f).ok())
-        {
-            std::ptr::copy_nonoverlapping(live.as_ptr(), pkt.cast::<u8>(), live.len().min(52));
-        }
-        std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
-        let dll_code = image.base() as u64 + 0x5afc0;
-        let c = ctx.cast::<u64>();
-        std::ptr::write(c.add(0), pkt as u64);
-        std::ptr::write(c.add(1), 0x4000_0000_0034);
-        std::ptr::write(c.add(3), start.spim.len() as u64); // +0x18
-        std::ptr::write(c.add(4), urlp as u64); // +0x20
-        std::ptr::write(c.add(5), 2); // +0x28
-        std::ptr::write(c.add(6), spimp as u64); // +0x30
-        std::ptr::write(c.add(7), start.spim.len() as u64); // +0x38
-        std::ptr::write(c.add(8), 4); // +0x40
-        std::ptr::write(c.add(9), cb_addr(cb_slot48)); // +0x48 = the live wrapper code slot
-        std::ptr::write(c.add(10), 0); // +0x50 = the live INLINE length slot (the worker writes 0x114 here)
-        std::ptr::write(c.add(11), start.spim.len() as u64); // +0x58
-        std::ptr::write(c.add(12), 0); // +0x60
-        std::ptr::write(c.add(13), spimp as u64); // +0x68
-        std::ptr::write(c.add(14), 0x1d0); // +0x70
-        std::ptr::write(c.add(15), urlp as u64); // +0x78
-        // The LIVE after-diff: +0x80 came back as the worker's OWN
-        // heap pointer (0x7680aece17c0), not the caller's buffer.
-        // The envelope slot is INLINE -- the worker allocates and
-        // writes the CPIM address there. Same for +0x50 (the 0x114
-        // length). Keep the out page only as a fallback probe.
-        std::ptr::write(c.add(16), 0); // +0x80 = the worker's CPIM slot
-        // The live Call-6 carried FIVE wrapper code pointers at
-        // +0x88..+0xa8 and the identity bytes at +0xb0/+0xb8; ours
-        // had neither. Probe: the DLL's own export as a valid guest
-        // code address, and our identity string inline.
-        std::ptr::write(c.add(17), cb_addr(cb_slot98)); // +0x88 (live wrapper code)
-        std::ptr::write(c.add(18), cb_addr(cb_slota0)); // +0x90
-        std::ptr::write(c.add(19), cb_addr(cb_slotb0)); // +0x98
-        std::ptr::write(c.add(20), cb_addr(cb_slotb8)); // +0xa0
-        std::ptr::write(c.add(21), cb_addr(cb_slot70)); // +0xa8
-        let idsrc = std::slice::from_raw_parts(ident.cast::<u8>(), 16);
-        for (i, b) in idsrc.iter().enumerate() {
-            std::ptr::write(ctx.cast::<u8>().add(0xb0 + i), *b);
-        }
-        // PERUN_HONEST=1: call the transform through the honest
-        // wrapper -- the SPIM pointer parked in the caller's own
-        // frame slot, the construction the live wrapper used; no
-        // external FIX30CTX poke. The library provably never
-        // writes the slot itself.
-        // PERUN_TR_SEED=1: arm the int3 station circuit around THIS
-        // call (the seq-proven five stations; the word seed is the
-        // show-and-seed probe -- the before-word print is built in).
-        let tr_seed = std::env::var_os("PERUN_TR_SEED").is_some();
-        if tr_seed {
-            stations_arm(image.base() as u64, true);
-        }
-        let r = if std::env::var_os("PERUN_HONEST").is_some() {
-            perun_honest_wrapper(f, 0x716bd86c, ctx as u64, 0xffff_ffff, spimp as u64)
-        } else {
-            // The live Call-6 carried arg3 = a CODE POINTER (the
-            // wrapper's own callback frame); ours was NULL. Probe:
-            // the DLL's own export as a valid guest code address.
-            // The live arg3 was the wrapper's frame pointer with
-            // low bytes 0xae906d1c; if the fold mixes r9d into E as
-            // a TERM, the exact live low-dword matters. PERUN_TR_R9
-            // overrides; the default keeps the DLL code address.
-            let r9v = std::env::var("PERUN_TR_R9")
-                .ok()
-                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-                .unwrap_or(dll_code);
-            guest_call(f, 0x716bd86c, ctx as u64, 0xffff_ffff, r9v)
-        };
-        if tr_seed {
-            // Disarm before anything else touches the image: restore
-            // the original bytes, drop the trap table, reset the
-            // SIGTRAP disposition to default.
-            {
-                let page = libc::sysconf(libc::_SC_PAGESIZE) as usize;
-                let mut pages: Vec<u64> = Vec::new();
-                let arr = std::ptr::addr_of!(STATION_AT);
-                let mut k = 0usize;
-                while k < STATION_N {
-                    let at = std::ptr::read_volatile((*arr).as_ptr().add(k));
-                    std::ptr::write_volatile(at as *mut u8, STATION_ORIG[k]);
-                    let pg = at & !(page as u64 - 1);
-                    if !pages.contains(&pg) {
-                        pages.push(pg);
-                    }
-                    k += 1;
-                }
-                for pg in &pages {
-                    libc::mprotect(
-                        *pg as *mut libc::c_void,
-                        page,
-                        libc::PROT_READ | libc::PROT_EXEC,
-                    );
-                }
-                STATION_N = 0;
-                libc::signal(libc::SIGTRAP, libc::SIG_DFL);
-            }
-            println!("[stations] disarmed");
-        }
-        println!("[transform] rc={r:#x} ({r})");
-        peek_state(&image, "transform");
-        // The live contract: the worker writes the CPIM pointer at
-        // +0x80, the length 0x114 at +0x50, the session id at +0x60.
-        // Read all three slots back -- plus whatever pages the
-        // callbacks handed out.
-        let cpim_ptr = std::ptr::read_volatile((ctx as u64 + 0x80) as *const u64);
-        let cpim_len = std::ptr::read_volatile((ctx as u64 + 0x50) as *const u64);
-        let session = std::ptr::read_volatile((ctx as u64 + 0x60) as *const u64);
-        println!(
-            "[tr-out] ctx[+0x80]={cpim_ptr:#x} ctx[+0x50]={cpim_len:#x} ctx[+0x60]={session:#x}"
-        );
-        if cpim_ptr > 0x1000 && cpim_len > 0 {
-            let n = cpim_len.min(0x400) as usize;
-            let bytes = std::slice::from_raw_parts(cpim_ptr as *const u8, n);
-            println!(
-                "[tr-out] first {n} bytes: {}",
-                bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
-            );
-            std::fs::write("/opt/data/il/tr_cpim_live.bin", bytes).ok();
-            println!("[tr-out] wrote /opt/data/il/tr_cpim_live.bin");
-        }
-        // The live transform had OLEN=0/OUT=0: the worker's CPIM (if
-        // any) would land IN the SPIM buffer (the envelope's only
-        // writable data slot, +0x30/+0x68 both point there). Diff the
-        // spim page around the SPIM body after the call.
-        let sp0 = std::slice::from_raw_parts(spimp.cast::<u8>(), 0x400);
-        let nz = sp0.iter().filter(|b| **b != 0).count();
-        println!("[spim] nonzero in spim page[0..1024] after transform: {nz}");
-        println!(
-            "[spim] spim[0..64] = {}",
-            sp0[..64]
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        );
-        // The live Call-6 envelope had OLEN=0/OUT=0 -- the CPIM, if
-        // the worker mints one, lands in the SPIM buffer itself. The
-        // page is writable; read what changed past the SPIM body.
-        let n_after = start.spim.len();
-        let tail = std::slice::from_raw_parts(spimp.cast::<u8>().add(n_after), 0x200);
-        let tnz = tail.iter().filter(|b| **b != 0).count();
-        println!("[spim] nonzero in spim[{n_after}..{n_after}+512]: {tnz}");
-        if tnz > 0 {
-            std::fs::write("/opt/data/il/spim_tail_after_transform.bin", tail).unwrap();
-            println!("[spim] wrote /opt/data/il/spim_tail_after_transform.bin");
-        }
-    }
-
-    // What did transform write into the packet? The live run rewrote the
-    // packet in place with a status header; ours may differ and the diff
-    // tells which branch the worker took without needing any sniffers.
-    unsafe {
-        let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 64);
-        let nz = pk.iter().filter(|b| **b != 0).count();
-        println!("[pkt] nonzero in pkt[0..64]: {nz}");
-        println!(
-            "[pkt] pkt[0..48] = {}",
-            pk[..48]
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        );
-    }
-
-    // ── node 4.5: the network finish -- close the loop ──────────────────
-    // The canon: transform writes the CPIM; the CPIM goes to
-    // finishMachineProvisioning; the server answers ptm/tk. Our
-    // transform's worker still reads -45001 (no session state), so the
-    // out buffer is empty -- send what we have and read the server's
-    // own verdict: it validates the CPIM's binding to this machine and
-    // answers ec=<code>. That ec is the FIRST outside oracle for the
-    // offline chain, and the shape of the answer tells whether the
-    // machine-binding lives in the CPIM at all.
-    let out_len = unsafe { std::ptr::read(olen.cast::<u64>()) } as usize;
-    let mut cpim =
-        unsafe { std::slice::from_raw_parts(out.cast::<u8>(), out_len.min(0x1000)) }.to_vec();
-    println!("[net] cpim candidate: {out_len} bytes (empty unless the worker minted)");
-    // PERUN_FINISH_CPIM=<path>: override the CPIM sent to the server --
-    // the probe lane for testing how the server binds the finish
-    // request (an external artifact against a fresh ptxid, etc.).
-    // The answer's ec is the outside oracle for the whole offline chain.
-    if let Some(f) = std::env::var_os("PERUN_FINISH_CPIM") {
-        match std::fs::read(f.to_string_lossy().as_ref()) {
-            Ok(bytes) => {
-                println!(
-                    "[net] PERUN_FINISH_CPIM override: {} bytes from {}",
-                    bytes.len(),
-                    f.to_string_lossy()
-                );
-                cpim = bytes;
-            }
-            Err(e) => println!("[net] PERUN_FINISH_CPIM unreadable: {e}"),
-        }
-    }
-    match perun_adi_win32::net::finish_provisioning(&id, &ep, &cpim, &start.ptxid) {
-        Ok(fin) => {
-            println!(
-                "[net] FINISH ec=0: ptm {} bytes, tk {} bytes, rinfo {}",
-                fin.ptm.len(),
-                fin.tk.len(),
-                fin.rinfo
-            );
-            std::fs::write("/opt/data/il/ptm.bin", &fin.ptm).expect("ptm");
-            std::fs::write("/opt/data/il/tk.bin", &fin.tk).expect("tk");
-        }
-        Err(e) => println!("[net] finish: {e}"),
-    }
-
+    // ── node 3 (the honest Windows chain, step 3): configuration
+    // (0xcfe0b46a) -- a RECOGNISED Windows opcode (table 24).
     // ── node 3: configuration mints the session objects ────────────────
     // The container the cfg reads: the Android stand (identity-bound,
     // its blobs answer -45020) or OUR synthesis -- the same geometry
@@ -2055,7 +1080,15 @@ fn main() {
         // (this machine's own session material, no Android stands).
         std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
         *pkt.cast::<u32>() = 2; // hdr 00 00 00 02, the live cfg_pkt's
-        let sptail = &start.spim;
+        // The cfg packet's data slice = OUR fresh SPIM's tail. The
+        // honest chain resolved the network in node 1; if the network
+        // is off (PERUN_NET=0) fall back to the zero tail (the cfg
+        // gate still runs; the blob's content is the diff to study).
+        let spim_ref: &[u8] = match start.as_ref() {
+            Some(s) => &s.spim,
+            None => &[],
+        };
+        let sptail = spim_ref;
         let n = sptail.len().min(44);
         std::ptr::copy_nonoverlapping(
             sptail[sptail.len() - n..].as_ptr(),
@@ -2107,59 +1140,1073 @@ fn main() {
         peek_state(&image, "cfg_synth");
     }
 
-    // ── node 5: the finish opcode probe (0x0b2b3196) ────────────────────
-    // Its envelope shape is not yet decoded (the live Call-7 dump sits in
-    // dumprun4 behind the same ctx-printing the others were). Probe with
-    // the transform shape to see the opcode's rejection class: whether it
-    // even exists in the Windows dispatcher (not -45019) is the question.
-    unsafe {
-        let dg = &start.spim;
-        // The finish matrix, ungated: the four double-V1 probes (each
-        // rc=0x0, each publishing the worker's -45001 verdict in place)
-        // are what shifts the dispatcher so the FOLLOWING OTP's dword-1|1
-        // packet passes its header fold (pipe17 measured: matrix then
-        // init3+transform3 then OTP = 0x0; without the matrix the OTP
-        // reads -45018, 5/5). The first measured inter-call dependency.
-        {
-            for (len, dname, dg_bytes) in [
-                (0x24u64, "z24", None),
-                (0x24, "s24", Some(dg)),
-                (0x34, "z34", None),
-                (0x34, "s34", Some(dg)),
-            ] {
-                std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
-                *pkt.cast::<u8>().add(3) = 1;
-                *pkt.cast::<u8>().add(7) = 1;
-                if let Some(d) = dg_bytes {
-                    for i in 0..32usize {
-                        *pkt.cast::<u8>().add(8 + i) = d[d.len() - 32 + i];
-                    }
+    // ── node 3.5: the ANDROID canon's middle calls -- REMOVED from the
+    // honest Windows chain (RESEARCH table 24: 0xb23c691e/0xc774d292 are
+    // unknownAdiFunction on the Windows build; the Android opcode set
+    // does not transfer). Kept under PERUN_LEGACY_ANDROID=1 for
+    // instrument comparisons only.
+    let legacy_android = std::env::var_os("PERUN_LEGACY_ANDROID").is_some();
+    if legacy_android {
+        // ── node 3.5: the canon's middle calls, even though they reject ────
+        // The live cycle ran SetPath (0xb23c691e) and SetID (0xc774d292)
+        // between the two inits and the transform. On the Windows dispatcher
+        // both return -45019 (unknownAdiFunction) -- but the measured
+        // inter-call dependency (the finish matrix re-keying the OTP's fold)
+        // says a call's SIDE EFFECT on the dispatcher cursor can matter more
+        // than its return code. Run both, in the live order, and read what
+        // the transform behind them does.
+        unsafe {
+            // The LIVE SetPath (dumprun4): a V2-HEADED packet with a fresh
+            // 12-byte nonce, NO time tag at +0x10, a fresh nonce at +0x18,
+            // the SELF-pointer at +0x20, and the {len, flags} pair repeated
+            // at +0x28 -- the double-nested envelope. Heap/code slots after.
+            std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+            *pkt.cast::<u32>() = 2; // V2 header, the live form
+            // PERUN_SETPATH_LIVE_PKT=<path>: the live packet's 12-byte tail
+            // is the fold's coefficients; urandom tails die at -45018.
+            let setpath_live = std::env::var("PERUN_SETPATH_LIVE_PKT")
+                .ok()
+                .and_then(|f| std::fs::read(f).ok());
+            match setpath_live {
+                Some(live) => {
+                    std::ptr::copy_nonoverlapping(
+                        live.as_ptr(),
+                        pkt.cast::<u8>(),
+                        live.len().min(16),
+                    );
                 }
-                std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
-                let c = ctx.cast::<u64>();
-                std::ptr::write(c.add(0), pkt as u64);
-                std::ptr::write(c.add(1), 0x4000_0000_0000 | len);
-                std::ptr::write(c.add(3), 0x114);
-                std::ptr::write(c.add(6), spimp as u64);
-                std::ptr::write(c.add(7), start.spim.len() as u64);
-                std::ptr::write(c.add(10), olen as u64);
-                std::ptr::write(c.add(13), spimp as u64);
-                std::ptr::write(c.add(16), out as u64);
-                let r = guest_call(f, 0x0b2b3196, ctx as u64, 0, 0);
-                println!("[finish:{dname}] rc={r:#x} ({r})");
-                let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 48);
-                println!(
-                    "[finish:{dname}] pkt[0..48] = {}",
-                    pk[..48]
-                        .iter()
-                        .map(|b| format!("{b:02x}"))
-                        .collect::<String>()
+                None => {
+                    let mut b = [0u8; 12];
+                    let mut fh = std::fs::File::open("/dev/urandom").unwrap();
+                    use std::io::Read as _;
+                    fh.read_exact(&mut b).unwrap();
+                    std::ptr::copy_nonoverlapping(b.as_ptr(), pkt.cast::<u8>().add(4), 12);
+                }
+            }
+            std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+            let c = ctx.cast::<u64>();
+            std::ptr::write(c.add(0), pkt as u64);
+            std::ptr::write(c.add(1), 0x4000_0000_0010);
+            std::ptr::write(c.add(2), 0); // +0x10 no tag (the live form)
+            // +0x18: the LIVE SetPath carried a NANOSEC TIME TAG here
+            // (0xe2720690ff56d95e -- the same shifted-nanosecond class
+            // as the init slots), not a random nonce. The previous runs
+            // wrote urandom bytes into a TIME slot. Honest fix: a real
+            // nanosecond timestamp, both +0x18 and +0x38 (the live had
+            // a second time tag at +0x38).
+            {
+                let now_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos() as u64;
+                std::ptr::write(ctx.cast::<u64>().add(3), now_ns); // +0x18 time tag
+            }
+            std::ptr::write(c.add(4), ctx as u64); // +0x20 SELF
+            std::ptr::write(c.add(5), 0x4000_0000_0010); // +0x28 len|flags again
+            // +0x38: the live SetPath's SECOND time tag (0x618974abaf043478
+            // in the dump). Ours was zero -- a real nanosecond timestamp.
+            {
+                let now_ns2 = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos() as u64;
+                std::ptr::write(c.add(7), now_ns2); // +0x38 the second time tag
+            }
+            // SetPath's own contract: ctx[+0x80] = A PATH STRING
+            // (the live dump shows '/opt/data/adi-mnt/stage/adi-data'
+            // as ASCII there -- the working provisioning dir the call
+            // SETS; init's +0x68 carried the ROOT '/opt/data/perun/').
+            // The honest Windows stand-in: our real adi dir, ALWAYS.
+            // PERUN_SP_PATH_UTF16=1 writes it as UTF-16LE (the wchar
+            // form Windows APIs take; cvu8io98wun's name says wchar).
+            {
+                let adi_dir = format!(
+                    "{}/adi\0",
+                    std::env::var("PERUN_APPDATA").unwrap_or_else(|_| {
+                        "/opt/data/home/.perun/appdata/Common/Apple Computer/iTunes".into()
+                    })
                 );
-                peek_state(&image, &format!("finish_{dname}"));
+                let p80 = page(0x1000);
+                if std::env::var_os("PERUN_SP_PATH_UTF16").is_some() {
+                    let mut wide: Vec<u16> =
+                        adi_dir.trim_end_matches('\0').encode_utf16().collect();
+                    wide.push(0);
+                    for (i, w) in wide.iter().enumerate() {
+                        std::ptr::write_volatile((p80 as *mut u16).add(i), *w);
+                    }
+                } else {
+                    put(p80, 0, adi_dir.as_bytes());
+                }
+                std::ptr::write(c.add(16), p80 as u64); // +0x80 the path string, ALWAYS
+            }
+            // The dumprun4 SetPath ctx was captured on the ANDROID stand:
+            // its VALUES are Android address-space artifacts (the 0x7680_
+            // heap prefix is the stand's own region -- the same class of
+            // residue as the arg3 stack garbage), NOT Windows semantics.
+            // What transfers is the STRUCTURE: +0x38 a time tag,
+            // +0x40/+0x48/+0x50/+0x60 code pointers the body may CALL
+            // while folding (the term-collapse hypothesis: our zeros mean
+            // no calls happen and the raw opcode term rides to the tail),
+            // +0x68 a string, +0x80 the provisioning path. PERUN_SP_LIVE_
+            // CTX=1 tests that structure with OUR OWN stand-ins.
+            if std::env::var_os("PERUN_SP_LIVE_CTX").is_some() {
+                std::ptr::write(c.add(6), 0x0000_7fff_0000_0000); // +0x30 our stack-space tag
+                let now_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos() as u64;
+                std::ptr::write(c.add(7), now_ns); // +0x38 a real time tag
+                std::ptr::write(c.add(8), cb_addr(cb_slot40)); // +0x40 callable code
+                std::ptr::write(c.add(9), cb_addr(cb_slot48)); // +0x48
+                std::ptr::write(c.add(10), cb_addr(cb_slot50)); // +0x50
+                std::ptr::write(c.add(12), cb_addr(cb_slot70)); // +0x60
+                std::ptr::write(c.add(13), aux[4] as u64); // +0x68 a string page
+                put(aux[4], 0, b"cannot persist ");
+                std::ptr::write(c.add(16), pathb as u64); // +0x80 the provisioning path
+            }
+            // PERUN_SESS_ARM=1: arm the observer table around the
+            // SetPath/SetID pair (the gate-45026 station names what the
+            // session selectors fold; the transform stations stay cold).
+            let sess_arm = std::env::var_os("PERUN_SESS_ARM").is_some();
+            if sess_arm {
+                stations_arm_mode(image.base() as u64, false, true);
+            }
+            let r = guest_call(f, 0xb23c691e, ctx as u64, 0, 0);
+            println!("[setpath] rc={r:#x} ({r})");
+            // The LIVE SetID envelope (decoded from dumprun4): a V2-headed
+            // 20-byte packet, the len/flags pair 0x400000014, the arg1
+            // buffer {int32 20, int32 20} (the DLL rewrites the second
+            // length), and the identity as a 24-char hex string at
+            // +0xa0..+0xb8 (the live: '1A7DC030' '8887C2D8' '4700E2EA').
+            // Ours: the guest's hex16 plus an 8-hex tail derived from the
+            // re-minted tails -- the X-Mme full id's shape.
+            std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+            *pkt.cast::<u8>().add(0) = 2; // V2 header, the live form
+            // PERUN_SETID_LIVE_PKT=<path>[,<path2>]: the live packets key
+            // the selector's fold past -45018 (the wrapper's nonce-tail
+            // bytes are fold COEFFICIENTS, not entropy). TWO paths = the
+            // live PAIR: call #1 gets the first (the '1a7d' fail packet,
+            // whose body still RUNS and contributes to the fold table),
+            // call #2 gets the success packet. The live numbering is the
+            // measured canon; swapping them answers -45019.
+            let setid_live_pair: Vec<Vec<u8>> = std::env::var("PERUN_SETID_LIVE_PKT")
+                .map(|spec| {
+                    spec.split(',')
+                        .filter_map(|f| std::fs::read(f.trim()).ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            match setid_live_pair.first() {
+                Some(live) => {
+                    std::ptr::copy_nonoverlapping(
+                        live.as_ptr(),
+                        pkt.cast::<u8>(),
+                        live.len().min(16),
+                    );
+                }
+                None => {
+                    let mut b = [0u8; 12];
+                    let mut fh = std::fs::File::open("/dev/urandom").unwrap();
+                    use std::io::Read as _;
+                    fh.read_exact(&mut b).unwrap();
+                    std::ptr::copy_nonoverlapping(b.as_ptr(), pkt.cast::<u8>().add(4), 12);
+                }
+            }
+            std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+            // The LIVE SetID envelope, slot for slot: the time tag (the
+            // same tag<<32 construction as init-2), the wrapper nonce, the
+            // SELF-pointer at +0x20, the 'cannot persist' string, the
+            // wrapper code pointers, and the size trio -- the validator
+            // walks the envelope as a container and empty slots fault it
+            // into the session-class rejects.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0x64e8);
+            let nonce = {
+                let mut b = [0u8; 8];
+                let mut fh = std::fs::File::open("/dev/urandom").unwrap();
+                use std::io::Read as _;
+                fh.read_exact(&mut b).unwrap();
+                u64::from_le_bytes(b)
+            };
+            std::ptr::write(c.add(0), pkt as u64);
+            std::ptr::write(c.add(1), 0x4000_0000_0014);
+            std::ptr::write(c.add(2), now << 32); // +0x10 tag<<32
+            std::ptr::write(c.add(3), nonce); // +0x18
+            // The live envelope carried +0x20 = a SECOND envelope
+            // (arg1 in the dump points at its own struct; the deep dump
+            // derefs it as the outer, and the inner holds the
+            // {ptr,len} descriptor family). PERUN_SETID_INNER=1 builds
+            // the inner struct as a real page and hands its address.
+            let inner: *mut core::ffi::c_void = if std::env::var_os("PERUN_SETID_INNER").is_some() {
+                let ip = page(0x100);
+                let ci = ip.cast::<u64>();
+                std::ptr::write(ci.add(0), pkt as u64);
+                std::ptr::write(ci.add(1), 0x0000_0004_0000_0014);
+                std::ptr::write(ci.add(2), now << 32);
+                std::ptr::write(ci.add(3), nonce);
+                std::ptr::write(ci.add(4), ip as u64); // self
+                std::ptr::write(ci.add(5), 0xffff_5037);
+                std::ptr::write(ci.add(6), aux[1] as u64);
+                std::ptr::write(ci.add(7), cb_addr(cb_slot48));
+                ip
+            } else {
+                std::ptr::null_mut()
+            };
+            let slot20: u64 = if std::env::var_os("PERUN_SETID_INNER").is_some() {
+                inner as u64
+            } else {
+                ctx as u64 + 0x20
+            };
+            std::ptr::write(c.add(4), slot20); // +0x20 the live inner envelope
+            std::ptr::write(c.add(5), 0xffff_5037); // +0x28 the live error marker
+            put(aux[1], 0, b"cannot persist \0");
+            std::ptr::write(c.add(6), aux[1] as u64); // +0x30
+            let dll_code = image.base() as u64 + 0x5afc0;
+            std::ptr::write(c.add(7), dll_code); // +0x38 code ptr
+            std::ptr::write(c.add(8), 0); // +0x40
+            std::ptr::write(c.add(9), 0x70); // +0x48
+            std::ptr::write(c.add(10), 0); // +0x50
+            std::ptr::write(c.add(11), 0xc2); // +0x58
+            std::ptr::write(c.add(12), 0xf4); // +0x60
+            std::ptr::write(c.add(13), 0x30); // +0x68
+            std::ptr::write(c.add(14), 0); // +0x70
+            std::ptr::write(c.add(15), dll_code); // +0x78
+            std::ptr::write(c.add(16), dll_code); // +0x80
+            std::ptr::write(c.add(17), dll_code); // +0x88
+            std::ptr::write(c.add(18), dll_code); // +0x90
+            std::ptr::write(c.add(19), dll_code); // +0x98
+            put(aux[2], 0, &{
+                let mut v = [0u8; 32];
+                let idb = std::slice::from_raw_parts(ident.cast::<u8>(), 16);
+                for (k, b) in idb.iter().take(16).enumerate() {
+                    v[k] = *b;
+                }
+                // The 8-hex tail: from the re-minted identity's own
+                // segments, the X-Mme full-id shape.
+                let tail_hex = id
+                    .device_id
+                    .split('.')
+                    .nth(1)
+                    .unwrap_or("00000000")
+                    .to_uppercase();
+                for (k, b) in tail_hex.bytes().take(8).enumerate() {
+                    v[16 + k] = b;
+                }
+                v
+            });
+            // The live arg1 descriptor read {20, 4} before the call -- the
+            // DLL rewrote the second field to 20 on success. The live
+            // envelope pointed +0x20 at the descriptor AND at itself
+            // through the same slot family; ours keeps the descriptor.
+            // The live +0x20 slot pointed at the envelope ITSELF (self);
+            // the {20,4} descriptor lived INSIDE the packet's tail, not
+            // in a separate slot.
+            std::ptr::write(aux[3] as *mut u32, 20);
+            std::ptr::write((aux[3] as *mut u32).add(1), 4);
+            std::ptr::write(c.add(4), ctx as u64 + 0x20); // +0x20 SELF-PTR
+            // The live envelope's identity span: a 24-char hex string at
+            // +0xa0..+0xb8 with a NUL after char 24, then one more 8-hex
+            // group at +0xb8. Ours: the guest's hex16 (16) + the re-minted
+            // identity's first tail (8) = 24 chars, NUL, then the second
+            // tail (8) -- the X-Mme full-id's exact 32-hex span.
+            // Mode 5 parks the full 32-hex span in aux[2]; the default
+            // (modes 3/4) composes hex16 + the device-id's tails.
+            let idb: Vec<u8> = if std::env::var("PERUN_GUEST_ID")
+                .map(|v| v == "5")
+                .unwrap_or(false)
+            {
+                std::slice::from_raw_parts(aux[2].cast::<u8>(), 32).to_vec()
+            } else {
+                std::slice::from_raw_parts(ident.cast::<u8>(), 16).to_vec()
+            };
+            let tail1: [u8; 8] = id
+                .device_id
+                .split('.')
+                .nth(1)
+                .unwrap_or("00000000")
+                .as_bytes()[..8]
+                .try_into()
+                .unwrap();
+            let tail2: [u8; 8] = id
+                .device_id
+                .split('.')
+                .nth(2)
+                .unwrap_or("00000000")
+                .as_bytes()[..8]
+                .try_into()
+                .unwrap();
+            // PERUN_SETID_SPAN: 24 (live 24-char span) | 16 (hex16 only).
+            // PERUN_SETID_LIVE_SPAN=<path>: the EXACT live 32-byte span
+            // ('1A7DC0308887C2D8' + NUL + '470E2EA813C70C1') -- the
+            // measured live form, byte for byte.
+            let span = std::env::var("PERUN_SETID_SPAN").unwrap_or_else(|_| "24".into());
+            let span: usize = span.parse().unwrap_or(24);
+            let live_span = std::env::var("PERUN_SETID_LIVE_SPAN")
+                .ok()
+                .and_then(|f| std::fs::read(f).ok());
+            let mut srcs: Vec<u8> = Vec::new();
+            if let Some(ls) = live_span {
+                // The live span wins: 32 bytes at +0xa0..+0xb8.
+                for (k, b) in ls.iter().take(32).enumerate() {
+                    std::ptr::write(ctx.cast::<u8>().add(0xa0 + k), *b);
+                }
+            } else {
+                srcs.extend_from_slice(&idb);
+                if span >= 24 {
+                    srcs.extend_from_slice(&tail1);
+                    srcs.push(0);
+                    for (k, b) in tail2.iter().enumerate() {
+                        std::ptr::write(ctx.cast::<u8>().add(0xb8 + k), *b);
+                    }
+                } else {
+                    srcs.push(0);
+                }
+                for (k, b) in srcs.iter().enumerate() {
+                    std::ptr::write(ctx.cast::<u8>().add(0xa0 + k), *b);
+                }
+            }
+            // The LIVE call carried a CODE POINTER in R9 (arg3 =
+            // 0x7680ae906d1c, the wrapper's own frame); ours was NULL.
+            // The selector's r9d gate masks the argument -- pass a real
+            // guest code address, the DLL's own export.
+            let dll_code = image.base() as u64 + 0x5afc0;
+            // The LIVE canon called SetID TWICE (dumprun4: the '1a7d'
+            // short-string fail first, then the full form's success). The
+            // selector's slot container at [rsp+0x340] INHERITS between
+            // vdfut calls through the uncleaned frame -- the second call
+            // reads what the first wrote. Run it twice, exactly like the
+            // live sequence.
+            // PERUN_SETID_CB=1: arg3 = a LIGHT host callback (the live
+            // call passed the wrapper's own code pointer; our vdfut-as-
+            // arg3 was a heavy recursive hazard -- the validator's
+            // counter exploded through it).
+            let r2 = if std::env::var_os("PERUN_SETID_CB").is_some() {
+                guest_call(f, 0xc774d292, ctx as u64, 0, cb_addr(cb_slot48))
+            } else {
+                guest_call(f, 0xc774d292, ctx as u64, 0, dll_code)
+            };
+            println!("[setid#1] rc={r2:#x} ({r2})");
+            // Rebuild the envelope: the first call rewrote the packet.
+            // The live canon's call #2 carried ITS OWN packet (the
+            // success one); the pair's second path supplies it.
+            std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+            *pkt.cast::<u8>().add(0) = 2;
+            match setid_live_pair.get(1) {
+                Some(live2) => {
+                    std::ptr::copy_nonoverlapping(
+                        live2.as_ptr(),
+                        pkt.cast::<u8>(),
+                        live2.len().min(16),
+                    );
+                }
+                None => {
+                    let mut b = [0u8; 12];
+                    let mut fh = std::fs::File::open("/dev/urandom").unwrap();
+                    use std::io::Read as _;
+                    fh.read_exact(&mut b).unwrap();
+                    std::ptr::copy_nonoverlapping(b.as_ptr(), pkt.cast::<u8>().add(4), 12);
+                }
+            }
+            std::ptr::write(c.add(0), pkt as u64);
+            let r3 = if std::env::var_os("PERUN_SETID_CB").is_some() {
+                guest_call(f, 0xc774d292, ctx as u64, 0, cb_addr(cb_slot48))
+            } else {
+                guest_call(f, 0xc774d292, ctx as u64, 0, dll_code)
+            };
+            println!("[setid#2] rc={r3:#x} ({r3})");
+            if sess_arm {
+                // Disarm the session observers: the page re-seal, the byte
+                // restores, and the SIGTRAP disposition reset. The transform
+                // arming later (if any) reopens what it needs.
+                {
+                    let page = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+                    let arr = std::ptr::addr_of!(STATION_AT);
+                    let mut pages: Vec<u64> = Vec::new();
+                    let mut k = 0usize;
+                    while k < STATION_N {
+                        let at = std::ptr::read_volatile((*arr).as_ptr().add(k));
+                        std::ptr::write_volatile(at as *mut u8, STATION_ORIG[k]);
+                        let pg = at & !(page as u64 - 1);
+                        if !pages.contains(&pg) {
+                            pages.push(pg);
+                        }
+                        k += 1;
+                    }
+                    for pg in &pages {
+                        libc::mprotect(
+                            *pg as *mut libc::c_void,
+                            page,
+                            libc::PROT_READ | libc::PROT_EXEC,
+                        );
+                    }
+                    STATION_N = 0;
+                    libc::signal(libc::SIGTRAP, libc::SIG_DFL);
+                }
+                println!("[stations] session observers disarmed");
             }
         }
-    }
+    } // legacy_android: the Android middle calls end here
 
+    // ── node 2.6 (legacy): THE GSA re-mint for the ANDROID transform
+    // opcode -- not part of the honest Windows chain.
+    if legacy_android {
+        // Mode 3 (PERUN_GUEST_ID=3): the pipe74 conditions -- the network
+        // ran BEFORE init (the session object's buffer only fills with real
+        // server data), so read the GUEST'S material at [obj+0x20] -> +0x20
+        // and RE-MINT the GSA request under it: a second start under the
+        // guest's own id, fresh SPIM onto the page, a second init-2
+        // transplant, then transform. Modes 1/2 keep the deferred network.
+        let guest_ident: Option<String> = if guest_mode == "live" {
+            // Mode "live": the measurement probe -- the WHOLE chain rides
+            // the live dump's identity string (the fold table's seed and
+            // the live packet's coefficients come from the same session).
+            // Purely diagnostic: proves or kills the coherence hypothesis.
+            Some("1A7DC0308887C2D8".to_string())
+        } else if guest_active {
+            let slot_ptr = image.base() as u64 + 0x19ddb0;
+            let obj = unsafe { std::ptr::read_volatile(slot_ptr as *const u64) };
+            let mid = if obj > 0x1000 {
+                unsafe { std::ptr::read_volatile((obj + 0x20) as *const u64) }
+            } else {
+                0
+            };
+            if mid > 0x1000 && (mid & 7) == 0 {
+                let b = unsafe { std::slice::from_raw_parts((mid + 0x20) as *const u8, 8) };
+                Some(b.iter().map(|x| format!("{x:02X}")).collect())
+            } else {
+                println!("[guest-id] object chain missing; fallback");
+                None
+            }
+        } else {
+            None
+        };
+        println!("[guest-id] material -> {guest_ident:?}");
+        if guest_mode == "5" {
+            // Mode 5: ONE wrapper-owned identity string everywhere. No
+            // material reads, no re-mint: the collect_linux id IS the
+            // session's id -- init carried its uuid36 at +0x48, the GSA
+            // request rides it, SetID's span and the envelope slots follow.
+            // PERUN_IDENT overrides the hex16 (a measurement probe: align
+            // the fold table's seed with the live packet's coefficients).
+            let segs: Vec<String> = id.device_id.split('.').map(|s| s.to_string()).collect();
+            let hex32: String = segs.iter().take(4).cloned().collect::<String>();
+            let hex16: String = std::env::var("PERUN_IDENT")
+                .unwrap_or_else(|_| segs.iter().take(2).cloned().collect::<String>());
+            // ident = hex16 (the envelope slots' live form, no dashes).
+            put(ident, 0, hex16.as_bytes());
+            put(ident, hex16.len(), b"\0");
+            println!("[env] ident={hex16:?}");
+            // Park the 32-hex span for the SetID call below.
+            put(aux[2], 0, hex32.as_bytes());
+            put(aux[2], hex32.len(), b"\0");
+            println!("[env] setid-span={hex32:?}");
+        }
+        if guest_mode == "4" {
+            // Mode 4: the material is random per run (measured), so the
+            // ONLY way to hand init the identity the guest itself minted
+            // is a SECOND init-1 pass inside the same process: read the
+            // material, build the full dashed UUID from it (the live
+            // Call-1 carried the 36-char form), and re-init with it.
+            if let Some(h) = &guest_ident {
+                let tail1: String = id
+                    .device_id
+                    .split('.')
+                    .nth(1)
+                    .unwrap_or("00000000")
+                    .to_uppercase();
+                let tail2: String = id
+                    .device_id
+                    .split('.')
+                    .nth(2)
+                    .unwrap_or("00000000")
+                    .to_uppercase();
+                let mut hex32: String = h.clone();
+                hex32.push_str(&tail1);
+                hex32.push_str(&tail2);
+                let uuid36 = format!(
+                    "{}-{}-{}-{}-{}",
+                    &hex32[0..8],
+                    &hex32[8..12],
+                    &hex32[12..16],
+                    &hex32[16..20],
+                    &hex32[20..32]
+                );
+                println!("[guest-id] mode4 uuid36 = {uuid36:?}");
+                // Re-run init-1 with the UUID in +0x48.
+                // (set_var not needed: the UUID is written directly below.)
+                unsafe {
+                    std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+                    *pkt.cast::<u8>().add(3) = 1;
+                    *pkt.cast::<u8>().add(7) = 1;
+                    std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+                    let c = ctx.cast::<u64>();
+                    std::ptr::write(c.add(0), pkt as u64);
+                    std::ptr::write(c.add(1), 0x0000_0004_0000_0010);
+                    std::ptr::write(c.add(2), 0x0000_7fff_0000_0000);
+                    // +0x18: the live Call-1 carried a CONTAINER POINTER
+                    // ({0x7680aecd4151, 0xe8b<<32} = {buffer ptr, len<<32} --
+                    // the len form matches the DLL's own len-shifted slots).
+                    // Our honest stand-in: a container page holding {our ident
+                    // buffer, its length <<32}. PERUN_INIT_CONT=0 reverts to
+                    // the bare zero page (the old baseline).
+                    let cont18 = page(64);
+                    {
+                        let ident_len = 0x40u64; // the ident page's readable span
+                        std::ptr::write_volatile(cont18 as *mut u64, ident as u64);
+                        std::ptr::write_volatile(cont18.add(8) as *mut u64, ident_len << 32);
+                    }
+                    let use_cont = std::env::var("PERUN_INIT_CONT")
+                        .map(|v| v != "0")
+                        .unwrap_or(true);
+                    std::ptr::write(
+                        c.add(3),
+                        if use_cont {
+                            cont18 as u64
+                        } else {
+                            aux[0] as u64
+                        },
+                    );
+                    std::ptr::write(c.add(4), 0x15);
+                    std::ptr::write(c.add(5), cb_addr(cb_slot28));
+                    std::ptr::write(c.add(6), cb_addr(cb_slot30));
+                    std::ptr::write(c.add(7), 0x0000_7fff_0000_0000);
+                    std::ptr::write(c.add(8), cb_addr(cb_slot40));
+                    put(aux[4], 0, uuid36.as_bytes());
+                    put(aux[4], uuid36.len(), b"\0");
+                    std::ptr::write(c.add(9), aux[4] as u64); // +0x48 the full UUID
+                    std::ptr::write(c.add(10), 0x40e8_976e_6bde_5309);
+                    std::ptr::write(c.add(11), 0xbee2_365f_bf17_664b);
+                    std::ptr::write(c.add(14), cb_addr(cb_slot70));
+                    std::ptr::write(c.add(18), cb_addr(cb_slot90));
+                    std::ptr::write(c.add(21), cb_addr(cb_slota0));
+                    std::ptr::write(c.add(22), cb_addr(cb_slotb0));
+                    std::ptr::write(c.add(23), cb_addr(cb_slotb8));
+                    let a3 = cb_page();
+                    let r = guest_call(f, 0xb0eda7af, ctx as u64, 0, a3 as u64);
+                    println!("[init#2pass] rc={r:#x} ({r})");
+                    peek_slots(&image, "after_reinit");
+                    // The material object the second pass minted:
+                    let slot_ptr = image.base() as u64 + 0x19ddb0;
+                    let obj = std::ptr::read_volatile(slot_ptr as *const u64);
+                    let mid = if obj > 0x1000 {
+                        std::ptr::read_volatile((obj + 0x20) as *const u64)
+                    } else {
+                        0
+                    };
+                    if mid > 0x1000 && (mid & 7) == 0 {
+                        let b = std::slice::from_raw_parts((mid + 0x20) as *const u8, 8);
+                        let m2: String = b.iter().map(|x| format!("{x:02X}")).collect();
+                        println!("[guest-id] material after re-init -> {m2:?}");
+                    }
+                    // ident buffer follows the guest's minted identity now.
+                    let idb = uuid36
+                        .chars()
+                        .filter(|c| *c != '-')
+                        .take(16)
+                        .collect::<String>();
+                    put(ident, 0, idb.as_bytes());
+                    put(ident, idb.len(), b"\0");
+                    println!("[env] ident={idb:?}");
+                }
+                // (remove_var not needed: nothing was set.)
+            }
+        }
+        if guest_mode == "3"
+            && let Some(h) = &guest_ident
+        {
+            id = perun_adi_win32::net::identity_overridden(h);
+            println!(
+                "[guest-id] re-minted device-id {} lu {}",
+                id.device_id, id.lu
+            );
+            ep = Some(match perun_adi_win32::net::lookup(&id) {
+                Ok(e) => e,
+                Err(e) => {
+                    println!("[net] re-mint lookup failed: {e}");
+                    return;
+                }
+            });
+            start = Some(
+                match perun_adi_win32::net::start_provisioning(&id, ep.as_ref().unwrap()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        println!("[net] re-mint start failed: {e}");
+                        return;
+                    }
+                },
+            );
+            let s = start.as_ref().unwrap();
+            println!(
+                "[net] (re-mint) spim {} bytes, ptxid {}",
+                s.spim.len(),
+                s.ptxid
+            );
+            unsafe {
+                std::ptr::copy_nonoverlapping(s.spim.as_ptr(), spimp.cast::<u8>(), s.spim.len());
+            }
+            // The ident buffer follows the re-minted identity.
+            // PERUN_IDENT_FULL=1 probes the FULL X-Mme-Device-Id form
+            // (the 36-char dashed UUID shape) in the envelope slots;
+            // the live dump carried the 16-char no-dash form.
+            let id_hex: String = h.clone();
+            let id_put: String = if std::env::var_os("PERUN_IDENT_FULL").is_some() {
+                format!(
+                    "{id_hex}-{}/{}/{}",
+                    id.device_id.split('.').nth(1).unwrap_or("00000000"),
+                    id.device_id.split('.').nth(2).unwrap_or("00000000"),
+                    id.lu.trim_start_matches('X')
+                )
+            } else {
+                id_hex.clone()
+            };
+            put(ident, 0, id_put.as_bytes());
+            put(ident, id_put.len(), b"\0");
+            println!("[env] ident={id_put:?}");
+            std::fs::write("/opt/data/il/fresh_spim.bin", &s.spim).expect("save spim");
+            println!("[env] fresh spim saved: {} bytes", s.spim.len());
+        }
+        if guest_active && guest_mode != "3" && guest_mode != "5" {
+            id = match &guest_ident {
+                Some(h) => perun_adi_win32::net::identity_overridden(h),
+                None => perun_adi_win32::net::identity(),
+            };
+            println!("[guest-id] device-id {} lu {}", id.device_id, id.lu);
+        }
+        if ep.is_none() {
+            ep = Some(match perun_adi_win32::net::lookup(&id) {
+                Ok(e) => e,
+                Err(e) => {
+                    println!("[net] lookup failed: {e}");
+                    return;
+                }
+            });
+        }
+        if start.is_none() {
+            start = Some(
+                match perun_adi_win32::net::start_provisioning(&id, ep.as_ref().unwrap()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        println!("[net] start failed: {e}");
+                        return;
+                    }
+                },
+            );
+        }
+        {
+            let start = start.as_ref().unwrap();
+            println!(
+                "[net] spim {} bytes, ptxid {}",
+                start.spim.len(),
+                start.ptxid
+            );
+        }
+        // Shadow the Options with the resolved values for the rest of the
+        // pipeline: everything downstream reads the minted bindings.
+        let ep = match ep {
+            Some(e) => e,
+            None => return,
+        };
+        let start = match start {
+            Some(s) => s,
+            None => return,
+        };
+        // ── node 3.5/4/4.5 (legacy, continuing node 2.6's block: the
+        // transform consumes the minted `start`/`ep` -- the shadowed
+        // bindings live only inside that block): the SECOND init (an
+        // Android-canon shape), the ANDROID transform opcode
+        // 0x716bd86c, and the network finish built for it -- ONE block.
+        // ── node 3.5: the SECOND init -- the live Call-5 SHAPE ─────────────
+        // The live Call 5 is NOT a copy of Call 1: the layout differs slot
+        // by slot. Call 5's carries a TIME TAG at +0x10 (and doubled at
+        // +0x18), the identity string WITHOUT dashes at +0x28, the string
+        // "adi" at +0x30, "cannot persist " at +0x68, and the sizes at
+        // +0x80/+0x90/+0x98/+0xa0. This call is what arms the transform:
+        // it hands the guest the identity and the persistence strings the
+        // worker's inputs are built from.
+        unsafe {
+            std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+            *pkt.cast::<u8>().add(3) = 1;
+            *pkt.cast::<u8>().add(7) = 1;
+            // Zero tail, the same healed form as init-1's packet: the
+            // live nonce is session material and reads as FOREIGN data
+            // (-45020); the zero tail answers the -45061 family.
+            std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+            let c = ctx.cast::<u64>();
+            // +0x10: the live time tag (0x618a2474 = the live stand's unix
+            // stamp doubled into +0x18). Ours: THIS machine's clock, the
+            // same construction.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0x618a_2474);
+            std::ptr::write(c.add(2), now << 32); // +0x10 tag<<32
+            std::ptr::write(c.add(3), (now << 32) | now); // +0x18 doubled
+            std::ptr::write(c.add(4), cb_addr(cb_slot48)); // +0x20 the live had a WRAPPER code ptr here
+            std::ptr::write(c.add(5), ident as u64); // +0x28 identity, no dashes
+            std::ptr::write(c.add(6), aux[0] as u64); // +0x30 the "adi" string
+            std::ptr::write(c.add(8), cb_addr(cb_slot40)); // +0x40 the live code ptr
+            std::ptr::write(c.add(9), (0x64e8u64) << 32); // +0x48 the live tag
+            std::ptr::write(c.add(13), 0); // +0x68 "cannot persist" ptr
+            std::ptr::write(c.add(16), 0x70); // +0x80
+            std::ptr::write(c.add(18), 0xc2); // +0x90
+            std::ptr::write(c.add(19), 0xf4); // +0x98
+            std::ptr::write(c.add(20), 0x30); // +0xa0
+            // The envelope's buffer slots that need real strings:
+            put(aux[0], 0, b"adi\0");
+            put(aux[1], 0, b"cannot persist \0");
+            std::ptr::write(c.add(6), aux[0] as u64); // +0x30 "adi"
+            std::ptr::write(c.add(13), aux[1] as u64); // +0x68 the persist string
+            let c2 = ctx.cast::<u64>();
+            std::ptr::write(c2.add(0), pkt as u64);
+            std::ptr::write(c2.add(1), 0x0000_0004_0000_0010);
+            let r = guest_call(f, 0xb0eda7af, ctx as u64, 0, 0);
+            peek_slots(&image, "after_init2");
+            println!("[init2] rc={r:#x} ({r})");
+            let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 32);
+            println!(
+                "[init2] pkt[0..32] = {}",
+                pk[..32]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            );
+            // The worker's early-exit fork decoded from the ring: it
+            // loads the session object through the [0x19ddb0] slot and
+            // tests THE OBJECT'S +4 FIELD -- zero takes the early exit
+            // (cache check -> ReleaseMutex -> epilogue), nonzero would
+            // take the crypto route. PERUN_SESS4 seeds that field right
+            // after init-2, the same field the live wrapper's init
+            // chain leaves populated.
+            if let Some(v) = std::env::var("PERUN_SESS4")
+                .ok()
+                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+            {
+                let slot_ptr = image.base() as u64 + 0x19ddb0;
+                let obj = std::ptr::read_volatile(slot_ptr as *const u64);
+                if obj > 0x1000 {
+                    std::ptr::write_volatile((obj + 4) as *mut u64, v);
+                    println!("[sess4] [{obj:#x}+4] = {v:#x} (the fork's field)");
+                } else {
+                    println!("[sess4] slot 0x19ddb0 = {obj:#x}: no object to seed");
+                }
+            }
+        }
+
+        // ── node 4: transform with the fresh SPIM ───────────────────────────
+        let url = b"https://gsa.apple.com/grandslam/MidService/startMachineProvisioning\0";
+        // PERUN_TR_FLAGS=1: seed the gate object's session flags before
+        // the call -- the measured flag experiment ([0x19dda8]+0x8/+0xc)
+        // opened the worker's SUCCESS branch, which then died reading an
+        // event handle from a garbage slot. The live wrapper's init chain
+        // leaves these set; with the live packet now carrying the real
+        // fold coefficients, the flags may complete the route.
+        if std::env::var_os("PERUN_TR_FLAGS").is_some() {
+            unsafe {
+                let slot_ptr = image.base() as u64 + 0x19dda8;
+                let obj = std::ptr::read_volatile(slot_ptr as *const u64);
+                if obj > 0x1000 {
+                    std::ptr::write_volatile((obj + 8) as *mut u64, 1);
+                    std::ptr::write_volatile((obj + 0xc) as *mut u64, 1);
+                    println!("[tr-flags] [{obj:#x}+8]=1 [+0xc]=1 seeded");
+                } else {
+                    println!("[tr-flags] slot 0x19dda8 = {obj:#x}: no object");
+                }
+                let slot_b = image.base() as u64 + 0x19ddb0;
+                let objb = std::ptr::read_volatile(slot_b as *const u64);
+                if objb > 0x1000 {
+                    std::ptr::write_volatile((objb + 4) as *mut u64, 1);
+                    println!("[tr-flags] [{objb:#x}+4]=1 seeded (the fork's field)");
+                }
+            }
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                start.spim.as_ptr(),
+                spimp.cast::<u8>(),
+                start.spim.len(),
+            );
+            std::ptr::copy_nonoverlapping(url.as_ptr(), urlp.cast::<u8>(), url.len());
+            std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+            // The LIVE Call-6 packet (52 bytes, decoded byte-for-byte from
+            // dumprun4): V2 header + the wrapper's nonce-tail that keys the
+            // selector's fold. Zero tails died at -45018 before the body
+            // ever ran; the live bytes carry the fold coefficients.
+            *pkt.cast::<u8>().add(3) = 1;
+            *pkt.cast::<u8>().add(7) = 1;
+            // PERUN_TR_LIVE_PKT=<path>: replace the synthetic packet with
+            // the live 52-byte Call-6 body (decoded from dumprun4) -- the
+            // wrapper's nonce-tail keys the selector's fold; a zero tail
+            // died at -45018 before the body ever ran.
+            if let Some(live) = std::env::var("PERUN_TR_LIVE_PKT")
+                .ok()
+                .and_then(|f| std::fs::read(f).ok())
+            {
+                std::ptr::copy_nonoverlapping(live.as_ptr(), pkt.cast::<u8>(), live.len().min(52));
+            }
+            std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+            let dll_code = image.base() as u64 + 0x5afc0;
+            let c = ctx.cast::<u64>();
+            std::ptr::write(c.add(0), pkt as u64);
+            std::ptr::write(c.add(1), 0x4000_0000_0034);
+            std::ptr::write(c.add(3), start.spim.len() as u64); // +0x18
+            std::ptr::write(c.add(4), urlp as u64); // +0x20
+            std::ptr::write(c.add(5), 2); // +0x28
+            std::ptr::write(c.add(6), spimp as u64); // +0x30
+            std::ptr::write(c.add(7), start.spim.len() as u64); // +0x38
+            std::ptr::write(c.add(8), 4); // +0x40
+            std::ptr::write(c.add(9), cb_addr(cb_slot48)); // +0x48 = the live wrapper code slot
+            std::ptr::write(c.add(10), 0); // +0x50 = the live INLINE length slot (the worker writes 0x114 here)
+            std::ptr::write(c.add(11), start.spim.len() as u64); // +0x58
+            std::ptr::write(c.add(12), 0); // +0x60
+            std::ptr::write(c.add(13), spimp as u64); // +0x68
+            std::ptr::write(c.add(14), 0x1d0); // +0x70
+            std::ptr::write(c.add(15), urlp as u64); // +0x78
+            // The LIVE after-diff: +0x80 came back as the worker's OWN
+            // heap pointer (0x7680aece17c0), not the caller's buffer.
+            // The envelope slot is INLINE -- the worker allocates and
+            // writes the CPIM address there. Same for +0x50 (the 0x114
+            // length). Keep the out page only as a fallback probe.
+            std::ptr::write(c.add(16), 0); // +0x80 = the worker's CPIM slot
+            // The live Call-6 carried FIVE wrapper code pointers at
+            // +0x88..+0xa8 and the identity bytes at +0xb0/+0xb8; ours
+            // had neither. Probe: the DLL's own export as a valid guest
+            // code address, and our identity string inline.
+            std::ptr::write(c.add(17), cb_addr(cb_slot98)); // +0x88 (live wrapper code)
+            std::ptr::write(c.add(18), cb_addr(cb_slota0)); // +0x90
+            std::ptr::write(c.add(19), cb_addr(cb_slotb0)); // +0x98
+            std::ptr::write(c.add(20), cb_addr(cb_slotb8)); // +0xa0
+            std::ptr::write(c.add(21), cb_addr(cb_slot70)); // +0xa8
+            let idsrc = std::slice::from_raw_parts(ident.cast::<u8>(), 16);
+            for (i, b) in idsrc.iter().enumerate() {
+                std::ptr::write(ctx.cast::<u8>().add(0xb0 + i), *b);
+            }
+            // PERUN_HONEST=1: call the transform through the honest
+            // wrapper -- the SPIM pointer parked in the caller's own
+            // frame slot, the construction the live wrapper used; no
+            // external FIX30CTX poke. The library provably never
+            // writes the slot itself.
+            // PERUN_TR_SEED=1: arm the int3 station circuit around THIS
+            // call (the seq-proven five stations; the word seed is the
+            // show-and-seed probe -- the before-word print is built in).
+            let tr_seed = std::env::var_os("PERUN_TR_SEED").is_some();
+            if tr_seed {
+                stations_arm(image.base() as u64, true);
+            }
+            let r = if std::env::var_os("PERUN_HONEST").is_some() {
+                perun_honest_wrapper(f, 0x716bd86c, ctx as u64, 0xffff_ffff, spimp as u64)
+            } else {
+                // The live Call-6 carried arg3 = a CODE POINTER (the
+                // wrapper's own callback frame); ours was NULL. Probe:
+                // the DLL's own export as a valid guest code address.
+                // The live arg3 was the wrapper's frame pointer with
+                // low bytes 0xae906d1c; if the fold mixes r9d into E as
+                // a TERM, the exact live low-dword matters. PERUN_TR_R9
+                // overrides; the default keeps the DLL code address.
+                let r9v = std::env::var("PERUN_TR_R9")
+                    .ok()
+                    .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+                    .unwrap_or(dll_code);
+                guest_call(f, 0x716bd86c, ctx as u64, 0xffff_ffff, r9v)
+            };
+            if tr_seed {
+                // Disarm before anything else touches the image: restore
+                // the original bytes, drop the trap table, reset the
+                // SIGTRAP disposition to default.
+                {
+                    let page = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+                    let mut pages: Vec<u64> = Vec::new();
+                    let arr = std::ptr::addr_of!(STATION_AT);
+                    let mut k = 0usize;
+                    while k < STATION_N {
+                        let at = std::ptr::read_volatile((*arr).as_ptr().add(k));
+                        std::ptr::write_volatile(at as *mut u8, STATION_ORIG[k]);
+                        let pg = at & !(page as u64 - 1);
+                        if !pages.contains(&pg) {
+                            pages.push(pg);
+                        }
+                        k += 1;
+                    }
+                    for pg in &pages {
+                        libc::mprotect(
+                            *pg as *mut libc::c_void,
+                            page,
+                            libc::PROT_READ | libc::PROT_EXEC,
+                        );
+                    }
+                    STATION_N = 0;
+                    libc::signal(libc::SIGTRAP, libc::SIG_DFL);
+                }
+                println!("[stations] disarmed");
+            }
+            println!("[transform] rc={r:#x} ({r})");
+            peek_state(&image, "transform");
+            // The live contract: the worker writes the CPIM pointer at
+            // +0x80, the length 0x114 at +0x50, the session id at +0x60.
+            // Read all three slots back -- plus whatever pages the
+            // callbacks handed out.
+            let cpim_ptr = std::ptr::read_volatile((ctx as u64 + 0x80) as *const u64);
+            let cpim_len = std::ptr::read_volatile((ctx as u64 + 0x50) as *const u64);
+            let session = std::ptr::read_volatile((ctx as u64 + 0x60) as *const u64);
+            println!(
+                "[tr-out] ctx[+0x80]={cpim_ptr:#x} ctx[+0x50]={cpim_len:#x} ctx[+0x60]={session:#x}"
+            );
+            if cpim_ptr > 0x1000 && cpim_len > 0 {
+                let n = cpim_len.min(0x400) as usize;
+                let bytes = std::slice::from_raw_parts(cpim_ptr as *const u8, n);
+                println!(
+                    "[tr-out] first {n} bytes: {}",
+                    bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                );
+                std::fs::write("/opt/data/il/tr_cpim_live.bin", bytes).ok();
+                println!("[tr-out] wrote /opt/data/il/tr_cpim_live.bin");
+            }
+            // The live transform had OLEN=0/OUT=0: the worker's CPIM (if
+            // any) would land IN the SPIM buffer (the envelope's only
+            // writable data slot, +0x30/+0x68 both point there). Diff the
+            // spim page around the SPIM body after the call.
+            let sp0 = std::slice::from_raw_parts(spimp.cast::<u8>(), 0x400);
+            let nz = sp0.iter().filter(|b| **b != 0).count();
+            println!("[spim] nonzero in spim page[0..1024] after transform: {nz}");
+            println!(
+                "[spim] spim[0..64] = {}",
+                sp0[..64]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            );
+            // The live Call-6 envelope had OLEN=0/OUT=0 -- the CPIM, if
+            // the worker mints one, lands in the SPIM buffer itself. The
+            // page is writable; read what changed past the SPIM body.
+            let n_after = start.spim.len();
+            let tail = std::slice::from_raw_parts(spimp.cast::<u8>().add(n_after), 0x200);
+            let tnz = tail.iter().filter(|b| **b != 0).count();
+            println!("[spim] nonzero in spim[{n_after}..{n_after}+512]: {tnz}");
+            if tnz > 0 {
+                std::fs::write("/opt/data/il/spim_tail_after_transform.bin", tail).unwrap();
+                println!("[spim] wrote /opt/data/il/spim_tail_after_transform.bin");
+            }
+        }
+
+        // What did transform write into the packet? The live run rewrote the
+        // packet in place with a status header; ours may differ and the diff
+        // tells which branch the worker took without needing any sniffers.
+        unsafe {
+            let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 64);
+            let nz = pk.iter().filter(|b| **b != 0).count();
+            println!("[pkt] nonzero in pkt[0..64]: {nz}");
+            println!(
+                "[pkt] pkt[0..48] = {}",
+                pk[..48]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            );
+        }
+
+        // ── node 4.5: the network finish -- close the loop ──────────────────
+        // The canon: transform writes the CPIM; the CPIM goes to
+        // finishMachineProvisioning; the server answers ptm/tk. Our
+        // transform's worker still reads -45001 (no session state), so the
+        // out buffer is empty -- send what we have and read the server's
+        // own verdict: it validates the CPIM's binding to this machine and
+        // answers ec=<code>. That ec is the FIRST outside oracle for the
+        // offline chain, and the shape of the answer tells whether the
+        // machine-binding lives in the CPIM at all.
+        let out_len = unsafe { std::ptr::read(olen.cast::<u64>()) } as usize;
+        let mut cpim =
+            unsafe { std::slice::from_raw_parts(out.cast::<u8>(), out_len.min(0x1000)) }.to_vec();
+        println!("[net] cpim candidate: {out_len} bytes (empty unless the worker minted)");
+        // PERUN_FINISH_CPIM=<path>: override the CPIM sent to the server --
+        // the probe lane for testing how the server binds the finish
+        // request (an external artifact against a fresh ptxid, etc.).
+        // The answer's ec is the outside oracle for the whole offline chain.
+        if let Some(f) = std::env::var_os("PERUN_FINISH_CPIM") {
+            match std::fs::read(f.to_string_lossy().as_ref()) {
+                Ok(bytes) => {
+                    println!(
+                        "[net] PERUN_FINISH_CPIM override: {} bytes from {}",
+                        bytes.len(),
+                        f.to_string_lossy()
+                    );
+                    cpim = bytes;
+                }
+                Err(e) => println!("[net] PERUN_FINISH_CPIM unreadable: {e}"),
+            }
+        }
+        match perun_adi_win32::net::finish_provisioning(&id, &ep, &cpim, &start.ptxid) {
+            Ok(fin) => {
+                println!(
+                    "[net] FINISH ec=0: ptm {} bytes, tk {} bytes, rinfo {}",
+                    fin.ptm.len(),
+                    fin.tk.len(),
+                    fin.rinfo
+                );
+                std::fs::write("/opt/data/il/ptm.bin", &fin.ptm).expect("ptm");
+                std::fs::write("/opt/data/il/tk.bin", &fin.tk).expect("tk");
+            }
+            Err(e) => println!("[net] finish: {e}"),
+        }
+
+        // ── node 5 (legacy, same block: consumes `start`): the ANDROID
+        // finish opcode 0x0b2b3196 probe.
+        // ── node 5: the finish opcode probe (0x0b2b3196) ────────────────────
+        // Its envelope shape is not yet decoded (the live Call-7 dump sits in
+        // dumprun4 behind the same ctx-printing the others were). Probe with
+        // the transform shape to see the opcode's rejection class: whether it
+        // even exists in the Windows dispatcher (not -45019) is the question.
+        unsafe {
+            let dg = &start.spim;
+            // The finish matrix, ungated: the four double-V1 probes (each
+            // rc=0x0, each publishing the worker's -45001 verdict in place)
+            // are what shifts the dispatcher so the FOLLOWING OTP's dword-1|1
+            // packet passes its header fold (pipe17 measured: matrix then
+            // init3+transform3 then OTP = 0x0; without the matrix the OTP
+            // reads -45018, 5/5). The first measured inter-call dependency.
+            {
+                for (len, dname, dg_bytes) in [
+                    (0x24u64, "z24", None),
+                    (0x24, "s24", Some(dg)),
+                    (0x34, "z34", None),
+                    (0x34, "s34", Some(dg)),
+                ] {
+                    std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+                    *pkt.cast::<u8>().add(3) = 1;
+                    *pkt.cast::<u8>().add(7) = 1;
+                    if let Some(d) = dg_bytes {
+                        for i in 0..32usize {
+                            *pkt.cast::<u8>().add(8 + i) = d[d.len() - 32 + i];
+                        }
+                    }
+                    std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+                    let c = ctx.cast::<u64>();
+                    std::ptr::write(c.add(0), pkt as u64);
+                    std::ptr::write(c.add(1), 0x4000_0000_0000 | len);
+                    std::ptr::write(c.add(3), 0x114);
+                    std::ptr::write(c.add(6), spimp as u64);
+                    std::ptr::write(c.add(7), start.spim.len() as u64);
+                    std::ptr::write(c.add(10), olen as u64);
+                    std::ptr::write(c.add(13), spimp as u64);
+                    std::ptr::write(c.add(16), out as u64);
+                    let r = guest_call(f, 0x0b2b3196, ctx as u64, 0, 0);
+                    println!("[finish:{dname}] rc={r:#x} ({r})");
+                    let pk = std::slice::from_raw_parts(pkt.cast::<u8>(), 48);
+                    println!(
+                        "[finish:{dname}] pkt[0..48] = {}",
+                        pk[..48]
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect::<String>()
+                    );
+                    peek_state(&image, &format!("finish_{dname}"));
+                }
+            }
+        }
+    } // legacy_android: the finish-opcode probe ends here
+
+    // ── node 6 (the honest Windows chain's tail): OTP (0x3e58e7f9) --
+    // a RECOGNISED Windows opcode (RESEARCH table 24).
     // OTP, minimal null-session envelope: the fold runs on dword-1 words
     // (pkt_pass2's shape) and returns 0 with the packet untouched -- the
     // canon's verdict channel reports nothing to publish. The live-shaped
