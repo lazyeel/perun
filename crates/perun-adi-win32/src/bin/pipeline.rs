@@ -831,7 +831,29 @@ fn main() {
             .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
             .unwrap_or(0x0000_7fff_0000_0000);
         std::ptr::write(c.add(2), tag3); // stack-ish tag (live: 7680 form)
-        std::ptr::write(c.add(3), aux[0] as u64);
+        // +0x18: the live Call-1 carried a CONTAINER POINTER
+        // ({0x7680aecd4151, 0xe8b<<32} = {buffer ptr, len<<32} --
+        // the len form matches the DLL's own len-shifted slots).
+        // Our honest stand-in: a container page holding {our ident
+        // buffer, its length <<32}. PERUN_INIT_CONT=0 reverts to
+        // the bare zero page (the old baseline).
+        let cont18 = page(64);
+        {
+            let ident_len = 0x40u64; // the ident page's readable span
+            std::ptr::write_volatile(cont18 as *mut u64, ident as u64);
+            std::ptr::write_volatile(cont18.add(8) as *mut u64, ident_len << 32);
+        }
+        let use_cont = std::env::var("PERUN_INIT_CONT")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        std::ptr::write(
+            c.add(3),
+            if use_cont {
+                cont18 as u64
+            } else {
+                aux[0] as u64
+            },
+        );
         std::ptr::write(c.add(4), 0x15); // 21, measured
         std::ptr::write(c.add(5), aux[1] as u64);
         std::ptr::write(c.add(6), aux[2] as u64);
@@ -841,12 +863,23 @@ fn main() {
         // LIVE Call-1 forms -- +0x60 (a heap pointer), +0x68 (the live
         // provisioning PATH '/opt/data/perun/'), +0x70 (a nanosec
         // address) -- the bounded diffs behind the init's fold.
+        // +0x68 is the LIVE Call-1's PATH string pointer ('/opt/
+        // data/perun/' -- the ROOT provisioning dir, read as ASCII
+        // in the dump). The honest default now carries it ALWAYS:
+        // the previous baseline left the slot ZERO while every live
+        // envelope had a path there, and SetPath's own +0x80 path
+        // contract shows the DLL reads these strings. PERUN_INIT_
+        // LIVE_CTX adds the remaining still-untested live slots.
+        {
+            let p68 = page(64);
+            put(p68, 0, b"/opt/data/perun/");
+            put(p68, 16, b"\0");
+            std::ptr::write(c.add(13), p68 as u64); // +0x68 the root path, ALWAYS
+        }
         if std::env::var_os("PERUN_INIT_LIVE_CTX").is_some() {
             let p60 = page(64);
             std::ptr::write(c.add(12), p60 as u64); // +0x60 heap ptr
-            put(pathb, 0, b"/opt/data/perun/");
-            put(pathb, 16, b"\0");
-            std::ptr::write(c.add(13), pathb as u64); // +0x68 the live path
+            // (+0x68 already set to the root path above.)
             // +0x70: the live was a NANOSEC-carrying address (a
             // wrapper time source), not a callback -- a fresh page
             // with a nanosec timestamp answers both readings.
@@ -1015,15 +1048,56 @@ fn main() {
         std::ptr::write(c.add(0), pkt as u64);
         std::ptr::write(c.add(1), 0x4000_0000_0010);
         std::ptr::write(c.add(2), 0); // +0x10 no tag (the live form)
+        // +0x18: the LIVE SetPath carried a NANOSEC TIME TAG here
+        // (0xe2720690ff56d95e -- the same shifted-nanosecond class
+        // as the init slots), not a random nonce. The previous runs
+        // wrote urandom bytes into a TIME slot. Honest fix: a real
+        // nanosecond timestamp, both +0x18 and +0x38 (the live had
+        // a second time tag at +0x38).
         {
-            let mut b = [0u8; 8];
-            let mut fh = std::fs::File::open("/dev/urandom").unwrap();
-            use std::io::Read as _;
-            fh.read_exact(&mut b).unwrap();
-            std::ptr::copy_nonoverlapping(b.as_ptr(), ctx.cast::<u8>().add(0x18), 8);
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64;
+            std::ptr::write(ctx.cast::<u64>().add(3), now_ns); // +0x18 time tag
         }
         std::ptr::write(c.add(4), ctx as u64); // +0x20 SELF
         std::ptr::write(c.add(5), 0x4000_0000_0010); // +0x28 len|flags again
+        // +0x38: the live SetPath's SECOND time tag (0x618974abaf043478
+        // in the dump). Ours was zero -- a real nanosecond timestamp.
+        {
+            let now_ns2 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64;
+            std::ptr::write(c.add(7), now_ns2); // +0x38 the second time tag
+        }
+        // SetPath's own contract: ctx[+0x80] = A PATH STRING
+        // (the live dump shows '/opt/data/adi-mnt/stage/adi-data'
+        // as ASCII there -- the working provisioning dir the call
+        // SETS; init's +0x68 carried the ROOT '/opt/data/perun/').
+        // The honest Windows stand-in: our real adi dir, ALWAYS.
+        // PERUN_SP_PATH_UTF16=1 writes it as UTF-16LE (the wchar
+        // form Windows APIs take; cvu8io98wun's name says wchar).
+        {
+            let adi_dir = format!(
+                "{}/adi\0",
+                std::env::var("PERUN_APPDATA").unwrap_or_else(|_| {
+                    "/opt/data/home/.perun/appdata/Common/Apple Computer/iTunes".into()
+                })
+            );
+            let p80 = page(0x1000);
+            if std::env::var_os("PERUN_SP_PATH_UTF16").is_some() {
+                let mut wide: Vec<u16> = adi_dir.trim_end_matches('\0').encode_utf16().collect();
+                wide.push(0);
+                for (i, w) in wide.iter().enumerate() {
+                    std::ptr::write_volatile((p80 as *mut u16).add(i), *w);
+                }
+            } else {
+                put(p80, 0, adi_dir.as_bytes());
+            }
+            std::ptr::write(c.add(16), p80 as u64); // +0x80 the path string, ALWAYS
+        }
         // The dumprun4 SetPath ctx was captured on the ANDROID stand:
         // its VALUES are Android address-space artifacts (the 0x7680_
         // heap prefix is the stand's own region -- the same class of
@@ -1423,7 +1497,29 @@ fn main() {
                 std::ptr::write(c.add(0), pkt as u64);
                 std::ptr::write(c.add(1), 0x0000_0004_0000_0010);
                 std::ptr::write(c.add(2), 0x0000_7fff_0000_0000);
-                std::ptr::write(c.add(3), aux[0] as u64);
+                // +0x18: the live Call-1 carried a CONTAINER POINTER
+                // ({0x7680aecd4151, 0xe8b<<32} = {buffer ptr, len<<32} --
+                // the len form matches the DLL's own len-shifted slots).
+                // Our honest stand-in: a container page holding {our ident
+                // buffer, its length <<32}. PERUN_INIT_CONT=0 reverts to
+                // the bare zero page (the old baseline).
+                let cont18 = page(64);
+                {
+                    let ident_len = 0x40u64; // the ident page's readable span
+                    std::ptr::write_volatile(cont18 as *mut u64, ident as u64);
+                    std::ptr::write_volatile(cont18.add(8) as *mut u64, ident_len << 32);
+                }
+                let use_cont = std::env::var("PERUN_INIT_CONT")
+                    .map(|v| v != "0")
+                    .unwrap_or(true);
+                std::ptr::write(
+                    c.add(3),
+                    if use_cont {
+                        cont18 as u64
+                    } else {
+                        aux[0] as u64
+                    },
+                );
                 std::ptr::write(c.add(4), 0x15);
                 std::ptr::write(c.add(5), cb_addr(cb_slot28));
                 std::ptr::write(c.add(6), cb_addr(cb_slot30));
