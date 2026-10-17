@@ -111,6 +111,16 @@ unsafe extern "C" fn station_handler(
                     // guest stack top (rsp rounded down a page) always is.
                     gregs[libc::REG_RAX as usize] = (rsp & !0xfff) as i64;
                 }
+                7 => {
+                    // The SetPath tail-gate seed: the final cascade
+                    // compares the fold term to the INIT opcode term
+                    // (cmp $0x9005d7c2,%edi at 0x8feaa); seeding rdi
+                    // with the init term passes it (measured in seq,
+                    // SetPath rc=0 x2 with the word+term pair).
+                    let rdi_v = gregs[libc::REG_RDI as usize] as u64;
+                    eprintln!("[station] tail-seed rip={rip:#x} rdi was {rdi_v:#x} -> 0x9005d7c2");
+                    gregs[libc::REG_RDI as usize] = 0x9005_d7c2;
+                }
                 6 => {
                     // The -45026 gate observer: the E-gate at 0x8b05c7
                     // (cmp r9d, 0x4069d332) -- print the incoming r9d,
@@ -259,59 +269,30 @@ fn stations_arm_mode(image_base: u64, seed_word: bool, observers_only: bool) {
         // contract (0x9154e), the epilogue (0x131620), the crypto
         // fork (0x131577).
         if observers_only {
-            // 5..=8 are the worker observers, 9 the fork, 10 the gate.
-            STATION_AT[0] = image_base + 0x100050;
-            STATION_KIND[0] = 4;
-            STATION_AT[1] = image_base + 0x91512;
-            STATION_KIND[1] = 4;
-            STATION_AT[2] = image_base + 0x9154e;
+            // The session watch. Under PERUN_SESS_WORDS=1 the TWO
+            // LOCKS are seeded (the verdict word at [PKT+4..8] via
+            // the 0x7019d station, and the init-term tail at 0x8feaa
+            // -- the pair that carries SetPath to rc=0); without it
+            // the same two sites are pure observers. The rest are the
+            // worker-route observers and the confirmed gate heads.
+            let seeds = std::env::var_os("PERUN_SESS_WORDS").is_some();
+            STATION_AT[0] = image_base + 0x7019d;
+            STATION_KIND[0] = if seeds { 1 } else { 4 };
+            STATION_AT[1] = image_base + 0x8feaa;
+            STATION_KIND[1] = if seeds { 7 } else { 4 };
+            STATION_AT[2] = image_base + 0x100050;
             STATION_KIND[2] = 4;
-            STATION_AT[3] = image_base + 0x131620;
+            STATION_AT[3] = image_base + 0x91512;
             STATION_KIND[3] = 4;
-            STATION_AT[4] = image_base + 0x131577;
+            STATION_AT[4] = image_base + 0x9154e;
             STATION_KIND[4] = 4;
-            STATION_AT[5] = image_base + 0xb05c7;
-            STATION_KIND[5] = 6;
-            // The -45026 publisher site and the tail-gate cascade's
-            // two-threshold block (the SetPath tail) -- watching what
-            // the session selectors actually visit.
-            STATION_AT[6] = image_base + 0xb05f5;
+            STATION_AT[5] = image_base + 0x131577;
+            STATION_KIND[5] = 4;
+            STATION_AT[6] = image_base + 0x8fee2;
             STATION_KIND[6] = 4;
-            // The SetPath tail-gate cascade's FINAL gate (cmp
-            // $0x9005d7c2, the INIT opcode term): the place the
-            // session bodies die at -45019. Watching edi here
-            // names the fold-term the body accumulated.
-            STATION_AT[7] = image_base + 0x8feaa;
-            STATION_KIND[7] = 4;
-            // Every cmp $0x4069d333 site in the image (16 found in the
-            // disassembly): watching which one the init body takes and
-            // what register value dies there.
-            let gates = [
-                0x66d14u64, 0x66d5e, 0x8f6fa, 0x8f945, 0x8fb62, 0x8fd6c, 0x8fee2, 0x900a5, 0x90275,
-                0x9041b, 0x9059a, 0x90758, 0x908e2, 0x90a6f, 0x90b38, 0xb4665,
-            ];
-            for (gi, gr) in gates.iter().enumerate() {
-                STATION_AT[8 + gi] = image_base + gr;
-                STATION_KIND[8 + gi] = 6;
-            }
-            // The E-bit cmovne nodes feeding the gate slot: the
-            // and-$1,%bl idiom picks between two fold results, and
-            // 0x83ba87 is the very writer of [rsp+0x6c0].
-            // NOTE: the 0x3ba72/0x3ba87 and 0x40812/0x40a2a probe
-            // stations are REMOVED -- an int3 landing inside a
-            // multi-byte instruction the body executes (not at its
-            // head) corrupts the decoder WITHOUT ever firing the
-            // station, and it polluted the init gate's fold term
-            // across two whole runs (r9d 0x4269d332 instead of the
-            // clean 0x4069d334). Observers must sit on CONFIRMED
-            // instruction heads only.
-            //
-            // For the INIT watch only the confirmed head 0x66d14:
-            // the other fifteen gate sites are NOT verified as
-            // instruction heads for this body's route.
-            STATION_AT[24] = image_base + 0x66d14;
-            STATION_KIND[24] = 6;
-            STATION_N = 25;
+            STATION_AT[7] = image_base + 0x66d14;
+            STATION_KIND[7] = 6;
+            STATION_N = 8;
             SEED_BASE = image_base;
         } else {
             STATION_N = if seed_word { 10 } else { 9 };
