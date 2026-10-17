@@ -506,6 +506,7 @@ cb!(cb_slot28);
 cb!(cb_slot30);
 cb!(cb_slot40);
 cb!(cb_slot48);
+cb!(cb_slot50);
 cb!(cb_slot70);
 cb!(cb_slot90);
 cb!(cb_slot98);
@@ -1023,6 +1024,31 @@ fn main() {
         }
         std::ptr::write(c.add(4), ctx as u64); // +0x20 SELF
         std::ptr::write(c.add(5), 0x4000_0000_0010); // +0x28 len|flags again
+        // The dumprun4 SetPath ctx was captured on the ANDROID stand:
+        // its VALUES are Android address-space artifacts (the 0x7680_
+        // heap prefix is the stand's own region -- the same class of
+        // residue as the arg3 stack garbage), NOT Windows semantics.
+        // What transfers is the STRUCTURE: +0x38 a time tag,
+        // +0x40/+0x48/+0x50/+0x60 code pointers the body may CALL
+        // while folding (the term-collapse hypothesis: our zeros mean
+        // no calls happen and the raw opcode term rides to the tail),
+        // +0x68 a string, +0x80 the provisioning path. PERUN_SP_LIVE_
+        // CTX=1 tests that structure with OUR OWN stand-ins.
+        if std::env::var_os("PERUN_SP_LIVE_CTX").is_some() {
+            std::ptr::write(c.add(6), 0x0000_7fff_0000_0000); // +0x30 our stack-space tag
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64;
+            std::ptr::write(c.add(7), now_ns); // +0x38 a real time tag
+            std::ptr::write(c.add(8), cb_addr(cb_slot40)); // +0x40 callable code
+            std::ptr::write(c.add(9), cb_addr(cb_slot48)); // +0x48
+            std::ptr::write(c.add(10), cb_addr(cb_slot50)); // +0x50
+            std::ptr::write(c.add(12), cb_addr(cb_slot70)); // +0x60
+            std::ptr::write(c.add(13), aux[4] as u64); // +0x68 a string page
+            put(aux[4], 0, b"cannot persist ");
+            std::ptr::write(c.add(16), pathb as u64); // +0x80 the provisioning path
+        }
         // PERUN_SESS_ARM=1: arm the observer table around the
         // SetPath/SetID pair (the gate-45026 station names what the
         // session selectors fold; the transform stations stay cold).
