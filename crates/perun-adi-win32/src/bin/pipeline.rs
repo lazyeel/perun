@@ -1066,6 +1066,38 @@ fn main() {
                     *pkt.cast::<u32>().add(1) = env_id;
                     guest_call(f, 0x85fe63b0, pkt as u64, 0, 0)
                 }
+                "frame" => {
+                    // The gate-1 decode (0x66be8): the argument frame is
+                    // rbx=[rsp+0x80] with input_len at +0x08 and the
+                    // cursor at +0x0c (input_len > cursor+4). The flags
+                    // field follows at +0x10 (the ADI glossary's fourth
+                    // field; the table-24 rule wants it >= 8).
+                    // PERUN_IDMS_V2=1 uses the V2 header (00 00 00 02 --
+                    // the provisioning-route header) instead of V1.
+                    let v2h = std::env::var_os("PERUN_IDMS_V2").is_some();
+                    std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+                    let b = pkt.cast::<u32>();
+                    *b.add(0) = if v2h { 2 } else { 1 }; // the version word
+                    *b.add(1) = env_id; // the routing value
+                    std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+                    let c = ctx.cast::<u64>();
+                    std::ptr::write(c.add(0), pkt as u64); // +0: the packet
+                    std::ptr::write(c.add(1), 0x10); // +8: input_len 16
+                    std::ptr::write(c.add(2), 0x4); // +0xc: cursor (output room)
+                    std::ptr::write(c.add(3), 0x08); // +0x10: FLAGS bit 3
+                    guest_call(f, 0x85fe63b0, ctx as u64, 0, 0)
+                }
+                "flat8" => {
+                    // The -45034 = unknownAdiCallFlags decode (RESEARCH
+                    // gate 1, RVA 0x66c2d): flags >= 8 with bit 3 set.
+                    // The flat block carries them at +0x08.
+                    std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+                    let b = pkt.cast::<u32>();
+                    *b.add(0) = 1; // the version-1 word
+                    *b.add(1) = env_id; // the routing value
+                    *b.add(2) = 0x08; // FLAGS: bit 3 set (>= 8)
+                    guest_call(f, 0x85fe63b0, pkt as u64, 0, 0)
+                }
                 "adiauth" => {
                     // The FULL ADI argument-block form (RESEARCH 2988:
                     // "arguments pointer, input size, output size, flags";
@@ -1093,6 +1125,22 @@ fn main() {
                 std::ptr::write(c2.add(0), pkt as u64);
                 std::ptr::write(c2.add(1), 0x4000_0000_0010);
                 guest_call(f, 0x632b8d6e, ctx as u64, 0, 0)
+            } else if idms_mode == "frame" {
+                std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+                *pkt.cast::<u32>() = 1;
+                std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+                let c = ctx.cast::<u64>();
+                std::ptr::write(c.add(0), pkt as u64);
+                std::ptr::write(c.add(1), 0x10);
+                std::ptr::write(c.add(2), 0x4);
+                std::ptr::write(c.add(3), 0x08);
+                guest_call(f, 0x632b8d6e, ctx as u64, 0, 0)
+            } else if idms_mode == "flat8" {
+                std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+                let b = pkt.cast::<u32>();
+                *b.add(0) = 1;
+                *b.add(2) = 0x08;
+                guest_call(f, 0x632b8d6e, pkt as u64, 0, 0)
             } else if idms_mode == "adiauth" {
                 std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
                 let b = pkt.cast::<u32>();
@@ -1131,6 +1179,71 @@ fn main() {
     // 0x00, byte7=0x01 (the gate's third-invocation flag bytes)},
     // and the guest global at 0x19db98 pointed at the same
     // scratch page. The default keeps the container form.
+    // PERUN_CFG_SPIM=1: the PROVISIONING FORM of Configuration
+    // (0xcfe0b46a = ProvisioningStart): the packet carries the LIVE
+    // SPIM (the 347 bytes the GSA start minted for this machine) with
+    // its length and the dsid, the envelope carries the SPIM pointer,
+    // the output buffer and sizes, and the flags field at +0x10 (bit 3).
+    if std::env::var_os("PERUN_CFG_SPIM").is_some() {
+        unsafe {
+            let spim: Vec<u8> = match start.as_ref() {
+                Some(s) => s.spim.clone(),
+                None => Vec::new(),
+            };
+            let spimp2 = page(0x1000);
+            std::ptr::copy_nonoverlapping(spim.as_ptr(), spimp2.cast::<u8>(), spim.len());
+            let out2 = page(0x1000);
+            std::ptr::write_bytes(pkt.cast::<u8>(), 0, 4096);
+            let pb = pkt.cast::<u8>();
+            *pb.add(0) = 0x00;
+            *pb.add(1) = 0x00;
+            *pb.add(2) = 0x00;
+            *pb.add(3) = 0x02; // the V2 provisioning header
+            let l = spim.len() as u32; // 0x15b = 347
+            *pb.add(4) = u8::try_from(l >> 24).unwrap_or(0); // BE length
+            *pb.add(5) = u8::try_from((l >> 16) & 0xff).unwrap_or(0);
+            *pb.add(6) = u8::try_from((l >> 8) & 0xff).unwrap_or(0);
+            *pb.add(7) = u8::try_from(l & 0xff).unwrap_or(0);
+            // +0x08..+0x0f: the dsid = -1 (the provisioning wildcard).
+            for i in 8..16usize {
+                *pb.add(i) = 0xff;
+            }
+            // +0x10..: the SPIM body itself.
+            std::ptr::copy_nonoverlapping(spim.as_ptr(), pb.add(16), spim.len());
+            std::ptr::write_bytes(ctx.cast::<u8>(), 0, 0x1_0000);
+            let c = ctx.cast::<u64>();
+            std::ptr::write(c.add(0), pkt as u64); // +0: the packet
+            std::ptr::write(c.add(1), u64::from(l) + 16); // +8: input size
+            std::ptr::write(c.add(2), 512); // +0xc: output size (CPIM room)
+            std::ptr::write(c.add(3), 0x08); // +0x10: FLAGS, bit 3
+            std::ptr::write(c.add(4), 0); // +0x18: the cursor
+            std::ptr::write(c.add(6), spimp2 as u64); // +0x30: the SPIM ptr
+            std::ptr::write(c.add(7), u64::from(l)); // +0x38: the SPIM len
+            std::ptr::write(c.add(14), 0x1d0); // +0x70: the measured size field
+            std::ptr::write(c.add(16), out2 as u64); // +0x80: the OUT buffer
+            let rs = guest_call(f, 0xcfe0b46a, ctx as u64, 0, 0);
+            println!("[cfg:spim] rc={rs:#x} ({rs}) (spim {l} B)");
+            let pk = std::slice::from_raw_parts(pb, 64);
+            println!(
+                "[cfg:spim] pkt[0..64] = {}",
+                pk.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            );
+            let ob = std::slice::from_raw_parts(out2.cast::<u8>(), 64);
+            let onz = std::slice::from_raw_parts(out2.cast::<u8>(), 512)
+                .iter()
+                .filter(|b| **b != 0)
+                .count();
+            println!(
+                "[cfg:spim] out[0..64] = {} (nonzero in 512: {onz})",
+                ob.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            );
+            let cpim_len = std::ptr::read_volatile((ctx as u64 + 0x50) as *const u64);
+            let cpim_ptr = std::ptr::read_volatile((ctx as u64 + 0x80) as *const u64);
+            println!("[cfg:spim] ctx[+0x50]={cpim_len:#x} ctx[+0x80]={cpim_ptr:#x}");
+            peek_state(&image, "cfg_spim");
+        }
+    }
+
     if std::env::var_os("PERUN_CFG_58").is_some() {
         unsafe {
             let sp58 = page(0x1000);
