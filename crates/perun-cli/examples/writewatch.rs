@@ -28,6 +28,12 @@ static WATCH_LEN: AtomicU64 = AtomicU64::new(0);
 static ZONE_PROBE_AT: AtomicU64 = AtomicU64::new(0);
 static ZONE_PROBE_ORIG: AtomicU64 = AtomicU64::new(0);
 static ZONE_PROBE_HIT: AtomicU64 = AtomicU64::new(0);
+static T8_BASE: AtomicU64 = AtomicU64::new(0);
+static T8_HIT: AtomicU64 = AtomicU64::new(0);
+static RESEAL_T8: AtomicBool = AtomicBool::new(false);
+static RESEAL_T8_HOST: AtomicBool = AtomicBool::new(false);
+static INIT_PKT_Q0: AtomicU64 = AtomicU64::new(0);
+static INIT_PKT_Q1: AtomicU64 = AtomicU64::new(0);
 static ZONE_REARM: AtomicBool = AtomicBool::new(false);
 static RESEAL: AtomicBool = AtomicBool::new(false);
 static HIT_N: AtomicU64 = AtomicU64::new(0);
@@ -35,6 +41,42 @@ static HIT_N: AtomicU64 = AtomicU64::new(0);
 extern "C" fn on_segv(_sig: libc::c_int, info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
     unsafe {
         let addr = (*info).si_addr() as u64;
+        let uc = &mut *(ctx as *mut libc::ucontext_t);
+        // PERUN_T8_ADDR: a write-only watch over the T8 table's page --
+        // catching the writer instruction that fills the r9 conveyor's
+        // first table (the 0x...a051 family).
+        let t8 = T8_BASE.load(Ordering::SeqCst);
+        if t8 != 0 && addr >= t8 && addr < t8 + 0x1000 {
+            let rip = uc.uc_mcontext.gregs[libc::REG_RIP as usize] as u64;
+            let n = T8_HIT.fetch_add(1, Ordering::SeqCst);
+            let off = addr - t8;
+            let rax = uc.uc_mcontext.gregs[libc::REG_RAX as usize] as u64;
+            let rbx = uc.uc_mcontext.gregs[libc::REG_RBX as usize] as u64;
+            let rcx = uc.uc_mcontext.gregs[libc::REG_RCX as usize] as u64;
+            let rdx = uc.uc_mcontext.gregs[libc::REG_RDX as usize] as u64;
+            let rsi = uc.uc_mcontext.gregs[libc::REG_RSI as usize] as u64;
+            let rdi = uc.uc_mcontext.gregs[libc::REG_RDI as usize] as u64;
+            let r8v = uc.uc_mcontext.gregs[libc::REG_R8 as usize] as u64;
+            let r9v = uc.uc_mcontext.gregs[libc::REG_R9 as usize] as u64;
+            let r11 = uc.uc_mcontext.gregs[libc::REG_R11 as usize] as u64;
+            let mut line = [0u8; 320];
+            let msg = format!(
+                "[t8] WRITE#{n} rip={rip:#x} (rva={:#x}) t8+{off:#x} | rax={rax:#x} rbx={rbx:#x} rcx={rcx:#x} rdx={rdx:#x} rsi={rsi:#x} rdi={rdi:#x} r8={r8v:#x} r9={r9v:#x} r11={r11:#x}\n",
+                rip.wrapping_sub(0x7c80_0000)
+            );
+            let bytes = msg.as_bytes();
+            let n_copy = line.len().min(bytes.len());
+            line[..n_copy].copy_from_slice(&bytes[..n_copy]);
+            libc::write(2, line.as_ptr().cast(), n_copy);
+            libc::mprotect(
+                t8 as *mut libc::c_void,
+                0x1000,
+                libc::PROT_READ | libc::PROT_WRITE,
+            );
+            uc.uc_mcontext.gregs[libc::REG_EFL as usize] |= 0x100;
+            RESEAL_T8.store(true, Ordering::SeqCst);
+            return;
+        }
         let base = WATCH_BASE.load(Ordering::SeqCst);
         let len = WATCH_LEN.load(Ordering::SeqCst);
         if len == 0 || addr < base || addr >= base.wrapping_add(len) {
@@ -43,7 +85,6 @@ extern "C" fn on_segv(_sig: libc::c_int, info: *mut libc::siginfo_t, ctx: *mut l
             libc::signal(libc::SIGSEGV, libc::SIG_DFL);
             return;
         }
-        let uc = &mut *(ctx as *mut libc::ucontext_t);
         let rip = uc.uc_mcontext.gregs[libc::REG_RIP as usize] as u64;
         let off = addr - base;
         let n = HIT_N.fetch_add(1, Ordering::SeqCst);
@@ -135,6 +176,24 @@ extern "C" fn on_trap(_sig: libc::c_int, _info: *mut libc::siginfo_t, ctx: *mut 
                 uc.uc_mcontext.gregs[libc::REG_R14 as usize] as u64,
                 uc.uc_mcontext.gregs[libc::REG_RDX as usize] as u64,
             );
+            // The init packet's own head -- the digest source check
+            // (the a051 family lives in the init packet the body
+            // published; T8 may be its direct rearrangement).
+            msg.push_str(&format!(
+                "  INITPKT: {:016x} {:016x}\n",
+                INIT_PKT_Q0.load(Ordering::SeqCst),
+                INIT_PKT_Q1.load(Ordering::SeqCst)
+            ));
+            // The first SIXTEEN words of T8 -- enough to read the fill
+            // pattern (the base word and the index sweep).
+            if r8v > 0x10000 {
+                let mut row = String::new();
+                for k in 0..16u64 {
+                    let w = std::ptr::read_volatile((r8v + k * 4) as *const u32);
+                    row.push_str(&format!("{w:08x} "));
+                }
+                msg.push_str(&format!("  T8ROW {r8v:#x}: {row}\n"));
+            }
             for (name, base) in [("T8", r8v), ("T12", r12v), ("T14", r14v), ("Tdx", rdxv)] {
                 if base > 0x10000 {
                     let w0 = std::ptr::read_volatile(base as *const u32);
@@ -184,6 +243,15 @@ extern "C" fn on_trap(_sig: libc::c_int, _info: *mut libc::siginfo_t, ctx: *mut 
             let flags = uc.uc_mcontext.gregs[libc::REG_EFL as usize] as u64;
             uc.uc_mcontext.gregs[libc::REG_EFL as usize] = (flags & !0x100) as i64;
             RESEAL.store(true, Ordering::SeqCst);
+            return;
+        }
+        if RESEAL_T8.swap(false, Ordering::SeqCst) {
+            let t8b = T8_BASE.load(Ordering::SeqCst);
+            if t8b != 0 {
+                libc::mprotect(t8b as *mut libc::c_void, 0x1000, libc::PROT_READ);
+            }
+            let flags = uc.uc_mcontext.gregs[libc::REG_EFL as usize] as u64;
+            uc.uc_mcontext.gregs[libc::REG_EFL as usize] = (flags & !0x100) as i64;
             return;
         }
         if RESEAL.swap(false, Ordering::SeqCst) {
@@ -289,6 +357,24 @@ fn main() {
             std::ptr::write_volatile((path_page as *mut u16).add(i), *w);
         }
     }
+    // PERUN_T8_ADDR: write-watch the T8 page from the very start
+    // (the table fills somewhere between cvu and the cfg conveyor).
+    // The handlers go in FIRST -- host writes on the shared heap page
+    // need the fall-through path from the very first cvu step.
+    install_handlers();
+    if let Some(v) = std::env::var("PERUN_T8_ADDR")
+        .ok()
+        .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+    {
+        T8_BASE.store(v, Ordering::SeqCst);
+        WATCH_LEN.store(0x1000, Ordering::SeqCst);
+        WATCH_BASE.store(0, Ordering::SeqCst);
+        // Seal the page read-only NOW: any write (the table's fill
+        // included) faults into the handler with the writer's rip.
+        let pg = v & !0xfff;
+        let mr = unsafe { libc::mprotect(pg as *mut libc::c_void, 0x1000, libc::PROT_READ) };
+        eprintln!("[ww] T8 watch armed at {v:#x} (mprotect={mr})");
+    }
     let _ = unsafe { cvu(path_page as u64, 0, 0, 0) };
     eprintln!("[ww] cvu rc noted");
 
@@ -301,6 +387,29 @@ fn main() {
         std::ptr::write_volatile(c, init_pkt as u64);
         std::ptr::write_volatile(c.add(1), 0x10);
         let r = op(0xb0eda7af, init_ctx as u64, 0, 0);
+        // Keep the init packet for the probe: the T8 tail family
+        // check (a051) and the X-sweep comparison -- the early
+        // 0x67891 series fills this packet right before the
+        // T-quartet allocations.
+        let ipk = std::slice::from_raw_parts(init_pkt.cast::<u8>(), 0x180);
+        let mut row = String::new();
+        for b in ipk.iter().take(64) {
+            row.push_str(&format!("{b:02x}"));
+        }
+        eprintln!("[ww] initpkt[0..64] = {row}");
+        let mut row2 = String::new();
+        for b in ipk.iter().skip(64).take(64) {
+            row2.push_str(&format!("{b:02x}"));
+        }
+        eprintln!("[ww] initpkt[64..128] = {row2}");
+        INIT_PKT_Q0.store(
+            std::ptr::read_volatile(init_pkt.cast::<u64>()),
+            Ordering::SeqCst,
+        );
+        INIT_PKT_Q1.store(
+            std::ptr::read_volatile((init_pkt as *mut u64).add(1)),
+            Ordering::SeqCst,
+        );
         eprintln!("[ww] init rc={r:#x} ({r})");
     }
 
@@ -378,12 +487,17 @@ fn main() {
         }
     }
 
-    // Arm the write-only watch over the packet page and call.
+    // Arm the write-only watch over the packet page and call
+    // (PERUN_NO_WATCH=1 leaves the packet writable -- the
+    // probe-only runs).
+    let no_watch = std::env::var_os("PERUN_NO_WATCH").is_some();
     WATCH_BASE.store(pkt as u64, Ordering::SeqCst);
-    WATCH_LEN.store(0x1000, Ordering::SeqCst);
+    WATCH_LEN.store(if no_watch { 0 } else { 0x1000 }, Ordering::SeqCst);
     install_handlers();
-    unsafe {
-        libc::mprotect(pkt as *mut libc::c_void, 0x1000, libc::PROT_READ);
+    if !no_watch {
+        unsafe {
+            libc::mprotect(pkt as *mut libc::c_void, 0x1000, libc::PROT_READ);
+        }
     }
     let r = unsafe { op(0xcfe0b46a, ctx as u64, 0, 0) };
     eprintln!("[ww] cfg rc={r:#x} ({r})");
