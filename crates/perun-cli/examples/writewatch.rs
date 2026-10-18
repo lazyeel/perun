@@ -122,9 +122,28 @@ extern "C" fn on_trap(_sig: libc::c_int, _info: *mut libc::siginfo_t, ctx: *mut 
             }
             // The round's frame slots (the store offsets and the index
             // seeds the 16 channels read): one dump line each.
-            for off in [0x88, 0xe8, 0x140, 0x310, 0x3c8, 0x4a0, 0x500, 0x508] {
+            for off in [
+                0x88, 0xe8, 0x140, 0x310, 0x3c8, 0x4a0, 0x500, 0x508, 0x5c0, 0x68, 0x70,
+            ] {
                 let v = std::ptr::read_volatile((rsp_v + off) as *const u64);
                 msg.push_str(&format!("  [rsp+{off:#x}]={v:#x}\n"));
+            }
+            // The T-table quartet's heads and the round's own indexes:
+            let (r8v, r12v, r14v, rdxv) = (
+                uc.uc_mcontext.gregs[libc::REG_R8 as usize] as u64,
+                uc.uc_mcontext.gregs[libc::REG_R12 as usize] as u64,
+                uc.uc_mcontext.gregs[libc::REG_R14 as usize] as u64,
+                uc.uc_mcontext.gregs[libc::REG_RDX as usize] as u64,
+            );
+            for (name, base) in [("T8", r8v), ("T12", r12v), ("T14", r14v), ("Tdx", rdxv)] {
+                if base > 0x10000 {
+                    let w0 = std::ptr::read_volatile(base as *const u32);
+                    let w1 = std::ptr::read_volatile((base + 4) as *const u32);
+                    let wmid = std::ptr::read_volatile((base + 0x200) as *const u32);
+                    msg.push_str(&format!(
+                        "  {name}[{base:#x}]: [0]={w0:#x} [1]={w1:#x} [mid]={wmid:#x}\n"
+                    ));
+                }
             }
             // The two packet-adjacent state pages the rounds also fold:
             let pkt_q = WATCH_BASE.load(Ordering::SeqCst);
@@ -138,21 +157,30 @@ extern "C" fn on_trap(_sig: libc::c_int, _info: *mut libc::siginfo_t, ctx: *mut 
             let nc = line.len().min(bytes.len());
             line[..nc].copy_from_slice(&bytes[..nc]);
             libc::write(2, line.as_ptr().cast(), nc);
-            // One-shot probe: restore, rewind, single-step, disarm.
-            // (Re-arming loops with the watch-page TF dance; the entry
-            // registers are what we came for.)
+            // Reusable probe: restore, rewind, single-step -- and the
+            // TF trap handler re-arms the 0xcc (PERUN_ZONE_PROBE_MAX
+            // caps the fire count; default 8).
             std::ptr::write_volatile(zat as *mut u8, ZONE_PROBE_ORIG.load(Ordering::SeqCst) as u8);
-            ZONE_PROBE_AT.store(0, Ordering::SeqCst);
             uc.uc_mcontext.gregs[libc::REG_RIP as usize] = zat as i64;
             let flags = uc.uc_mcontext.gregs[libc::REG_EFL as usize] as u64;
             uc.uc_mcontext.gregs[libc::REG_EFL as usize] = (flags | 0x100) as i64;
             RESEAL.store(true, Ordering::SeqCst);
+            ZONE_REARM.store(true, Ordering::SeqCst);
             return;
         }
-        // The single-step after a probe hit: put the 0xcc back.
+        // The single-step after a probe hit: put the 0xcc back (up to
+        // PERUN_ZONE_PROBE_MAX fires), then re-seal the watch page.
         if ZONE_REARM.swap(false, Ordering::SeqCst) {
             let zat2 = ZONE_PROBE_AT.load(Ordering::SeqCst);
-            std::ptr::write_volatile(zat2 as *mut u8, 0xcc);
+            let max: u64 = std::env::var("PERUN_ZONE_PROBE_MAX")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8);
+            if ZONE_PROBE_HIT.load(Ordering::SeqCst) < max && zat2 != 0 {
+                std::ptr::write_volatile(zat2 as *mut u8, 0xcc);
+            } else {
+                ZONE_PROBE_AT.store(0, Ordering::SeqCst);
+            }
             let flags = uc.uc_mcontext.gregs[libc::REG_EFL as usize] as u64;
             uc.uc_mcontext.gregs[libc::REG_EFL as usize] = (flags & !0x100) as i64;
             RESEAL.store(true, Ordering::SeqCst);
