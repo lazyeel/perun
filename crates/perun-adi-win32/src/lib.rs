@@ -382,4 +382,6 @@ mod tests {
         }
     }
 }
+pub mod fold_zone;
+pub mod simd_cycles;
 pub mod word_channels;
