@@ -25,6 +25,10 @@ type ExportFn = unsafe extern "win64" fn(u64, u64, u64, u64) -> u64;
 
 static WATCH_BASE: AtomicU64 = AtomicU64::new(0);
 static WATCH_LEN: AtomicU64 = AtomicU64::new(0);
+static ZONE_PROBE_AT: AtomicU64 = AtomicU64::new(0);
+static ZONE_PROBE_ORIG: AtomicU64 = AtomicU64::new(0);
+static ZONE_PROBE_HIT: AtomicU64 = AtomicU64::new(0);
+static ZONE_REARM: AtomicBool = AtomicBool::new(false);
 static RESEAL: AtomicBool = AtomicBool::new(false);
 static HIT_N: AtomicU64 = AtomicU64::new(0);
 
@@ -83,6 +87,77 @@ extern "C" fn on_segv(_sig: libc::c_int, info: *mut libc::siginfo_t, ctx: *mut l
 
 extern "C" fn on_trap(_sig: libc::c_int, _info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
     unsafe {
+        // The zone probe: int3 at the fold zone's entry -- dump the
+        // register file, restore the byte, single-step past it, and
+        // re-arm for a second hit.
+        let uc = &mut *(ctx as *mut libc::ucontext_t);
+        let rip = uc.uc_mcontext.gregs[libc::REG_RIP as usize] as u64;
+        let zat = ZONE_PROBE_AT.load(Ordering::SeqCst);
+        if zat != 0 && rip == zat + 1 {
+            let n = ZONE_PROBE_HIT.fetch_add(1, Ordering::SeqCst);
+            let g = &uc.uc_mcontext.gregs;
+            let regs: [(&str, u64); 16] = [
+                ("rax", g[libc::REG_RAX as usize] as u64),
+                ("rbx", g[libc::REG_RBX as usize] as u64),
+                ("rcx", g[libc::REG_RCX as usize] as u64),
+                ("rdx", g[libc::REG_RDX as usize] as u64),
+                ("rsi", g[libc::REG_RSI as usize] as u64),
+                ("rdi", g[libc::REG_RDI as usize] as u64),
+                ("rbp", g[libc::REG_RBP as usize] as u64),
+                ("rsp", g[libc::REG_RSP as usize] as u64),
+                ("r8", g[libc::REG_R8 as usize] as u64),
+                ("r9", g[libc::REG_R9 as usize] as u64),
+                ("r10", g[libc::REG_R10 as usize] as u64),
+                ("r11", g[libc::REG_R11 as usize] as u64),
+                ("r12", g[libc::REG_R12 as usize] as u64),
+                ("r13", g[libc::REG_R13 as usize] as u64),
+                ("r14", g[libc::REG_R14 as usize] as u64),
+                ("r15", g[libc::REG_R15 as usize] as u64),
+            ];
+            let mut line = [0u8; 4096];
+            let rsp_v = uc.uc_mcontext.gregs[libc::REG_RSP as usize] as u64;
+            let mut msg = format!("[zone] HIT#{n} entry rip={rip:#x}\n");
+            for (name, val) in regs {
+                msg.push_str(&format!("  {name}={val:#x}\n"));
+            }
+            // The round's frame slots (the store offsets and the index
+            // seeds the 16 channels read): one dump line each.
+            for off in [0x88, 0xe8, 0x140, 0x310, 0x3c8, 0x4a0, 0x500, 0x508] {
+                let v = std::ptr::read_volatile((rsp_v + off) as *const u64);
+                msg.push_str(&format!("  [rsp+{off:#x}]={v:#x}\n"));
+            }
+            // The two packet-adjacent state pages the rounds also fold:
+            let pkt_q = WATCH_BASE.load(Ordering::SeqCst);
+            if pkt_q != 0 {
+                for off in [0x0, 0x10, 0x20, 0x30] {
+                    let v = std::ptr::read_volatile((pkt_q + off) as *const u64);
+                    msg.push_str(&format!("  [pkt+{off:#x}]={v:#x}\n"));
+                }
+            }
+            let bytes = msg.as_bytes();
+            let nc = line.len().min(bytes.len());
+            line[..nc].copy_from_slice(&bytes[..nc]);
+            libc::write(2, line.as_ptr().cast(), nc);
+            // One-shot probe: restore, rewind, single-step, disarm.
+            // (Re-arming loops with the watch-page TF dance; the entry
+            // registers are what we came for.)
+            std::ptr::write_volatile(zat as *mut u8, ZONE_PROBE_ORIG.load(Ordering::SeqCst) as u8);
+            ZONE_PROBE_AT.store(0, Ordering::SeqCst);
+            uc.uc_mcontext.gregs[libc::REG_RIP as usize] = zat as i64;
+            let flags = uc.uc_mcontext.gregs[libc::REG_EFL as usize] as u64;
+            uc.uc_mcontext.gregs[libc::REG_EFL as usize] = (flags | 0x100) as i64;
+            RESEAL.store(true, Ordering::SeqCst);
+            return;
+        }
+        // The single-step after a probe hit: put the 0xcc back.
+        if ZONE_REARM.swap(false, Ordering::SeqCst) {
+            let zat2 = ZONE_PROBE_AT.load(Ordering::SeqCst);
+            std::ptr::write_volatile(zat2 as *mut u8, 0xcc);
+            let flags = uc.uc_mcontext.gregs[libc::REG_EFL as usize] as u64;
+            uc.uc_mcontext.gregs[libc::REG_EFL as usize] = (flags & !0x100) as i64;
+            RESEAL.store(true, Ordering::SeqCst);
+            return;
+        }
         if RESEAL.swap(false, Ordering::SeqCst) {
             let base = WATCH_BASE.load(Ordering::SeqCst);
             let len = WATCH_LEN.load(Ordering::SeqCst);
@@ -243,6 +318,36 @@ fn main() {
         std::ptr::write_volatile(c.add(7), u64::from(spim.len() as u32));
         std::ptr::write_volatile(c.add(14), 0x1d0);
         std::ptr::write_volatile(c.add(16), out as u64);
+    }
+
+    // PERUN_ZONE_PROBE=1: an int3 at the fold zone's entry
+    // (image_base + 0x6c5fe) dumps the register file once, then
+    // resumes -- measuring whether the cfg path crosses the zone.
+    let zone_probe = std::env::var_os("PERUN_ZONE_PROBE").is_some();
+    #[allow(unused_assignments)]
+    let mut zone_orig = 0u8;
+    let image_base = 0x7c80_0000u64;
+    if zone_probe {
+        unsafe {
+            let page = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+            let a = image_base
+                + u64::from(
+                    std::env::var("PERUN_ZONE_PROBE_RVA")
+                        .ok()
+                        .and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+                        .unwrap_or(0x6c5fe),
+                );
+            let pg = a & !((page - 1) as u64);
+            libc::mprotect(
+                pg as *mut libc::c_void,
+                page,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+            );
+            zone_orig = std::ptr::read_volatile(a as *const u8);
+            std::ptr::write_volatile(a as *mut u8, 0xcc);
+            ZONE_PROBE_AT.store(a, Ordering::SeqCst);
+            ZONE_PROBE_ORIG.store(u64::from(zone_orig), Ordering::SeqCst);
+        }
     }
 
     // Arm the write-only watch over the packet page and call.

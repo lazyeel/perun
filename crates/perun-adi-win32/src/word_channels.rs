@@ -22,6 +22,15 @@
 //! read constants): base4 = 0x162cb0, base5 = 0x14b830,
 //! base6 = 0x183cf0, base7 = 0x159270.
 //!
+//! The round map (the 2026-10-23 probe): the cfg body writes the
+//! packet in SIXTEEN-BYTE ROUNDS -- 45 rounds x 16 stores = the 736
+//! logged writes -- every channel reading one image byte through a
+//! planter row and folding it through its own bijective mixer. The
+//! word is round 0's slots +4..+7; the digest body (+8..+0x13) rides
+//! the same machinery. Channels +8 and +9 are transcribed here too
+//! (measured, parity-pinned); the remaining ten follow the same
+//! skeleton with their own constants.
+//!
 //! G4 is a byte bijection whose unique preimages are 0x01 <- 0x69
 //! and 0x00 <- 0xda: the SUCCESS WORD 00 00 00 01 therefore requires
 //! every channel to land on its own success byte of the image, which
@@ -84,6 +93,59 @@ pub fn g6(x: u8) -> u32 {
     let neg = (((edi << 1) as u32) & 0x30).wrapping_neg();
     0x98_u32.wrapping_add(edi as u32).wrapping_add(neg)
 }
+
+/// The pkt+8 index: [rsp+0x88] ^ 0x19 -- read DIRECTLY (no MBA
+/// chain; the +8 channel is the plain-xor sibling of the +4 base).
+#[inline]
+pub fn idx8(frame88: u8) -> u32 {
+    u32::from(frame88 ^ 0x19)
+}
+
+/// The pkt+8 byte mixer (bijective; preimages 0x01 <- ?, 0x00 <- ?).
+#[inline]
+pub fn g8(x: u8) -> u8 {
+    // cl = x ^ 0x23; dl = cl*0x4f - (cl*0x9e & 0x64) + 0x32;
+    // al = ((dl>>1) & 0x62) - (dl & 0x44) + 0x26; al ^= dl; al ^= 0x38.
+    let cl = x ^ 0x23;
+    let dl = (cl.wrapping_mul(0x4f))
+        .wrapping_sub(cl.wrapping_mul(0x9e) & 0x64)
+        .wrapping_add(0x32);
+    let al = ((dl >> 1) & 0x62)
+        .wrapping_sub(dl & 0x44)
+        .wrapping_add(0x26);
+    (al ^ dl) ^ 0x38
+}
+
+/// The pkt+9 index mixer: a = [rsp+0xe8] ^ 0xd3 (the byte).
+#[inline]
+pub fn mba9(a: u8) -> u32 {
+    let x = a as u32;
+    let neg = ((x << 1) & 0x11c).wrapping_neg();
+    (0x77e278e_u32).wrapping_add(x).wrapping_add(neg) ^ 0x77e2745
+}
+
+/// The pkt+9 byte mixer (bijective; 0x00 <- 0xd6, 0x01 <- 0xd7).
+#[inline]
+pub fn g9(x: u8) -> u8 {
+    let ecx = x;
+    let al = (ecx << 1) & 0x20;
+    let mut dl = al | 0x19;
+    let al2 = al << 1;
+    dl = dl.wrapping_sub(al2).wrapping_add(0x57) ^ 0x50;
+    dl = dl.wrapping_add(0xf0);
+    let al3 = dl ^ 0xeb;
+    let mut cl = (x ^ 0x2d).wrapping_add(al3);
+    let dl2 = (dl << 1) & 0xd4;
+    cl = cl.wrapping_add(dl2).wrapping_add(0x15);
+    let al4 = (cl << 1) & 0xca;
+    cl = cl.wrapping_sub(al4).wrapping_add(0x65) ^ 0x8e;
+    cl
+}
+
+/// The measured +8/+9 channel bases (the r13/r14 rows minus their
+/// read constants).
+pub const BASE8: u32 = 0x162cb0;
+pub const BASE9: u32 = 0x14b830;
 
 /// The measured channel bases (image RVAs).
 pub const BASE4: u32 = 0x162cb0;
@@ -207,5 +269,35 @@ mod tests {
         assert_eq!(mba7(0xfa), 0xb2);
         assert_eq!(mba6(0x77), 0x6e);
         assert_eq!(g6(0x00), 0xa3);
+    }
+
+    /// The +8 channel: the measured byte 0xa7 reads to the digest's
+    /// first body byte 0xd2, and the mixer is a bijection.
+    #[test]
+    fn channel8_digest_parity_and_bijection() {
+        assert_eq!(idx8(0x4b), 0x52);
+        assert_eq!(g8(0xa7), 0xd2);
+        let mut seen = [false; 256];
+        for x in 0u16..256 {
+            let y = g8(x as u8) as usize;
+            assert!(!seen[y], "g8 collision at {x:#x}");
+            seen[y] = true;
+        }
+    }
+
+    /// The +9 channel: the measured byte 0x75 reads to 0xa3, and the
+    /// mixer's preimages of the success bytes are 0xd6/0xd7.
+    #[test]
+    fn channel9_digest_parity_and_preimages() {
+        assert_eq!(mba9(0x8b ^ 0xd3), 0x93);
+        assert_eq!(g9(0x75), 0xa3);
+        assert_eq!(g9(0xd6), 0x00);
+        assert_eq!(g9(0xd7), 0x01);
+        let mut seen = [false; 256];
+        for x in 0u16..256 {
+            let y = g9(x as u8) as usize;
+            assert!(!seen[y], "g9 collision at {x:#x}");
+            seen[y] = true;
+        }
     }
 }

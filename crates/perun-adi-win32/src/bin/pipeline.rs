@@ -327,6 +327,17 @@ fn stations_arm_mode(image_base: u64, seed_word: bool, observers_only: bool) {
         // Patch the int3 bytes. The .text page is RWX (the loader maps
         // it PROT_READ|WRITE|EXEC); each address is a verified
         // instruction boundary from the walk.
+        // PERUN_ZONE_OBS=1: the fold-zone entry/exit observers -- the
+        // zone (0x6c5fe..0x6e453) runs inside every call's fold; the
+        // stations dump the register file at its entry and its exit.
+        // Pure measurement: no writes.
+        if std::env::var("PERUN_ZONE_OBS").is_ok() && observers_only {
+            STATION_N = 2;
+            STATION_AT[0] = image_base + 0x6c5fe;
+            STATION_KIND[0] = 4;
+            STATION_AT[1] = image_base + 0x6e453;
+            STATION_KIND[1] = 4;
+        }
         let n_armed = STATION_N;
         println!("[arm] base={image_base:#x} n={n_armed}");
         // The loader seals sections to their PE permissions after the
