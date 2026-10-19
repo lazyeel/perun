@@ -28,6 +28,9 @@ static WATCH_LEN: AtomicU64 = AtomicU64::new(0);
 static ZONE_PROBE_AT: AtomicU64 = AtomicU64::new(0);
 static ZONE_PROBE_ORIG: AtomicU64 = AtomicU64::new(0);
 static ZONE_PROBE_HIT: AtomicU64 = AtomicU64::new(0);
+static SPIM_BASE: AtomicU64 = AtomicU64::new(0);
+static SPIM_HIT: AtomicU64 = AtomicU64::new(0);
+static RESEAL_SPIM: AtomicBool = AtomicBool::new(false);
 static T8_BASE: AtomicU64 = AtomicU64::new(0);
 static T8_HIT: AtomicU64 = AtomicU64::new(0);
 static RESEAL_T8: AtomicBool = AtomicBool::new(false);
@@ -44,6 +47,38 @@ extern "C" fn on_segv(_sig: libc::c_int, info: *mut libc::siginfo_t, ctx: *mut l
         // PERUN_T8_ADDR: a write-only watch over the T8 table's page --
         // catching the writer instruction that fills the r9 conveyor's
         // first table (the 0x...a051 family).
+        // PERUN_SPIM_TRACE: read-watch over the SPIM page -- every
+        // guest read faults with the reader's rip and the offset.
+        let sp = SPIM_BASE.load(Ordering::SeqCst);
+        if sp != 0 && addr >= sp && addr < sp + 0x1000 {
+            let rip = uc.uc_mcontext.gregs[libc::REG_RIP as usize] as u64;
+            let n = SPIM_HIT.fetch_add(1, Ordering::SeqCst);
+            let off = addr - sp;
+            let rax = uc.uc_mcontext.gregs[libc::REG_RAX as usize] as u64;
+            let rbx = uc.uc_mcontext.gregs[libc::REG_RBX as usize] as u64;
+            let rcx = uc.uc_mcontext.gregs[libc::REG_RCX as usize] as u64;
+            let rdx = uc.uc_mcontext.gregs[libc::REG_RDX as usize] as u64;
+            let rsi = uc.uc_mcontext.gregs[libc::REG_RSI as usize] as u64;
+            let rdi = uc.uc_mcontext.gregs[libc::REG_RDI as usize] as u64;
+            let r8v = uc.uc_mcontext.gregs[libc::REG_R8 as usize] as u64;
+            let r9v = uc.uc_mcontext.gregs[libc::REG_R9 as usize] as u64;
+            let r10 = uc.uc_mcontext.gregs[libc::REG_R10 as usize] as u64;
+            let r11 = uc.uc_mcontext.gregs[libc::REG_R11 as usize] as u64;
+            let r14 = uc.uc_mcontext.gregs[libc::REG_R14 as usize] as u64;
+            let mut line = [0u8; 320];
+            let msg = format!(
+                "[spim] READ#{n} rip={rip:#x} (rva={:#x}) spim+{off:#x} | rax={rax:#x} rbx={rbx:#x} rcx={rcx:#x} rdx={rdx:#x} rsi={rsi:#x} rdi={rdi:#x} r8={r8v:#x} r9={r9v:#x} r10={r10:#x} r11={r11:#x} r14={r14:#x}\n",
+                rip.wrapping_sub(0x7c80_0000)
+            );
+            let bytes = msg.as_bytes();
+            let nc = line.len().min(bytes.len());
+            line[..nc].copy_from_slice(&bytes[..nc]);
+            libc::write(2, line.as_ptr().cast(), nc);
+            libc::mprotect(sp as *mut libc::c_void, 0x1000, libc::PROT_READ);
+            uc.uc_mcontext.gregs[libc::REG_EFL as usize] |= 0x100;
+            RESEAL_SPIM.store(true, Ordering::SeqCst);
+            return;
+        }
         let t8 = T8_BASE.load(Ordering::SeqCst);
         if t8 != 0 && addr >= t8 && addr < t8 + 0x1000 {
             let rip = uc.uc_mcontext.gregs[libc::REG_RIP as usize] as u64;
@@ -251,6 +286,16 @@ extern "C" fn on_trap(_sig: libc::c_int, _info: *mut libc::siginfo_t, ctx: *mut 
             uc.uc_mcontext.gregs[libc::REG_EFL as usize] = (flags | 0x100) as i64;
             RESEAL.store(true, Ordering::SeqCst);
             ZONE_REARM.store(true, Ordering::SeqCst);
+            return;
+        }
+        // The single-step after a SPIM read: re-seal the page.
+        if RESEAL_SPIM.swap(false, Ordering::SeqCst) {
+            let sb = SPIM_BASE.load(Ordering::SeqCst);
+            if sb != 0 {
+                libc::mprotect(sb as *mut libc::c_void, 0x1000, libc::PROT_NONE);
+            }
+            let flags = uc.uc_mcontext.gregs[libc::REG_EFL as usize] as u64;
+            uc.uc_mcontext.gregs[libc::REG_EFL as usize] = (flags & !0x100) as i64;
             return;
         }
         // The single-step after a probe hit: put the 0xcc back (up to
@@ -556,6 +601,24 @@ fn main() {
         }
     }
 
+    eprintln!(
+        "[ww] pages: pkt={:#x} spim_page={:#x} out={:#x} init_pkt={:#x} init_ctx={:#x} ctx={:#x}",
+        pkt as usize,
+        spim_page as usize,
+        out as usize,
+        init_pkt as usize,
+        init_ctx as usize,
+        ctx as usize
+    );
+    // PERUN_SPIM_TRACE=1: read-watch the SPIM page from the cfg
+    // call -- every guest read faults with its rip and offset.
+    if std::env::var_os("PERUN_SPIM_TRACE").is_some() {
+        SPIM_BASE.store(spim_page as u64, Ordering::SeqCst);
+        unsafe {
+            libc::mprotect(spim_page as *mut libc::c_void, 0x1000, libc::PROT_NONE);
+        }
+        eprintln!("[ww] SPIM read-watch armed at {:#x}", spim_page as usize);
+    }
     // Arm the write-only watch over the packet page and call
     // (PERUN_NO_WATCH=1 leaves the packet writable -- the
     // probe-only runs).
