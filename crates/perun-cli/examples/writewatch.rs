@@ -31,7 +31,6 @@ static ZONE_PROBE_HIT: AtomicU64 = AtomicU64::new(0);
 static T8_BASE: AtomicU64 = AtomicU64::new(0);
 static T8_HIT: AtomicU64 = AtomicU64::new(0);
 static RESEAL_T8: AtomicBool = AtomicBool::new(false);
-static RESEAL_T8_HOST: AtomicBool = AtomicBool::new(false);
 static INIT_PKT_Q0: AtomicU64 = AtomicU64::new(0);
 static INIT_PKT_Q1: AtomicU64 = AtomicU64::new(0);
 static ZONE_REARM: AtomicBool = AtomicBool::new(false);
@@ -184,15 +183,17 @@ extern "C" fn on_trap(_sig: libc::c_int, _info: *mut libc::siginfo_t, ctx: *mut 
                 INIT_PKT_Q0.load(Ordering::SeqCst),
                 INIT_PKT_Q1.load(Ordering::SeqCst)
             ));
-            // The first SIXTEEN words of T8 -- enough to read the fill
-            // pattern (the base word and the index sweep).
-            if r8v > 0x10000 {
-                let mut row = String::new();
-                for k in 0..16u64 {
-                    let w = std::ptr::read_volatile((r8v + k * 4) as *const u32);
-                    row.push_str(&format!("{w:08x} "));
+            // The first SIXTEEN words of each quartet table -- the
+            // fill patterns (base words and index sweeps) side by side.
+            for (name, base) in [("T8", r8v), ("T12", r12v), ("T14", r14v), ("Tdx", rdxv)] {
+                if base > 0x10000 {
+                    let mut row = String::new();
+                    for k in 0..16u64 {
+                        let w = std::ptr::read_volatile((base + k * 4) as *const u32);
+                        row.push_str(&format!("{w:08x} "));
+                    }
+                    msg.push_str(&format!("  {name}ROW {base:#x}: {row}\n"));
                 }
-                msg.push_str(&format!("  T8ROW {r8v:#x}: {row}\n"));
             }
             for (name, base) in [("T8", r8v), ("T12", r12v), ("T14", r14v), ("Tdx", rdxv)] {
                 if base > 0x10000 {
@@ -378,14 +379,57 @@ fn main() {
     let _ = unsafe { cvu(path_page as u64, 0, 0, 0) };
     eprintln!("[ww] cvu rc noted");
 
-    // The honest init (V1): rc=0, the 'not provisioned' contract.
+    // The HONEST V1 init -- the a4485c6 contract, ported from
+    // pipeline.rs verbatim: the live Call-1 envelope (the identity
+    // string, the container form, the root path, the nanosec page)
+    // with the V1-keyed packet (bytes 3 and 7 set), which answers
+    // rc=0 and publishes the -45061 'not provisioned' verdict word
+    // {ffff4ffb, 00000001} -- the SUCCESS family the T-quartet
+    // sweep must bake instead of the failed branch's 0x4145a051.
     let init_ctx = region(0x1_0000);
     let init_pkt = region(0x1000);
     unsafe {
-        std::ptr::write_volatile(init_pkt.cast::<u32>(), 1);
+        std::ptr::write_bytes(init_pkt.cast::<u8>(), 0, 4096);
+        std::ptr::write_volatile(init_pkt.cast::<u8>().add(3), 1);
+        std::ptr::write_volatile(init_pkt.cast::<u8>().add(7), 1);
         let c = init_ctx.cast::<u64>();
-        std::ptr::write_volatile(c, init_pkt as u64);
-        std::ptr::write_volatile(c.add(1), 0x10);
+        std::ptr::write_bytes(init_ctx.cast::<u8>(), 0, 0x1_0000);
+        std::ptr::write_volatile(c.add(0), init_pkt as u64);
+        std::ptr::write_volatile(c.add(1), 0x0000_0004_0000_0010); // len | flags
+        std::ptr::write_volatile(c.add(2), 0x0000_7fff_0000_0000); // stack tag
+        let cont18 = region(64);
+        let ident_buf = region(4096);
+        let id_hex: String = std::env::var("PERUN_IDENT").unwrap_or_else(|_| {
+            perun_adi_win32::net::identity()
+                .device_id
+                .chars()
+                .filter(|ch| *ch != '.')
+                .take(16)
+                .collect()
+        });
+        std::ptr::copy_nonoverlapping(id_hex.as_ptr(), ident_buf.cast::<u8>(), id_hex.len());
+        std::ptr::write_volatile(ident_buf.cast::<u8>().add(id_hex.len()), 0);
+        std::ptr::write_volatile(cont18.cast::<u64>(), ident_buf as u64);
+        std::ptr::write_volatile(cont18.add(8) as *mut u64, 0x40u64 << 32);
+        std::ptr::write_volatile(c.add(3), cont18 as u64); // +0x18 container
+        std::ptr::write_volatile(c.add(4), 0x15); // +0x20 21, measured
+        std::ptr::write_volatile(c.add(5), region(4096) as u64); // +0x28 zero page
+        std::ptr::write_volatile(c.add(6), region(4096) as u64); // +0x30 zero page
+        std::ptr::write_volatile(c.add(7), 0x0000_7fff_0000_0000);
+        std::ptr::write_volatile(c.add(8), region(4096) as u64); // +0x40 zero page
+        std::ptr::write_volatile(c.add(9), ident_buf as u64); // +0x48 identity
+        let p68 = region(64);
+        std::ptr::copy_nonoverlapping(b"/opt/data/perun/".as_ptr(), p68.cast::<u8>(), 16);
+        std::ptr::write_volatile(p68.cast::<u8>().add(16), 0);
+        std::ptr::write_volatile(c.add(13), p68 as u64); // +0x68 root path
+        let nsp = region(64);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        std::ptr::write_volatile(nsp.cast::<u64>(), now);
+        std::ptr::write_volatile(c.add(14), nsp as u64); // +0x70 nanosec
+        eprintln!("[ww] ident={id_hex:?}");
         let r = op(0xb0eda7af, init_ctx as u64, 0, 0);
         // Keep the init packet for the probe: the T8 tail family
         // check (a051) and the X-sweep comparison -- the early
