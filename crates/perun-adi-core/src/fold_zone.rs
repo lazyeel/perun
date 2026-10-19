@@ -11,8 +11,8 @@
 //! the `FoldView` trait and every round key baked from the image.
 
 use crate::simd_cycles::{
-    Lanes, movd_from_u32, paddd, pand, pmuludq, pshufd, psubd, punpckhdq, punpckldq, punpcklqdq,
-    pxor,
+    movd_from_u32, paddd, pand, pmuludq, pshufd, psubd, punpckhdq, punpckldq, punpcklqdq, pxor,
+    Lanes,
 };
 
 /// The fold machine's round keys -- broadcast constants baked from
@@ -326,13 +326,13 @@ pub fn fold_zone_body(s: &mut FoldState, v: &dyn FoldView) {
     s.xmm1 = pshufd(0x4eu8, s.xmm3);
     // 0x7c86c780: movd -0x563a41b(%rax,%rdi,4),%xmm3
     s.xmm3 = movd_from_u32(0); // approximate
-    // 0x7c86c789: movd -0x563a41b(%rax,%rsi,4),%xmm0
+                               // 0x7c86c789: movd -0x563a41b(%rax,%rsi,4),%xmm0
     s.xmm0 = movd_from_u32(0); // approximate
-    // 0x7c86c792: movd -0x563a41b(%rax,%rbp,4),%xmm1
+                               // 0x7c86c792: movd -0x563a41b(%rax,%rbp,4),%xmm1
     s.xmm1 = movd_from_u32(0); // approximate
-    // 0x7c86c79b: movd -0x563a41b(%rax,%rbx,4),%xmm2
+                               // 0x7c86c79b: movd -0x563a41b(%rax,%rbx,4),%xmm2
     s.xmm2 = movd_from_u32(0); // approximate
-    // 0x7c86c7a4: punpckldq %xmm0,%xmm3
+                               // 0x7c86c7a4: punpckldq %xmm0,%xmm3
     s.xmm3 = punpckldq(s.xmm3, s.xmm0);
     // 0x7c86c7a8: punpckldq %xmm2,%xmm1
     s.xmm1 = punpckldq(s.xmm1, s.xmm2);

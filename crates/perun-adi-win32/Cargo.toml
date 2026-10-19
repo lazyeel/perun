@@ -19,3 +19,4 @@ perun-core = { workspace = true }
 perun-shims = { workspace = true }
 libc = "0.2"
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip", "json"] }
+perun-adi-core = { path = "../perun-adi-core" }

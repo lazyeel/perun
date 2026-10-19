@@ -386,10 +386,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "perun-adi-core"
+version = "0.1.0"
+
+[[package]]
 name = "perun-adi-win32"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "perun-adi-core",
  "perun-core",
  "perun-shims",
  "ureq",

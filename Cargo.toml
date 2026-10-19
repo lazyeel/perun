@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/perun-adi-core",
     "crates/perun-core",
     "crates/perun-shims",
     "crates/perun-cli",

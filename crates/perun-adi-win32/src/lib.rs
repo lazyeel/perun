@@ -30,6 +30,10 @@
 use perun_core::loader::{DLL_PROCESS_ATTACH, Image};
 use std::fmt;
 
+// fold_zone/simd_cycles/word_channels moved to perun-adi-core
+// (the white-box mathematics is a standalone crate now).
+pub use perun_adi_core::{fold_zone, simd_cycles, word_channels};
+
 pub mod guest;
 pub mod net;
 
@@ -382,6 +386,3 @@ mod tests {
         }
     }
 }
-pub mod fold_zone;
-pub mod simd_cycles;
-pub mod word_channels;

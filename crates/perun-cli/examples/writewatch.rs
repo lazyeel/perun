@@ -183,6 +183,31 @@ extern "C" fn on_trap(_sig: libc::c_int, _info: *mut libc::siginfo_t, ctx: *mut 
                 INIT_PKT_Q0.load(Ordering::SeqCst),
                 INIT_PKT_Q1.load(Ordering::SeqCst)
             ));
+            // The ROUND-0 INDEXED words of the four tables -- the
+            // conveyor's exact operands. The indexes are computed
+            // here the way the guest computes them right after
+            // this probe point (0x6f86d..0x6f892): ebx>>16 byte
+            // ^0xe4 for T14, cl^0x70 for T12, (bpl+0x70)^0x70 for
+            // Tdx, and [rsp+0x88]'s byte for T8.
+            {
+                let ebx = uc.uc_mcontext.gregs[libc::REG_RBX as usize] as u32;
+                let rcxv = uc.uc_mcontext.gregs[libc::REG_RCX as usize] as u64;
+                let rbpv = uc.uc_mcontext.gregs[libc::REG_RBP as usize] as u64;
+                let f88 = std::ptr::read_volatile((rsp_v + 0x88) as *const u64) as u32;
+                let i8 = (f88 & 0xff) as u64;
+                let i14 = (((ebx >> 16) & 0xff) ^ 0xe4) as u64;
+                let i12 = ((rcxv as u8) ^ 0x70) as u64;
+                let idxdx = ((rbpv as u8).wrapping_add(0x70) ^ 0x70) as u64;
+                if r8v > 0x10000 && r14v > 0x10000 && r12v > 0x10000 && rdxv > 0x10000 {
+                    let w8 = std::ptr::read_volatile((r8v + i8 * 4) as *const u32);
+                    let w14 = std::ptr::read_volatile((r14v + i14 * 4) as *const u32);
+                    let w12 = std::ptr::read_volatile((r12v + i12 * 4) as *const u32);
+                    let wdx = std::ptr::read_volatile((rdxv + idxdx * 4) as *const u32);
+                    msg.push_str(&format!(
+                        "  TIDX i8={i8:#x} T8={w8:#x} i14={i14:#x} T14={w14:#x} i12={i12:#x} T12={w12:#x} idxDx={idxdx:#x} Tdx={wdx:#x}\n"
+                    ));
+                }
+            }
             // The first SIXTEEN words of each quartet table -- the
             // fill patterns (base words and index sweeps) side by side.
             for (name, base) in [("T8", r8v), ("T12", r12v), ("T14", r14v), ("Tdx", rdxv)] {
