@@ -402,6 +402,39 @@ win32_api! {
 
 use crate::registry::{RegType, Registry};
 
+/// Seed the Apple registry branch the hosts themselves query:
+/// `HKLM\\SOFTWARE\\Apple Inc.\\CoreADI` with `InstallDir`
+/// (the value name that lives in the same .rdata island as
+/// `cvu8io98wun` in CoreFP.dll), and the sibling
+/// `...\\Apple Application Support` key. The directory is the
+/// iTunes tree where our CoreADI64.dll actually sits, so a
+/// guest following the registry contract loads the real DLL.
+/// PERUN_APPDATA overrides the root (tests run hermetic).
+fn seed_apple_registry() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let dir = std::env::var("PERUN_APPLE_INSTALLDIR")
+            .unwrap_or_else(|_| "/opt/data/adi-pe/extracted/itunes_extracted/iTunes/".into());
+        let dir_win = dir.to_string();
+        for key in [
+            "HKEY_LOCAL_MACHINE\\SOFTWARE\\Apple Inc.\\CoreADI",
+            "HKEY_LOCAL_MACHINE\\SOFTWARE\\Apple Inc.\\Apple Application Support",
+        ] {
+            let full_path = format!("{key}\\InstallDir");
+            let mut data = dir_win.as_bytes().to_vec();
+            data.push(0); // REG_SZ is NUL-terminated
+            Registry::global().set(
+                &full_path,
+                crate::registry::RegValue {
+                    data,
+                    kind: RegType::Sz,
+                },
+            );
+        }
+    });
+}
+
 const HKEY_LOCAL_MACHINE: HANDLE = 0x8000_0002usize as HANDLE;
 const HKEY_CURRENT_USER: HANDLE = 0x8000_0001usize as HANDLE;
 
@@ -425,13 +458,26 @@ win32_api! {
         let sub = read_narrow(subkey);
         let sub = String::from_utf8_lossy(&sub);
         let path = format!("{root}\\{}", sub.replace('/', "\\"));
+        // The Apple branch is the campaign's live lead: the hosts'
+        // own strings show `SOFTWARE\\Apple Inc.\\CoreADI` (with
+        // `InstallDir` as the value name, sitting in the very same
+        // .rdata island as `cvu8io98wun`) and `...\\Apple
+        // Application Support`. Seed both honestly so a guest that
+        // follows the registry contract finds a real directory --
+        // and log EVERY Apple-branch open unconditionally so the
+        // spy lane sees the ask even when the value is absent.
+        seed_apple_registry();
         let exists = Registry::global().key_exists(&path);
-        if std::env::var("PERUN_TRACE").is_ok() {
-            eprintln!("[perun] RegOpenKeyExA({:?}) -> {}", path, if exists { 0 } else { 2 });
+        if path.contains("Apple") || std::env::var("PERUN_TRACE").is_ok() {
+            eprintln!(
+                "[perun] RegOpenKeyExA({:?}) -> {}",
+                path,
+                if exists { 0 } else { 2 }
+            );
         }
         if exists {
             if !result.is_null() {
-                *result = path.len() as HANDLE; // opaque key token
+                *result = crate::registry::mint_key_handle(&path) as HANDLE;
             }
             0 // ERROR_SUCCESS
         } else {
@@ -452,15 +498,18 @@ win32_api! {
         inout_size: *mut DWORD,
     ) -> LONG {
     unsafe {
-        // The key token is the path length; we cannot recover the path from it
-        // in phase 1, so queries succeed only for preseeded lookups by name.
-        let _ = key;
+        // The key token is a minted handle: recover the full path it
+        // was opened for, then look the value up as `path\\name`.
         let name = read_narrow(value_name);
         let name = String::from_utf8_lossy(&name);
-        if std::env::var("PERUN_TRACE").is_ok() {
-            eprintln!("[perun] RegQueryValueExA({name:?})");
+        let lookup = match crate::registry::key_handle_path(key as usize) {
+            Some(path) => format!("{path}\\{name}"),
+            None => name.to_string(),
+        };
+        if lookup.contains("Apple") || std::env::var("PERUN_TRACE").is_ok() {
+            eprintln!("[perun] RegQueryValueExA({lookup:?})");
         }
-        match Registry::global().get(&name) {
+        match Registry::global().get(&lookup).or_else(|| Registry::global().get(&name)) {
             Some(v) => {
                 let need = v.data.len() as DWORD;
                 let cap = if inout_size.is_null() { 0 } else { *inout_size };
@@ -565,5 +614,40 @@ win32_api! {
     unsafe extern "win64" fn IsValidCodePage(cp: UINT) -> i32 {
         let _ = cp;
         1
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    const COREADI_KEY: &str = "HKEY_LOCAL_MACHINE\\SOFTWARE\\Apple Inc.\\CoreADI";
+
+    /// The seeded Apple branch: the CoreADI key exists and its
+    /// InstallDir value answers the real iTunes directory.
+    #[test]
+    fn apple_coreadi_key_seeded_with_installdir() {
+        seed_apple_registry();
+        let reg = Registry::global();
+        assert!(reg.key_exists(COREADI_KEY));
+        let v = reg.get(&format!("{COREADI_KEY}\\InstallDir"));
+        assert!(v.is_some(), "InstallDir must be seeded");
+        let s = String::from_utf8_lossy(&v.unwrap().data)
+            .trim_end_matches('\0')
+            .to_string();
+        assert!(
+            s.ends_with("iTunes/"),
+            "the dir points at the tree holding CoreADI64.dll, got {s}"
+        );
+    }
+
+    /// Open-key handles mint and recover the full path.
+    #[test]
+    fn key_handle_roundtrip() {
+        let tok = crate::registry::mint_key_handle(COREADI_KEY);
+        assert_eq!(
+            crate::registry::key_handle_path(tok).as_deref(),
+            Some(COREADI_KEY)
+        );
     }
 }

@@ -38,6 +38,28 @@ static REGISTRY: LazyLock<Registry> = LazyLock::new(|| Registry {
     values: Mutex::new(HashMap::new()),
 });
 
+/// Open-key handles: a `RegOpenKeyExA` success mints an opaque
+/// token and remembers the full path it was opened for, so the
+/// query side can resolve `token + value name -> the store key`.
+static OPEN_KEYS: LazyLock<Mutex<HashMap<usize, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Mint an open-key token for a path (used by RegOpenKeyExA).
+pub fn mint_key_handle(path: &str) -> usize {
+    let mut m = OPEN_KEYS.lock().unwrap();
+    // A stable, collision-free token: the next sequence number
+    // with the registry's address space baked in.
+    let token = 0x5245_4700_0000_0000usize + m.len() + 1;
+    m.insert(token, path.to_string());
+    token
+}
+
+/// Recover the path an open-key token was minted for.
+#[must_use]
+pub fn key_handle_path(token: usize) -> Option<String> {
+    OPEN_KEYS.lock().unwrap().get(&token).cloned()
+}
+
 impl Registry {
     #[must_use]
     pub fn global() -> &'static Registry {
