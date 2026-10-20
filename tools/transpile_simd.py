@@ -329,6 +329,36 @@ def scalar_rust(ins: Insn, cmt: str) -> list[str] | None:
             (dst,) = parts
             de = operand_read(dst, ins)
             return [cmt, f"        {operand_write(dst, f"({de}).wrapping_add(1)", ins)}"]
+        if mn == "rol":
+            # rol imm/reg -- rotate left. ATT order: rol src,dst
+            # ('rol $0x5,%cl' or 'rol %cl,%eax').
+            parts_ops = [clean_op(x) for x in split_ops(ins.ops)]
+            src = parts_ops[0]
+            dst = parts_ops[-1]
+            de = operand_read(dst, ins)
+            se = operand_read(src, ins) if not src.startswith("$") else src[1:]
+            w = 8 if dst in ("cl", "dl", "al", "bl") else 32 if dst in REG32 else 64
+            mask = (1 << w) - 1
+            cnt = f"(({se}) & {w-1})"
+            return [cmt, f"        {{ let v = ({de}) & {mask:#x}; let r = {cnt}; s.{reg_to_field(dst)} = ((v << r) | (v >> ((-r) & {w-1}))) & {mask:#x}; }}"]
+        if mn == "movabs":
+            parts_ops = [clean_op(x) for x in ins.ops.split(",")]
+            dst, imm = parts_ops[0], parts_ops[1]
+            v = int(imm, 0)
+            if v < 0:
+                v &= 0xFFFFFFFFFFFFFFFF
+            return [cmt, f"        s.{reg_to_field(dst)} = {v:#x}u64;"]
+        if mn == "mul":
+            # mul r/m -- the implicit AX *= operand product into rdx:rax.
+            parts_ops = [clean_op(x) for x in split_ops(ins.ops)]
+            src = parts_ops[0]
+            se = operand_read(src, ins)
+            if src in REG8L or src in ("cl", "dl", "al", "bl", "sil", "dil", "bpl", "spl") or (src.endswith("b") and src[:-1] in REG64):
+                # 8-bit mul: ax = al * src
+                al = f"(s.rax & 0xff)"
+                return [cmt, f"        s.rax = ({al} * (({se}) & 0xff)) & 0xffff;"]
+            # 32-bit mul: rdx:rax = rax * src
+            return [cmt, f"        {{ let p = (s.rax & 0xffffffff) * (({se}) & 0xffffffff); s.rax = p & 0xffffffff; s.rdx = (p >> 32) & 0xffffffff; }}"]
         if mn in ("cmp", "test"):
             return [cmt, f"        // flags: {mn} {ins.ops} (folded into cmov)"]
         if mn in ("setb", "sete", "setne"):
@@ -448,6 +478,11 @@ def att_mem_parse(op: str):
             op = op
         else:
             return None
+    # the baseless form: disp(,index,scale)
+    mb = re.match(r"^(-?0x[0-9a-f]+)?\(,%([a-z0-9]+)(?:,([0-9]+))?\)$", op)
+    if mb:
+        disp = int(mb.group(1), 0) if mb.group(1) else 0
+        return disp, None, mb.group(2), int(mb.group(3) or "1")
     m = re.match(r"^(-?0x[0-9a-f]+)?\(%([a-z0-9]+)(?:,%([a-z0-9]+)(?:,([0-9]+))?)?\)$", op)
     if not m:
         return None
@@ -529,8 +564,10 @@ def emit_insn(ins: Insn, consts: dict, dll: bytes) -> list[str] | None:
                    "xor", "and", "or", "shl", "shr", "sar", "imul", "neg",
                    "not", "cmp", "test", "setb", "sete", "setne", "cmove",
                    "cmovne", "cmovb", "cmova", "xchg", "movzbl", "movslq",
-                   "cltq", "inc"):
+                   "cltq", "inc", "rol", "movabs", "mul"):
             return scalar_rust(ins, cmt)
+        if mn == "nopw" or mn.startswith("cs "):
+            return None
         return [cmt, f"        // UNHANDLED: {mn} {ins.ops}"]
     except Exception as e:  # keep emitting; the audit line shows the failure
         return [cmt, f"        // EMIT-ERROR {e}: {mn} {ins.ops}"]
@@ -600,7 +637,7 @@ pub struct FoldState {{
     pub xmm4: Lanes, pub xmm5: Lanes, pub xmm6: Lanes, pub xmm7: Lanes,
     pub xmm8: Lanes, pub xmm9: Lanes, pub xmm10: Lanes, pub xmm11: Lanes,
     pub xmm12: Lanes, pub xmm13: Lanes, pub xmm14: Lanes, pub xmm15: Lanes,
-    pub frame: [u64; 0x1000],
+    pub frame: [u64; 0x2000],
 }}
 
 /// Guest memory view: the image bytes and the harness pages.

@@ -26,6 +26,8 @@
 pub mod chain;
 pub mod conveyor;
 pub mod cpim;
+pub mod early_series;
+pub mod early_zone;
 pub mod fold_zone;
 pub mod simd_cycles;
 pub mod word_channels;

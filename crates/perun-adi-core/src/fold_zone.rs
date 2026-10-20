@@ -107,13 +107,13 @@ pub struct FoldState {
     pub xmm13: Lanes,
     pub xmm14: Lanes,
     pub xmm15: Lanes,
-    pub frame: [u64; 0x1000],
+    pub frame: [u64; 0x2000],
 }
 
 impl Default for FoldState {
     fn default() -> Self {
         Self {
-            frame: [0; 0x1000],
+            frame: [0; 0x2000],
             ..Self::zeroed()
         }
     }
@@ -154,7 +154,7 @@ impl FoldState {
             xmm13: [0; 4],
             xmm14: [0; 4],
             xmm15: [0; 4],
-            frame: [0; 0x1000],
+            frame: [0; 0x2000],
         }
     }
 }
