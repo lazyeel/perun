@@ -2660,6 +2660,248 @@ peak RSS ≈ 2.8 MiB + 165 B × entries + 2.95 × cd_size
 
 and predicts every measured point to within 8 %. The consequences are worth stating plainly, because they are not what the size of the download suggests. Real App Store packages stay well under 32 MiB: the largest measured is 31.96 MiB for 47 007 entries in 3.14 GB (Tanks Blitz), and 16 packages spanning 107 to 47 007 entries and 4.6 MB to 3.14 GB all land between 3.8 and 32.0 MiB. The 3.14 GB package and a 4.6 MB package differ by a factor of 683 in size and by a factor of 10.6 in resident set. What the formula does **not** give is a 35 MiB guarantee over the whole input space: an archive at the ZIP64 boundary of 65 534 entries with maximum-length (255-byte) names carries a 19.3 MiB directory and measures **70.2 MiB**, twice the budget. The bound is on the directory, so the honest statement is per-entry-count and per-directory-size, not per-package, and any cap expressed in MiB of package size says nothing about it.
 
+## 5.11 The October White-Box Campaign (2026-10-13 → 2026-10-20): the word to the live oracle
+
+This section consolidates the second great arc of the Windows
+lane: the verdict word's anatomy, the pure-Rust white box, the
+caller hunt across the host corpus, and the strategic pivot to
+the live Android oracle. The two PLATFORM PATHS are recorded
+SEPARATELY — the Windows lane (CoreADI64.dll under the perun
+projection) and the Android lane (libCoreADI.so under the
+native stand) share one engine but were measured with
+different instruments, at different addresses, and with
+different constants. Nothing measured on one path is quoted
+as a fact of the other without an explicit cross-note.
+
+### 5.11a The Windows lane: the word, the fold, and the white box
+
+**The verdict word.** The Configuration call (0xcfe0b46a)
+publishes a four-byte verdict word into pkt[4..8] — our
+sessions always `9058b9ad`, the failure digest. The
+write-only watchpoint (writewatch.rs, PROT_READ packet page +
+SEGV resume) caught the writers: FOUR byte-stores
+(0x6fe0d/0x6fe9c/0x6faa9/0x6fc95), each a planter-fed MBA
+mixer, no fork in sight (§5.10 already knew the fork lives
+upstream). The channels' collapsed forms
+(word_channels.rs in perun-adi-core):
+
+    pkt+4 = G4(image[0x162cb0 + ((r9d>>24)^0x72)])   -- bijective
+    pkt+5 = image[0x14b830 + MBA5(a)] ^ 0x13          -- MBA5(a)=(0x1a82438f+a-((a*2)&0x11e))^0x1a824375
+    pkt+6 = (G6(image[0x183cf0 + MBA6(r13b)]) ^ r13d ^ 0x4b) ^ 0x26  -- parametric in r13d
+    pkt+7 = image[0x159270 + MBA7(r9b)] ^ 0x64        -- MBA7 over a=r9b^0xfb, mask 0x1c4
+
+Parity proven: on the ww1 measured entry the channels
+reproduce [90 58 b9 ad] byte for byte. The SUCCESS WORD is
+little-endian 01 00 00 00 — the ONE is the +4 channel's
+output; its unique preimage under G4 is image byte 0x69, and
+the +6 channel's target depends on the session's own r13d
+(the G6 mixers reach 128 of 256 lows, so at the ww1 r13d the
+needed low is unreachable — the word is a thermometer of the
+fold-computed indices, not of any caller input).
+
+**The r9 conveyor.** The writer cluster's register r9d is
+folded by a six-step XOR conveyor in the prologue tail
+(0x6f854..0x6f892): r9d = [rsp+0x68] (the tape, r15d>>8 of the
+previous round) ^ [rsp+0x5c0] ^ T8[[rsp+0x88]] ^ T14[(ebx>>16)
+&0xff)^0xe4] ^ T12[cl^0x70] ^ Tdx[(bpl+0x70)^0x70]. The four
+T-tables are 0x404/0x408-byte heap blocks allocated INSIDE the
+cfg prologue (between the early series and the conveyor); the
+TIDX probe captured the round's own words — T8[0x8e]=
+0xaf9ea051, T14[0xbb]=0xb7aa8ad2, T12[0xc9]=0xc440a9e3,
+Tdx[0x34]=0xf75cebac — and the algebra closes: tape ^ frame5c0
+^ the four words = 0x73dc77fa, the measured cluster-entry
+r9d. EVERY channel seed is then a pure shift of r9d
+(frame140=r9d>>16, its +5 mixer input = low^0xe5=0x39,
+r13d=r9d>>8, r13b, r9b). The tables' structure: T8[k] =
+0x4145a051 + ((X[k]<<12)|0x59)<<16 — the a051 tail is the
+INIT DIGEST family's low half swept additively, a carry
+(0x45+0x59=0x9e), not a copy. The word is a rigid function of
+the guest's own constants: honest init, different identity,
+per-run nonces all leave it byte-identical (measured).
+
+**The SPIM ingress and the gated egress.** The SPIM never
+touches its dedicated page (read-watch: ZERO faults on the
+honest call): it travels INSIDE THE PACKET (pkt[0x10..0x15b])
+and the generator reads it through an arithmetic access —
+0x67639 `mov r15,[rsp+0x48]` (the packet), 0x6763e `add al,
+[r15+rdx-0x45a3f7f]` (the masked offset that emptied every
+static scan). The delta battery (four SPIMs, one call): the
+all-zero SPIM answers the word 872b88b6 and a different body;
+the real SPIMs answer 9058b9ad with bodies diverging from
+pkt+0x14 — the output IS SPIM-dependent. The egress is GATED:
+the OUT buffer (ctx+0x80) stays empty on every -45020 run;
+the 276-byte CPIM unloads only on the success verdict.
+
+**The early series.** The cfg packet generator (the 368 writes
+the watch logged) is a 647-INSTRUCTION LINEAR BODY
+(0x67015..0x67891) with ONE byte store, hopping through the
+cursor table back to its head; 368 passes, r9=0..0x16f
+verified continuous. Its 32 guest reads classify into the
+planter rows, three masked image families
+(-0x39bae07e/-0x47b862f6/-0x786f0193), the 14-byte image
+window at 0x148300 (r8=0x7c948300), the SPIM ingress, one
+frame-object read, and the cursor/planter dwords. Transcribed
+instruction-for-instruction into perun-adi-core
+(early_zone.rs, 618 lines; transpile_simd.py extended with
+rol/movabs/mul/baseless-lea); the driver (early_series.rs)
+runs the 368 iterations and its zero-entry smoke test
+generates live bytes. The iter0 snapshot (the write-watch's
+own SEGV handler capturing WRITE#0's sixteen registers plus
+the frame, 8592 bytes, no int3) drives it: 4/368 bytes match
+the measured early tape — the honest boundary being that the
+snapshot is the iteration-0 EXIT state and every iteration
+reseeds rdi through its own CFF block chain (the 0x67b00
+second hop table — a STATIC .rdata array of 1400+ signed
+dword offsets from the base 0x67a96, the GLOBAL vdfut hop
+labyrinth indexed by the session tape; the FIRST hop instead
+rides the runtime cursor page 0x7c95fc90). The early dl-tape
+(early_tape_guest.bin, the watch's own captures) is the
+packet's FIRST layer — SPIM-dependent, 2/368 overlap with
+the cluster's SECOND layer (the 45-round writer cluster
+overwrites it).
+
+**The white box (perun-adi-core).** The standalone crate owns:
+simd_cycles (the SSE lane kernel + 21 baked broadcast round
+keys), fold_zone (the 1772-instruction cascade of the
+TRANSFORM fold — 0x6c5fe..0x6e453, NOT on the cfg path),
+word_channels (the four channels, parity-proven), conveyor (the
+r9 fold, algebra-pinned), cpim (the 276-byte anatomy —
+ver5|session16|lenA 0xa0|bodyA 160|digest 32|lenB 0x34|ver4|
+bodyB 52; 0xe0+0x34=0x114 exact; byte-exact round-trip),
+chain (Entry::measured -> fold -> channels; nothing
+hardcoded), early_zone/early_series (the cfg generator), and
+generate_cpim_with_early (the contour: the tape fills body A
+and the digest when a drive is supplied; never smuggling the
+SPIM). parity_cpim: a fresh 347-byte SPIM parses, the chain
+over the real image reproduces the measured r9d and the word,
+the generator emits an anatomy-valid container, and the
+reference round-trips. The honest gap to a byte-parity body
+A is one named structure: the CFF labyrinth's rdi-reseed
+blocks.
+
+**The verdict gate.** The -45020 is THE VERDICT GATE, not
+machinery: the word never folds to 00000001 on our synthetic
+frames (the success preimages exist but the fold-computed
+indices must land on them). The transform opcode's live
+envelope is byte-identical between the platforms (see
+§5.11b) — the gate is the only thing standing between our
+white box and the CPIM on the Windows side.
+
+### 5.11b The Windows lane: the caller hunt closed across the whole corpus
+
+The forensic PE audit (tools/audit_pe.py): DataDirectory[14]
+(the CLR header) is ZERO in iTunes.exe, CoreFP.dll,
+CoreADI64.dll, AOSKit.dll, iCloud.exe and iCloudServices.exe
+— ALL 100% NATIVE MSVC C++ (Rich Headers with the MSVC
+linkers; iTunes imports MSVCP140/VCRUNTIME140/UCRT). The
+RT_CODE section of iTunes.exe is a ~2 KB runtime CPUID
+feature-probe block — NOT .NET ReadyToRun; the old
+managed-metadata story is purged from this document. The
+vdfut/cvu strings sit in iTunes.exe, CoreFP.dll and
+AOSKit.dll with ZERO static xrefs — because CoreFP resolves
+through an ENCRYPTED-TABLE LoadLibraryA/GetProcAddress loader
+(the resolver at RVA 0x19568e8, five delay-load thunks
+resolving the MSVC FLS quartet first; the vdfut string outside
+any thunk record in the encrypted-table zone beside the
+registry route SOFTWARE\Apple Inc.\CoreADI).
+
+The candidate sweep, each closed by measurement: the six
+CoreFP exports never ask GetProcAddress (the fdjk/lxpgv pair
+answers rc=0 on the dialog lane, the rest keep the argument
+guards; the two-guest spy stand never fires); the registry
+shim seeded with the honest Apple keys and the InstallDir
+measured in CoreFP's own .rdata (beside cvu8io98wun) answers
+zero registry opens; iTunes.exe's 109 GetProcAddress sites
+(tools/scan_itunes_gpa.py) dissect to 105 DIRECT-LEA names
+(DirectX, Bonjour DNS-SD, WER, the Vista+ KERNEL32 set, the
+transactional registry, themes/IME/UIA, the ATL thunks, WMV
+DRM, the twenty VVViTSL speech exports, iTunesPluginMain, the
+HE-AAC factory, WLD, typelibs, MiniDumpWriteDump) and four
+register-carried plugin resolvers — NO vdfut/cvu/CoreADI
+anywhere; AOSKit stands down as 32-bit (it cannot load the
+64-bit DLL in-process). The wild vdfut caller is NONE of the
+binaries in the corpus; the resolution anatomy (the registry
+route, the InstallDir island, the delay-load resolver) stands
+as the map for whatever process Apple ships the caller in.
+
+### 5.11c The Android lane: the live oracle
+
+The Android stand (libstoreservicescore.so + libCoreADI.so on
+the Bionic runtime) is the ONE WORKING ORACLE: its session
+provisions natively end to end. The launch recipe: the
+bind-mount namespace (/system and /vendor <- the stage
+directory; the Bionic loader demands absolute paths),
+adi_native with the libs directory, the CA bundle, and the
+ADI_RESOLVE pin. With the engine's adi.pb set aside the stand
+ran a COMPLETE fresh provisioning — lookup, start (SPIM),
+transform, finish (ptm/tk), PROVISIONING COMPLETE, OTP green
+— and captured the FIRST SAME-SECOND LIVE PAIR:
+/opt/data/adi-re/live_prov_in.bin (347-byte SPIM) +
+/opt/data/adi-re/live_prov_out.bin (276-byte CPIM), the input
+and output of one successful transform.
+
+The live transform envelope (the dump_adi proxy at the GOT slot
+0x255820) is BYTE-IDENTICAL TO OUR WINDOWS FORM:
+ctx[+0x30] = the SPIM pointer (content-proven), [+0x38] =
+0x15b, [+0x70] = 0x1d0, [+0x80] = the OUT slot; after the
+call [+0x50] = 0x114 (the CPIM length) and [+0x80] the heap
+pointer, the packet carrying {00000001, ff..fe} — THE SUCCESS
+WORD, LIVE, in the exact shape the Windows channels compute.
+The CPIM egress is direct on Android: the transform body
+writes the 276 bytes into the heap buffer on the successful
+verdict. This is the cross-note that closes the Windows
+-45020 question: THE GATE, NOT THE MACHINERY.
+
+The headless decompilation (Ghidra 12.1.4 analyzeHeadless +
+pyghidra) names the wrapper and the engine:
+/opt/data/il/prov_start_decomp.c carries all eight obfuscated
+exports in clean Clang pseudo-C. rsegvyrt87
+(ProvisioningStart) @ 0x2deec0 is a THIN TRANSCEIVER:
+null-guard -45001, an argument-aligning MBA fold, and ONE
+indirect call — vdfut(0x10, ctx, 1, &cpim, &cpim_len,
+&session). No crypto in the wrapper. libCoreADI.so's
+vdfut768ig @ VMA 0x87550 measures 0xb8ba3 bytes — the same
+CFF mega-dispatcher as CoreADI64.dll, with the same opcode
+mask family ((op-(2op&0xdeb10b0e))+0x6f588587 — the Android
+twin of the Windows (op+(-(2op&0x41d0e0da))+0x20e8706d)), a
+512-entry cursor table @ 0x48c0 — STATIC, in .rodata, unlike
+the Windows RUNTIME table at 0x7c95fc90 — 262 valid hop
+targets, the rip-0x29 hop glue, and the -45002 null-guard.
+
+The derivation engine located on the Android side: the cursor
+targets walked with Capstone yield TWELVE SSE fold blocks
+(0x8892f..0x8ccb9 — the mirror of the Windows SSE zone), and
+hop_445/483 @ 0x8b5d8 show the fold heart: `movdqu xmm3,
+[rdi+rcx]` READS THE INPUT BUFFER (rdi = the SPIM packet),
+pmovzxbd lifts bytes to dword lanes, pmulld applies
+rip-relative round keys, paddd/psubd/pxor fold — the campaign's
+fold pattern processing the SPIM bytes directly.
+
+The crypto-scheme verdict (measured on the same-second pair):
+body A is NOT AES-GCM, NOT a XOR-masked SPIM, NOT sha256/HMAC
+of the SPIM/bodyA/session in any probed combination. THE
+ALGORITHM IS THE FOLD CASCADE ITSELF — the SPIM bytes enter
+the SSE fold, the cascade's tape becomes body A, the digest is
+the cascade's window — exactly the machinery perun-adi-core
+transcribes, now with the live pair as its ground truth.
+
+**The platform separation, stated plainly.** Windows
+CoreADI64.dll: image base 0x7c800000, vdfut body
+RVA 0x5afc0..0xb5c98, RUNTIME cursor table 0x7c95fc90,
+planter 0x7c97eca0, word channels at 0x6fa2c..0x6fe9c,
+conveyor 0x6f854..0x6f892, early series 0x67015..0x67891,
+second hop table .rdata 0x15fc90 (base 0x67a96), opcode mask
+(op+(-(2op&0x41d0e0da))+0x20e8706d). Android libCoreADI.so:
+vdfut VMA 0x87550 size 0xb8ba3, STATIC cursor table @0x48c0,
+hop glue rip-0x29, SSE fold blocks 0x8892f..0x8ccb9, opcode
+mask (op-(2op&0xdeb10b0e))+0x6f588587, wrapper transceivers
+at 0x2dxxxx in libstoreservicescore.so. The TWO cursor tables
+are DIFFERENT ARTIFACTS on the two paths (a runtime page on
+Windows, a static .rodata array on Android) — same role, same
+mechanics, different storage and different entries. The
+envelope form (+0x30/+0x38/+0x70/+0x80) is the one cross-
+platform invariant measured identical.
+
 ## 6. Benchmarks
 
 ### 6.1 Methodology
@@ -3083,6 +3325,7 @@ Neither requires perun to disclose its own source or to relicence its code, and 
 | 2026-10-24e | **The two quick checks: the tape-CPIM correlation and the hop-table verdict.** Check 1: early_tape_guest vs cpim276 -- every hypothesis NEGATIVE (direct substring for body A/digest/whole tail, sliding XOR-constant, additive-constant, reverse, word-XOR masks: zero hits), and for the fundamental reason that the two artifacts are from DIFFERENT SESSIONS (the Oct-11 Android cold canon vs the Oct-20 Windows run) -- cross-session byte correlation is cryptographically unexpected; the binding same-session check requires an rc=0 OUT dump (the verdict gate again). The early tape stands as the measured SPIM-dependent LAYER ONE. Check 2: the 0x67b00 lea resolves to RVA 0x15fc90 -- a STATIC .rdata array of signed dword offsets from the labyrinth base 0x67a96; 1400 consecutive entries verified valid, targets densely clustered in the CFF block swarm, entry[2]=0x8e -> the confirmed 0x67b24 mixer chain; it is the GLOBAL vdfut hop table (not a 368-per-iteration array -- the direct-dump shortcut does not close parity alone), indexed by the session's rsi/r13 tape, while the FIRST hop (0x67a84 -> 0x67820 back into the body) rides the RUNTIME cursor page 0x7c95fc90. The strategic gain: the labyrinth's block map is static and fully dumpable -- only the route is dynamic, and it is reconstructible from the 368 WRITE snapshots' register tape; the next rung is concrete: dump the table as a Rust array, derive the 368-entry route, replay the route's blocks through the transcriber. |
 | 2026-10-24f | **The live oracle answers: the Android stand reborn, the complete provisioning cycle green, and the transform envelope measured identical to ours.** The stand's launch recipe recovered and recorded (the bind-mount namespace over /opt/data/adi-mnt/stage -- the Bionic loader demands absolute /system paths; adi_native + libs + CA bundle + ADI_RESOLVE), and with the engine's adi.pb temporarily set aside the stand ran a COMPLETE fresh provisioning against Apple: lookup -> start (SPIM) -> transform -> finish (ptm/tk) -> PROVISIONING COMPLETE, the OTP check green. **The first same-second live pair captured**: live_prov_in.bin (347B) + live_prov_out.bin (276B) -- the SPIM->CPIM input/output of a successful transform as file artifacts. The dump proxy caught the live transform (716bd86c) with its full envelope -- BYTE-FOR-BYTE OUR WINDOWS FORM: +0x30 the SPIM pointer (content-proven), +0x38 0x15b, +0x70 0x1d0, +0x80 the OUT slot; after the call +0x50 = 0x114 (the CPIM length) and +0x80 = the CPIM heap pointer, the packet carrying {00000001, ff..fe} -- the success word live. The CPIM egress is DIRECT (the body writes the 276 bytes into the heap buffer on the successful verdict); the Windows -45020 is therefore THE VERDICT GATE, not a difference of machinery. The fresh pair's derivation facts: the session block is f(the machine state) (not in the SPIM), body A the cascade's ciphertext over the SPIM (no trivial slice or mask) -- the ALGORITHM is the vdfut cascade itself, the machinery perun-adi-core transcribes, and the live pair is now the binding parity target. |
 | 2026-10-20g | **The live-oracle strike: headless decompilation through the new arsenal, and the one-engine theorem.** `re gh`/pyghidra imported and analyzed libstoreservicescore.so (analyzeHeadless, 126s); /opt/data/il/prov_start_decomp.c carries all eight obfuscated exports in clean Clang pseudo-C -- rsegvyrt87 (ProvisioningStart) @ 0x2deec0 is a THIN TRANSCEIVER: null-guard -45001, an argument-aligning MBA fold ((x-(2x&0x62e1fd4f2b034634))+0x3170fea79581a31a; SiMBA/z3: not the canonical (x^K)+C form), and ONE indirect call -- vdfut(0x10, ctx, 1, &cpim, &cpim_len, &session): NO crypto in the wrapper. libCoreADI.so's vdfut768ig @ VMA 0x87550 measures 0xb8ba3 bytes -- the same CFF mega-dispatcher as CoreADI64.dll, with the same opcode-mask family ((op-(2op&0xdeb10b0e))+0x6f588587 vs the Windows (op+(-(2op&0x41d0e0da))+0x20e8706d)), a 512-entry cursor table @ 0x48c0 (STATIC in .rodata, 262 valid hop targets -- unlike the Windows runtime table), the rip-0x29 hop glue, and the -45002 guard. Capstone walked the cursor targets: TWELVE SSE-hop blocks (0x8892f..0x8ccb9), and hop_445/483 @ 0x8b5d8 show the DERIVATION ENGINE: `movdqu xmm3,[rdi+rcx]` reads the input buffer (rdi = the SPIM packet), pmovzxbd lifts bytes to dwords, pmulld applies rip-relative round keys, paddd/psubd/pxor fold -- the campaign's fold pattern processing the SPIM directly. The same-second live pair kills the textbook crypto hypotheses at once: body A is not AES-GCM, not a XOR-masked SPIM, not sha256/HMAC of the SPIM/bodyA/session; THE ALGORITHM IS THE FOLD CASCADE ITSELF -- the machinery perun-adi-core transcribes -- and the fresh live pair is its ground truth. |
+| 2026-10-24h | **The documentation round: the full record consolidated, the platforms kept strictly separate.** §5.11 written (a: the Windows white box -- the verdict word's four channels with their collapsed MBA forms and parity, the r9 conveyor algebra with the TIDX-pinned tables, the SPIM ingress/egress gating, the early series, the white box itself; b: the Windows caller hunt closed across the whole corpus; c: the Android live oracle -- the same-second pair, the envelope identity, the headless decompilation, the one-engine theorem). The **-45028 label on 0xffff5024 corrected to -45020** everywhere it stood in the active prose (RESEARCH §5.10, HANDOVER §4.5a -- the old label was an arithmetic slip; -45028 itself is 0xffff501c, a different code); the revision-table rows keep their dated history. HANDOVER §4.5c written (the white box + the oracle, the corrected code taxonomy). README gains the ADI research lane (perun-adi-core, the white-box goal) and the updated documentation map. Workspace 361 passed / 0 failed, clippy clean. |
 
 *Apple, macOS, OS X, StoreKit, FairPlay, iTunes and related marks are trademarks of Apple Inc. This independent research project is not affiliated with, endorsed by, or sponsored by Apple Inc. All binary images referenced are obtained by users directly from Apple's public distribution servers and are never redistributed with this project.**`f` is a full-avalanching block transform.** Sixteen runs, base packet from
 the Android engine, one input byte raised by one each time:
@@ -3544,17 +3787,17 @@ Measured on that pipeline: `init = 0` (events mint, the adi.pb lookup resolves t
 
 #### The October campaign (2026-10-13 → 2026-10-14): the live packets, the verdict chain, and the exclusion theorem
 
-The second half of October ran the pipeline against **live session material** and closed the input space of the `-45019/-45028` verdict family. Everything below is measured; the working logs are `/opt/data/il/` (`FINDINGS.md` carries the round-by-round chronicle).
+The second half of October ran the pipeline against **live session material** and closed the input space of the `-45019/-45020` verdict family. Everything below is measured; the working logs are `/opt/data/il/` (`FINDINGS.md` carries the round-by-round chronicle).
 
-**The code taxonomy, corrected.** `0xffff5026 = -45018` (fold-gate reject), `0xffff5025 = -45019` (unknown-function family), `0xffff5024 = -45028` (cfg-zone E-gate), `0xffff5037 = -45001` (the worker's post-check verdict, published into the packet). The earlier "state family -45024/25/26" naming was a hex-reading error, withdrawn.
+**The code taxonomy, corrected.** `0xffff5026 = -45018` (fold-gate reject), `0xffff5025 = -45019` (unknown-function family), `0xffff5024 = -45020` (the cfg-zone verdict; the earlier `-45028` label on this code was an arithmetic slip, corrected 2026-10-24 — `-45028` itself is `0xffff501c`, a different, genuinely-mapped code), `0xffff5037 = -45001` (the worker's post-check verdict, published into the packet). The earlier "state family -45024/25/26" naming was a hex-reading error, withdrawn.
 
-**The live packets are fold coefficients.** The live Call-6 transform packet (52 B, byte-exact from the wrapper's before-diffs: `00 00 00 02 | ab d8 56 03 …`) breaks the `-45018` reject and starts the real body — two back-to-back **256-round SIMD cycles** (`0x6c45b`, counter `0xf0..0x100`, heap page A; then `0x6c830`, counter `0x700..0x702`, page B) whose final words (`0x2fdbd1e3/0x4b97c940/0x652cbc21` at `0x6ca04`) bridge through `0x70088 → 0x70156` into the term birth (`ebp = 0x70a`) and the verdict cascade. With live packets SetPath answers `-45019` and transform `-45028`; with a **zero packet body** (V2 header only) the verdicts are **identical** — the packet moves E (the packet-reading cursor at `0x7c86cab4`, `movzbl (%r12,(r9d|8),1)`, MSB-flip matrix: `0x7f/0x71/0xf1/0xee/0xc/0x42/0x1/0x33/0xed/0x21…`) but not the verdict.
+**The live packets are fold coefficients.** The live Call-6 transform packet (52 B, byte-exact from the wrapper's before-diffs: `00 00 00 02 | ab d8 56 03 …`) breaks the `-45018` reject and starts the real body — two back-to-back **256-round SIMD cycles** (`0x6c45b`, counter `0xf0..0x100`, heap page A; then `0x6c830`, counter `0x700..0x702`, page B) whose final words (`0x2fdbd1e3/0x4b97c940/0x652cbc21` at `0x6ca04`) bridge through `0x70088 → 0x70156` into the term birth (`ebp = 0x70a`) and the verdict cascade. With live packets SetPath answers `-45019` and transform `-45020` (0xffff5024; then mislabeled -45028); with a **zero packet body** (V2 header only) the verdicts are **identical** — the packet moves E (the packet-reading cursor at `0x7c86cab4`, `movzbl (%r12,(r9d|8),1)`, MSB-flip matrix: `0x7f/0x71/0xf1/0xee/0xc/0x42/0x1/0x33/0xed/0x21…`) but not the verdict.
 
 **The verdict chain, disassembled end to end.** Envelope E-validation (`0x870134..0x870170`, `r9d=0x9f`) publishes `edi := 0xffff5016` and re-arms `r9d := 0x4069d332`; the fold series (`0x8b1517`) masks the verdict into the selector term; the segment cascade (`0x88f5-6`) computes `ebx=0x615 → edx=0x633`; the fork (`0x88fa9e..0x88fb0d`) computes `ebp = 26·[term<otp] + 7·[setg] + edx` → `0x64d`, index `0x64e` → the `-45019` publisher `0x7c8b5b21`. The fork's preimage algebra is solved: gate B (`cmp $0xb691a4d8`) has the unique opcode preimage `0x9679d4b5`, which no canon opcode masks to — the live route provably never visits our fork.
 
 **The exclusion theorem.** Two live `rc=0` sessions (the Android dump and the re-armed cold-stand capture) cross-compared: the transform envelopes differ **only** in pointers, time tag, and identity span — every structural slot byte-identical, so the envelope is not the key (proven live-vs-live). Then, each with a control: the packet (zero-packet verdict), the identity string (the whole chain under the live identity's exact form), the **LU-slot formula** (a measured law of the envelope: `+0x48 = LU[7]`, `+0x58 = LU[4]`, `+0x60 = LU[6]`, `+0x68 = LU[1]`, where LU = identity bytes 2..10 — verified on two independent sessions), the call order (the full live sequence, every live packet), the envelope inheritance (the `{20,4}→{20,20}` arg1 rewrite, ctx reused verbatim), arg3 (a light host callback vs the recursive vdfut hazard), the object interiors (a new `objdump RVA FILE` seq verb snapshots all three objects' buffers after every canon call — the change matrix is **empty**, the objects are frozen after init), the deep init's table rewrite (the masked blob in `tbl6f8[0..0x40]` — the fork is deaf to it), the rbp entry (four probes through the prologue's magic fold), and TLS (absent from the IAT).
 
-**The verdict, stated plainly.** The `-45019/-45028` family is a stable characteristic of the release Windows DLL in the perun environment: every stage of the cascade that computes it is disassembled, and every external input is either equalized or proven non-causal. The DLL mints `rc=0` under its real host wrapper (AuthKit — which ships with iCloud for Windows, not the iTunes installer, and is absent from every available extraction). The remaining Windows-native engineering path is to reproduce the fold cascade in Rust — both SIMD cycles' round functions, the `0x6caXX` mixers, the term arithmetic, all measured — and emit the CPIM directly; every constant needed is on the table.
+**The verdict, stated plainly.** The `-45019/-45020` family is a stable characteristic of the release Windows DLL in the perun environment: every stage of the cascade that computes it is disassembled, and every external input is either equalized or proven non-causal. The DLL mints `rc=0` under its real host wrapper (AuthKit — which ships with iCloud for Windows, not the iTunes installer, and is absent from every available extraction). The remaining Windows-native engineering path is to reproduce the fold cascade in Rust — both SIMD cycles' round functions, the `0x6caXX` mixers, the term arithmetic, all measured — and emit the CPIM directly; every constant needed is on the table.
 
 #### The late-October rounds: the unified self-check, the traps, and the honest Windows canon (2026-10-20 → 2026-10-22)
 

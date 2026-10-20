@@ -52,6 +52,10 @@ perun list-purchases --format json
 - **64-bit Mach-O images** from macOS, with the libSystem/Mach surface translated into Linux equivalents — including a full FairPlay **SAP** session, the `X-Apple-ActionSignature` handshake, executed natively against the live servers.
 - **An App Store client** on the same SAP session: `X-Apple-ActionSignature` is produced by the same native runtime that the benchmark above measures.
 
+### The ADI / anisette research lane
+
+The same PE runtime re-executes Apple's `CoreADI64.dll` (the ADI/anisette engine behind `X-Apple-I-MD` / `X-Apple-I-MD-M`), and the research crate **`perun-adi-core`** transcribes the measured fold cascades of that engine into pure, dependency-free Rust: the SSE round functions, the verdict-word channels (parity-proven byte-for-byte against the guest), the r9 conveyor algebra, and the 276-byte CPIM container anatomy. The goal is a standalone, auditable generator of provisioning data — every constant measured, nothing guessed. See [RESEARCH.md § 5.10–5.11](RESEARCH.md) for the full campaign record, kept strictly separate per platform (the Windows DLL lane and the Android `libCoreADI.so` oracle lane).
+
 ### App Store client
 
 Login is MZFinance password auth with out-of-band 2FA: the code from push or SMS is appended to the password on the retry round. Search goes through the public iTunes Search and Lookup APIs. Purchase is free-license only. Download streams with a progress bar and replicates the package.
@@ -238,7 +242,7 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
 
 | File | What it covers |
 |---|---|
-| [RESEARCH.md](RESEARCH.md) | The unified specification: the Mach-O/FairPlay SAP lane (binary map, entry points, memory invariants, protocol, benchmarks, prior-art credits) and the Win32/PE ADI lane (runtime invariants, provisioning-gate analysis, 20-row verification log — § 2.2, § 4.7, § 5.8, § 5.10, § 6.7) |
+| [RESEARCH.md](RESEARCH.md) | The unified specification: the Mach-O/FairPlay SAP lane (binary map, entry points, memory invariants, protocol, benchmarks, prior-art credits) and the Win32/PE ADI lane (runtime invariants, provisioning-gate analysis — § 2.2, § 4.7, § 5.8, § 5.10, § 5.11: the white-box campaign and the live-oracle record, Windows and Android paths recorded separately) |
 | [NOTICE](NOTICE) | Attribution for the code and for third-party components compiled into the binary |
 
 ## Obtaining guest binaries
