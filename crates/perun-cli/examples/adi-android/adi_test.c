@@ -620,12 +620,19 @@ int main(int argc, char **argv) {
          * At this call site both buffers are named, so what lands on disk is
          * the library's real input and its real output, and nothing else. */
         save_prov_pair(spim, spim_n);
+        /* 2026-10-21 measured: pre-filling &cpim/cpim_n reroutes the engine
+         * into a different envelope branch (the OUT slot moves +0x80 -> +0x78
+         * and the engine rewrites &cpim anyway) -- so the pair capture stays
+         * on the CLEAN branch and the write-watch lives at point A: the
+         * envelope's OUT slot, swapped in wrap_vdfut when it is still NULL. */
+        extern void ww_finish(const uint8_t *, uint32_t);
 #endif
         rc = pStart(DS_ID, spim, (uint32_t)spim_n, &cpim, &cpim_n, &session);
         if (rc != 0) die("ADIProvisioningStart=%d", rc);
         info("prov", "cpim ready (%u bytes, session=%u)", cpim_n, session);
 #ifdef DUMP_ADI
         save_prov_result(cpim, cpim_n, rc);
+        ww_finish(cpim, cpim_n);
 #endif
 
         char *cpim_b64 = b64_encode(cpim, cpim_n);

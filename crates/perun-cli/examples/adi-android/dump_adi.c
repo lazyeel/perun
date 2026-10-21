@@ -55,6 +55,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/ucontext.h>
 #include <unistd.h>
 
 // The vaddrs above, for the 4.9.6 build in libs/ (Apple Music, x86_64).
@@ -535,6 +536,191 @@ static void hunt_spim(uint64_t a1) {
     printf("    [hunt] scan complete\n");
 }
 
+/* ── live write-watch over the CPIM out-buffer ──────────────────────────────
+ * Two capture points, one machine. The engine's own convention decides which
+ * fires: (B) rsegvyrt87's caller-supplied &cpim -- adi_test hands OUR page in
+ * before the call; (A) the transform envelope's OUT slot ctx[+0x80] --
+ * wrap_vdfut swaps it only when it is still NULL. Either way, every byte the
+ * engine stores into a watched page trips a PROT_READ fault whose ucontext
+ * carries the writer's rip and the full register set; the trap re-arms per
+ * write through the single-step flag -- the campaign's proven writewatch
+ * cycle, on the live engine, no ptrace and no patching of Apple's bytes.
+ */
+#define WW_MAX 2
+static uint64_t ww_bufs[WW_MAX];
+static int ww_nbufs;
+static int ww_active;
+static int ww_fd = -1;           /* log fd: write(2) is async-safe */
+static int ww_nwrites;
+static struct sigaction ww_old_segv, ww_old_trap;
+
+static long ww_page_ro(long page) {
+    return mprotect((void *)(page & ~0xFFFULL), 0x1000, PROT_READ);
+}
+
+static int ww_index_of(uint64_t fault) {
+    for (int i = 0; i < ww_nbufs; i++)
+        if (fault >= ww_bufs[i] && fault < ww_bufs[i] + 0x1000)
+            return i;
+    return -1;
+}
+
+static void ww_segv(int sig, siginfo_t *si, void *vuc) {
+    ucontext_t *uc = (ucontext_t *)vuc;
+    greg_t *g = uc->uc_mcontext.gregs;
+    uint64_t fault = (uint64_t)si->si_addr;
+    int idx = ww_active ? ww_index_of(fault) : -1;
+    if (idx < 0) {
+        /* not ours: hand the fault back untouched */
+        sigaction(SIGSEGV, &ww_old_segv, NULL);
+        raise(SIGSEGV);
+        return;
+    }
+    if (ww_fd >= 0) {
+        char l[512];
+        int n = snprintf(l, sizeof l,
+            "W %4d buf=%d off=0x%03llx rip=%#llx "
+            "rdi=%#llx rsi=%#llx rdx=%#llx rcx=%#llx rax=%#llx rbx=%#llx "
+            "rbp=%#llx r8=%#llx r9=%#llx r10=%#llx r11=%#llx r12=%#llx "
+            "r13=%#llx r14=%#llx r15=%#llx\n",
+            ww_nwrites++, idx,
+            (unsigned long long)(fault - ww_bufs[idx]),
+            (unsigned long long)g[REG_RIP],
+            (unsigned long long)g[REG_RDI], (unsigned long long)g[REG_RSI],
+            (unsigned long long)g[REG_RDX], (unsigned long long)g[REG_RCX],
+            (unsigned long long)g[REG_RAX], (unsigned long long)g[REG_RBX],
+            (unsigned long long)g[REG_RBP], (unsigned long long)g[REG_R8],
+            (unsigned long long)g[REG_R9], (unsigned long long)g[REG_R10],
+            (unsigned long long)g[REG_R11], (unsigned long long)g[REG_R12],
+            (unsigned long long)g[REG_R13], (unsigned long long)g[REG_R14],
+            (unsigned long long)g[REG_R15]);
+        if (n > 0) {
+            ssize_t rc_w = write(ww_fd, l, (size_t)n);
+            (void)rc_w;
+        }
+    } else {
+        ww_nwrites++;
+    }
+    /* let the store complete, then re-protect after it retires */
+    mprotect((void *)((ww_bufs[idx]) & ~0xFFFULL), 0x1000, PROT_READ | PROT_WRITE);
+    g[REG_EFL] |= 0x100; /* single-step: the next trap re-arms the watch */
+}
+
+static void ww_trap(int sig, siginfo_t *si, void *vuc) {
+    (void)sig; (void)si;
+    ucontext_t *uc = (ucontext_t *)vuc;
+    greg_t *g = uc->uc_mcontext.gregs;
+    if (!(g[REG_EFL] & 0x100)) {
+        /* not our single-step: hand it back */
+        sigaction(SIGTRAP, &ww_old_trap, NULL);
+        raise(SIGTRAP);
+        return;
+    }
+    g[REG_EFL] &= ~(greg_t)0x100;
+    for (int i = 0; i < ww_nbufs; i++)
+        ww_page_ro((long)ww_bufs[i]);
+}
+
+static void ww_handlers_install(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = ww_segv;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGSEGV, &sa, &ww_old_segv) != 0)
+        return;
+    struct sigaction st;
+    memset(&st, 0, sizeof st);
+    st.sa_sigaction = ww_trap;
+    st.sa_flags = SA_SIGINFO;
+    sigemptyset(&st.sa_mask);
+    if (sigaction(SIGTRAP, &st, &ww_old_trap) != 0) {
+        sigaction(SIGSEGV, &ww_old_segv, NULL);
+        return;
+    }
+    ww_active = 1;
+    if (ww_fd < 0)
+        ww_fd = open("/opt/data/il/ww_live.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    ww_nwrites = 0;
+}
+
+/* Capture point B: adi_test hands our page in as rsegvyrt87's out-buffer
+ * (&cpim). Returns NULL if the machine cannot arm. */
+uint8_t *ww_provide(void) {
+    if (ww_nbufs >= WW_MAX)
+        return NULL;
+    void *p = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED)
+        return NULL;
+    memset(p, 0, 0x1000);
+    ww_bufs[ww_nbufs++] = (uint64_t)p;
+    ww_handlers_install();
+    ww_page_ro((long)(uint64_t)p);
+    printf("[ww] provide: buf[%d]=%#llx (PROT_READ) handed to &cpim\n",
+           ww_nbufs - 1, (unsigned long long)(uint64_t)p);
+    return (uint8_t *)p;
+}
+
+/* Capture point A: the transform envelope's OUT slots. The 2026-10-20 run
+ * (identity 8216A061) carried the CPIM pointer at ctx[+0x80]; the 2026-10-21
+ * runs (identity 1A7DC030) carry it at ctx[+0x78] with +0x80 holding the
+ * service URL instead -- the frame's shape follows the caller's branch, so
+ * BOTH slots are treated as capture candidates: every slot that is NULL on
+ * entry gets one of our read-only pages, whichever the engine fills is the
+ * one its writers will trip. */
+static void ww_arm(uint64_t ctx) {
+    if (!ctx)
+        return;
+    static const int offs[2] = {0x78, 0x80};
+    for (int k = 0; k < 2; k++) {
+        uint64_t *slot = (uint64_t *)(ctx + offs[k]);
+        if (*slot != 0) {
+            printf("    [ww] slot +0x%02x already non-null (%#llx); skipped\n",
+                   offs[k], (unsigned long long)*slot);
+            continue;
+        }
+        uint8_t *pg = ww_provide();
+        if (!pg)
+            return;
+        *slot = (uint64_t)(uintptr_t)pg;
+        printf("    [ww] armed (point A): slot +0x%02x -> %#llx\n",
+               offs[k], (unsigned long long)*slot);
+    }
+}
+
+/* Called after the provisioning call returns: stop the watch, report which
+ * page the engine actually used, dump the CPIM when it is ours. */
+void ww_finish(const uint8_t *cpim, uint32_t cpim_n) {
+    if (!ww_active)
+        return;
+    ww_active = 0;
+    for (int i = 0; i < ww_nbufs; i++)
+        mprotect((void *)(ww_bufs[i] & ~0xFFFULL), 0x1000, PROT_READ | PROT_WRITE);
+    sigaction(SIGSEGV, &ww_old_segv, NULL);
+    sigaction(SIGTRAP, &ww_old_trap, NULL);
+    int used = -1;
+    for (int i = 0; i < ww_nbufs; i++)
+        if ((uint64_t)(uintptr_t)cpim == ww_bufs[i])
+            used = i;
+    printf("[ww] finish: writes=%d nbufs=%d cpim=%#llx used_buf=%d cpim_n=%u\n",
+           ww_nwrites, ww_nbufs, (unsigned long long)(uint64_t)(uintptr_t)cpim,
+           used, cpim_n);
+    if (used >= 0 && cpim_n >= 0x114) {
+        int f = open("/opt/data/adi-re/ww_pair_cpim.bin", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (f >= 0) {
+            ssize_t rc_w = write(f, (const void *)ww_bufs[used], 0x114);
+            (void)rc_w;
+            close(f);
+            printf("[ww] CPIM dumped -> /opt/data/adi-re/ww_pair_cpim.bin\n");
+        }
+    }
+    if (ww_fd >= 0) {
+        close(ww_fd);
+        ww_fd = -1;
+    }
+}
+
 static int wrap_vdfut(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
     const char *prev = phase;
     phase = "vdfut768ig";
@@ -546,6 +732,7 @@ static int wrap_vdfut(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
     // worth answering with data is what the working engine actually passes.
     save_payload(a0, a1);
     if (a0 == OPCODE_TRANSFORM) hunt_spim(a1);
+    if (a0 == OPCODE_TRANSFORM) ww_arm(a1);
 
     // Deep dump of the caller's ctx. The frame is 96 bytes and eight of its
     // slots are host pointers; whether they are buffers, strings or numbers is
@@ -585,6 +772,12 @@ static int wrap_vdfut(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
     }
 
     int rc = real_vdfut ? real_vdfut(a0, a1, a2, a3) : -1;
+    if (a0 == OPCODE_TRANSFORM) {
+        uint64_t *slot = (uint64_t *)(a1 + 0x80);
+        printf("    [ww] post-transform: slot=%#llx rc=%d (point A %s)\n",
+               a1 ? (unsigned long long)*slot : 0ULL, rc,
+               (a1 && ww_nbufs > 0 && *slot == ww_bufs[ww_nbufs - 1]) ? "accepted" : "not engaged");
+    }
     // Post-transform reading of the packet. The pre-call dump is what the
     // caller handed over; whether the engine rewrites it in place is a
     // separate question, and answering it is the only way to compare the two
