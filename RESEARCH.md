@@ -2902,6 +2902,87 @@ mechanics, different storage and different entries. The
 envelope form (+0x30/+0x38/+0x70/+0x80) is the one cross-
 platform invariant measured identical.
 
+### 5.11d The depot theorem and the mixer cascade (2026-10-22, the live-oracle assault)
+
+The second assault on the live oracle, driven with the new RE
+arsenal, cracked the CPIM derivation open. Every fact below is
+measured on live Apple provisioning runs; the round-by-round
+chronicle is in `FINDINGS.md` (2026-10-22a..h).
+
+**The depot theorem (four same-run verifications).** The whole
+zone CPIM[0x18..0xd8) -- body A (160 bytes) and the digest (32
+bytes) -- is a CONTIGUOUS SLICE OF ONE RUNTIME TABLE, the "depot":
+`cpim[0x18..0xd8) == depot[0..0xC0)` byte for byte, proven by
+dumping the depot at the writer's start and comparing to the same
+run's CPIM. The unloader is a 28-instruction CFF cycle at
+libCoreADI+0xdc6dc..0xdc748: 96 turns, `idx = edi - 0x43cd3cea`
+descending by two (an always-false MBA mask selects the cmov
+term), `rbx = idx + 0x19`, two byte-stores per turn, both fed from
+the depot. It is transcribed into pure Rust --
+`perun-adi-core/src/cpim_engine.rs`, `unload_depot` -- with a
+live-parity test green on the same-run gdb pair, and an epilogue at
++0x13f7b7 that stores the finished buffer into the envelope slot.
+
+**Determinism laws (three live pairs).** Same identity + same
+SPIM ⇒ BYTE-IDENTICAL CPIM (two full runs compared through
+session, body A, digest and body B); Apple's server REPEATS a
+SPIM for the same identity for ~3 hours; the depot's heap address
+drifts between runs (never bake it -- take it from a register at a
+known rip).
+
+**The depot map.** A pre-init writes 18 head bytes; the mixer
+block -- SIXTEEN byte-stores (+0xe6b9d..+0xe7023; the sixteenth
+at +0xe6eaa was the reason earlier short tapes lost 62 positions)
+-- runs ELEVEN cycles writing one 16-byte row each (the position
+ladder is exactly 3,2,1,0,7,6,5,4,B,A,9,8,F,E,D,C, the inter-cycle
+cursor `[rbp-0x38] += 0x10`); a STAGE-2 node OUTSIDE the block
+(+0xfbf67..+0xfc07d, with its own key sequence) then REWRITES the
+rows 0xA0..0xBF after the mixers and before the writer -- the
+mixers own body A, stage-2 owns the digest.
+
+**The mixer arithmetic -- all four families closed on live bytes
+(24/24, plus 16/16 for family 1 across two sessions).** Every
+mixer: a cycle-key byte selects a planter row through an XOR mask,
+the planter byte feeds a family-specific tail, and a masked table
+read adds state:
+- fam1 (+0xd60): `al = ((c*c + read) ^ FINAL_m)` -- the squaring
+  mul measured 11/11;
+- fam2 (+0x1a00): same shape, its own masks;
+- fam3 (+0x2460): the or/sub/shl tail decoded --
+  `cl = ((read - (c3|0x35)) ^ (((read - (c3|0x15))<<3)&0xFF) ^ 0x5F)`;
+- fam4 (+0x1390): the nibble tail --
+  `cl = (((read - (sel|0xa2)) & 0xF0) | ((read - (sel|2)) & 0x0F)) ^ 0x6D`.
+Each mixer carries ITS OWN masks (the full table is
+`tools/extract_mixers.py` -> `mixers.json`); the "four-family"
+reading flattens them.
+
+**The selector graph and the four-zone theorem.** The live
+selectors: mixer-1 `sel = (rbx & 0xFF) ^ 0xFC`, mixer-2
+`((rbx>>8)&0xFF)^0x37`, mixer-3 `((rbx>>16)&0xFF)^0xE1` (each
+proven on fresh sessions; note `xor ebx, 0x27eb5e18` at +0xe6b41
+does NOT execute on live cycles -- CFF routes around the head).
+A full selector tape (176 rows = 11 cycles x 16 mixers) is the
+measured graph. And the block reads only FOUR masked pointers in
+total -- one per family (X1=0x800020c00dc2 for mixers 1/5/9/13,
+zone image+0x31080+c; X2/X3/X4 for the other families) -- so the
+four dumped zones (load-stable, 386/386 cross-run) cover every
+read the block makes.
+
+**The key chain, caught inside the block.** `[rbp-0x48] <- ebx`
+at +0xe6c4d (40 taped rows), the tail `ebx = [rbp-0x48] ^
+0xa4e7203b` at +0xe6c84 starts the next cycle.
+
+**What stands between the campaign and a white CPIM generator --
+every input measured:** the selector weave of mixers 5-16 closed
+into formulas from the tape (a paper exercise); `generate_body_a`
+-> 160 bytes in Rust; the stage-2 digest node -> 32 bytes (its
+rip tape and the depot reference are captured); the SPIM -> key
+genesis; and the session/bodyB writers for the full 276. The
+capture channel is gdb alone (frida-gum refuses the Bionic
+process off-Android: "Unable to locate Android dynamic linker");
+one hardware watchpoint at a time; the BP on vdfut768ig
+(entry-delta 0x87554) is the reliable gate.
+
 ## 6. Benchmarks
 
 ### 6.1 Methodology
@@ -3326,6 +3407,7 @@ Neither requires perun to disclose its own source or to relicence its code, and 
 | 2026-10-24f | **The live oracle answers: the Android stand reborn, the complete provisioning cycle green, and the transform envelope measured identical to ours.** The stand's launch recipe recovered and recorded (the bind-mount namespace over /opt/data/adi-mnt/stage -- the Bionic loader demands absolute /system paths; adi_native + libs + CA bundle + ADI_RESOLVE), and with the engine's adi.pb temporarily set aside the stand ran a COMPLETE fresh provisioning against Apple: lookup -> start (SPIM) -> transform -> finish (ptm/tk) -> PROVISIONING COMPLETE, the OTP check green. **The first same-second live pair captured**: live_prov_in.bin (347B) + live_prov_out.bin (276B) -- the SPIM->CPIM input/output of a successful transform as file artifacts. The dump proxy caught the live transform (716bd86c) with its full envelope -- BYTE-FOR-BYTE OUR WINDOWS FORM: +0x30 the SPIM pointer (content-proven), +0x38 0x15b, +0x70 0x1d0, +0x80 the OUT slot; after the call +0x50 = 0x114 (the CPIM length) and +0x80 = the CPIM heap pointer, the packet carrying {00000001, ff..fe} -- the success word live. The CPIM egress is DIRECT (the body writes the 276 bytes into the heap buffer on the successful verdict); the Windows -45020 is therefore THE VERDICT GATE, not a difference of machinery. The fresh pair's derivation facts: the session block is f(the machine state) (not in the SPIM), body A the cascade's ciphertext over the SPIM (no trivial slice or mask) -- the ALGORITHM is the vdfut cascade itself, the machinery perun-adi-core transcribes, and the live pair is now the binding parity target. |
 | 2026-10-20g | **The live-oracle strike: headless decompilation through the new arsenal, and the one-engine theorem.** `re gh`/pyghidra imported and analyzed libstoreservicescore.so (analyzeHeadless, 126s); /opt/data/il/prov_start_decomp.c carries all eight obfuscated exports in clean Clang pseudo-C -- rsegvyrt87 (ProvisioningStart) @ 0x2deec0 is a THIN TRANSCEIVER: null-guard -45001, an argument-aligning MBA fold ((x-(2x&0x62e1fd4f2b034634))+0x3170fea79581a31a; SiMBA/z3: not the canonical (x^K)+C form), and ONE indirect call -- vdfut(0x10, ctx, 1, &cpim, &cpim_len, &session): NO crypto in the wrapper. libCoreADI.so's vdfut768ig @ VMA 0x87550 measures 0xb8ba3 bytes -- the same CFF mega-dispatcher as CoreADI64.dll, with the same opcode-mask family ((op-(2op&0xdeb10b0e))+0x6f588587 vs the Windows (op+(-(2op&0x41d0e0da))+0x20e8706d)), a 512-entry cursor table @ 0x48c0 (STATIC in .rodata, 262 valid hop targets -- unlike the Windows runtime table), the rip-0x29 hop glue, and the -45002 guard. Capstone walked the cursor targets: TWELVE SSE-hop blocks (0x8892f..0x8ccb9), and hop_445/483 @ 0x8b5d8 show the DERIVATION ENGINE: `movdqu xmm3,[rdi+rcx]` reads the input buffer (rdi = the SPIM packet), pmovzxbd lifts bytes to dwords, pmulld applies rip-relative round keys, paddd/psubd/pxor fold -- the campaign's fold pattern processing the SPIM directly. The same-second live pair kills the textbook crypto hypotheses at once: body A is not AES-GCM, not a XOR-masked SPIM, not sha256/HMAC of the SPIM/bodyA/session; THE ALGORITHM IS THE FOLD CASCADE ITSELF -- the machinery perun-adi-core transcribes -- and the fresh live pair is its ground truth. |
 | 2026-10-24h | **The documentation round: the full record consolidated, the platforms kept strictly separate.** §5.11 written (a: the Windows white box -- the verdict word's four channels with their collapsed MBA forms and parity, the r9 conveyor algebra with the TIDX-pinned tables, the SPIM ingress/egress gating, the early series, the white box itself; b: the Windows caller hunt closed across the whole corpus; c: the Android live oracle -- the same-second pair, the envelope identity, the headless decompilation, the one-engine theorem). The **-45028 label on 0xffff5024 corrected to -45020** everywhere it stood in the active prose (RESEARCH §5.10, HANDOVER §4.5a -- the old label was an arithmetic slip; -45028 itself is 0xffff501c, a different code); the revision-table rows keep their dated history. HANDOVER §4.5c written (the white box + the oracle, the corrected code taxonomy). README gains the ADI research lane (perun-adi-core, the white-box goal) and the updated documentation map. Workspace 361 passed / 0 failed, clippy clean. |
+| 2026-10-24i | **The live-oracle assault: the depot theorem, the mixer cascade closed on live bytes, and the selector/four-zone map.** The second campaign against the Android oracle, driven by the new RE arsenal, cracked the CPIM derivation open (chronicle: FINDINGS 2026-10-22a..h). §5.11d records it all: the DEPOT THEOREM -- CPIM[0x18..0xd8) is a contiguous slice of one runtime table (four same-run verifications, 192/192), the 28-instruction unloader cycle transcribed into cpim_engine.rs with a live-parity test green; the DETERMINISM LAWS -- same identity + SPIM ⇒ byte-identical CPIM, Apple's ~3h SPIM cache, the never-baked depot address; the DEPOT MAP -- 18 pre-init bytes, SIXTEEN mixer stores (the sixteenth at +0xe6eaa recovered, the census automated in tools/extract_mixers.py) over eleven cycles on the measured position ladder, and a stage-2 node (+0xfbf67..0xfc07d) that owns the digest rows; the MIXER ARITHMETIC -- all four families closed on live bytes 24/24 (fam1 additionally 16/16 cross-session), every mixer with its own masks; the SELECTOR GRAPH (176-row tape; the +0xe6b41 key-xor proven non-executing on live cycles) and the FOUR-ZONE THEOREM -- the block reads only four masked pointers, one per family, so the four dumped load-stable zones cover every read; the KEY CHAIN caught at +0xe6c4d/+0xe6c84; and the measured ladder that remains to a white generator (the selector weave of mixers 5-16, generate_body_a, the stage-2 digest node, the key genesis, the session/bodyB writers). The capture channel verdict: gdb alone -- frida-gum refuses the Bionic process off-Android. New tooling in the repo: tools/extract_mixers.py, tools/solve_delta.py, examples/cpim_anatomy.rs, cpim_engine.rs; workspace 363 passed / 0 failed, clippy clean; commits 0d1a6da, d4cb74e, 420d072. |
 
 *Apple, macOS, OS X, StoreKit, FairPlay, iTunes and related marks are trademarks of Apple Inc. This independent research project is not affiliated with, endorsed by, or sponsored by Apple Inc. All binary images referenced are obtained by users directly from Apple's public distribution servers and are never redistributed with this project.**`f` is a full-avalanching block transform.** Sixteen runs, base packet from
 the Android engine, one input byte raised by one each time:
