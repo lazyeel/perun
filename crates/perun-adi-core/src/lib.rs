@@ -28,6 +28,7 @@ pub mod conveyor;
 pub mod cpim;
 pub mod body_a;
 pub mod cpim_engine;
+pub mod digest;
 pub mod early_series;
 pub mod early_zone;
 pub mod fold_zone;
