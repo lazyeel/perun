@@ -224,6 +224,146 @@ mod tests {
         eprintln!("BODY A live parity: {ok}/{checked} (named skips: {skipped_named})");
     }
 
+    /// THE THROUGH TEST: the full 192-byte depot of ONE session --
+    /// body A assembled from the mixer tape, the digest from the
+    /// watchpoint word tape -- laid against the same run's CPIM
+    /// (the unloader's law: cpim[0x18+j] == depot[j]). The digest
+    /// block resolves every word from a measured store hit, so no
+    /// byte on either side is derived. Gated like the digest pair.
+    #[test]
+    fn live_full_depot_parity() {
+        use crate::digest::{generate_digest, DigestInputs, K_HIGH, K_LOW};
+        let dir = std::env::var("PERUN_LIVE_DIR")
+            .unwrap_or_else(|_| "/opt/data/adi-re".into());
+        if std::env::var("PERUN_DIGEST_PAIR_READY").is_err() {
+            eprintln!("gating: PERUN_DIGEST_PAIR_READY not set");
+            return;
+        }
+        let (Ok(zones), Ok(tape), Ok(wtape), Ok(cpim)) = (
+            Zones::from_files(&dir),
+            std::fs::read_to_string(format!("{dir}/zone26_tape.txt")),
+            std::fs::read_to_string(format!("{dir}/pair_wp_words.txt")),
+            std::fs::read(format!("{dir}/live_prov_out.bin")),
+        ) else {
+            eprintln!("gating: through-test artifacts not present under {dir}");
+            return;
+        };
+        assert_eq!(cpim.len(), 0x114, "the live CPIM is 276 bytes");
+        let mut depot = [0u8; 0xC0];
+        let mut seen = [false; 0xC0];
+        // body A from the mixer tape (same parser as live_body_a_parity)
+        let mut rounds_raw: Vec<Vec<(usize, MixerInputs)>> = Vec::new();
+        let mut cur: Vec<(usize, MixerInputs)> = Vec::new();
+        for line in tape.lines() {
+            let mut fields = line.split_whitespace();
+            let _n = fields.next();
+            let mut d = std::collections::HashMap::new();
+            for f in fields {
+                let (k, v) = f.split_once('=').expect("field");
+                d.insert(k.to_string(), v.to_string());
+            }
+            let store = u32::from_str_radix(d["store"].trim_start_matches("0x"), 16).unwrap();
+            if store == STORES[0] && !cur.is_empty() {
+                rounds_raw.push(std::mem::take(&mut cur));
+            }
+            let rcx = u64::from_str_radix(d["rcx"].trim_start_matches("0x"), 16).unwrap();
+            let al = u8::from_str_radix(d["al"].trim_start_matches("0x"), 16).unwrap();
+            let rdx = u64::from_str_radix(d["rdx"].trim_start_matches("0x"), 16).unwrap();
+            let rax = u64::from_str_radix(d["rax"].trim_start_matches("0x"), 16).unwrap();
+            let mixer = STORES.iter().position(|&s| s == store).expect("store in census");
+            let lane = LANE_OF[mixer];
+            let lane_value = match lane {
+                0 | 1 => rcx as u8,
+                2 => rdx as u8,
+                _ => rax as u8,
+            };
+            cur.push((mixer, MixerInputs { lane_value, mul: al }));
+        }
+        if !cur.is_empty() {
+            rounds_raw.push(cur);
+        }
+        let mut body_bytes = 0;
+        for (k, round) in rounds_raw.iter().take(10).enumerate() {
+            for (j, inp) in round {
+                if *j == 11 || *j == 13 || (*j == 3 && k == 0) {
+                    continue; // the named skips -- their rows stay unseen
+                }
+                let pos = ROW_POS[*j] + 0x10 * k;
+                if let Some(b) = mixer_byte(*j, inp, &zones) {
+                    depot[pos] = b;
+                    seen[pos] = true;
+                    body_bytes += 1;
+                }
+            }
+        }
+        // the digest: resolve the eight words from measured hits
+        let mut rows: Vec<Vec<(String, u32)>> = Vec::new();
+        for line in wtape.lines() {
+            if line.starts_with("hit") {
+                let mut fields = Vec::new();
+                for f in line.split_whitespace() {
+                    if let Some((k, v)) = f.split_once('=') {
+                        if let Ok(x) = u32::from_str_radix(v.trim_start_matches("0x"), 16) {
+                            fields.push((k.to_string(), x));
+                        }
+                    }
+                }
+                rows.push(fields);
+            }
+        }
+        const CANON: [(usize, &str, u32); 8] = [
+            (0xA0, "RCX", K_LOW), (0xA4, "W8", K_LOW),
+            (0xA8, "W6", K_LOW), (0xAC, "W2", K_LOW),
+            (0xB0, "W1", K_HIGH), (0xB4, "W3", K_HIGH),
+            (0xB8, "W5", K_HIGH), (0xBC, "W4", K_HIGH),
+        ];
+        let mut words = DigestInputs::default();
+        for (block, key, k) in CANON {
+            let mut s_live = 0u32;
+            for b in 0..4 {
+                s_live = (s_live << 8) | cpim[0x18 + block + b] as u32;
+            }
+            let mut word = None;
+            'hits: for row in &rows {
+                for (kk, vv) in row {
+                    if kk == key && vv.wrapping_add(k) == s_live {
+                        word = Some(*vv);
+                        break 'hits;
+                    }
+                }
+            }
+            let w = word.unwrap_or_else(|| {
+                panic!("block {block:#x}: no measured word sums to {s_live:08x}")
+            });
+            match block {
+                0xA0 => words.a0 = w,
+                0xA4 => words.a4 = w,
+                0xA8 => words.a8 = w,
+                0xAC => words.ac = w,
+                0xB0 => words.b0 = w,
+                0xB4 => words.b4 = w,
+                0xB8 => words.b8 = w,
+                _ => words.bc = w,
+            }
+        }
+        let dz = generate_digest(&words);
+        depot[0xA0..0xC0].copy_from_slice(&dz);
+        for s in &mut seen[0xA0..0xC0] {
+            *s = true;
+        }
+        // the unloader law, byte for byte, over everything assembled
+        let mut ok = 0;
+        for j in 0..0xC0 {
+            if !seen[j] {
+                continue; // the body-A skips are not asserted here
+            }
+            assert_eq!(depot[j], cpim[0x18 + j], "depot+{j:#04x} vs cpim+{:#04x}", 0x18 + j);
+            ok += 1;
+        }
+        assert_eq!(ok, body_bytes + 32, "the through count is body bytes plus the digest");
+        eprintln!("THROUGH depot parity: {ok}/192 positions live (body A {body_bytes} + digest 32; body-A skips {}/{})", 160 - body_bytes, 160);
+    }
+
     /// The ladder invariant, pinned without any live files: every
     /// mixer lands on its own depot position, no overlap, no gap.
     #[test]
