@@ -137,6 +137,16 @@ mod tests {
     #[test]
     fn live_body_a_parity() {
         let dir = std::env::var("PERUN_LIVE_DIR").unwrap_or_else(|_| "/opt/data/adi-re".into());
+        // The parity is only meaningful when the tape and the CPIM
+        // come from ONE session -- the tape's planter is session-
+        // born (the cross-session law, paid for twice). The digest
+        // run overwrites live_prov_out.bin, so the body-A gate is
+        // its OWN switch, flipped only while the zone-26 artifacts
+        // are the same run's pair.
+        if std::env::var("PERUN_BODY_A_PAIR_READY").is_err() {
+            eprintln!("gating: PERUN_BODY_A_PAIR_READY not set (the zone-26 tape and the current live_prov_out.bin must be one session)");
+            return;
+        }
         let (Ok(zones), Ok(tape), Ok(cpim)) = (
             Zones::from_files(&dir),
             std::fs::read_to_string(format!("{dir}/zone26_tape.txt")),
