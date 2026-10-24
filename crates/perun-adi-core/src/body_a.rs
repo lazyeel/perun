@@ -26,14 +26,6 @@
 //! here are the cascade's measured lane values, and the test pins
 //! the tails' arithmetic byte for byte on the live pair.
 
-/// The zone read offsets into the four dumped zone buffers.
-pub mod zone_offsets {
-    pub const A: i32 = -0x10;
-    pub const B: i32 = 0x2E;
-    pub const C: i32 = -0x30;
-    pub const D: i32 = 0x49;
-}
-
 /// One lane's measured inputs for a single mixer pass.
 #[derive(Clone, Copy, Debug)]
 pub struct MixerInputs {
@@ -58,27 +50,43 @@ pub const FINAL_XOR: [u8; 16] = [0x98, 0xB8, 0x5F, 0x6D, 0x85, 0x64, 0x54, 0x17,
 pub const ROW_POS: [usize; 16] = [3, 2, 1, 0, 7, 6, 5, 4, 0xB, 0xA, 9, 8, 0xF, 0xE, 0xD, 0xC];
 
 /// The four read zones (0x200 each, dumped live; load-stable).
+pub const ZONE_WINDOW: usize = 0x300;
+
+/// The zone window is tied to the session's FIRST lane value: the
+/// capture dumps [addr_1 - 0x100, +0x300) where addr_1 is the
+/// first giant read of that family -- so the true index of any
+/// read is (v - c1) + 0x100, SESSION-INVARIANT. The old static
+/// offsets were the same law with the taping session's c1 baked
+/// in (0x90/0x52/0xb0/0x37); a fresh SPIM rotates c1 and static
+/// offsets die -- the dynamic c1 fields live forever.
 pub struct Zones {
-    pub a: [u8; 0x200],
-    pub b: [u8; 0x200],
-    pub c: [u8; 0x200],
-    pub d: [u8; 0x200],
+    pub a: [u8; ZONE_WINDOW],
+    pub b: [u8; ZONE_WINDOW],
+    pub c: [u8; ZONE_WINDOW],
+    pub d: [u8; ZONE_WINDOW],
+    pub c1a: u8,
+    pub c1b: u8,
+    pub c1c: u8,
+    pub c1d: u8,
 }
 
 impl Zones {
     pub fn from_files(dir: &str) -> Result<Self, String> {
-        let read = |name: &str| -> Result<[u8; 0x200], String> {
+        let read = |name: &str| -> Result<[u8; ZONE_WINDOW], String> {
             let p = format!("{dir}/{name}");
             let blob = std::fs::read(&p).map_err(|e| format!("{p}: {e}"))?;
             blob.try_into().map_err(|_| format!("{p}: wrong size"))
         };
+        // c1 defaults to the old baked-in alignment until the test
+        // feeds the session's own first lane values.
         Ok(Self { a: read("fam1_zone.bin")?, b: read("fam2_zone.bin")?,
-                  c: read("fam3_zone.bin")?, d: read("fam4_zone.bin")? })
+                  c: read("fam3_zone.bin")?, d: read("fam4_zone.bin")?,
+                  c1a: 0x90, c1b: 0x52, c1c: 0xB0, c1d: 0x37 })
     }
 
-    fn read_at(z: &[u8; 0x200], c: u8, off: i32) -> Option<u8> {
-        let idx = c as i32 + off;
-        if (0..0x200).contains(&idx) { Some(z[idx as usize]) } else { None }
+    fn read_at(z: &[u8; ZONE_WINDOW], v: u8, c1: u8) -> Option<u8> {
+        let idx = v as i32 - c1 as i32 + 0x100;
+        if (0..ZONE_WINDOW as i32).contains(&idx) { Some(z[idx as usize]) } else { None }
     }
 }
 
@@ -94,13 +102,13 @@ pub fn mixer_byte(mixer: usize, inp: &MixerInputs, zones: &Zones) -> Option<u8> 
     let fx = FINAL_XOR[mixer];
     let v = inp.lane_value;
     match lane {
-        0 => Zones::read_at(&zones.a, v, zone_offsets::A)
+        0 => Zones::read_at(&zones.a, v, zones.c1a)
             .map(|r| inp.mul.wrapping_add(r) ^ fx),
-        1 => Zones::read_at(&zones.b, v, zone_offsets::B)
+        1 => Zones::read_at(&zones.b, v, zones.c1b)
             .map(|r| inp.mul.wrapping_add(r) ^ fx),
-        2 => Zones::read_at(&zones.c, v, zone_offsets::C)
+        2 => Zones::read_at(&zones.c, v, zones.c1c)
             .map(|read| (read.wrapping_sub(v | 0x35)) ^ ((read.wrapping_sub(v | 0x15)).wrapping_shl(3)) ^ fx),
-        _ => Zones::read_at(&zones.d, v, zone_offsets::D).map(|read| {
+        _ => Zones::read_at(&zones.d, v, zones.c1d).map(|read| {
             if mixer == 3 { nibble_tail(read, v, fx) } else { read.wrapping_sub(v | 0xA2) ^ fx }
         }),
     }
@@ -235,7 +243,7 @@ mod tests {
             eprintln!("gating: PERUN_BODY_A_PAIR_READY not set (the zone-26 tape and the current live_prov_out.bin must be one session)");
             return;
         }
-        let (Ok(zones), Ok(tape), Ok(cpim)) = (
+        let (Ok(mut zones), Ok(tape), Ok(cpim)) = (
             Zones::from_files(&dir),
             std::fs::read_to_string(format!("{dir}/zone26_tape.txt")),
             std::fs::read(format!("{dir}/live_prov_out.bin")),
@@ -244,6 +252,40 @@ mod tests {
             return;
         };
         assert_eq!(cpim.len(), 0x114, "the live CPIM is 276 bytes");
+        // the session's first lane values, straight off the tape:
+        // fam1/fam2 index by rcx, fam3 by rdx, fam4 by rax.
+        {
+            let mut got = [0u8; 4];
+            let mut have = [false; 4];
+            for line in tape.lines() {
+                let mut d = std::collections::HashMap::new();
+                for f in line.split_whitespace() {
+                    if let Some((k, v)) = f.split_once('=') { d.insert(k.to_string(), v.to_string()); }
+                }
+                let Some(s) = d.get("store") else { continue };
+                let sv = s.trim_start_matches("0x");
+                let ci = match sv {
+                    "e6b9d" if !have[0] => 0,
+                    "e6be2" if !have[1] => 1,
+                    "e6c47" if !have[2] => 2,
+                    "e6ca0" if !have[3] => 3,
+                    _ => 99,
+                };
+                if ci < 4 {
+                    // fam1/fam2 giant reads index by rcx, fam3 by rdx,
+                    // and the fam4 lane by RAX -- the selector itself.
+                    let key = match ci { 2 => "dl", 3 => "al", _ => "cl" };
+                    got[ci] = u8::from_str_radix(d[key].trim_start_matches("0x"), 16).unwrap_or(0);
+                    have[ci] = true;
+                }
+            }
+            assert!(have.iter().all(|&h| h), "the tape must carry the four family first hits");
+            zones.c1a = got[0];
+            zones.c1b = got[1];
+            zones.c1c = got[2];
+            zones.c1d = got[3];
+        }
+
 
         // parse the tape into rounds, each opened at mixer 1 (m15 rows
         // are absent in round 1 -- the tape is parsed by boundaries,
@@ -279,17 +321,45 @@ mod tests {
             rounds_raw.push(cur);
         }
 
+        // THE SEL-TAPE BACKFILL: m12's giant breakpoint sits inside an
+        // instruction (never fires) and the m4 first round is the named
+        // anomaly -- but the planter tape carries every round complete,
+        // and for the fam4 lanes the lane_value IS the selector (rax
+        // right after the s-box xor, measured).
+        if let Ok(st) = std::fs::read_to_string(format!("{dir}/sel34_tape.txt")) {
+            let mut sel_rounds: Vec<Vec<u8>> = Vec::new();
+            let mut srow: Vec<u8> = Vec::new();
+            for line in st.lines() {
+                let mut is_m1 = false;
+                let mut sel = 0u8;
+                for f in line.split_whitespace() {
+                    if let Some((k, v)) = f.split_once('=') {
+                        if k == "store" { is_m1 = v.trim_start_matches("0x") == "e6b9d"; }
+                        if k == "sel" { sel = u8::from_str_radix(v, 16).unwrap_or(0); }
+                    }
+                }
+                if is_m1 && !srow.is_empty() { sel_rounds.push(std::mem::take(&mut srow)); }
+                srow.push(sel);
+            }
+            if !srow.is_empty() { sel_rounds.push(srow); }
+            for (k, rnd) in rounds_raw.iter_mut().enumerate() {
+                let Some(sr) = sel_rounds.get(k) else { continue };
+                if sr.len() < 16 { continue; }
+                if !rnd.iter().any(|(j, _)| *j == 11) {
+                    rnd.push((11, MixerInputs { lane_value: sr[11], mul: 0 }));
+                }
+                if !rnd.iter().any(|(j, _)| *j == 3) {
+                    rnd.push((3, MixerInputs { lane_value: sr[3], mul: 0 }));
+                }
+            }
+        }
         let mut checked = 0;
         let mut ok = 0;
         let mut skipped_named = 0;
         for (k, round) in rounds_raw.iter().take(10).enumerate() {
             for (j, inp) in round {
-                if *j == 11 || *j == 13 {
-                    skipped_named += 1; // the defective tape rows (m12, m14)
-                    continue;
-                }
-                if *j == 3 && k == 0 {
-                    skipped_named += 1; // the open first-round anomaly
+                if *j == 11 && inp.mul == 0 {
+                    skipped_named += 1; // m12 row without the sel-tape backfill
                     continue;
                 }
                 let pos = ROW_POS[*j] + 0x10 * k;
@@ -327,7 +397,7 @@ mod tests {
             eprintln!("gating: PERUN_DIGEST_PAIR_READY not set");
             return;
         }
-        let (Ok(zones), Ok(tape), Ok(wtape), Ok(cpim)) = (
+        let (Ok(mut zones), Ok(tape), Ok(wtape), Ok(cpim)) = (
             Zones::from_files(&dir),
             std::fs::read_to_string(format!("{dir}/zone26_tape.txt")),
             std::fs::read_to_string(format!("{dir}/pair_wp_words.txt")),
@@ -337,6 +407,40 @@ mod tests {
             return;
         };
         assert_eq!(cpim.len(), 0x114, "the live CPIM is 276 bytes");
+        // the session's first lane values, straight off the tape:
+        // fam1/fam2 index by rcx, fam3 by rdx, fam4 by rax.
+        {
+            let mut got = [0u8; 4];
+            let mut have = [false; 4];
+            for line in tape.lines() {
+                let mut d = std::collections::HashMap::new();
+                for f in line.split_whitespace() {
+                    if let Some((k, v)) = f.split_once('=') { d.insert(k.to_string(), v.to_string()); }
+                }
+                let Some(s) = d.get("store") else { continue };
+                let sv = s.trim_start_matches("0x");
+                let ci = match sv {
+                    "e6b9d" if !have[0] => 0,
+                    "e6be2" if !have[1] => 1,
+                    "e6c47" if !have[2] => 2,
+                    "e6ca0" if !have[3] => 3,
+                    _ => 99,
+                };
+                if ci < 4 {
+                    // fam1/fam2 giant reads index by rcx, fam3 by rdx,
+                    // and the fam4 lane by RAX -- the selector itself.
+                    let key = match ci { 2 => "dl", 3 => "al", _ => "cl" };
+                    got[ci] = u8::from_str_radix(d[key].trim_start_matches("0x"), 16).unwrap_or(0);
+                    have[ci] = true;
+                }
+            }
+            assert!(have.iter().all(|&h| h), "the tape must carry the four family first hits");
+            zones.c1a = got[0];
+            zones.c1b = got[1];
+            zones.c1c = got[2];
+            zones.c1d = got[3];
+        }
+
         let mut depot = [0u8; 0xC0];
         let mut seen = [false; 0xC0];
         // body A from the mixer tape (same parser as live_body_a_parity)
@@ -370,11 +474,43 @@ mod tests {
         if !cur.is_empty() {
             rounds_raw.push(cur);
         }
+// THE SEL-TAPE BACKFILL: m12's giant breakpoint sits inside an
+        // instruction (never fires) and the m4 first round is the named
+        // anomaly -- but the planter tape carries every round complete,
+        // and for the fam4 lanes the lane_value IS the selector (rax
+        // right after the s-box xor, measured).
+        if let Ok(st) = std::fs::read_to_string(format!("{dir}/sel34_tape.txt")) {
+            let mut sel_rounds: Vec<Vec<u8>> = Vec::new();
+            let mut srow: Vec<u8> = Vec::new();
+            for line in st.lines() {
+                let mut is_m1 = false;
+                let mut sel = 0u8;
+                for f in line.split_whitespace() {
+                    if let Some((k, v)) = f.split_once('=') {
+                        if k == "store" { is_m1 = v.trim_start_matches("0x") == "e6b9d"; }
+                        if k == "sel" { sel = u8::from_str_radix(v, 16).unwrap_or(0); }
+                    }
+                }
+                if is_m1 && !srow.is_empty() { sel_rounds.push(std::mem::take(&mut srow)); }
+                srow.push(sel);
+            }
+            if !srow.is_empty() { sel_rounds.push(srow); }
+            for (k, rnd) in rounds_raw.iter_mut().enumerate() {
+                let Some(sr) = sel_rounds.get(k) else { continue };
+                if sr.len() < 16 { continue; }
+                if !rnd.iter().any(|(j, _)| *j == 11) {
+                    rnd.push((11, MixerInputs { lane_value: sr[11], mul: 0 }));
+                }
+                if !rnd.iter().any(|(j, _)| *j == 3) {
+                    rnd.push((3, MixerInputs { lane_value: sr[3], mul: 0 }));
+                }
+            }
+        }
         let mut body_bytes = 0;
         for (k, round) in rounds_raw.iter().take(10).enumerate() {
             for (j, inp) in round {
-                if *j == 11 || *j == 13 || (*j == 3 && k == 0) {
-                    continue; // the named skips -- their rows stay unseen
+                if *j == 11 && inp.mul == 0 && inp.lane_value == 0 {
+                    continue; // an unfilled m12 backfill row stays unseen
                 }
                 let pos = ROW_POS[*j] + 0x10 * k;
                 if let Some(b) = mixer_byte(*j, inp, &zones) {
