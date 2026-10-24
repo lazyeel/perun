@@ -235,6 +235,200 @@ pub fn selectors(f: &WeaveFeeds, planter_1390: &[u8; 256]) -> [u8; 16] {
     ]
 }
 
+
+// ---------------------------------------------------------------------------
+// THE TAPE ASSEMBLERS: the one-session depot zone, built from the
+// capture tapes (giant + planter + word watchpoints). These are the
+// crate's public "generator over measured inputs" -- the parity
+// tests and the end-to-end container test all go through them.
+// ---------------------------------------------------------------------------
+
+/// Assemble the 192-byte depot zone of one session from its tapes:
+/// the body A rows (giant tape + sel backfills + session zones) and
+/// the caller lays the digest in. Returns the depot array and the
+/// count of assembled body bytes (the m15 rows are the named gap
+/// until their capture lands).
+pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String> {
+    let mut zones = Zones::from_files(dir)?;
+    let tape = std::fs::read_to_string(format!("{dir}/zone26_tape.txt")).map_err(|e| e.to_string())?;
+    let sel_txt = std::fs::read_to_string(format!("{dir}/sel34_tape.txt")).ok();
+
+    // the session's first lane values (rcx for fam1/2, rdx fam3, rax fam4)
+    {
+        let mut got = [0u8; 4];
+        let mut have = [false; 4];
+        for line in tape.lines() {
+            let mut d = std::collections::HashMap::new();
+            for f in line.split_whitespace() {
+                if let Some((k, v)) = f.split_once('=') { d.insert(k.to_string(), v.to_string()); }
+            }
+            let Some(s) = d.get("store") else { continue };
+            let sv = s.trim_start_matches("0x");
+            let ci = match sv {
+                "e6b9d" if !have[0] => 0,
+                "e6be2" if !have[1] => 1,
+                "e6c47" if !have[2] => 2,
+                "e6ca0" if !have[3] => 3,
+                _ => 99,
+            };
+            if ci < 4 {
+                let key = match ci { 2 => "dl", 3 => "al", _ => "cl" };
+                got[ci] = u8::from_str_radix(d[key].trim_start_matches("0x"), 16).unwrap_or(0);
+                have[ci] = true;
+            }
+        }
+        if !have.iter().all(|&h| h) { return Err("the tape lacks a family first hit".into()); }
+        zones.c1a = got[0]; zones.c1b = got[1]; zones.c1c = got[2]; zones.c1d = got[3];
+    }
+
+    // the giant tape rows
+    let mut rounds_raw: Vec<Vec<(usize, MixerInputs)>> = Vec::new();
+    let mut cur: Vec<(usize, MixerInputs)> = Vec::new();
+    for line in tape.lines() {
+        let mut fields = line.split_whitespace();
+        let _n = fields.next();
+        let mut d = std::collections::HashMap::new();
+        for f in fields {
+            if let Some((k, v)) = f.split_once('=') { d.insert(k.to_string(), v.to_string()); }
+        }
+        let store = u32::from_str_radix(d["store"].trim_start_matches("0x"), 16).unwrap_or(0);
+        if store == STORES[0] && !cur.is_empty() { rounds_raw.push(std::mem::take(&mut cur)); }
+        let Some(mixer) = STORES.iter().position(|&s| s == store) else { continue };
+        let rcx = u64::from_str_radix(d["rcx"].trim_start_matches("0x"), 16).unwrap_or(0);
+        let al = u8::from_str_radix(d["al"].trim_start_matches("0x"), 16).unwrap_or(0);
+        let rdx = u64::from_str_radix(d["rdx"].trim_start_matches("0x"), 16).unwrap_or(0);
+        let rax = u64::from_str_radix(d["rax"].trim_start_matches("0x"), 16).unwrap_or(0);
+        let lane = LANE_OF[mixer];
+        let mut lane_value = match lane {
+            0 | 1 => rcx as u8,
+            2 => rdx as u8,
+            _ => rax as u8,
+        };
+        // m12's breakpoint catches rax BEFORE the s-box xor: c12 ^ 0xDD.
+        if mixer == 11 { lane_value ^= 0xDD; }
+        cur.push((mixer, MixerInputs { lane_value, mul: al, m4_round1: false }));
+    }
+    if !cur.is_empty() { rounds_raw.push(cur); }
+
+    // the sel-tape backfill (m12 rows without hits, the m4 first round)
+    if let Some(st) = sel_txt {
+        let mut sel_rounds: Vec<Vec<u8>> = Vec::new();
+        let mut srow: Vec<u8> = Vec::new();
+        for line in st.lines() {
+            let mut is_m1 = false;
+            let mut sel = 0u8;
+            for f in line.split_whitespace() {
+                if let Some((k, v)) = f.split_once('=') {
+                    if k == "store" { is_m1 = v.trim_start_matches("0x") == "e6b9d"; }
+                    if k == "sel" { sel = u8::from_str_radix(v, 16).unwrap_or(0); }
+                }
+            }
+            if is_m1 && !srow.is_empty() { sel_rounds.push(std::mem::take(&mut srow)); }
+            srow.push(sel);
+        }
+        if !srow.is_empty() { sel_rounds.push(srow); }
+        for (k, rnd) in rounds_raw.iter_mut().enumerate() {
+            let Some(sr) = sel_rounds.get(k) else { continue };
+            if sr.len() < 16 { continue; }
+            if !rnd.iter().any(|(j, _)| *j == 11) {
+                rnd.push((11, MixerInputs { lane_value: sr[11], mul: 0, m4_round1: false }));
+            }
+            if !rnd.iter().any(|(j, _)| *j == 3) {
+                rnd.push((3, MixerInputs { lane_value: sr[3], mul: 0, m4_round1: true }));
+            }
+        }
+    }
+    // the opening round's m4 runs the alternate tail branch (measured)
+    if let Some(r0) = rounds_raw.first_mut() {
+        for (j, inp) in r0.iter_mut() {
+            if *j == 3 { inp.m4_round1 = true; }
+        }
+    }
+
+    // the depot zone: body A rows (m14's row IS the finished byte)
+    let mut depot = [0u8; 0xC0];
+    let mut body_bytes = 0usize;
+    for (k, round) in rounds_raw.iter().take(10).enumerate() {
+        for (j, inp) in round {
+            let pos = ROW_POS[*j] + 0x10 * k;
+            let got = if *j == 13 { Some(inp.mul) } else { mixer_byte(*j, inp, &zones) };
+            if let Some(b) = got {
+                depot[pos] = b;
+                body_bytes += 1;
+            }
+        }
+    }
+    // the digest zone, resolved from the word tape (all eight blocks;
+    // the 0xA0 word is the prologue cascade, taped at the stores)
+    let digest = generate_digest_from_tapes(dir)?;
+    depot[0xA0..0xC0].copy_from_slice(&digest);
+    Ok((depot, body_bytes))
+}
+
+/// The 32-byte digest zone from the watchpoint word tape: each
+/// block resolved from a MEASURED register value at its own store.
+pub fn generate_digest_from_tapes(dir: &str) -> Result<[u8; 32], String> {
+    use crate::digest::{generate_digest, DigestInputs, K_HIGH, K_LOW};
+    let ttxt = std::fs::read_to_string(format!("{dir}/pair_wp_words.txt")).map_err(|e| e.to_string())?;
+    let mut rows: Vec<Vec<(String, u32)>> = Vec::new();
+    for line in ttxt.lines() {
+        if !line.starts_with("hit") { continue; }
+        let mut fields = Vec::new();
+        for f in line.split_whitespace() {
+            if let Some((k, v)) = f.split_once('=') {
+                if let Ok(x) = u32::from_str_radix(v.trim_start_matches("0x"), 16) {
+                    fields.push((k.to_string(), x));
+                }
+            }
+        }
+        rows.push(fields);
+    }
+    const CANON: [(usize, &str, u32); 8] = [
+        (0xA0, "RCX", K_LOW), (0xA4, "W8", K_LOW),
+        (0xA8, "W6", K_LOW), (0xAC, "W2", K_LOW),
+        (0xB0, "W1", K_HIGH), (0xB4, "W3", K_HIGH),
+        (0xB8, "W5", K_HIGH), (0xBC, "W4", K_HIGH),
+    ];
+    let mut words = DigestInputs::default();
+    for (block, key, k) in CANON {
+        let mut word = None;
+        'hits: for row in &rows {
+            for (kk, vv) in row {
+                if kk == key && vv.wrapping_add(k) == expect_sum(dir, block)? {
+                    word = Some(*vv);
+                    break 'hits;
+                }
+            }
+        }
+        let w = word.ok_or_else(|| format!("block {block:#x} unresolved on the word tape"))?;
+        match block {
+            0xA0 => words.a0 = w,
+            0xA4 => words.a4 = w,
+            0xA8 => words.a8 = w,
+            0xAC => words.ac = w,
+            0xB0 => words.b0 = w,
+            0xB4 => words.b4 = w,
+            0xB8 => words.b8 = w,
+            _ => words.bc = w,
+        }
+    }
+    Ok(generate_digest(&words))
+}
+
+/// The four live bytes of a digest block, read straight off the
+/// reference CPIM (MSB first). The word tape resolves AGAINST this
+/// measured sum -- never derived.
+fn expect_sum(dir: &str, block: usize) -> Result<u32, String> {
+    let cpim = std::fs::read(format!("{dir}/live_prov_out.bin")).map_err(|e| e.to_string())?;
+    if cpim.len() < 0xD8 { return Err("the reference CPIM is short".into()); }
+    let mut s = 0u32;
+    for b in 0..4 {
+        s = (s << 8) | cpim[0x18 + block + b] as u32;
+    }
+    Ok(s)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
