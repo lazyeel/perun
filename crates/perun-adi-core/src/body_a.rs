@@ -33,6 +33,11 @@ pub struct MixerInputs {
     pub lane_value: u8,
     /// The mul operand (lanes A/B only; unused by the C/D tails).
     pub mul: u8,
+    /// The m4 first-round flag: the opening round's m4 tail runs the
+    /// ALTERNATE CFF branch -- the same or-fold WITHOUT the final
+    /// xor (measured: the live depot[0] equals the bare or-fold;
+    /// rounds two to ten take the xor). Defaults to the main branch.
+    pub m4_round1: bool,
 }
 
 /// The sixteen mixers in block order (store RVAs of the census).
@@ -95,6 +100,13 @@ fn nibble_tail(read: u8, c4: u8, fx: u8) -> u8 {
     (((read.wrapping_sub(c4 | 0xA2)) & 0xF0) | ((read.wrapping_sub(c4 | 0x02)) & 0x0F)) ^ fx
 }
 
+/// The opening round's m4 tail: the same fold, the final xor skipped
+/// (the alternate CFF branch -- measured live on depot[0]).
+#[inline]
+fn nibble_tail_raw(read: u8, c4: u8) -> u8 {
+    ((read.wrapping_sub(c4 | 0xA2)) & 0xF0) | ((read.wrapping_sub(c4 | 0x02)) & 0x0F)
+}
+
 /// One mixer's output byte from its measured inputs (None if the
 /// zone read falls outside the dumped window).
 pub fn mixer_byte(mixer: usize, inp: &MixerInputs, zones: &Zones) -> Option<u8> {
@@ -109,7 +121,11 @@ pub fn mixer_byte(mixer: usize, inp: &MixerInputs, zones: &Zones) -> Option<u8> 
         2 => Zones::read_at(&zones.c, v, zones.c1c)
             .map(|read| (read.wrapping_sub(v | 0x35)) ^ ((read.wrapping_sub(v | 0x15)).wrapping_shl(3)) ^ fx),
         _ => Zones::read_at(&zones.d, v, zones.c1d).map(|read| {
-            if mixer == 3 { nibble_tail(read, v, fx) } else { read.wrapping_sub(v | 0xA2) ^ fx }
+            if mixer == 3 {
+                if inp.m4_round1 { nibble_tail_raw(read, v) } else { nibble_tail(read, v, fx) }
+            } else {
+                read.wrapping_sub(v | 0xA2) ^ fx
+            }
         }),
     }
 }
@@ -315,7 +331,11 @@ mod tests {
                 2 => rdx as u8,
                 _ => rax as u8,
             };
-            cur.push((mixer, MixerInputs { lane_value, mul: al }));
+            // m12's giant breakpoint (0xe6ec8) catches rax BEFORE the
+            // fam4 s-box xor -- the planter value c12, not the selector.
+            // The fam4 lane indexes by the SELECTOR: c12 ^ 0xDD.
+            let lane_value = if mixer == 11 { lane_value ^ 0xDD } else { lane_value };
+            cur.push((mixer, MixerInputs { lane_value, mul: al, m4_round1: false }));
         }
         if !cur.is_empty() {
             rounds_raw.push(cur);
@@ -346,11 +366,17 @@ mod tests {
                 let Some(sr) = sel_rounds.get(k) else { continue };
                 if sr.len() < 16 { continue; }
                 if !rnd.iter().any(|(j, _)| *j == 11) {
-                    rnd.push((11, MixerInputs { lane_value: sr[11], mul: 0 }));
+                    rnd.push((11, MixerInputs { lane_value: sr[11], mul: 0, m4_round1: false }));
                 }
                 if !rnd.iter().any(|(j, _)| *j == 3) {
-                    rnd.push((3, MixerInputs { lane_value: sr[3], mul: 0 }));
+                    rnd.push((3, MixerInputs { lane_value: sr[3], mul: 0, m4_round1: true }));
                 }
+            }
+        }
+        // the opening round's m4 runs the alternate tail branch (measured).
+        if let Some(r0) = rounds_raw.first_mut() {
+            for (j, inp) in r0.iter_mut() {
+                if *j == 3 { inp.m4_round1 = true; }
             }
         }
         let mut checked = 0;
@@ -364,7 +390,10 @@ mod tests {
                 }
                 let pos = ROW_POS[*j] + 0x10 * k;
                 let expect = cpim[0x18 + pos];
-                match mixer_byte(*j, inp, &zones) {
+                // m14's breakpoint (0xe6f6c) sits AFTER its tail -- the
+                // tape row carries the finished byte itself (10/10 live).
+                let got = if *j == 13 { Some(inp.mul) } else { mixer_byte(*j, inp, &zones) };
+                match got {
                     Some(b) => {
                         assert_eq!(b, expect,
                             "mixer {} round {}: {b:#04x} != cpim+{:#04x}", *j + 1, k + 1, 0x18 + pos);
@@ -469,7 +498,11 @@ mod tests {
                 2 => rdx as u8,
                 _ => rax as u8,
             };
-            cur.push((mixer, MixerInputs { lane_value, mul: al }));
+            // m12's giant breakpoint (0xe6ec8) catches rax BEFORE the
+            // fam4 s-box xor -- the planter value c12, not the selector.
+            // The fam4 lane indexes by the SELECTOR: c12 ^ 0xDD.
+            let lane_value = if mixer == 11 { lane_value ^ 0xDD } else { lane_value };
+            cur.push((mixer, MixerInputs { lane_value, mul: al, m4_round1: false }));
         }
         if !cur.is_empty() {
             rounds_raw.push(cur);
@@ -499,11 +532,17 @@ mod tests {
                 let Some(sr) = sel_rounds.get(k) else { continue };
                 if sr.len() < 16 { continue; }
                 if !rnd.iter().any(|(j, _)| *j == 11) {
-                    rnd.push((11, MixerInputs { lane_value: sr[11], mul: 0 }));
+                    rnd.push((11, MixerInputs { lane_value: sr[11], mul: 0, m4_round1: false }));
                 }
                 if !rnd.iter().any(|(j, _)| *j == 3) {
-                    rnd.push((3, MixerInputs { lane_value: sr[3], mul: 0 }));
+                    rnd.push((3, MixerInputs { lane_value: sr[3], mul: 0, m4_round1: true }));
                 }
+            }
+        }
+        // the opening round's m4 runs the alternate tail branch (measured).
+        if let Some(r0) = rounds_raw.first_mut() {
+            for (j, inp) in r0.iter_mut() {
+                if *j == 3 { inp.m4_round1 = true; }
             }
         }
         let mut body_bytes = 0;
@@ -513,7 +552,10 @@ mod tests {
                     continue; // an unfilled m12 backfill row stays unseen
                 }
                 let pos = ROW_POS[*j] + 0x10 * k;
-                if let Some(b) = mixer_byte(*j, inp, &zones) {
+                // m14's row carries the finished byte (the breakpoint
+                // sits after the tail, measured 10/10).
+                let got = if *j == 13 { Some(inp.mul) } else { mixer_byte(*j, inp, &zones) };
+                if let Some(b) = got {
                     depot[pos] = b;
                     seen[pos] = true;
                     body_bytes += 1;
