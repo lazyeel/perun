@@ -100,13 +100,6 @@ fn nibble_tail(read: u8, c4: u8, fx: u8) -> u8 {
     (((read.wrapping_sub(c4 | 0xA2)) & 0xF0) | ((read.wrapping_sub(c4 | 0x02)) & 0x0F)) ^ fx
 }
 
-/// The opening round's m4 tail: the same fold, the final xor skipped
-/// (the alternate CFF branch -- measured live on depot[0]).
-#[inline]
-fn nibble_tail_raw(read: u8, c4: u8) -> u8 {
-    ((read.wrapping_sub(c4 | 0xA2)) & 0xF0) | ((read.wrapping_sub(c4 | 0x02)) & 0x0F)
-}
-
 /// One mixer's output byte from its measured inputs (None if the
 /// zone read falls outside the dumped window).
 pub fn mixer_byte(mixer: usize, inp: &MixerInputs, zones: &Zones) -> Option<u8> {
@@ -121,11 +114,7 @@ pub fn mixer_byte(mixer: usize, inp: &MixerInputs, zones: &Zones) -> Option<u8> 
         2 => Zones::read_at(&zones.c, v, zones.c1c)
             .map(|read| (read.wrapping_sub(v | 0x35)) ^ ((read.wrapping_sub(v | 0x15)).wrapping_shl(3)) ^ fx),
         _ => Zones::read_at(&zones.d, v, zones.c1d).map(|read| {
-            if mixer == 3 {
-                if inp.m4_round1 { nibble_tail_raw(read, v) } else { nibble_tail(read, v, fx) }
-            } else {
-                read.wrapping_sub(v | 0xA2) ^ fx
-            }
+            if mixer == 3 { nibble_tail(read, v, fx) } else { read.wrapping_sub(v | 0xA2) ^ fx }
         }),
     }
 }
@@ -301,6 +290,10 @@ pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String
         let lane = LANE_OF[mixer];
         let mut lane_value = match lane {
             0 | 1 => rcx as u8,
+            // m15's tail v is the SELECTOR (rax), not c3: its planter
+            // value crosses the s-box xor 0x28 BEFORE the giant reads,
+            // and the old rdx is not yet rewritten at the hit.
+            2 if mixer == 14 => rax as u8,
             2 => rdx as u8,
             _ => rax as u8,
         };
@@ -335,6 +328,13 @@ pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String
             }
             if !rnd.iter().any(|(j, _)| *j == 3) {
                 rnd.push((3, MixerInputs { lane_value: sr[3], mul: 0, m4_round1: true }));
+            }
+            if !rnd.iter().any(|(j, _)| *j == 14) {
+                // m15's tail takes the SELECTOR as v (the family-3 law's
+                // measured exception: the planter value passes the s-box
+                // xor 0x28 first -- disassembly 0xe6f8d), and its zone
+                // read indexes by the same selector.
+                rnd.push((14, MixerInputs { lane_value: sr[14], mul: 0, m4_round1: false }));
             }
         }
     }
@@ -522,6 +522,9 @@ mod tests {
             let lane = LANE_OF[mixer];
             let lane_value = match lane {
                 0 | 1 => rcx as u8,
+                // m15's tail v is the SELECTOR (the planter value
+                // crosses the 0x28 s-box xor before its giant reads).
+                2 if mixer == 14 => rax as u8,
                 2 => rdx as u8,
                 _ => rax as u8,
             };
@@ -567,12 +570,10 @@ mod tests {
                 }
             }
         }
-        // the opening round's m4 runs the alternate tail branch (measured).
-        if let Some(r0) = rounds_raw.first_mut() {
-            for (j, inp) in r0.iter_mut() {
-                if *j == 3 { inp.m4_round1 = true; }
-            }
-        }
+        // The m4 first round: one session matched the bare fold and the
+        // raw branch was inferred -- the next session's live byte
+        // DISPROVED it (the xor branch, like every round); the field
+        // stays for input compatibility, the branch is gone.
         let mut checked = 0;
         let mut ok = 0;
         let mut skipped_named = 0;
@@ -689,6 +690,9 @@ mod tests {
             let lane = LANE_OF[mixer];
             let lane_value = match lane {
                 0 | 1 => rcx as u8,
+                // m15's tail v is the SELECTOR (the planter value
+                // crosses the 0x28 s-box xor before its giant reads).
+                2 if mixer == 14 => rax as u8,
                 2 => rdx as u8,
                 _ => rax as u8,
             };
@@ -733,12 +737,10 @@ mod tests {
                 }
             }
         }
-        // the opening round's m4 runs the alternate tail branch (measured).
-        if let Some(r0) = rounds_raw.first_mut() {
-            for (j, inp) in r0.iter_mut() {
-                if *j == 3 { inp.m4_round1 = true; }
-            }
-        }
+        // The m4 first round: one session matched the bare fold and the
+        // raw branch was inferred -- the next session's live byte
+        // DISPROVED it (the xor branch, like every round); the field
+        // stays for input compatibility, the branch is gone.
         let mut body_bytes = 0;
         for (k, round) in rounds_raw.iter().take(10).enumerate() {
             for (j, inp) in round {
