@@ -591,6 +591,37 @@ int main(int argc, char **argv) {
     if (code != 0 && code != -45061) die("ADI login code %d: unexpected", code);
 
     if (code == -45061) {
+        /* OFFLINE SPIM: skip the network entirely, feed the transform
+         * directly from a captured 347-byte SPIM file. The transform
+         * is pure computation -- it needs the SPIM bytes, not the
+         * server that issued them. */
+        const char *offline_spim = getenv("ADI_OFFLINE_SPIM");
+        if (offline_spim && *offline_spim) {
+            int sfd = open(offline_spim, O_RDONLY);
+            if (sfd < 0) die("offline spim: cannot open %s", offline_spim);
+            static uint8_t spim_buf[4096];
+            size_t spim_n = 0;
+            spim_n = (size_t)read(sfd, spim_buf, sizeof spim_buf);
+            close(sfd);
+            if (spim_n == 0) die("offline spim: empty file %s", offline_spim);
+            info("prov", "OFFLINE spim loaded (%zu bytes from %s)", spim_n, offline_spim);
+
+            uint8_t *cpim = NULL; uint32_t cpim_n = 0; uint32_t session = 0;
+#ifdef DUMP_ADI
+            save_prov_pair(spim_buf, spim_n);
+            extern void ww_finish(const uint8_t *, uint32_t);
+#endif
+            rc = pStart(DS_ID, spim_buf, (uint32_t)spim_n, &cpim, &cpim_n, &session);
+            if (rc != 0) die("ADIProvisioningStart=%d", rc);
+            info("prov", "cpim ready (%u bytes, session=%u)", cpim_n, session);
+#ifdef DUMP_ADI
+            save_prov_result(cpim, cpim_n, rc);
+            ww_finish(cpim, cpim_n);
+#endif
+            info("done", "offline transform complete");
+            return 0;
+        }
+
         /* 4a. full provisioning cycle */
         char *lookup = http_get("https://gsa.apple.com/grandslam/GsService2/lookup");
         if (getenv("ADI_DUMP_LOOKUP")) dump_raw(getenv("ADI_DUMP_LOOKUP"), lookup, strlen(lookup));
