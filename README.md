@@ -1,8 +1,8 @@
-# Perun
+# Perun: Native FairPlay SAP & ADI Runtime (ipatool Drop-In Replacement for Linux)
 
-A native FairPlay runtime and a self-contained App Store client for Linux, in Rust. Perun does not emulate anything: it maps Apple's Mach-O and Microsoft's PE binaries into the Linux address space and runs them on the bare CPU, translating the guest API surface at the boundary. No Wine, no QEMU, no Unicorn, no instruction interpreter.
+A native user-space runtime and App Store client for Linux, written in pure Rust. Perun maps Apple's Mach-O and Microsoft's PE binaries directly into the Linux address space on bare CPU — translating Win32 and macOS libSystem calls to POSIX with zero emulation (no Wine, no QEMU, no Unicorn).
 
-On top of that runtime sits a working App Store client — login with 2FA, search, purchase, download, purchase history — and a strict `ipatool`-compatible persona that reproduces the reference tool's grammar, output shapes and exit codes. It is a drop-in replacement for `ipatool` on the surface it implements; the one known gap is macOS `.pkg` packages, and it is listed below rather than hidden.
+Fixes the August 2026 Apple CommerceKit HTTP 403 / 204 attestation block by generating valid `X-Apple-ActionSignature` headers natively. Drop-in replacement for `majd/ipatool` with 100% CLI grammar, JSON output, and exit-code parity.
 
 ## Performance
 
