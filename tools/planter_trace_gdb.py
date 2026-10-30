@@ -97,6 +97,8 @@ LOG = os.path.join(OUT, "trace.log")
 
 STATE = {
     "base": None,
+    "rva_install_started": False,
+    "rva_install_complete": False,
     "entry_bp": None,
     "base_load_bps": [],
     "active_op": None,
@@ -637,7 +639,13 @@ def arm_buffers_and_continue(src, dst, rbp):
 
 
 def install_after_entry(base):
-    log("INSTALL STAGE: callback entered")
+    """Install trace breakpoints from a GDB breakpoint command list.
+
+    Breakpoint.stop() must not mutate GDB's breakpoint set. EntryBP therefore
+    only records state and returns True; its command list calls this function
+    after the stop callback has returned.
+    """
+    log("INSTALL STAGE: command list entered")
     try:
         gdb.execute("set language c", to_string=True)
         log("INSTALL STAGE: language configured")
@@ -669,20 +677,34 @@ def install_after_entry(base):
             f"{len(WRITERS)} writer sites, "
             f"{len(MIXER_READS)} mixer-read sites; "
             f"unknown ranges={UNKNOWN_RANGES}")
+        STATE["rva_install_complete"] = True
     except Exception as e:
         log(f"INSTALL ERROR: {e}")
-    log("INSTALL STAGE: requesting continue")
-    gdb.execute("continue")
+    log("INSTALL STAGE: return to command-list continue")
 
 
 class EntryBP(gdb.Breakpoint):
     def __init__(self):
         # Keep this breakpoint enabled: vdfut768ig is called with several
-        # opcodes (configuration/init and the actual transform). The later
-        # static sites must only be attributed to the transform opcode.
+        # opcodes (configuration/init and the actual transform). Do not install
+        # RVA breakpoints until the target transform opcode is reached.
         super().__init__("vdfut768ig", gdb.BP_BREAKPOINT, internal=False)
         self.silent = True
         self.installed = False
+        # GDB forbids changing the breakpoint set from Breakpoint.stop().
+        # The attached command list runs after stop() returns and owns the
+        # deferred breakpoint installation and resume operation.
+        self.commands = """silent
+python
+if STATE["active_op"] == TRANSFORM_OPCODE and not STATE["rva_install_started"]:
+    STATE["rva_install_started"] = True
+    log("ENTRY COMMAND: installing target transform breakpoints")
+    install_after_entry(STATE["base"])
+else:
+    log(f"ENTRY COMMAND: skipped opcode={STATE['active_op']:#010x}")
+end
+continue
+"""
 
     def stop(self):
         pc = rv("$pc")
@@ -693,14 +715,11 @@ class EntryBP(gdb.Breakpoint):
             STATE["base"] = base
             self.installed = True
             log(f"FIRST vdfut768ig entry: pc={pc:#x} base={base:#x} opcode={opcode:#010x}")
-            log("ENTRY STAGE: posting installer callback")
-            gdb.post_event(lambda b=base: install_after_entry(b))
-            log("ENTRY STAGE: installer callback queued")
-            # Hold at the function's first instruction until all RVAs are armed.
-            return True
-        log(f"vdfut768ig entry: opcode={opcode:#010x} "
-            f"transform={opcode == TRANSFORM_OPCODE}")
-        return False
+        else:
+            log(f"vdfut768ig entry: opcode={opcode:#010x} "
+                f"transform={opcode == TRANSFORM_OPCODE}")
+        # Stop so GDB can run the attached command list outside this callback.
+        return True
 
 
 # Keep a handle to the entry BP and initialize a clean log.

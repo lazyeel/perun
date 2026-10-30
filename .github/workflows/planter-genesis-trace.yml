@@ -212,15 +212,14 @@ jobs:
               log = (run / "trace.log").read_text(errors="replace") if (run / "trace.log").exists() else ""
               trace_lines = log.splitlines()
               install_stages = [
-                  ("installer callback posted", "ENTRY STAGE: posting installer callback"),
-                  ("installer callback queued", "ENTRY STAGE: installer callback queued"),
-                  ("installer callback entered", "INSTALL STAGE: callback entered"),
+                  ("target opcode requested installation", "ENTRY COMMAND: installing target transform breakpoints"),
+                  ("command list entered installer", "INSTALL STAGE: command list entered"),
                   ("language configured", "INSTALL STAGE: language configured"),
                   ("software watchpoints selected", "INSTALL STAGE: software watchpoints selected"),
                   ("source-slot breakpoint created", "INSTALL STAGE: source-slot breakpoint created"),
                   ("post-malloc breakpoint created", "INSTALL STAGE: post-malloc breakpoint created"),
                   ("copy-entry breakpoint created", "INSTALL STAGE: copy-entry breakpoint created"),
-                  ("continue requested", "INSTALL STAGE: requesting continue"),
+                  ("command list returned to continue", "INSTALL STAGE: return to command-list continue"),
               ]
               lines += ["## GDB installation steps", "",
                         "| Stage | Reached |", "|---|---:|"]
