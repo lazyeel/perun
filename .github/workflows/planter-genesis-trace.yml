@@ -119,6 +119,11 @@ jobs:
           export ANDROID_ROOT=/system ANDROID_DATA=/data
           export PERUN_TRACE_DIR="$WORK/traces"
           export ADI_GDB=1
+          # Force the pure local SPIM -> CPIM call even when this anonymous
+          # machine reports login-code 0; exit immediately after pStart so
+          # this trace never calls midFinishProvisioning/pEnd.
+          export ADI_FORCE_START=1
+          export ADI_TRACE_START_ONLY=1
           export GDB_SCRIPT="$GITHUB_WORKSPACE/tools/planter_trace_gdb.py"
 
           echo "Using GDB: $(gdb --version | head -1)"
@@ -259,10 +264,19 @@ jobs:
               lines += [f"- {name}: {count}" for name, count in error_counts.items()]
               console_log = Path(os.environ.get("RUN_WORK", "")) / "gdb-console.log"
               console_diagnostics = []
+              login_codes = []
+              start_results = []
               if console_log.is_file():
                   for raw in console_log.read_text(errors="replace").splitlines():
                       line = raw.strip()
                       low = line.lower()
+                      login_match = re.search(r"ADIGetLoginCode=(-?\\d+)", line)
+                      if login_match:
+                          login_codes.append(int(login_match.group(1)))
+                      start_match = re.search(
+                          r"TRACE-ONLY start rc=(-?\\d+) cpim_len=(\\d+)", line)
+                      if start_match:
+                          start_results.append((int(start_match.group(1)), int(start_match.group(2))))
                       if "program received signal" in low:
                           tail = low.split("program received signal", 1)[1].strip()
                           signal = tail.split(",", 1)[0].split()[0] if tail else "unknown"
@@ -275,6 +289,14 @@ jobs:
                           console_diagnostics.append("GDB Python exception reported")
                       elif "segmentation fault" in low:
                           console_diagnostics.append("Segmentation fault reported by launcher/child")
+              lines += ["", "## Harness branch results", ""]
+              lines.append("- ADIGetLoginCode results: " +
+                           (", ".join(str(x) for x in login_codes) if login_codes else "not observed"))
+              if start_results:
+                  for rc, cpim_len in start_results:
+                      lines.append(f"- Trace-only ProvisioningStart: rc={rc}, cpim_len={cpim_len}")
+              else:
+                  lines.append("- Trace-only ProvisioningStart result: not observed")
               lines += ["", "## GDB console status", ""]
               lines += [f"- {item}" for item in sorted(set(console_diagnostics))]
               if not console_diagnostics:

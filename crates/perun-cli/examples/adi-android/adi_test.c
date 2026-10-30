@@ -590,7 +590,14 @@ int main(int argc, char **argv) {
 
     if (code != 0 && code != -45061) die("ADI login code %d: unexpected", code);
 
-    if (code == -45061) {
+    const char *force_start_env = getenv("ADI_FORCE_START");
+    int force_start = force_start_env && strcmp(force_start_env, "1") == 0;
+    const char *trace_only_env = getenv("ADI_TRACE_START_ONLY");
+    int trace_start_only = trace_only_env && strcmp(trace_only_env, "1") == 0;
+
+    if (code == -45061 || force_start) {
+        if (force_start && code != -45061)
+            info("prov", "ADI_FORCE_START=1: invoking ProvisioningStart despite login-code=%d", code);
         /* OFFLINE SPIM: skip the network entirely, feed the transform
          * directly from a captured 347-byte SPIM file. The transform
          * is pure computation -- it needs the SPIM bytes, not the
@@ -659,6 +666,10 @@ int main(int argc, char **argv) {
         extern void ww_finish(const uint8_t *, uint32_t);
 #endif
         rc = pStart(DS_ID, spim, (uint32_t)spim_n, &cpim, &cpim_n, &session);
+        if (force_start && trace_start_only) {
+            info("prov", "TRACE-ONLY start rc=%d cpim_len=%u", rc, cpim_n);
+            return 0;
+        }
         if (rc != 0) die("ADIProvisioningStart=%d", rc);
         info("prov", "cpim ready (%u bytes, session=%u)", cpim_n, session);
 #ifdef DUMP_ADI
