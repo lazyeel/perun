@@ -210,6 +210,51 @@ jobs:
               lines += [f"- Trace run id: `{manifest.get('run_id', run.name)}`",
                         f"- Tracer version: `{manifest.get('script_version', 'unknown')}`", ""]
               log = (run / "trace.log").read_text(errors="replace") if (run / "trace.log").exists() else ""
+              trace_lines = log.splitlines()
+              checkpoints = [
+                  ("Tracer initialized", "armed; output=" in log),
+                  ("First vdfut768ig entry", "FIRST vdfut768ig entry" in log),
+                  ("Transform opcode observed", "transform=True" in log),
+                  ("Source pointer captured", "SOURCE SLOT STORE" in log),
+                  ("malloc result captured", "POST_MALLOC" in log),
+                  ("Planter base candidate observed", "PLANTER WRITER CANDIDATE" in log),
+                  ("Source/planter overlap measured", "SOURCE/PLANTER OVERLAP" in log),
+                  ("Planter watches armed", "PLANTER WATCHES ARMED" in log),
+                  ("First mixer read reached", "FIRST MIXER READ" in log),
+              ]
+              lines += ["## Tracer progress", "", "| Checkpoint | Reached |",
+                        "|---|---:|"]
+              lines += [f"| {name} | {'yes' if ok else 'no'} |"
+                        for name, ok in checkpoints]
+              error_counts = {
+                  "Breakpoint installation errors": sum("INSTALL ERROR:" in x for x in trace_lines),
+                  "Watchpoint setup errors": sum("WATCH ERROR" in x for x in trace_lines),
+                  "Watchpoint callback errors": sum("WATCH CALLBACK ERROR" in x for x in trace_lines),
+              }
+              lines += ["", "## Tracer errors", ""]
+              lines += [f"- {name}: {count}" for name, count in error_counts.items()]
+              console_log = Path(os.environ.get("RUN_WORK", "")) / "gdb-console.log"
+              console_diagnostics = []
+              if console_log.is_file():
+                  for raw in console_log.read_text(errors="replace").splitlines():
+                      line = raw.strip()
+                      low = line.lower()
+                      match = re.search(r"program received signal\\s+(sig[a-z0-9]+)", low)
+                      if match:
+                          console_diagnostics.append(f"GDB inferior signal: {match.group(1).upper()}")
+                      elif "during startup program exited with code" in low:
+                          console_diagnostics.append("GDB reports inferior exited during startup")
+                      elif "internal-error:" in low:
+                          console_diagnostics.append("GDB internal error reported")
+                      elif "python exception" in low or "error occurred in python" in low:
+                          console_diagnostics.append("GDB Python exception reported")
+                      elif "segmentation fault" in low:
+                          console_diagnostics.append("Segmentation fault reported by launcher/child")
+              lines += ["", "## GDB console status", ""]
+              lines += [f"- {item}" for item in sorted(set(console_diagnostics))]
+              if not console_diagnostics:
+                  lines.append("No allow-listed GDB console diagnostic matched.")
+              lines.append("")
               planter_path = run / "planter.final.bin"
               planter = planter_path.read_bytes() if planter_path.exists() else b""
               lines += ["## Capture checkpoints", "",
