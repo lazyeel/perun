@@ -54,7 +54,17 @@ jobs:
           echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
           "$SDKMANAGER" --sdk_root="$SDK_ROOT" --version
+          # sdkmanager may exit as soon as all licenses are accepted; that closes
+          # the pipe and makes yes exit with SIGPIPE. Check sdkmanager's status,
+          # not the expected early-EOF status from yes.
+          set +e
           yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null
+          license_status=("${PIPESTATUS[@]}")
+          set -e
+          if [ "${license_status[1]}" -ne 0 ]; then
+            echo "sdkmanager --licenses failed with exit code ${license_status[1]}" >&2
+            exit "${license_status[1]}"
+          fi
 
       - name: Install or locate Android NDK r27c
         shell: bash
