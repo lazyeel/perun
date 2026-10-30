@@ -637,23 +637,32 @@ def arm_buffers_and_continue(src, dst, rbp):
 
 
 def install_after_entry(base):
+    log("INSTALL STAGE: callback entered")
     try:
         gdb.execute("set language c", to_string=True)
+        log("INSTALL STAGE: language configured")
         # Wide arrays cannot fit x86 debug-register watchpoints. Force GDB's
         # software implementation, which single-steps and compares the region.
         gdb.execute("set can-use-hw-watchpoints 0", to_string=True)
+        log("INSTALL STAGE: software watchpoints selected")
         STATE["source_init_bp"] = SourceSlotStoreBP()
+        log("INSTALL STAGE: source-slot breakpoint created")
         STATE["postmalloc_bp"] = PostMallocBP()
+        log("INSTALL STAGE: post-malloc breakpoint created")
         STATE["copy_entry_bp"] = CopyEntryBP()
+        log("INSTALL STAGE: copy-entry breakpoint created")
         for rva, reg_name in ((0xE243D, "$rdi"), (0xFAC8A, "$r12")):
             bp = PlanterBaseLoadBP(rva, reg_name)
             STATE["base_load_bps"].append(bp)
+            log(f"INSTALL STAGE: base-load breakpoint {rva:#x} created")
         for rva, spec in WRITERS.items():
             bp = WriterSiteBP(rva, spec)
             STATE["writer_bps"].append(bp)
+            log(f"INSTALL STAGE: writer breakpoint {rva:#x} created")
         for rva in MIXER_READS:
             bp = FirstMixerReadBP(rva)
             STATE["mixer_bps"].append(bp)
+            log(f"INSTALL STAGE: mixer-read breakpoint {rva:#x} created")
         log(f"BASE={base:#x}; armed source-slot @{SOURCE_SLOT_STORE_RVA:#x}, "
             f"post-malloc @{POST_MALLOC_RVA:#x}, copy-entry @{COPY_ENTRY_RVA:#x}, "
             f"base-load sites 0xe243d/0xfac8a, "
@@ -662,6 +671,7 @@ def install_after_entry(base):
             f"unknown ranges={UNKNOWN_RANGES}")
     except Exception as e:
         log(f"INSTALL ERROR: {e}")
+    log("INSTALL STAGE: requesting continue")
     gdb.execute("continue")
 
 
@@ -683,7 +693,9 @@ class EntryBP(gdb.Breakpoint):
             STATE["base"] = base
             self.installed = True
             log(f"FIRST vdfut768ig entry: pc={pc:#x} base={base:#x} opcode={opcode:#010x}")
+            log("ENTRY STAGE: posting installer callback")
             gdb.post_event(lambda b=base: install_after_entry(b))
+            log("ENTRY STAGE: installer callback queued")
             # Hold at the function's first instruction until all RVAs are armed.
             return True
         log(f"vdfut768ig entry: opcode={opcode:#010x} "
