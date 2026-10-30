@@ -90,4 +90,17 @@ export CA_BUNDLE LD_LIBRARY_PATH="$LIBS:$SYSROOT/lib64" \
        ANDROID_ROOT=/system ANDROID_DATA=/data \
        ANDROID_RUNTIME_ROOT=/apex/com.android.runtime
 export ADI_RESOLVE="${ADI_RESOLVE:-gsa.apple.com:443:17.179.252.2}"
+if [ "${ADI_GDB:-0}" = "1" ]; then
+  GDB_BIN="${GDB_BIN:-gdb}"
+  GDB_SCRIPT="${GDB_SCRIPT:-$HERE/../../../../tools/planter_trace_gdb.py}"
+  command -v "$GDB_BIN" >/dev/null || { echo "gdb not found: $GDB_BIN" >&2; exit 1; }
+  [ -f "$GDB_SCRIPT" ] || { echo "GDB script not found: $GDB_SCRIPT" >&2; exit 1; }
+  say "running under GDB ($GDB_BIN), script=$GDB_SCRIPT"
+  exec "$GDB_BIN" --quiet --batch \
+    -ex "set pagination off" \
+    -ex "set confirm off" \
+    -ex "source $GDB_SCRIPT" \
+    -ex "run" \
+    --args "$PWD/adi_native" "$LIBS"
+fi
 exec "$PWD/adi_native" "$LIBS"

@@ -1,0 +1,230 @@
+name: Planter genesis GDB trace
+
+on:
+  push:
+    branches:
+      - rnd/phase1-standalone-anisette
+    paths:
+      - .github/workflows/planter-genesis-trace.yml
+      - crates/perun-cli/examples/adi-android/run-native.sh
+      - tools/planter_trace_gdb.py
+      - tools/analyze_planter_trace.py
+
+permissions:
+  contents: write
+
+concurrency:
+  group: planter-genesis-trace-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  trace:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout research branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 1
+
+      - name: Install GDB and filesystem tools
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            gdb e2fsprogs ca-certificates curl unzip python3 file
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install or locate Android NDK r27c
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          NDK_ROOT="$SDK_ROOT/ndk/27.2.12479018"
+          if [ ! -x "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang" ]; then
+            yes | sdkmanager --licenses >/dev/null
+            sdkmanager --install "ndk;27.2.12479018"
+          fi
+          test -x "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang"
+          echo "ANDROID_NDK=$NDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_CC=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang" >> "$GITHUB_ENV"
+          "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang" --version | head -1
+
+      - name: Download Android 21 x86_64 Bionic system image
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="$RUNNER_TEMP/android-x86_64-21_r05.zip"
+          curl -fL --retry 4 --retry-all-errors --connect-timeout 30 \
+            -o "$ZIP" \
+            https://dl.google.com/android/repository/sys-img/android/x86_64-21_r05.zip
+          unzip -l "$ZIP" | grep -E 'x86_64/system.img$'
+          unzip -p "$ZIP" x86_64/system.img > "$RUNNER_TEMP/android-21-x86_64-system.img"
+          test -s "$RUNNER_TEMP/android-21-x86_64-system.img"
+          echo "SYS_IMG=$RUNNER_TEMP/android-21-x86_64-system.img" >> "$GITHUB_ENV"
+          sha256sum "$RUNNER_TEMP/android-21-x86_64-system.img"
+
+      - name: Fetch Apple's x86_64 libraries and run the GDB trace
+        id: trace
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/perun-adi-gdb"
+          mkdir -p "$WORK"
+          cd "$WORK"
+
+          GSA_IP="$(getent ahostsv4 gsa.apple.com | awk 'NR==1 {print $1}')"
+          BUY_IP="$(getent ahostsv4 buy.itunes.apple.com | awk 'NR==1 {print $1}')"
+          test -n "$GSA_IP"
+          test -n "$BUY_IP"
+
+          export SYS_IMG
+          export SYSROOT="$WORK/sysroot"
+          export LIBS="$WORK/libs"
+          export CC="$ANDROID_CC"
+          export CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+          export ADI_RESOLVE="gsa.apple.com:443:$GSA_IP,buy.itunes.apple.com:443:$BUY_IP"
+          export ANDROID_ROOT=/system ANDROID_DATA=/data
+          export PERUN_TRACE_DIR="$WORK/traces"
+          export ADI_GDB=1
+          export GDB_SCRIPT="$GITHUB_WORKSPACE/tools/planter_trace_gdb.py"
+
+          echo "Using GDB: $(gdb --version | head -1)"
+          echo "Android NDK compiler: $CC"
+          set +e
+          timeout --signal=TERM 50m "$GITHUB_WORKSPACE/crates/perun-cli/examples/adi-android/run-native.sh" \
+            > "$WORK/gdb-console.log" 2>&1
+          RC=$?
+          set -e
+          echo "$RC" > "$WORK/run-exit-code.txt"
+          echo "RUN_WORK=$WORK" >> "$GITHUB_ENV"
+          echo "TRACE_RUN_RC=$RC" >> "$GITHUB_ENV"
+          echo "Harness/GDB exit code: $RC"
+          exit 0
+
+      - name: Build a redacted trace report
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="${RUN_WORK:-$RUNNER_TEMP/perun-adi-gdb}"
+          REPORT="$GITHUB_WORKSPACE/research-runs/planter-trace-${GITHUB_RUN_ID}.md"
+          mkdir -p "$(dirname "$REPORT")"
+          TRACE_ROOT="$WORK/traces" REPORT="$REPORT" RUN_RC="${TRACE_RUN_RC:-not-started}" \
+            GDB_VERSION="$(gdb --version | head -1 2>/dev/null || echo unavailable)" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_SHA="$GITHUB_SHA" \
+            python3 - <<'PY'
+          import csv, json, os
+          from collections import Counter, defaultdict
+          from pathlib import Path
+
+          root = Path(os.environ["TRACE_ROOT"])
+          report = Path(os.environ["REPORT"])
+          run_rc = os.environ.get("RUN_RC", "not-started")
+          gdb_version = os.environ.get("GDB_VERSION", "unavailable")
+          dirs = sorted((p for p in root.glob("run-*") if p.is_dir()),
+                        key=lambda p: p.stat().st_mtime) if root.exists() else []
+          run = dirs[-1] if dirs else None
+          lines = [
+              "# Android CoreADI planter-genesis trace",
+              "",
+              f"- GitHub run: `{os.environ.get('GITHUB_RUN_ID', 'unknown')}`",
+              f"- Source revision: `{os.environ.get('GITHUB_SHA', 'unknown')}`",
+              f"- GDB: `{gdb_version}`",
+              f"- Harness/GDB exit code: `{run_rc}`",
+              f"- Trace directory created: `{'yes' if run else 'no'}`",
+              "",
+              "This report is intentionally redacted: no SPIM/CPIM, device identifier, raw memory bytes, pointer values, or register snapshots are published.",
+              "",
+          ]
+          if run is None:
+              lines += ["## Result", "", "No trace directory was created. Inspect the Actions setup/runner step status.", ""]
+          else:
+              manifest = {}
+              try:
+                  manifest = json.loads((run / "run.json").read_text())
+              except Exception:
+                  pass
+              lines += [f"- Trace run id: `{manifest.get('run_id', run.name)}`",
+                        f"- Tracer version: `{manifest.get('script_version', 'unknown')}`", ""]
+              log = (run / "trace.log").read_text(errors="replace") if (run / "trace.log").exists() else ""
+              planter_path = run / "planter.final.bin"
+              planter = planter_path.read_bytes() if planter_path.exists() else b""
+              lines += ["## Capture checkpoints", "",
+                        f"- Planter watches armed: `{'yes' if 'PLANTER WATCHES ARMED' in log else 'no'}`",
+                        f"- First-mixer snapshot: `{'yes' if len(planter) >= 0x2700 else 'no'}`",
+                        f"- Source/planter overlap check executed: `{'yes' if 'source[32:256] == planter[0:224]' in log else 'no'}`", ""]
+              tables = {"fam1":0x0D60,"fam2":0x1A00,"fam3":0x2460,"fam4":0x1390}
+              lines += ["## Known family windows", "",
+                        "| Family | Unique bytes | Permutation | Zero bytes | Cycles |",
+                        "|---|---:|---:|---:|---:|"]
+              for name, off in tables.items():
+                  data = planter[off:off+256] if len(planter) >= off+256 else b""
+                  unique = len(set(data))
+                  cycles = Counter()
+                  if len(data) == 256 and unique == 256:
+                      seen = set()
+                      for start in range(256):
+                          if start in seen: continue
+                          cur, n = start, 0
+                          while cur not in seen:
+                              seen.add(cur); n += 1; cur = data[cur]
+                          cycles[n] += 1
+                  lines.append(f"| {name} | {unique}/256 | {'yes' if len(data)==256 and unique==256 else 'no'} | {data.count(0) if data else 'n/a'} | {sum(cycles.values()) if cycles else 'n/a'} |")
+              lines += ["", "## Unknown regions", "", "| Region | Size | Unique byte values |",
+                        "|---|---:|---:|"]
+              for item in manifest.get("unknown_ranges", []):
+                  try:
+                      name, off, size = item
+                      off, size = int(off), int(size)
+                      data = planter[off:off+size] if len(planter) >= off+size else b""
+                      lines.append(f"| {name} | {size:#x} | {len(set(data)) if data else 'n/a'} |")
+                  except Exception:
+                      continue
+              lines += ["", "## Direct writer coverage", "",
+                        "| Writer | Hits | Distinct indices | Index min..max |",
+                        "|---|---:|---:|---:|"]
+              groups = defaultdict(list)
+              csv_path = run / "writer_events.csv"
+              if csv_path.exists():
+                  with csv_path.open(newline="") as stream:
+                      for row in csv.DictReader(stream):
+                          groups[row.get("name", "unknown")].append(row)
+              for name, rows in sorted(groups.items()):
+                  try:
+                      indexes = [int(row["index"],16) for row in rows]
+                      span = f"{min(indexes):#x}..{max(indexes):#x}" if indexes else "n/a"
+                      lines.append(f"| {name} | {len(rows)} | {len(set(indexes))} | {span} |")
+                  except Exception:
+                      lines.append(f"| {name} | {len(rows)} | n/a | n/a |")
+              lines += ["", "## Status", ""]
+              if len(planter) >= 0x2700:
+                  lines.append("A complete 0x2700-byte planter snapshot was captured in one process.")
+              elif run_rc == "0":
+                  lines.append("The harness exited successfully, but no complete planter snapshot was recorded.")
+              else:
+                  lines.append("The run did not produce a complete planter snapshot. Raw traces remain on the ephemeral runner and are not published.")
+              lines.append("")
+          report.parent.mkdir(parents=True, exist_ok=True)
+          report.write_text("\n".join(lines), encoding="utf-8")
+          print(report.read_text())
+          PY
+          cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit the redacted report to the research branch
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add research-runs/planter-trace-${GITHUB_RUN_ID}.md
+          if git diff --cached --quiet; then
+            echo "No report to commit."
+            exit 0
+          fi
+          git commit -m "research(adi): record planter trace run ${GITHUB_RUN_ID}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
