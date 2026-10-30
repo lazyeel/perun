@@ -124,7 +124,7 @@ jobs:
           echo "Using GDB: $(gdb --version | head -1)"
           echo "Android NDK compiler: $CC"
           set +e
-          timeout --signal=TERM 50m "$GITHUB_WORKSPACE/crates/perun-cli/examples/adi-android/run-native.sh" \
+          timeout --signal=TERM 50m bash "$GITHUB_WORKSPACE/crates/perun-cli/examples/adi-android/run-native.sh" \
             > "$WORK/gdb-console.log" 2>&1
           RC=$?
           set -e
