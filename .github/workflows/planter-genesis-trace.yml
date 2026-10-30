@@ -211,6 +211,29 @@ jobs:
                         f"- Tracer version: `{manifest.get('script_version', 'unknown')}`", ""]
               log = (run / "trace.log").read_text(errors="replace") if (run / "trace.log").exists() else ""
               trace_lines = log.splitlines()
+              install_stages = [
+                  ("installer callback posted", "ENTRY STAGE: posting installer callback"),
+                  ("installer callback queued", "ENTRY STAGE: installer callback queued"),
+                  ("installer callback entered", "INSTALL STAGE: callback entered"),
+                  ("language configured", "INSTALL STAGE: language configured"),
+                  ("software watchpoints selected", "INSTALL STAGE: software watchpoints selected"),
+                  ("source-slot breakpoint created", "INSTALL STAGE: source-slot breakpoint created"),
+                  ("post-malloc breakpoint created", "INSTALL STAGE: post-malloc breakpoint created"),
+                  ("copy-entry breakpoint created", "INSTALL STAGE: copy-entry breakpoint created"),
+                  ("continue requested", "INSTALL STAGE: requesting continue"),
+              ]
+              lines += ["## GDB installation steps", "",
+                        "| Stage | Reached |", "|---|---:|"]
+              lines += [f"| {label} | {'yes' if marker in log else 'no'} |"
+                        for label, marker in install_stages]
+              for label, fragment in [
+                  ("base-load breakpoints", "INSTALL STAGE: base-load breakpoint"),
+                  ("writer breakpoints", "INSTALL STAGE: writer breakpoint"),
+                  ("mixer-read breakpoints", "INSTALL STAGE: mixer-read breakpoint"),
+              ]:
+                  count = sum(fragment in x for x in trace_lines)
+                  lines.append(f"- {label} created: {count}")
+              lines.append("")
               checkpoints = [
                   ("Tracer initialized", "armed; output=" in log),
                   ("First vdfut768ig entry", "FIRST vdfut768ig entry" in log),
