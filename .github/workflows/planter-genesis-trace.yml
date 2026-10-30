@@ -146,7 +146,7 @@ jobs:
             GDB_VERSION="$(gdb --version | head -1 2>/dev/null || echo unavailable)" \
             GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_SHA="$GITHUB_SHA" \
             python3 - <<'PY'
-          import csv, json, os
+          import csv, json, os, re
           from collections import Counter, defaultdict
           from pathlib import Path
 
@@ -170,7 +170,37 @@ jobs:
               "",
           ]
           if run is None:
-              lines += ["## Result", "", "No trace directory was created. Inspect the Actions setup/runner step status.", ""]
+              lines += ["## Result", "", "No trace directory was created. Inspect the safe runner diagnostics below.", ""]
+              console_log = Path(os.environ.get("RUN_WORK", "")) / "gdb-console.log"
+              safe_diagnostics = []
+              if console_log.is_file():
+                  for raw in console_log.read_text(errors="replace").splitlines():
+                      line = raw.strip()
+                      if not line:
+                          continue
+                      low = line.lower()
+                      stage = line.startswith(("== ", "PT_INTERP ->", "   PT_INTERP ->"))
+                      failure = any(marker in low for marker in (
+                          "ld.lld:", "clang: error:", "error while loading shared libraries",
+                          "no such file or directory", "permission denied", "exec format error",
+                          "cannot execute", "during startup program exited with code",
+                          "program exited with code", "not an executable", "invalid elf",
+                          "cannot find", "undefined reference", "failed to execute",
+                          "failed to start", "could not open", "warning: error disabling address space randomization",
+                      ))
+                      if stage or failure:
+                          # Do not publish process addresses, UUIDs, or arbitrary app output.
+                          line = re.sub(r"0x[0-9a-fA-F]{8,}", "[address]", line)
+                          line = re.sub(
+                              r"(?i)\\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\b",
+                              "[uuid]", line)
+                          safe_diagnostics.append(line[:400])
+              lines += ["## Safe runner diagnostics", ""]
+              if safe_diagnostics:
+                  lines += [f"- \`{item}\`" for item in safe_diagnostics[-40:]]
+              else:
+                  lines.append("No allow-listed launcher/build diagnostics were found in the private console log.")
+              lines.append("")
           else:
               manifest = {}
               try:
