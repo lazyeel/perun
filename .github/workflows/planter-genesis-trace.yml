@@ -34,6 +34,12 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             gdb e2fsprogs ca-certificates curl unzip python3 file
 
+      - name: Set up JDK 17 for Android SDK tools
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
