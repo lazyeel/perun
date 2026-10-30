@@ -214,6 +214,8 @@ jobs:
               checkpoints = [
                   ("Tracer initialized", "armed; output=" in log),
                   ("First vdfut768ig entry", "FIRST vdfut768ig entry" in log),
+                  ("RVA breakpoints installed", "armed source-slot" in log),
+                  ("Subsequent vdfut768ig entry logged", "vdfut768ig entry: opcode=" in log),
                   ("Transform opcode observed", "transform=True" in log),
                   ("Source pointer captured", "SOURCE SLOT STORE" in log),
                   ("malloc result captured", "POST_MALLOC" in log),
@@ -239,9 +241,10 @@ jobs:
                   for raw in console_log.read_text(errors="replace").splitlines():
                       line = raw.strip()
                       low = line.lower()
-                      match = re.search(r"program received signal\\s+(sig[a-z0-9]+)", low)
-                      if match:
-                          console_diagnostics.append(f"GDB inferior signal: {match.group(1).upper()}")
+                      if "program received signal" in low:
+                          tail = low.split("program received signal", 1)[1].strip()
+                          signal = tail.split(",", 1)[0].split()[0] if tail else "unknown"
+                          console_diagnostics.append(f"GDB inferior signal: {signal.upper()}")
                       elif "during startup program exited with code" in low:
                           console_diagnostics.append("GDB reports inferior exited during startup")
                       elif "internal-error:" in low:
