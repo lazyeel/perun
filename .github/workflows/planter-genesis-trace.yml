@@ -192,12 +192,12 @@ jobs:
                           # Do not publish process addresses, UUIDs, or arbitrary app output.
                           line = re.sub(r"0x[0-9a-fA-F]{8,}", "[address]", line)
                           line = re.sub(
-                              r"(?i)\\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\b",
+                              r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
                               "[uuid]", line)
                           safe_diagnostics.append(line[:400])
               lines += ["## Safe runner diagnostics", ""]
               if safe_diagnostics:
-                  lines += [f"- \`{item}\`" for item in safe_diagnostics[-40:]]
+                  lines += [f"- `{item}`" for item in safe_diagnostics[-40:]]
               else:
                   lines.append("No allow-listed launcher/build diagnostics were found in the private console log.")
               lines.append("")
