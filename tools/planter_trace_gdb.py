@@ -353,10 +353,10 @@ class WriterSiteBP(gdb.Breakpoint):
             STATE["writer_bases"][self.name] = base
             with open(os.path.join(OUT, "writer_events.csv"), "a", encoding="utf-8") as f:
                 if f.tell() == 0:
-                    f.write("rva,name,ea,before,value,base,index,disp,active_opcode,source_delta\\n")
+                    f.write("rva,name,ea,before,value,base,index,disp,active_opcode,source_delta\n")
                 delta_text = f"{source_delta:+#x}" if source_delta is not None else "na"
                 f.write(f"{self.rva:#x},{self.name},{ea:#x},{before_s},{value:02x},"
-                        f"{base:#x},{index:#x},{self.disp:#x},{STATE['active_op']:#x},{delta_text}\\n")
+                        f"{base:#x},{index:#x},{self.disp:#x},{STATE['active_op']:#x},{delta_text}\n")
             st = STATE["writer_stats"].setdefault(self.name, {
                 "hits": 0, "min_index": None, "max_index": None,
                 "min_ea": None, "max_ea": None, "changed": 0,
@@ -403,6 +403,168 @@ class WriterSiteBP(gdb.Breakpoint):
         if (self.rva in planter_writer_sites and base is not None
                 and STATE["planter"] is None and ptr_ok(base, PLANTER_SIZE)):
             rbp = rv("$rbp")
+            slot_ptr = ptr_from_slot(rbp, -0x30)
+            src = STATE["src"]
+            overlap_ok = src is not None and base == src + 32
+            log(f"PLANTER WRITER CANDIDATE: site={self.rva:#x} base_operand={base:#x} "
+                f"slot_now={slot_ptr:#x} slot_eq_base={slot_ptr == base} "
+                f"source={src!r} source_plus_32_match={overlap_ok}")
+            if overlap_ok:
+                if src and ptr_ok(src, 256):
+                    sb = read_mem(src, 256)
+                    pb = read_mem(base, 224)
+                    equal = sb[32:256] == pb
+                    mismatches = sum(a != b for a, b in zip(sb[32:256], pb))
+                    log(f"SOURCE/PLANTER OVERLAP src_plus_32_eq_base={src + 32 == base} "
+                        f"source[32:256] == planter[0:224]: {equal} mismatches={mismatches}")
+                STATE["planter"] = base
+                log(f"PLANTER BASE IDENTIFIED: method=writer-operand site={self.rva:#x} "
+                    f"source_plus_0x20=True; snapshot=0x{PLANTER_SIZE:x}")
+                write_blob("planter.at_writer_candidate.bin", read_mem(base, PLANTER_SIZE))
+                return False
+            expected = (src + 32) if src is not None else None
+            log(f"REJECTING PLANTER CANDIDATE {base:#x}: "
+                f"source+0x20={expected!r} (source pointer must be captured first)")
+        return False
+
+
+class SourceSlotStoreBP(gdb.Breakpoint):
+    """Capture RCX at 0xDD511; continue through a GDB command list."""
+    def __init__(self):
+        super().__init__(f"*{STATE['base'] + SOURCE_SLOT_STORE_RVA:#x}",
+                         gdb.BP_BREAKPOINT, internal=False)
+        self.silent = True
+        self.done = False
+        # Command lists run after stop() returns; no nested continue is posted
+        # back into GDB's Python UI event loop.
+        self.commands = """silent
+continue
+"""
+
+    def stop(self):
+        if self.done or STATE["active_op"] != TRANSFORM_OPCODE:
+            return False
+        self.done = True
+        src = rv("$rcx")
+        rbp = rv("$rbp")
+        slot_before = ptr_from_slot(rbp, -0x11A8)
+        STATE["source_init"] = src
+        STATE["src"] = src
+        log(f"SOURCE SLOT STORE rva={SOURCE_SLOT_STORE_RVA:#x} "
+            f"RCX_source={src:#x} prior_slot={slot_before:#x} rbp={rbp:#x}")
+        if ptr_ok(src, 256):
+            initial = read_mem(src, 256)
+            STATE["source_initial"] = initial
+            write_blob("source.at_dd511.bin", initial)
+            log("SOURCE INITIAL SNAPSHOT: captured 256 bytes at the source-slot store")
+        else:
+            log("SOURCE INITIAL SNAPSHOT: skipped; source is not a readable RW 256-byte span")
+        return True
+
+
+class PostMallocBP(gdb.Breakpoint):
+    """At 0xDD83B, snapshot allocator buffers without installing software watchpoints."""
+    def __init__(self):
+        super().__init__(f"*{STATE['base'] + POST_MALLOC_RVA:#x}", gdb.BP_BREAKPOINT, internal=False)
+        self.silent = True
+        self.done = False
+        self.commands = """silent
+continue
+"""
+
+    def stop(self):
+        if self.done or STATE["active_op"] != TRANSFORM_OPCODE:
+            return False
+        self.done = True
+        rbp = rv("$rbp")
+        src = ptr_from_slot(rbp, -0x11A8)
+        dst = rv("$rax")
+        init_src = STATE["source_init"]
+        STATE["src"] = src
+        STATE["dst"] = dst
+        log(f"POST_MALLOC rva={POST_MALLOC_RVA:#x} "
+            f"source_pointer_unchanged={init_src is None or init_src == src} "
+            f"destination_valid_200={ptr_ok(dst, 200)}")
+
+        early_source = STATE.get("source_initial")
+        if early_source is not None and ptr_ok(src, 256):
+            current_source = read_mem(src, 256)
+            changed = [i for i, (a, b) in enumerate(zip(early_source, current_source)) if a != b]
+            log(f"SOURCE DELTA to post-malloc: changed={len(changed)}/256; "
+                f"first_indices={[hex(i) for i in changed[:24]]}")
+            write_blob("source.at_postmalloc.bin", current_source)
+
+        if ptr_ok(dst, 256):
+            STATE["dst_span"] = 256
+            write_blob("staging.at_postmalloc.span_256.bin", read_mem(dst, 256))
+            log("STAGING INITIAL SNAPSHOT: 256 mapped bytes; bytes[200:256] remain adjacent memory, not proven allocation-owned")
+        elif ptr_ok(dst, 200):
+            STATE["dst_span"] = 200
+            write_blob("staging.at_postmalloc.span_200.bin", read_mem(dst, 200))
+            log("STAGING INITIAL SNAPSHOT: requested 200-byte span")
+        else:
+            STATE["dst_span"] = 0
+            log("STAGING INITIAL SNAPSHOT: skipped; destination is not a readable RW span")
+
+        slot = ptr_from_slot(rbp, -0x30)
+        log(f"PLANTER SLOT SNAPSHOT at post-malloc: mapped={ptr_ok(slot, PLANTER_SIZE)}; "
+            "mutable CFF carrier, not accepted as planter base")
+        return True
+
+
+class CopyEntryBP(gdb.Breakpoint):
+    """Snapshot the staging region at the first known fam1 copy-entry site."""
+    def __init__(self):
+        super().__init__(f"*{STATE['base'] + COPY_ENTRY_RVA:#x}", gdb.BP_BREAKPOINT, internal=False)
+        self.silent = True
+        self.done = False
+
+    def stop(self):
+        if self.done or STATE["active_op"] != TRANSFORM_OPCODE:
+            return False
+        self.done = True
+        rbp = rv("$rbp")
+        slot_dst = ptr_from_slot(rbp, -0x3F8)
+        n = 256 if ptr_ok(slot_dst, 256) else (200 if ptr_ok(slot_dst, 200) else 0)
+        log(f"COPY_ENTRY rva={COPY_ENTRY_RVA:#x} [rbp-0x3f8]={slot_dst:#x} "
+            f"saved_dst={STATE['dst'] or 0:#x} span={n}")
+        if n:
+            data = read_mem(slot_dst, n)
+            write_blob(f"staging.copy_entry.{n}.bin", data)
+            requested = data[:200]
+            log(f"COPY_ENTRY unique={len(set(data))}/{n} "
+                f"first64={data[:64].hex()} requested200_unique={len(set(requested))}/200")
+            if STATE["dst"] and slot_dst != STATE["dst"]:
+                log("WARNING: copy-entry staging pointer differs from post-malloc RAX")
+        else:
+            log("COPY_ENTRY staging span is not readable")
+        return False
+
+
+def has_planter_signature(addr):
+    """Known final signature: the four documented 256-byte windows are bijections."""
+    if not addr or not ptr_ok(addr, PLANTER_SIZE):
+        return False
+    try:
+        inf = gdb.selected_inferior()
+        for _name, off in TABLES:
+            if len(set(bytes(inf.read_memory(addr + off, WINDOW_SIZE)))) != 256:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+class FirstMixerReadBP(gdb.Breakpoint):
+    def __init__(self, rva):
+        self.rva = rva
+        super().__init__(f"*{STATE['base'] + rva:#x}", gdb.BP_BREAKPOINT, internal=False)
+        self.silent = True
+
+    def stop(self):
+        if STATE["final_dumped"] or STATE["active_op"] != TRANSFORM_OPCODE:
+            return False
+        rbp = rv("$rbp")
         slot_ptr = ptr_from_slot(rbp, -0x30)
         p = STATE["planter"] if has_planter_signature(STATE["planter"]) else None
         slot_signature = has_planter_signature(slot_ptr)
