@@ -310,7 +310,7 @@ jobs:
               lines += ["", "## Crash-site backtrace", ""]
               signal_lines = [x for x in trace_lines if "SIGNAL STOP:" in x]
               signal_match = (re.search(
-                  r"name=(SIG[A-Z0-9]+)\\s+pc_rva=(0x[0-9a-fA-F]+|outside-module)\\s+active_opcode=(0x[0-9a-fA-F]+|unknown)",
+                  r"name=(SIG[A-Z0-9]+)\s+pc_rva=(0x[0-9a-fA-F]+|outside-module)\s+active_opcode=(0x[0-9a-fA-F]+|unknown)",
                   signal_lines[-1]) if signal_lines else None)
               if signal_match:
                   lines.append(f"- Signal: {signal_match.group(1)}")
@@ -319,7 +319,7 @@ jobs:
                   frames = []
                   for trace_line in trace_lines:
                       frame_match = re.search(
-                          r"SIGNAL FRAME: n=(\\d+) (rva=0x[0-9a-fA-F]+|external) symbol=(.*)$",
+                          r"SIGNAL FRAME: n=(\d+) (rva=0x[0-9a-fA-F]+|external) symbol=(.*)$",
                           trace_line)
                       if frame_match:
                           frames.append(
