@@ -120,6 +120,7 @@ STATE = {
     "slot_watch_armed": False,
     "writer_stats": {},
     "planter_mismatch": False,
+    "signal_seen": False,
     "started": time.time(),
 }
 
@@ -134,6 +135,56 @@ def log(message):
 
 def rv(expr):
     return int(gdb.parse_and_eval(expr)) & 0xFFFFFFFFFFFFFFFF
+
+
+def on_inferior_stop(event):
+    """Record crash-site RVAs without persisting absolute addresses/registers."""
+    signal = getattr(event, "stop_signal", None)
+    if signal not in ("SIGSEGV", "SIGBUS", "SIGILL", "SIGABRT"):
+        return
+    if STATE["signal_seen"]:
+        return
+    STATE["signal_seen"] = True
+    try:
+        pc = rv("$pc")
+        base = STATE.get("base")
+        if base is not None and pc >= base:
+            pc_text = f"{pc - base:#x}"
+        else:
+            pc_text = "outside-module"
+        opcode = STATE.get("active_op")
+        opcode_text = f"{opcode:#010x}" if opcode is not None else "unknown"
+        log(f"SIGNAL STOP: name={signal} pc_rva={pc_text} active_opcode={opcode_text}")
+
+        # Raw disassembly/backtrace stays only in the ephemeral runner log.
+        # The published report extracts module-relative frame offsets only.
+        try:
+            disassembly = gdb.execute("x/8i $pc", to_string=True)
+            for raw in disassembly.splitlines():
+                match = re.search(r":\s*(.*)$", raw)
+                if match and match.group(1).strip():
+                    log("SIGNAL INSTRUCTION: " + match.group(1).strip())
+        except Exception as exc:
+            log(f"SIGNAL DISASSEMBLY ERROR: {type(exc).__name__}")
+
+        try:
+            backtrace = gdb.execute("bt 12", to_string=True)
+            for raw in backtrace.splitlines():
+                match = re.match(r"#(\d+)\s+(?:0x([0-9a-fA-F]+)\s+in\s+)?(.*)", raw.strip())
+                if not match:
+                    continue
+                frame_no = int(match.group(1))
+                address = int(match.group(2), 16) if match.group(2) else None
+                if address is not None and base is not None and address >= base:
+                    location = f"rva={address - base:#x}"
+                else:
+                    location = "external"
+                symbol = match.group(3).split("(", 1)[0].strip()
+                log(f"SIGNAL FRAME: n={frame_no} {location} symbol={symbol[:100] or 'unknown'}")
+        except Exception as exc:
+            log(f"SIGNAL BACKTRACE ERROR: {type(exc).__name__}")
+    except Exception as exc:
+        log(f"SIGNAL HANDLER ERROR: {type(exc).__name__}")
 
 
 def read_mem(addr, size):
@@ -729,7 +780,7 @@ with open(LOG, "w", encoding="utf-8") as f:
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v7", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v8", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},
@@ -738,5 +789,8 @@ with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
 gdb.execute("set confirm off", to_string=True)
 gdb.execute("set pagination off", to_string=True)
 gdb.execute("set breakpoint pending on", to_string=True)
+for _signal in ("SIGSEGV", "SIGBUS", "SIGILL", "SIGABRT"):
+    gdb.execute(f"handle {_signal} stop print nopass", to_string=True)
+gdb.events.stop.connect(on_inferior_stop)
 log(f"armed; output={OUT}; waiting for first vdfut768ig call")
 STATE["entry_bp"] = EntryBP()
