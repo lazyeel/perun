@@ -407,6 +407,43 @@ jobs:
                           f"{index_range} | {d['changed_runs']} |")
               else:
                   lines.append("No slot window index-topology metrics were recorded.")
+              # Search the whole active object at byte alignment. This catches
+              # genuine 256-byte tables shifted across the legacy partition
+              # boundaries; only offsets and permutation cycle summaries are
+              # published, never the underlying bytes.
+              slot_object_path = run / "planter.slot_anchored.bin" if run else None
+              lines += ["## Full-object 256-byte permutation census", ""]
+              if slot_object_path and slot_object_path.is_file():
+                  blob = slot_object_path.read_bytes()
+                  candidates = []
+                  for offset in range(max(0, len(blob) - 255)):
+                      window = blob[offset:offset + 256]
+                      if len(set(window)) != 256:
+                          continue
+                      seen = bytearray(256)
+                      cycle_lengths = []
+                      for start in range(256):
+                          if seen[start]:
+                              continue
+                          current, cycle_length = start, 0
+                          while not seen[current]:
+                              seen[current] = 1
+                              cycle_length += 1
+                              current = window[current]
+                          cycle_lengths.append(cycle_length)
+                      histogram = Counter(cycle_lengths)
+                      candidates.append((offset, len(cycle_lengths),
+                                         histogram.get(1, 0),
+                                         ", ".join(f"{k}:{v}" for k, v in sorted(histogram.items()))))
+                  lines.append(f"- Slot-anchored object bytes scanned: {len(blob)}")
+                  lines.append(f"- Byte-aligned 256-byte permutation windows: {len(candidates)}")
+                  if candidates:
+                      lines += ["", "| Object offset | Cycles | Fixed points | Cycle-length histogram |",
+                                "|---:|---:|---:|---|"]
+                      for offset, cycle_count, fixed, histogram in candidates:
+                          lines.append(f"| 0x{offset:04X} | {cycle_count} | {fixed} | {histogram} |")
+              else:
+                  lines.append("No slot-anchored object dump was available for a full-object scan.")
               lines.append("")
 
               install_stages = [
