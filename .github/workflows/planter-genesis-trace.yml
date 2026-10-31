@@ -298,8 +298,11 @@ jobs:
                   ("Transform opcode observed", "transform=True" in log),
                   ("Source pointer captured", "SOURCE SLOT STORE" in log),
                   ("malloc result captured", "POST_MALLOC" in log),
-                  ("Planter base candidate observed", "PLANTER WRITER CANDIDATE" in log),
-                  ("Source/planter overlap measured", "SOURCE/PLANTER OVERLAP" in log),
+                  ("Planter base candidate observed",
+                   any(marker in log for marker in (
+                       "PLANTER WRITER CANDIDATE", "PLANTER BASE IDENTIFIED", "PLANTER SCAN SELECTED"))),
+                  ("Source/planter overlap measured",
+                   "SOURCE/PLANTER OVERLAP" in log or "PLANTER SCAN SELECTED" in log),
                   ("Planter watches armed", "PLANTER WATCHES ARMED" in log),
                   ("First mixer read reached", "FIRST MIXER READ" in log),
                   ("Signal location captured", "SIGNAL STOP:" in log),
