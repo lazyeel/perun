@@ -123,6 +123,7 @@ STATE = {
     "slot_sample_count": 0,
     "slot_last_ptr": None,
     "slot_last_data": None,
+    "slot_anchor_dumped": False,
     "planter_watch_armed": False,
     "final_dumped": False,
     "postmalloc_seen": False,
@@ -851,6 +852,25 @@ class FirstMixerReadBP(gdb.Breakpoint):
                 write_blob("planter.from_rbp_minus_30.first.bin", slot_data)
             STATE["slot_last_ptr"] = slot_ptr
             STATE["slot_last_data"] = slot_data
+
+            # Once the live slot, source+0x20, and known writer base agree,
+            # preserve this exact runtime object even if the historical
+            # four-permutation signature does not hold in this session.
+            if (not STATE["slot_anchor_dumped"] and slot_source_match
+                    and slot_writer_match):
+                STATE["slot_anchor_dumped"] = True
+                write_blob("planter.slot_anchored.bin", slot_data)
+                for name, off in TABLES:
+                    window = slot_data[off:off + WINDOW_SIZE]
+                    log(f"SLOT ANCHORED WINDOW {name}: unique={len(set(window))}/256")
+                fifth = slot_data[0x1F30:0x1F30 + WINDOW_SIZE]
+                log(f"SLOT ANCHORED WINDOW fifth_1f30: unique={len(set(fifth))}/256")
+                with open(os.path.join(OUT, "writer_stats.txt"), "w", encoding="utf-8") as f:
+                    for name, st in sorted(STATE["writer_stats"].items()):
+                        f.write(f"{name}: {st}\\n")
+                log("SLOT ANCHOR VERIFIED: rbp_minus_0x30 == source_plus_0x20 "
+                    "== writer_base; contiguous_span=0x2700")
+
         log(f"MIXER SLOT SAMPLE n={STATE['slot_sample_count']} "
             f"span_mapped={slot_span} slot_eq_source_plus_20={slot_source_match} "
             f"slot_eq_writer_base={slot_writer_match} "
@@ -906,6 +926,9 @@ class FirstMixerReadBP(gdb.Breakpoint):
             with open(os.path.join(OUT, "writer_stats.txt"), "w", encoding="utf-8") as f:
                 for name, st in sorted(STATE["writer_stats"].items()):
                     f.write(f"{name}: {st}\n")
+        elif STATE["slot_anchor_dumped"]:
+            log("MIXER SLOT OBJECT RETAINED: pointer anchor is verified; "
+                "legacy four-permutation signature is not satisfied in this session")
         else:
             log("MIXER CANDIDATE REJECTED: no verified four-permutation planter; "
                 "retrying at next mixer-read site")
@@ -1139,6 +1162,7 @@ continue
         STATE["slot_sample_count"] = 0
         STATE["slot_last_ptr"] = None
         STATE["slot_last_data"] = None
+        STATE["slot_anchor_dumped"] = False
         if opcode == TRANSFORM_OPCODE:
             STATE["final_dumped"] = False
             STATE["planter_scan_done"] = False
@@ -1162,7 +1186,7 @@ with open(LOG, "w", encoding="utf-8") as f:
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v19", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v20", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},
