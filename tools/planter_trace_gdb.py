@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v15).
+"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v16).
 
 Canonical project copy: tools/planter_trace_gdb.py.
 
@@ -674,13 +674,66 @@ def scan_planter_memory(rbp, rsp, rva):
             except Exception as exc:
                 log(f"PLANTER SCAN: frame fallback unavailable ({type(exc).__name__})")
 
+    # The original planter_scan.py also performs a full byte-aligned pass
+    # after the fast 16-byte pass. This covers non-aligned bases and RW maps
+    # larger than 16 MiB (up to 32 MiB), without assuming allocator alignment.
+    wide_regions = 0
+    wide_bytes = 0
+    if not matches:
+        log("PLANTER SCAN: stride16 missed; running exhaustive step=1 scan")
+        try:
+            with open(f"/proc/{pid}/maps", "r", encoding="ascii", errors="replace") as maps_file:
+                wide_mappings = []
+                for line in maps_file:
+                    if "rw-p" not in line:
+                        continue
+                    parts = line.split()
+                    bounds = parts[0].split("-", 1)
+                    low, high = int(bounds[0], 16), int(bounds[1], 16)
+                    size = high - low
+                    if PLANTER_SIZE <= size <= 0x2000000:
+                        wide_mappings.append((low, high, parts[-1] if len(parts) > 5 else "anonymous"))
+            wide_mappings.sort(key=lambda item: 0 if item[0] <= rbp < item[1] or item[0] <= rsp < item[1] else 1)
+            for low, high, name in wide_mappings:
+                size = high - low
+                try:
+                    data = bytes(inf.read_memory(low, size))
+                except Exception:
+                    continue
+                wide_regions += 1
+                wide_bytes += size
+                for offset in range(0, size - PLANTER_SIZE + 1):
+                    if offset % 16 == 0:
+                        continue  # already covered by the fast pass
+                    valid = True
+                    for _family, table_offset in TABLES:
+                        window = data[offset + table_offset:offset + table_offset + WINDOW_SIZE]
+                        if len(window) != WINDOW_SIZE or len(set(window)) != WINDOW_SIZE:
+                            valid = False
+                            break
+                    if not valid:
+                        continue
+                    candidate = low + offset
+                    refs = stack_refs.get(candidate, [])
+                    relative = candidate - STATE["src"] if STATE["src"] is not None else None
+                    log(f"PLANTER SCAN MATCH (wide step=1): rva={rva:#x} "
+                        f"source_relative_base={relative if relative is not None else 'unknown'} "
+                        f"stack_ref_rbp_deltas={[hex(x) for x in refs[:8]]}")
+                    matches.append((candidate, data[offset:offset + PLANTER_SIZE], refs, name))
+                    chosen = matches[-1]
+                    break
+                if chosen is not None:
+                    break
+        except Exception as exc:
+            log(f"PLANTER SCAN: exhaustive pass unavailable ({type(exc).__name__})")
+
     if chosen is None and matches:
         # Four independent bijective windows are an overwhelming signature.
         chosen = next((item for item in matches if -0x30 in item[2]), matches[0])
 
     if chosen is None:
         log(f"PLANTER SCAN: no four-permutation candidate; "
-            f"regions={scanned_regions} bytes={scanned_bytes}")
+            f"regions={scanned_regions + wide_regions} bytes={scanned_bytes + wide_bytes}")
         return None
 
     candidate, blob, refs, map_name = chosen
@@ -1013,7 +1066,7 @@ with open(LOG, "w", encoding="utf-8") as f:
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v15", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v16", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},
