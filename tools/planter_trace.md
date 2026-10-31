@@ -71,6 +71,27 @@ the older four-permutation structural model. Tracer v21 preserves this exact
 slot-anchored object as `planter.slot_anchored.bin` without falsely requiring
 all four historical windows to be bijections.
 
+**Index topology (2026-10-31, run `41204128058`, first mixer read).**
+The pre-transform snapshot had one unique byte per legacy window; the live
+object changed these positions:
+
+| Window | Unique | Zero bytes | Changed indices | Runs |
+|---|---:|---:|---:|---:|
+| fam1 | 256/256 | 1 | 255, range 0..255 | 2 |
+| fam2 | 53/256 | 204 | 52, range 204..255 | 1 |
+| fam3 | 256/256 | 1 | 255, range 0..255 | 2 |
+| fam4 | 196/256 | 61 | 195, range 60..255 | 2 |
+| +0x1F30 | 256/256 | 1 | 255, range 0..255 | 2 |
+
+The `fam2` pattern is consistent with a 256-byte table beginning at
+`+0x1ACC` (204 bytes after the old `+0x1A00` boundary): its first 52 bytes
+would be the observed suffix, with the remaining 204 bytes in the next region.
+The `fam4` pattern motivates testing a table beginning at `+0x1354` (60 bytes
+before the old `+0x1390` boundary). These are testable offset hypotheses,
+not identifications. The v22 full-object census checks every byte-aligned
+256-byte window across the entire anchored object, including windows crossing
+the old partition boundaries.
+
 ## Running the trace
 
 The tracer is intended for the same Bionic x86_64 `adi_native` process used by
@@ -152,8 +173,8 @@ a candidate passing all four windows becomes `planter.final.bin`.
 - `source.final.bin`, `staging.copy_entry.*.bin`, `staging.final.*.bin`,
   `planter.final.bin`, family snapshots and unknown-range snapshots: memory
   captures from this process only.
-- `writer_stats.txt`: direct-writer coverage once a valid four-window
-  planter signature has been obtained.
+- `writer_stats.txt`: direct-writer coverage when either the strict
+  four-window signature or the active slot anchor is confirmed.
 
 The analyzer checks the four known permutations, cycle lengths, byte-level
 source/planter overlap, candidate bijection windows in unknown ranges, writer
