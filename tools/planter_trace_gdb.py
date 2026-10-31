@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v7).
+"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v8).
 
 Canonical project copy: tools/planter_trace_gdb.py.
 
@@ -39,6 +39,7 @@ SOURCE_SLOT_STORE_RVA = 0xDD511
 POST_MALLOC_RVA = 0xDD83B
 COPY_ENTRY_RVA = 0xFB022
 TRANSFORM_OPCODE = 0x716BD86C
+MODULE_RVA_LIMIT = 0x200000
 
 # Exact writer sites observed in the Android x86_64 libCoreADI.so.
 # Each tuple: (name, base-register, index-register, displacement, value-register).
@@ -148,7 +149,7 @@ def on_inferior_stop(event):
     try:
         pc = rv("$pc")
         base = STATE.get("base")
-        if base is not None and pc >= base:
+        if base is not None and base <= pc < base + MODULE_RVA_LIMIT:
             pc_text = f"{pc - base:#x}"
         else:
             pc_text = "outside-module"
@@ -170,17 +171,17 @@ def on_inferior_stop(event):
         try:
             backtrace = gdb.execute("bt 12", to_string=True)
             for raw in backtrace.splitlines():
-                match = re.match(r"#(\d+)\s+(?:0x([0-9a-fA-F]+)\s+in\s+)?(.*)", raw.strip())
+                match = re.match(r"#(\d+)\s+0x([0-9a-fA-F]+)(?:\s+in\s+([^ (]+))?", raw.strip())
                 if not match:
                     continue
                 frame_no = int(match.group(1))
-                address = int(match.group(2), 16) if match.group(2) else None
-                if address is not None and base is not None and address >= base:
+                address = int(match.group(2), 16)
+                if base is not None and base <= address < base + MODULE_RVA_LIMIT:
                     location = f"rva={address - base:#x}"
                 else:
                     location = "external"
-                symbol = match.group(3).split("(", 1)[0].strip()
-                log(f"SIGNAL FRAME: n={frame_no} {location} symbol={symbol[:100] or 'unknown'}")
+                symbol = match.group(3) or "unknown"
+                log(f"SIGNAL FRAME: n={frame_no} {location} symbol={symbol[:100]}")
         except Exception as exc:
             log(f"SIGNAL BACKTRACE ERROR: {type(exc).__name__}")
     except Exception as exc:
