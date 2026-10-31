@@ -3,6 +3,7 @@
 from __future__ import annotations
 import importlib.util
 import io
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -40,6 +41,21 @@ class PlanterTraceTests(unittest.TestCase):
         data = b"prefix" + bytes(range(256)) + b"suffix"
         hits = ANALYZER.scan_bijections(data)
         self.assertTrue(any(offset == 6 for offset, _ in hits))
+
+    def test_slot_anchored_snapshot_fallback_and_final_precedence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertEqual(ANALYZER.load_planter_snapshot(root), (None, None))
+            (root / "planter.slot_anchored.bin").write_bytes(b"anchored")
+            self.assertEqual(
+                ANALYZER.load_planter_snapshot(root),
+                (b"anchored", "slot-anchored"),
+            )
+            (root / "planter.final.bin").write_bytes(b"validated")
+            self.assertEqual(
+                ANALYZER.load_planter_snapshot(root),
+                (b"validated", "final"),
+            )
 
     def test_manifest_round_trip(self):
         manifest = {"tables": list(ANALYZER.DEFAULT_TABLES.items()),
