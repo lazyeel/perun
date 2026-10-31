@@ -485,15 +485,41 @@ jobs:
                   lines.append("No allow-listed GDB console diagnostic matched.")
               lines.append("")
               planter_path = run / "planter.final.bin"
-              planter = planter_path.read_bytes() if planter_path.exists() else b""
-              lines += ["## Capture checkpoints", "",
-                        f"- Planter watches armed: `{'yes' if 'PLANTER WATCHES ARMED' in log else 'no'}`",
-                        f"- First-mixer snapshot: `{'yes' if len(planter) >= 0x2700 else 'no'}`",
-                        f"- Source/planter overlap check executed: `{'yes' if 'source[32:256] == planter[0:224]' in log else 'no'}`", ""]
+              candidate_files = sorted(
+                  list(run.glob("mixer_*_candidate_*.bin")) + list(run.glob("planter.at_*.bin")),
+                  key=lambda p: p.stat().st_mtime)
+              window_files = sorted(run.glob("window_*.final_candidate.bin"))
+              snapshot_path = (planter_path if planter_path.exists() else
+                               (candidate_files[-1] if candidate_files else None))
+              planter = snapshot_path.read_bytes() if snapshot_path else b""
+              snapshot_kind = ("final" if snapshot_path == planter_path else
+                               (f"candidate:{snapshot_path.name}" if snapshot_path else "none"))
               tables = {"fam1":0x0D60,"fam2":0x1A00,"fam3":0x2460,"fam4":0x1390}
-              lines += ["## Known family windows", "",
-                        "| Family | Unique bytes | Permutation | Zero bytes | Cycles |",
-                        "|---|---:|---:|---:|---:|"]
+              lines += ["## Capture checkpoints", "",
+                        f"- Software watchpoints armed: `{'yes' if 'WATCH ARMED' in log else 'no'}`",
+                        f"- Planter base candidate logged: `{'yes' if 'PLANTER BASE CANDIDATE' in log or 'PLANTER BASE IDENTIFIED' in log else 'no'}`",
+                        f"- Mapped 0x2700 candidate snapshots: `{len(candidate_files)}`",
+                        f"- Independent writer-window snapshots: `{len(window_files)}`",
+                        f"- Final four-permutation snapshot: `{'yes' if planter_path.exists() else 'no'}`",
+                        f"- Source/planter overlap check executed: `{'yes' if 'source[32:256] == planter[0:224]' in log else 'no'}`",
+                        f"- Snapshot selected for byte statistics: `{snapshot_kind}`", ""]
+              if candidate_files:
+                  lines += ["## Mapped candidate object snapshots", "",
+                            "| Snapshot | Bytes | fam1 unique | fam2 unique | fam3 unique | fam4 unique |",
+                            "|---|---:|---:|---:|---:|---:|"]
+                  for candidate_path in candidate_files:
+                      data = candidate_path.read_bytes()
+                      vals = []
+                      for _name, _off in tables.items():
+                          w = data[_off:_off+256] if len(data) >= _off+256 else b""
+                          vals.append(f"{len(set(w))}/256" if w else "n/a")
+                      lines.append(f"| {candidate_path.name} | {len(data)} | " + " | ".join(vals) + " |")
+              if window_files:
+                  lines += ["", "## Independent writer-window snapshots", "",
+                            "| Window | Unique bytes | Permutation |", "|---|---:|---:|"]
+                  for window_path in window_files:
+                      data = window_path.read_bytes()
+                      lines.append(f"| {window_path.stem} | {len(set(data))}/256 | {'yes' if len(data)==256 and len(set(data))==256 else 'no'} |")
               for name, off in tables.items():
                   data = planter[off:off+256] if len(planter) >= off+256 else b""
                   unique = len(set(data))
@@ -518,8 +544,8 @@ jobs:
                   except Exception:
                       continue
               lines += ["", "## Direct writer coverage", "",
-                        "| Writer | Hits | Distinct indices | Index min..max |",
-                        "|---|---:|---:|---:|"]
+                        "| Writer | Hits | Distinct indices | Index min..max | Base−source delta |",
+                        "|---|---:|---:|---:|---:|"]
               groups = defaultdict(list)
               csv_path = run / "writer_events.csv"
               if csv_path.exists():
@@ -530,9 +556,17 @@ jobs:
                   try:
                       indexes = [int(row["index"],16) for row in rows]
                       span = f"{min(indexes):#x}..{max(indexes):#x}" if indexes else "n/a"
-                      lines.append(f"| {name} | {len(rows)} | {len(set(indexes))} | {span} |")
+                      deltas = []
+                      for row in rows:
+                          raw_delta = row.get("source_delta", "na")
+                          if raw_delta and raw_delta != "na":
+                              try: deltas.append(int(raw_delta, 16))
+                              except ValueError: pass
+                      delta_span = (f"{min(deltas):+#x}..{max(deltas):+#x}"
+                                    if deltas else "n/a")
+                      lines.append(f"| {name} | {len(rows)} | {len(set(indexes))} | {span} | {delta_span} |")
                   except Exception:
-                      lines.append(f"| {name} | {len(rows)} | n/a | n/a |")
+                      lines.append(f"| {name} | {len(rows)} | n/a | n/a | n/a |")
               lines += ["", "## Status", ""]
               if len(planter) >= 0x2700:
                   lines.append("A complete 0x2700-byte planter snapshot was captured in one process.")
