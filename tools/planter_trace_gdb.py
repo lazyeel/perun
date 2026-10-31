@@ -576,7 +576,7 @@ class FirstMixerReadBP(gdb.Breakpoint):
         candidate_sources = [("slot", slot_ptr), ("writer_base", STATE["planter"])]
         for kind, candidate in candidate_sources:
             if candidate and ptr_ok(candidate, PLANTER_SIZE):
-                key = (kind, candidate)
+                key = (kind, candidate, self.rva)
                 if key not in STATE["mixer_candidate_addrs"]:
                     STATE["mixer_candidate_addrs"].add(key)
                     write_blob(f"mixer_{kind}_candidate_{self.rva:x}.bin",
@@ -601,7 +601,7 @@ class FirstMixerReadBP(gdb.Breakpoint):
             window_addr = writer_base + off if writer_base is not None else 0
             if window_addr and ptr_ok(window_addr, WINDOW_SIZE):
                 data = read_mem(window_addr, WINDOW_SIZE)
-                write_blob(f"window_{label}.final_candidate.bin", data)
+                write_blob(f"window_{label}_at_{self.rva:x}.final_candidate.bin", data)
                 rel = writer_base - STATE["src"] if STATE["src"] is not None else "unknown"
                 log(f"WINDOW SNAPSHOT: {label} unique={len(set(data))}/256 "
                     f"source_relative_base={rel}")
@@ -662,6 +662,12 @@ class PlanterBaseLoadBP(gdb.Breakpoint):
         relation_ok = src is not None and slot == src + 32
         if ptr_ok(slot, PLANTER_SIZE) and relation_ok:
             STATE["planter"] = slot
+            if ptr_ok(src, 256):
+                source_bytes = read_mem(src, 256)
+                planter_head = read_mem(slot, 224)
+                mismatches = sum(a != b for a, b in zip(source_bytes[32:256], planter_head))
+                log(f"SOURCE/PLANTER OVERLAP source_plus_0x20=True "
+                    f"equal={mismatches == 0} mismatches={mismatches}")
             log(f"PLANTER BASE IDENTIFIED: method=base-load site={self.rva:#x} "
                 f"source_plus_0x20=True; snapshot=0x{PLANTER_SIZE:x}")
             write_blob("planter.at_base_load.bin", read_mem(slot, PLANTER_SIZE))
@@ -858,7 +864,7 @@ with open(LOG, "w", encoding="utf-8") as f:
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v13", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v14", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},
