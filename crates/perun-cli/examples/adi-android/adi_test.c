@@ -596,6 +596,8 @@ int main(int argc, char **argv) {
     int trace_start_only = trace_only_env && strcmp(trace_only_env, "1") == 0;
 
     if (code == -45061 || force_start) {
+        info("prov", "entering ProvisioningStart path: login-code=%d force=%d",
+             code, force_start);
         if (force_start && code != -45061)
             info("prov", "ADI_FORCE_START=1: invoking ProvisioningStart despite login-code=%d", code);
         /* OFFLINE SPIM: skip the network entirely, feed the transform
