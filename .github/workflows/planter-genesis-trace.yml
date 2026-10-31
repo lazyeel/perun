@@ -308,6 +308,59 @@ jobs:
                   lines.append("No source-anchored window comparisons were recorded.")
               lines.append("")
 
+              # Direct measurements from the mutable [RBP-0x30] slot.
+              # These values are aggregate metadata only; do not publish
+              # absolute addresses, raw bytes, SPIM, or register snapshots.
+              slot_samples = []
+              for trace_line in trace_lines:
+                  slot_match = re.search(
+                      r"MIXER SLOT SAMPLE n=(\d+) span_mapped=(True|False) "
+                      r"slot_eq_source_plus_20=(True|False) "
+                      r"slot_eq_writer_base=(True|False) "
+                      r"slot_pointer_changed=(True|False|unknown) "
+                      r"same_ptr_changed=(\d+|unknown) (.*)$", trace_line)
+                  if not slot_match:
+                      continue
+                  tail = slot_match.group(7)
+                  values = {}
+                  for name, value in re.findall(
+                          r"([A-Za-z0-9_]+)_unique=(\d+|na)/256", tail):
+                      values[name] = int(value) if value != "na" else None
+                  slot_samples.append({
+                      "n": int(slot_match.group(1)),
+                      "mapped": slot_match.group(2) == "True",
+                      "source_match": slot_match.group(3) == "True",
+                      "writer_match": slot_match.group(4) == "True",
+                      "pointer_changed": slot_match.group(5),
+                      "same_ptr_changed": slot_match.group(6),
+                      "values": values,
+                  })
+              lines += ["## Live [rbp-0x30] slot sampling", ""]
+              if slot_samples:
+                  first, last = slot_samples[0], slot_samples[-1]
+                  transitions = sum(x["pointer_changed"] == "True" for x in slot_samples)
+                  lines.append(f"- Mixer-read samples: {len(slot_samples)}")
+                  lines.append("- 0x2700-byte RW span mapped (first → last): " +
+                               ("yes" if first["mapped"] else "no") + " → " +
+                               ("yes" if last["mapped"] else "no"))
+                  lines.append("- Slot equals source+0x20 (first → last): " +
+                               ("yes" if first["source_match"] else "no") + " → " +
+                               ("yes" if last["source_match"] else "no"))
+                  lines.append("- Slot equals writer-base candidate (first → last): " +
+                               ("yes" if first["writer_match"] else "no") + " → " +
+                               ("yes" if last["writer_match"] else "no"))
+                  lines.append(f"- Slot pointer transitions between samples: {transitions}")
+                  lines += ["", "| Window | First unique | Final unique |",
+                            "|---|---:|---:|"]
+                  for name in ("fam1", "fam2", "fam3", "fam4", "fifth_1f30"):
+                      a, b = first["values"].get(name), last["values"].get(name)
+                      a_text = f"{a}/256" if a is not None else "n/a"
+                      b_text = f"{b}/256" if b is not None else "n/a"
+                      lines.append(f"| {name} | {a_text} | {b_text} |")
+              else:
+                  lines.append("No direct slot samples were recorded.")
+              lines.append("")
+
               install_stages = [
                   ("global writer probes requested", "ENTRY COMMAND: installing global writer probes"),
                   ("global installer entered", "GLOBAL INSTALL STAGE: command list entered"),
