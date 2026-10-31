@@ -7,6 +7,7 @@ on:
     paths:
       - .github/workflows/planter-genesis-trace.yml
       - crates/perun-cli/examples/adi-android/run-native.sh
+      - crates/perun-cli/examples/adi-android/adi_test.c
       - tools/planter_trace_gdb.py
       - tools/analyze_planter_trace.py
 
@@ -291,7 +292,22 @@ jobs:
                           if status_match:
                               provisioning_fatals.append("Apple endpoint HTTP " + status_match.group(1))
                           elif "failed:" in low:
-                              provisioning_fatals.append("Apple endpoint transport failure")
+                              detail = low.split("failed:", 1)[1].strip()
+                              if "resolve host" in detail or "resolve proxy" in detail:
+                                  category = "DNS resolution failure"
+                              elif "ssl" in detail or "certificate" in detail or "peer verification" in detail:
+                                  category = "TLS handshake/certificate failure"
+                              elif "network is unreachable" in detail:
+                                  category = "network unreachable"
+                              elif "timed out" in detail or "timeout" in detail:
+                                  category = "TCP/request timeout"
+                              elif "connect" in detail or "connection" in detail:
+                                  category = "TCP connection failure"
+                              elif "recv failure" in detail or "send failure" in detail:
+                                  category = "socket I/O failure"
+                              else:
+                                  category = "other curl transport failure"
+                              provisioning_fatals.append("Apple endpoint " + category)
                           elif "url bag did not contain" in low:
                               provisioning_fatals.append("lookup response lacked provisioning endpoints")
                           elif "no spim in" in low:
@@ -330,14 +346,14 @@ jobs:
                       lines.append(f"- Trace-only ProvisioningStart: rc={rc}, cpim_len={cpim_len}")
               else:
                   lines.append("- Trace-only ProvisioningStart result: not observed")
-              forced_start = False
+              provisioning_start_entered = False
               spim_decoded = False
               if console_log.is_file():
                   private_console = console_log.read_text(errors="replace")
-                  forced_start = "ADI_FORCE_START=1: invoking ProvisioningStart" in private_console
+                  provisioning_start_entered = "entering ProvisioningStart path:" in private_console
                   spim_decoded = "spim received (" in private_console
               lines += ["", "## Live provisioning path", ""]
-              lines.append(f"- Forced ProvisioningStart path entered: {'yes' if forced_start else 'no/not observed'}")
+              lines.append(f"- ProvisioningStart path entered: {'yes' if provisioning_start_entered else 'no/not observed'}")
               lines.append(f"- SPIM decoded from live Apple response: {'yes' if spim_decoded else 'no/not observed'}")
               lines += ["## vdfut768ig opcode sequence", ""]
               observed_opcodes = []
@@ -443,4 +459,15 @@ jobs:
             exit 0
           fi
           git commit -m "research(adi): record planter trace run ${GITHUB_RUN_ID}"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          # A source commit may land while the trace is running. Rebase the
+          # per-run report commit onto the current branch before publishing it.
+          for attempt in 1 2 3; do
+            git fetch origin "$GITHUB_REF_NAME"
+            git rebase "origin/$GITHUB_REF_NAME"
+            if git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              exit 0
+            fi
+            echo "Branch advanced during push (attempt $attempt); retrying."
+          done
+          echo "Could not publish the trace report after three attempts." >&2
+          exit 1
