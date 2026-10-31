@@ -4,14 +4,22 @@ This note describes the live research instrumentation for the Android x86_64
 `libCoreADI.so` build used by the `adi-android` harness. The GDB 12.1 path has
 now completed a real Apple provisioning start: the native control and GDB run
 both reached `ProvisioningStart rc=0` with a 276-byte CPIM from a 347-byte SPIM.
-The current unresolved question is the exact in-memory planter base: candidate
-buffers have not yet passed the four-window signature check.
+The live planter base is now identified by the active-frame slot
+`[RBP-0x30]`: run `41203130396` measured the same mapped object at all 160
+mixer-read stops, with the slot equal to both `source+0x20` and the writer
+base, and no pointer transitions. The unresolved question is the object's
+internal table layout and the genesis of its session-dependent contents:
+the older four-permutation signature does not hold for two windows in this
+fresh session.
 
 ## Current measured model
 
-The working signature from prior corrected captures is four 256-byte
-permutations. A fresh live run must independently pass all four windows before
-a buffer is labeled the final planter:
+Earlier corrected captures showed four 256-byte permutations. That remains a
+historical observation, not a universal acceptance predicate: fresh run
+`41203130396` directly anchored the active planter through `[RBP-0x30]`,
+while two of the four previously named windows were not permutations. The
+window values are therefore measured independently rather than used to reject
+an object whose base pointer is independently confirmed:
 
 | Family | Planter offset | First known writer site(s) |
 |---|---:|---|
@@ -46,17 +54,22 @@ That establishes a permutation-shaped output for this run, but not yet its
 semantic role: it is a fifth S-box candidate, not a proven fifth member of the
 four-family mixer model.
 
-**Important base-pointer qualification (2026-10-31, run `41202921615`).**
-The `source+0x20` span was readable at the source-slot store, but
-`[RBP-0x30]` did not equal `source+0x20` at that point. At later mixer reads,
-the source+0x20 candidate had `fam1=256/256`, `fam2=53/256`,
-`fam3=256/256`, `fam4=196/256`, and `+0x1F30=256/256` unique values;
-these counts remained stable across 160 comparisons. Thus the previously
-measured source overlap is not a universal identity proof for the planter base.
-Tracer v19 separately samples the actual `[RBP-0x30]` target at every mixer
-read and compares it with the source+0x20 and writer-base candidates. Until
-that direct slot evidence is inspected, neither candidate should be promoted
-to `planter.final.bin`.
+**Direct slot-anchor result (2026-10-31, run `41203130396`).**
+At the source-slot store (`0xDD511`), `[RBP-0x30]` had not yet become
+`source+0x20`; this is an initialization-order observation, not a rejection
+of the candidate. At every one of 160 later mixer-read samples, the
+`0x2700`-byte span at `[RBP-0x30]` was mapped, the slot equaled both
+`source+0x20` and the writer-base candidate, and the pointer did not change.
+This confirms `source+0x20` as the active planter-object base during the
+mixer phase.
+
+The same slot-anchored object measured `fam1=256/256`,
+`fam2=53/256`, `fam3=256/256`, `fam4=196/256`, and
+`+0x1F30=256/256` unique values. These counts remained stable through the
+160 samples. The base is therefore no longer ambiguous; the mismatch is in
+the older four-permutation structural model. Tracer v20 preserves this exact
+slot-anchored object as `planter.slot_anchored.bin` without falsely requiring
+all four historical windows to be bijections.
 
 ## Running the trace
 
