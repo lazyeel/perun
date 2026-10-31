@@ -266,17 +266,40 @@ jobs:
               console_diagnostics = []
               login_codes = []
               start_results = []
+              http_responses = []
+              provisioning_fatals = []
+              spim_lengths = []
               if console_log.is_file():
                   for raw in console_log.read_text(errors="replace").splitlines():
                       line = raw.strip()
                       low = line.lower()
-                      login_match = re.search(r"ADIGetLoginCode=(-?\d+)", line)
+                      login_match = re.search(r"ADIGetLoginCode=(-?\\d+)", line)
                       if login_match:
                           login_codes.append(int(login_match.group(1)))
                       start_match = re.search(
-                          r"TRACE-ONLY start rc=(-?\d+) cpim_len=(\d+)", line)
+                          r"TRACE-ONLY start rc=(-?\\d+) cpim_len=(\\d+)", line)
                       if start_match:
                           start_results.append((int(start_match.group(1)), int(start_match.group(2))))
+                      response_match = re.search(r"\\[net\\]\\s+->\\s+(\\d+)\\s+\\((\\d+)\\s+bytes\\)", line)
+                      if response_match:
+                          http_responses.append((int(response_match.group(1)), int(response_match.group(2))))
+                      spim_match = re.search(r"spim received \\((\\d+) bytes decoded\\)", line, re.I)
+                      if spim_match:
+                          spim_lengths.append(int(spim_match.group(1)))
+                      if "[fatal]" in low:
+                          status_match = re.search(r"HTTP\\s+(\\d{3})", line, re.I)
+                          if status_match:
+                              provisioning_fatals.append("Apple endpoint HTTP " + status_match.group(1))
+                          elif "failed:" in low:
+                              provisioning_fatals.append("Apple endpoint transport failure")
+                          elif "url bag did not contain" in low:
+                              provisioning_fatals.append("lookup response lacked provisioning endpoints")
+                          elif "no spim in" in low:
+                              provisioning_fatals.append("start response lacked SPIM field")
+                          elif "no ptm/tk" in low:
+                              provisioning_fatals.append("finish response lacked ptm/tk fields")
+                          else:
+                              provisioning_fatals.append("harness fatal exit (details withheld)")
                       if "program received signal" in low:
                           tail = low.split("program received signal", 1)[1].strip()
                           signal = tail.split(",", 1)[0].split()[0] if tail else "unknown"
@@ -289,6 +312,16 @@ jobs:
                           console_diagnostics.append("GDB Python exception reported")
                       elif "segmentation fault" in low:
                           console_diagnostics.append("Segmentation fault reported by launcher/child")
+              lines += ["", "## Apple network/provisioning progression", ""]
+              lines.append("- HTTP responses: " +
+                           (" -> ".join(f"{code} ({size} bytes)" for code, size in http_responses)
+                            if http_responses else "not observed"))
+              lines.append("- SPIM decoded lengths: " +
+                           (", ".join(str(n) + " bytes" for n in spim_lengths)
+                            if spim_lengths else "not observed"))
+              lines.append("- Provisioning fatal classifications: " +
+                           ("; ".join(dict.fromkeys(provisioning_fatals))
+                            if provisioning_fatals else "none observed"))
               lines += ["", "## Harness branch results", ""]
               lines.append("- ADIGetLoginCode results: " +
                            (", ".join(str(x) for x in login_codes) if login_codes else "not observed"))
@@ -308,15 +341,27 @@ jobs:
               lines.append(f"- SPIM decoded from live Apple response: {'yes' if spim_decoded else 'no/not observed'}")
               lines += ["## vdfut768ig opcode sequence", ""]
               observed_opcodes = []
+              entry_commands = []
               for trace_line in trace_lines:
-                  if trace_line.startswith(("FIRST vdfut768ig entry:", "vdfut768ig entry:")):
-                      opcode_match = re.search(r"opcode=(0x[0-9a-fA-F]{8})", trace_line)
+                  # log() prepends a timestamp; match markers anywhere in the line.
+                  if ("FIRST vdfut768ig entry:" in trace_line or
+                          "vdfut768ig entry:" in trace_line):
+                      opcode_match = re.search(r"opcode=(0x[0-9a-fA-F]+)", trace_line)
                       if opcode_match:
                           observed_opcodes.append(opcode_match.group(1))
+                  if "ENTRY COMMAND:" in trace_line:
+                      if "installing target transform breakpoints" in trace_line:
+                          entry_commands.append("install")
+                      else:
+                          command_match = re.search(r"skipped opcode=(0x[0-9a-fA-F]+)", trace_line)
+                          entry_commands.append(
+                              "skip " + command_match.group(1) if command_match else "other")
               if observed_opcodes:
                   lines.append("- " + " -> ".join(observed_opcodes[:32]))
               else:
                   lines.append("No vdfut768ig opcode values were recorded.")
+              lines.append("- Entry breakpoint command-list actions: " +
+                           (", ".join(entry_commands[:32]) if entry_commands else "not observed"))
               lines += ["", "## GDB console status", ""]
               lines += [f"- {item}" for item in sorted(set(console_diagnostics))]
               if not console_diagnostics:
