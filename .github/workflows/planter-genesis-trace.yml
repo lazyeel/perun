@@ -269,23 +269,24 @@ jobs:
               log = (run / "trace.log").read_text(errors="replace") if (run / "trace.log").exists() else ""
               trace_lines = log.splitlines()
               install_stages = [
-                  ("target opcode requested installation", "ENTRY COMMAND: installing target transform breakpoints"),
-                  ("command list entered installer", "INSTALL STAGE: command list entered"),
-                  ("language configured", "INSTALL STAGE: language configured"),
-                  ("software watchpoints selected", "INSTALL STAGE: software watchpoints selected"),
-                  ("source-slot breakpoint created", "INSTALL STAGE: source-slot breakpoint created"),
-                  ("post-malloc breakpoint created", "INSTALL STAGE: post-malloc breakpoint created"),
-                  ("copy-entry breakpoint created", "INSTALL STAGE: copy-entry breakpoint created"),
-                  ("command list returned to continue", "INSTALL STAGE: return to command-list continue"),
+                  ("global writer probes requested", "ENTRY COMMAND: installing global writer probes"),
+                  ("global installer entered", "GLOBAL INSTALL STAGE: command list entered"),
+                  ("source-slot breakpoint created", "GLOBAL INSTALL STAGE: source-slot breakpoint created"),
+                  ("post-malloc breakpoint created", "GLOBAL INSTALL STAGE: post-malloc breakpoint created"),
+                  ("copy-entry breakpoint created", "GLOBAL INSTALL STAGE: copy-entry breakpoint created"),
+                  ("writer breakpoints created", "GLOBAL INSTALL STAGE: writer breakpoint"),
+                  ("target transform probes requested", "ENTRY COMMAND: installing target transform probes"),
+                  ("target installer entered", "TRANSFORM INSTALL STAGE: command list entered"),
+                  ("target mixer-read breakpoint created", "TRANSFORM INSTALL STAGE: mixer-read breakpoint"),
               ]
               lines += ["## GDB installation steps", "",
                         "| Stage | Reached |", "|---|---:|"]
               lines += [f"| {label} | {'yes' if marker in log else 'no'} |"
                         for label, marker in install_stages]
               for label, fragment in [
-                  ("base-load breakpoints", "INSTALL STAGE: base-load breakpoint"),
-                  ("writer breakpoints", "INSTALL STAGE: writer breakpoint"),
-                  ("mixer-read breakpoints", "INSTALL STAGE: mixer-read breakpoint"),
+                  ("global writer breakpoints", "GLOBAL INSTALL STAGE: writer breakpoint"),
+                  ("base-load breakpoints", "TRANSFORM INSTALL STAGE: base-load breakpoint"),
+                  ("mixer-read breakpoints", "TRANSFORM INSTALL STAGE: mixer-read breakpoint"),
               ]:
                   count = sum(fragment in x for x in trace_lines)
                   lines.append(f"- {label} created: {count}")
@@ -293,7 +294,8 @@ jobs:
               checkpoints = [
                   ("Tracer initialized", "armed; output=" in log),
                   ("First vdfut768ig entry", "FIRST vdfut768ig entry" in log),
-                  ("RVA breakpoints installed", "armed source-slot" in log),
+                  ("Global writer probes installed", "GLOBAL INSTALL STAGE: writer breakpoint" in log),
+                  ("Target mixer probes installed", "TRANSFORM INSTALL STAGE: mixer-read breakpoint" in log),
                   ("Subsequent vdfut768ig entry logged", "vdfut768ig entry: opcode=" in log),
                   ("Transform opcode observed", "transform=True" in log),
                   ("Source pointer captured", "SOURCE SLOT STORE" in log),
@@ -303,7 +305,6 @@ jobs:
                        "PLANTER WRITER CANDIDATE", "PLANTER BASE IDENTIFIED", "PLANTER SCAN SELECTED"))),
                   ("Source/planter overlap measured",
                    "SOURCE/PLANTER OVERLAP" in log or "PLANTER SCAN SELECTED" in log),
-                  ("Planter watches armed", "PLANTER WATCHES ARMED" in log),
                   ("First mixer read reached", "FIRST MIXER READ" in log),
                   ("Signal location captured", "SIGNAL STOP:" in log),
               ]
@@ -470,8 +471,10 @@ jobs:
                       if opcode_match:
                           observed_opcodes.append(opcode_match.group(1))
                   if "ENTRY COMMAND:" in trace_line:
-                      if "installing target transform breakpoints" in trace_line:
-                          entry_commands.append("install")
+                      if "installing global writer probes" in trace_line:
+                          entry_commands.append("global-writers")
+                      elif "installing target transform probes" in trace_line:
+                          entry_commands.append("target-mixers")
                       else:
                           command_match = re.search(r"skipped opcode=(0x[0-9a-fA-F]+)", trace_line)
                           entry_commands.append(
@@ -569,16 +572,17 @@ jobs:
                       lines.append(f"| {name} | {size:#x} | {len(set(data)) if data else 'n/a'} |")
                   except Exception:
                       continue
-              lines += ["", "## Direct writer coverage", "",
-                        "| Writer | Hits | Distinct indices | Index min..max | Base−source delta |",
-                        "|---|---:|---:|---:|---:|"]
+              lines += ["", "## Direct writer coverage by opcode", "",
+                        "| Writer | vdfut opcode | Hits | Distinct indices | Index min..max | Base−source delta |",
+                        "|---|---|---:|---:|---:|---:|"]
               groups = defaultdict(list)
               csv_path = run / "writer_events.csv"
               if csv_path.exists():
                   with csv_path.open(newline="") as stream:
                       for row in csv.DictReader(stream):
-                          groups[row.get("name", "unknown")].append(row)
-              for name, rows in sorted(groups.items()):
+                          groups[(row.get("name", "unknown"),
+                                   row.get("active_opcode", "unknown"))].append(row)
+              for (name, opcode), rows in sorted(groups.items()):
                   try:
                       indexes = [int(row["index"],16) for row in rows]
                       span = f"{min(indexes):#x}..{max(indexes):#x}" if indexes else "n/a"
@@ -590,9 +594,9 @@ jobs:
                               except ValueError: pass
                       delta_span = (f"{min(deltas):+#x}..{max(deltas):+#x}"
                                     if deltas else "n/a")
-                      lines.append(f"| {name} | {len(rows)} | {len(set(indexes))} | {span} | {delta_span} |")
+                      lines.append(f"| {name} | {opcode} | {len(rows)} | {len(set(indexes))} | {span} | {delta_span} |")
                   except Exception:
-                      lines.append(f"| {name} | {len(rows)} | n/a | n/a | n/a |")
+                      lines.append(f"| {name} | {opcode} | {len(rows)} | n/a | n/a | n/a |")
               lines += ["", "## Status", ""]
               if planter_path.exists() and len(planter) >= 0x2700:
                   lines.append("A final 0x2700-byte planter snapshot passed the four-permutation signature check.")
