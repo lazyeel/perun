@@ -262,6 +262,52 @@ jobs:
                         f"- Tracer version: `{manifest.get('script_version', 'unknown')}`", ""]
               log = (run / "trace.log").read_text(errors="replace") if (run / "trace.log").exists() else ""
               trace_lines = log.splitlines()
+
+              # Publish only booleans and aggregate counts from the v18
+              # pre-transform snapshot; never expose pointers or memory bytes.
+              early_anchor = []
+              window_deltas = defaultdict(list)
+              for trace_line in trace_lines:
+                  anchor_match = re.search(
+                      r"EARLY PLANTER SOURCE-ANCHOR: mapped=(True|False) "
+                      r"slot_eq_source_plus_0x20=(True|False)", trace_line)
+                  if anchor_match:
+                      early_anchor.append((anchor_match.group(1) == "True",
+                                           anchor_match.group(2) == "True"))
+                  delta_match = re.search(
+                      r"PLANTER DELTA ([A-Za-z0-9_]+): changed=(\d+)/256 "
+                      r"pre_unique=(\d+)/256 now_unique=(\d+)/256 "
+                      r"now_permutation=(True|False)", trace_line)
+                  if delta_match:
+                      window_deltas[delta_match.group(1)].append({
+                          "changed": int(delta_match.group(2)),
+                          "pre_unique": int(delta_match.group(3)),
+                          "now_unique": int(delta_match.group(4)),
+                          "permutation": delta_match.group(5) == "True",
+                      })
+              lines += ["## Early planter anchor", ""]
+              if early_anchor:
+                  mapped, slot_match = early_anchor[-1]
+                  lines.append("- Source+0x20 span mapped before transform: " +
+                               ("yes" if mapped else "no"))
+                  lines.append("- [rbp-0x30] equaled source+0x20 at source-slot store: " +
+                               ("yes" if slot_match else "no"))
+              else:
+                  lines.append("No early source+0x20 snapshot was recorded.")
+              lines += ["", "## Window evolution (pre-transform → mixer read)", ""]
+              if window_deltas:
+                  lines += ["| Window | Mixer samples | First changed | Final changed | Final unique | Final permutation |",
+                            "|---|---:|---:|---:|---:|---:|"]
+                  for name, samples in sorted(window_deltas.items()):
+                      first, last = samples[0], samples[-1]
+                      lines.append(
+                          f"| {name} | {len(samples)} | {first['changed']}/256 | "
+                          f"{last['changed']}/256 | {last['now_unique']}/256 | "
+                          f"{'yes' if last['permutation'] else 'no'} |")
+              else:
+                  lines.append("No source-anchored window comparisons were recorded.")
+              lines.append("")
+
               install_stages = [
                   ("global writer probes requested", "ENTRY COMMAND: installing global writer probes"),
                   ("global installer entered", "GLOBAL INSTALL STAGE: command list entered"),
