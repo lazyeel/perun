@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v12).
+"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v13).
 
 Canonical project copy: tools/planter_trace_gdb.py.
 
@@ -858,7 +858,7 @@ with open(LOG, "w", encoding="utf-8") as f:
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v12", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v13", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},
