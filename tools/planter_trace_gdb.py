@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v19).
+"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v21).
 
 Canonical project copy: tools/planter_trace_gdb.py.
 
@@ -18,16 +18,16 @@ RAX at RVA 0xDD83B. The source pointer is captured at 0xDD511 from RCX,
 before the first post-pointer CFF writes. The planter base is captured at known
 base-load sites or from an actual family-store operand. Two direct staging
 writer sites (0xFA9C1/0xFAA8F) log the computed byte stream independently of
-software watchpoint timing.
-The [RBP-0x30] slot is separately watched because it is a mutable CFF carrier.
+watchpoint timing. At each mixer-read stop, the tracer samples the actual
+[RBP-0x30] slot and preserves the object when it agrees with source+0x20 and
+the known writer base, independently of the legacy four-permutation test.
 The entry breakpoint tracks vdfut768ig opcodes, so init/config calls are not
 mistaken for the provisioning transform.
 
-Wide software watchpoints are intentionally slow. They are used because the
-CFF writer path is session-dependent and a small number of hardware
-watchpoints cannot cover the buffers. Software watchpoints report *value
-changes*; writes that store the byte already present are not visible through
-watchpoints, so known static writer sites are also instrumented directly.
+Wide software watchpoints are deliberately disabled on the production trace
+path: experiments showed that they destabilize the Bionic inferior. Instead,
+known static writer sites are instrumented directly, and the mutable frame
+slot is sampled at the sixteen mixer-read instruction sites.
 """
 
 import gdb
@@ -56,8 +56,9 @@ WRITERS = {
     0xFB075: ("fam1_b",     "$r12", "$rsi", 0x0D60, "$rdx"),
 }
 
-# Selector/mixer read sites. The first reachable one gives a valid in-frame
-# [RBP-0x30] planter pointer and marks the completed planter for final dump.
+# Selector/mixer read sites. Each reachable site samples the actual in-frame
+# [RBP-0x30] object; a slot-anchored snapshot is distinct from the legacy
+# four-permutation "final planter" classification.
 MIXER_READS = [
     0xE6B54, 0xE6BAB, 0xE6BF7, 0xE6C76,
     0xE6CDE, 0xE6D16, 0xE6D53, 0xE6DAA,
@@ -850,6 +851,29 @@ class FirstMixerReadBP(gdb.Breakpoint):
                 same_ptr_changed = sum(a != b for a, b in zip(previous_data, slot_data))
             if STATE["slot_sample_count"] == 1:
                 write_blob("planter.from_rbp_minus_30.first.bin", slot_data)
+                # Characterize each window without publishing byte values.
+                # Index topology can distinguish an incomplete fill from a
+                # wrong offset or a window that is not a permutation.
+                early = STATE.get("pre_planter_snapshot")
+                window_specs = list(TABLES) + [("fifth_1f30", 0x1F30)]
+                for name, off in window_specs:
+                    now = slot_data[off:off + WINDOW_SIZE]
+                    frequencies = {}
+                    for value in now:
+                        frequencies[value] = frequencies.get(value, 0) + 1
+                    changed_indices = []
+                    if early is not None and STATE.get("pre_planter_base") == slot_ptr:
+                        before = early[off:off + WINDOW_SIZE]
+                        changed_indices = [i for i, (a, b) in enumerate(zip(before, now)) if a != b]
+                    runs = sum(1 for i, idx in enumerate(changed_indices)
+                               if i == 0 or idx != changed_indices[i - 1] + 1)
+                    cmin = min(changed_indices) if changed_indices else -1
+                    cmax = max(changed_indices) if changed_indices else -1
+                    log(f"SLOT WINDOW DETAIL {name}: unique={len(frequencies)}/256 "
+                        f"zero_count={frequencies.get(0, 0)} "
+                        f"max_multiplicity={max(frequencies.values())} "
+                        f"changed={len(changed_indices)} changed_min={cmin} "
+                        f"changed_max={cmax} changed_runs={runs}")
             STATE["slot_last_ptr"] = slot_ptr
             STATE["slot_last_data"] = slot_data
 
@@ -1190,7 +1214,7 @@ with open(LOG, "w", encoding="utf-8") as f:
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v20", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v21", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},
