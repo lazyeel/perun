@@ -495,13 +495,36 @@ jobs:
               snapshot_kind = ("final" if snapshot_path == planter_path else
                                (f"candidate:{snapshot_path.name}" if snapshot_path else "none"))
               tables = {"fam1":0x0D60,"fam2":0x1A00,"fam3":0x2460,"fam4":0x1390}
-              lines += ["## Capture checkpoints", "",
+              scan_selected = next((x for x in trace_lines if "PLANTER SCAN SELECTED:" in x), None)
+              scan_miss = next((x for x in trace_lines if "PLANTER SCAN: no four-permutation candidate" in x), None)
+              lines += ["## Full-memory signature scan", ""]
+              if scan_selected:
+                  scan_match = re.search(
+                      r"source_relative_base=(\S+) source_overlap=(\d+/224 mismatches|unknown) pointer_at_rbp_minus_0x30=(True|False) matches=(\d+)",
+                      scan_selected)
+                  if scan_match:
+                      lines.append("- Four-permutation candidate: yes")
+                      lines.append(f"- Candidate relative to source: {scan_match.group(1)}")
+                      lines.append(f"- Source/planter overlap: {scan_match.group(2)}")
+                      lines.append(f"- Pointer held at [rbp-0x30]: {scan_match.group(3)}")
+                      lines.append(f"- Signature candidates found: {scan_match.group(4)}")
+                  else:
+                      lines.append("- Candidate selected; summary parser did not match the diagnostic line.")
+              elif scan_miss:
+                  scan_counts = re.search(r"regions=(\d+) bytes=(\d+)", scan_miss)
+                  lines.append("- Four-permutation candidate: no")
+                  if scan_counts:
+                      lines.append(f"- RW regions scanned: {scan_counts.group(1)}")
+                      lines.append(f"- Bytes inspected: {scan_counts.group(2)}")
+              else:
+                  lines.append("The memory signature scan did not run or did not record a result.")
+              lines += ["", "## Capture checkpoints", "",
                         f"- Software watchpoints armed: `{'yes' if 'WATCH ARMED' in log else 'no'}`",
-                        f"- Planter base candidate logged: `{'yes' if 'PLANTER BASE CANDIDATE' in log or 'PLANTER BASE IDENTIFIED' in log else 'no'}`",
+                        f"- Planter base candidate logged: `{'yes' if 'PLANTER BASE CANDIDATE' in log or 'PLANTER BASE IDENTIFIED' in log or 'PLANTER SCAN SELECTED' in log else 'no'}`",
                         f"- Mapped 0x2700 candidate snapshots: `{len(candidate_files)}`",
                         f"- Independent writer-window snapshots: `{len(window_files)}`",
                         f"- Final four-permutation snapshot: `{'yes' if planter_path.exists() else 'no'}`",
-                        f"- Source/planter overlap check executed: `{'yes' if 'source[32:256] == planter[0:224]' in log else 'no'}`",
+                        f"- Source/planter overlap check executed: `{'yes' if 'source[32:256] == planter[0:224]' in log or 'SOURCE/PLANTER OVERLAP' in log or 'PLANTER SCAN SELECTED' in log else 'no'}`",
                         f"- Snapshot selected for byte statistics: `{snapshot_kind}`", ""]
               if candidate_files:
                   lines += ["## Mapped candidate object snapshots", "",
