@@ -380,10 +380,10 @@ jobs:
               slot_window_details = {}
               for trace_line in trace_lines:
                   detail = re.search(
-                      r"SLOT WINDOW DETAIL ([A-Za-z0-9_]+): unique=(\\d+)/256 "
-                      r"zero_count=(\\d+) max_multiplicity=(\\d+) "
-                      r"changed=(\\d+) changed_min=(-?\\d+) "
-                      r"changed_max=(-?\\d+) changed_runs=(\\d+)", trace_line)
+                      r"SLOT WINDOW DETAIL ([A-Za-z0-9_]+): unique=(\d+)/256 "
+                      r"zero_count=(\d+) max_multiplicity=(\d+) "
+                      r"changed=(\d+) changed_min=(-?\d+) "
+                      r"changed_max=(-?\d+) changed_runs=(\d+)", trace_line)
                   if detail:
                       slot_window_details[detail.group(1)] = {
                           "unique": int(detail.group(2)),
