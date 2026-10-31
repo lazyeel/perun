@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v9).
+"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v10).
 
 Canonical project copy: tools/planter_trace_gdb.py.
 
@@ -413,12 +413,17 @@ class WriterSiteBP(gdb.Breakpoint):
 
 
 class SourceSlotStoreBP(gdb.Breakpoint):
-    """Capture RCX at 0xDD511; defer wide watchpoints until after malloc."""
+    """Capture RCX at 0xDD511; continue through a GDB command list."""
     def __init__(self):
         super().__init__(f"*{STATE['base'] + SOURCE_SLOT_STORE_RVA:#x}",
                          gdb.BP_BREAKPOINT, internal=False)
         self.silent = True
         self.done = False
+        # Command lists run after stop() returns; no nested continue is posted
+        # back into GDB's Python UI event loop.
+        self.commands = """silent
+continue
+"""
 
     def stop(self):
         if self.done or STATE["active_op"] != TRANSFORM_OPCODE:
@@ -438,10 +443,6 @@ class SourceSlotStoreBP(gdb.Breakpoint):
             log("SOURCE INITIAL SNAPSHOT: captured 256 bytes at the source-slot store")
         else:
             log("SOURCE INITIAL SNAPSHOT: skipped; source is not a readable RW 256-byte span")
-        # Avoid installing a wide software watchpoint in the narrow interval
-        # between source capture and malloc return. Compare snapshots there,
-        # then arm source/staging/frame watches at PostMallocBP.
-        gdb.post_event(lambda: gdb.execute("continue"))
         return True
 
 
@@ -780,7 +781,7 @@ with open(LOG, "w", encoding="utf-8") as f:
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v9", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v10", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},
