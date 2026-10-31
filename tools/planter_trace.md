@@ -37,9 +37,26 @@ Two known dynamic byte stores write through that staging pointer:
 
 The fam1 loop at `0xFB05B`/`0xFB075` transports bytes into the planter; it is
 not, by itself, the permutation generator. The staging/source/planter writes
-are interleaved in the CFF stream. A separate store at `0xE24C9` writes to
-`[RDI+R15+0x1F30]`; it is intentionally called an *unclassified writer*, not a
-fifth S-box, until the live index range and final data structure are measured.
+are interleaved in the CFF stream.
+
+A separate store at `0xE24C9` writes to `[RDI+R15+0x1F30]`. In live run
+`41202921615`, this site executed 256 times over all 256 indices
+(`0x00..0xFF`), and the resulting 256-byte window contained 256 unique values.
+That establishes a permutation-shaped output for this run, but not yet its
+semantic role: it is a fifth S-box candidate, not a proven fifth member of the
+four-family mixer model.
+
+**Important base-pointer qualification (2026-10-31, run `41202921615`).**
+The `source+0x20` span was readable at the source-slot store, but
+`[RBP-0x30]` did not equal `source+0x20` at that point. At later mixer reads,
+the source+0x20 candidate had `fam1=256/256`, `fam2=53/256`,
+`fam3=256/256`, `fam4=196/256`, and `+0x1F30=256/256` unique values;
+these counts remained stable across 160 comparisons. Thus the previously
+measured source overlap is not a universal identity proof for the planter base.
+Tracer v19 separately samples the actual `[RBP-0x30]` target at every mixer
+read and compares it with the source+0x20 and writer-base candidates. Until
+that direct slot evidence is inspected, neither candidate should be promoted
+to `planter.final.bin`.
 
 ## Running the trace
 
