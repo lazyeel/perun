@@ -27,7 +27,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.ref_name }}
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Install GDB and filesystem tools
         run: |
@@ -97,6 +97,40 @@ jobs:
           echo "SYS_IMG=$RUNNER_TEMP/android-21-x86_64-system.img" >> "$GITHUB_ENV"
           sha256sum "$RUNNER_TEMP/android-21-x86_64-system.img"
 
+      - name: Install verified Apple TLS trust anchors
+        shell: bash
+        run: |
+          set -euo pipefail
+          TRUST_DIR="$RUNNER_TEMP/perun-adi-gdb"
+          mkdir -p "$TRUST_DIR"
+          ROOT_CA="$TRUST_DIR/AppleIncRootCertificate.cer"
+          ROOT_G3="$TRUST_DIR/AppleRootCA-G3.cer"
+
+          # Fetch only official Apple root certificates over the runner's
+          # already trusted HTTPS connection, then pin their SHA-256 digests.
+          curl -fL --retry 4 --retry-all-errors --connect-timeout 30 \
+            -o "$ROOT_CA" \
+            https://www.apple.com/appleca/AppleIncRootCertificate.cer
+          curl -fL --retry 4 --retry-all-errors --connect-timeout 30 \
+            -o "$ROOT_G3" \
+            https://www.apple.com/certificateauthority/AppleRootCA-G3.cer
+
+          root_ca_sha="$(openssl x509 -inform DER -in "$ROOT_CA" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+          root_g3_sha="$(openssl x509 -inform DER -in "$ROOT_G3" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+          test "$root_ca_sha" = "b0b1730ecbc7ff4505142c49f1295e6eda6bcaed7e2c68c5be91b5a11001f024"
+          test "$root_g3_sha" = "63343abfb89a6a03ebb57e9b3f5fa7be7c4f5c756f3017b3a8c488c3653e9179"
+
+          # Preserve the normal public CA store and add the two verified
+          # Apple trust anchors. Peer/hostname verification remains enabled.
+          {
+            openssl x509 -inform DER -in "$ROOT_CA" -outform PEM
+            openssl x509 -inform DER -in "$ROOT_G3" -outform PEM
+            cat /etc/ssl/certs/ca-certificates.crt
+          } > "$TRUST_DIR/apple_chain.pem"
+          test -s "$TRUST_DIR/apple_chain.pem"
+          echo "APPLE_CA_BUNDLE=$TRUST_DIR/apple_chain.pem" >> "$GITHUB_ENV"
+          echo "Verified Apple Root CA and Apple Root CA - G3 fingerprints."
+
       - name: Fetch Apple's x86_64 libraries and run the GDB trace
         id: trace
         shell: bash
@@ -115,7 +149,7 @@ jobs:
           export SYSROOT="$WORK/sysroot"
           export LIBS="$WORK/libs"
           export CC="$ANDROID_CC"
-          export CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+          export CA_BUNDLE="${APPLE_CA_BUNDLE:?verified Apple CA bundle missing}"
           export ADI_RESOLVE="gsa.apple.com:443:$GSA_IP,buy.itunes.apple.com:443:$BUY_IP"
           export ANDROID_ROOT=/system ANDROID_DATA=/data
           export PERUN_TRACE_DIR="$WORK/traces"
