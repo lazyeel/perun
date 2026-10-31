@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v18).
+"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v19).
 
 Canonical project copy: tools/planter_trace_gdb.py.
 
@@ -120,6 +120,9 @@ STATE = {
     "planter": None,
     "pre_planter_base": None,
     "pre_planter_snapshot": None,
+    "slot_sample_count": 0,
+    "slot_last_ptr": None,
+    "slot_last_data": None,
     "planter_watch_armed": False,
     "final_dumped": False,
     "postmalloc_seen": False,
@@ -823,8 +826,41 @@ class FirstMixerReadBP(gdb.Breakpoint):
                 log(f"WINDOW SNAPSHOT: {label} unique={len(set(data))}/256 "
                     f"source_relative_base={rel}")
 
+        # The true base candidate is the mutable [RBP-0x30] slot. Sample
+        # this object directly at every mixer read, independently of the
+        # source+0x20 writer-base hypothesis. Never publish pointer values.
+        slot_span = ptr_ok(slot_ptr, PLANTER_SIZE)
+        slot_source_match = STATE["src"] is not None and slot_ptr == STATE["src"] + 0x20
+        slot_writer_match = STATE["planter"] is not None and slot_ptr == STATE["planter"]
+        previous_ptr = STATE.get("slot_last_ptr")
+        previous_data = STATE.get("slot_last_data")
+        pointer_changed = (None if previous_ptr is None else previous_ptr != slot_ptr)
+        same_ptr_changed = None
+        slot_values = {}
+        slot_data = None
+        STATE["slot_sample_count"] += 1
+        if slot_span:
+            slot_data = read_mem(slot_ptr, PLANTER_SIZE)
+            for name, off in TABLES:
+                slot_values[name] = len(set(slot_data[off:off + WINDOW_SIZE]))
+            slot_values["fifth_1f30"] = len(set(
+                slot_data[0x1F30:0x1F30 + WINDOW_SIZE]))
+            if previous_ptr == slot_ptr and previous_data is not None:
+                same_ptr_changed = sum(a != b for a, b in zip(previous_data, slot_data))
+            if STATE["slot_sample_count"] == 1:
+                write_blob("planter.from_rbp_minus_30.first.bin", slot_data)
+            STATE["slot_last_ptr"] = slot_ptr
+            STATE["slot_last_data"] = slot_data
+        log(f"MIXER SLOT SAMPLE n={STATE['slot_sample_count']} "
+            f"span_mapped={slot_span} slot_eq_source_plus_20={slot_source_match} "
+            f"slot_eq_writer_base={slot_writer_match} "
+            f"slot_pointer_changed={pointer_changed if pointer_changed is not None else 'unknown'} "
+            f"same_ptr_changed={same_ptr_changed if same_ptr_changed is not None else 'unknown'} "
+            + " ".join(f"{name}_unique={slot_values.get(name, 'na')}/256"
+                       for name in ("fam1", "fam2", "fam3", "fam4", "fifth_1f30")))
+
         log(f"FIRST MIXER READ rva={self.rva:#x} rbp={rbp:#x} "
-            f"slot_mapped={ptr_ok(slot_ptr, PLANTER_SIZE)} slot_signature={slot_signature} "
+            f"slot_mapped={slot_span} slot_signature={slot_signature} "
             f"writer_base_signature={has_planter_signature(STATE['planter'])} "
             f"selected_planter={p or 0:#x}")
 
@@ -1100,6 +1136,9 @@ continue
         STATE["planter"] = None
         STATE["pre_planter_base"] = None
         STATE["pre_planter_snapshot"] = None
+        STATE["slot_sample_count"] = 0
+        STATE["slot_last_ptr"] = None
+        STATE["slot_last_data"] = None
         if opcode == TRANSFORM_OPCODE:
             STATE["final_dumped"] = False
             STATE["planter_scan_done"] = False
@@ -1123,7 +1162,7 @@ with open(LOG, "w", encoding="utf-8") as f:
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v18", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v19", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},
