@@ -273,21 +273,21 @@ jobs:
                   for raw in console_log.read_text(errors="replace").splitlines():
                       line = raw.strip()
                       low = line.lower()
-                      login_match = re.search(r"ADIGetLoginCode=(-?\\d+)", line)
+                      login_match = re.search(r"ADIGetLoginCode=(-?\d+)", line)
                       if login_match:
                           login_codes.append(int(login_match.group(1)))
                       start_match = re.search(
-                          r"TRACE-ONLY start rc=(-?\\d+) cpim_len=(\\d+)", line)
+                          r"TRACE-ONLY start rc=(-?\d+) cpim_len=(\d+)", line)
                       if start_match:
                           start_results.append((int(start_match.group(1)), int(start_match.group(2))))
-                      response_match = re.search(r"\\[net\\]\\s+->\\s+(\\d+)\\s+\\((\\d+)\\s+bytes\\)", line)
+                      response_match = re.search(r"\[net\]\s+->\s+(\d+)\s+\((\d+)\s+bytes\)", line)
                       if response_match:
                           http_responses.append((int(response_match.group(1)), int(response_match.group(2))))
-                      spim_match = re.search(r"spim received \\((\\d+) bytes decoded\\)", line, re.I)
+                      spim_match = re.search(r"spim received \((\d+) bytes decoded\)", line, re.I)
                       if spim_match:
                           spim_lengths.append(int(spim_match.group(1)))
                       if "[fatal]" in low:
-                          status_match = re.search(r"HTTP\\s+(\\d{3})", line, re.I)
+                          status_match = re.search(r"HTTP\s+(\d{3})", line, re.I)
                           if status_match:
                               provisioning_fatals.append("Apple endpoint HTTP " + status_match.group(1))
                           elif "failed:" in low:
