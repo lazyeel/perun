@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v10).
+"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v11).
 
 Canonical project copy: tools/planter_trace_gdb.py.
 
@@ -388,7 +388,7 @@ class WriterSiteBP(gdb.Breakpoint):
         # ptr_ok() alone proves mapping, not allocation identity.
         planter_writer_sites = {0xE24C9, 0xE250C, 0xE25C2, 0xE26AE, 0xFB05B, 0xFB075}
         if (self.rva in planter_writer_sites and base is not None
-                and not STATE["planter_watch_armed"] and ptr_ok(base, PLANTER_SIZE)):
+                and STATE["planter"] is None and ptr_ok(base, PLANTER_SIZE)):
             rbp = rv("$rbp")
             slot_ptr = ptr_from_slot(rbp, -0x30)
             src = STATE["src"]
@@ -404,8 +404,11 @@ class WriterSiteBP(gdb.Breakpoint):
                     mismatches = sum(a != b for a, b in zip(sb[32:256], pb))
                     log(f"SOURCE/PLANTER OVERLAP src_plus_32_eq_base={src + 32 == base} "
                         f"source[32:256] == planter[0:224]: {equal} mismatches={mismatches}")
-                gdb.post_event(lambda p=base: arm_planter_and_continue(p))
-                return True
+                STATE["planter"] = base
+                log(f"PLANTER BASE IDENTIFIED: method=writer-operand site={self.rva:#x} "
+                    f"source_plus_0x20=True; snapshot=0x{PLANTER_SIZE:x}")
+                write_blob("planter.at_writer_candidate.bin", read_mem(base, PLANTER_SIZE))
+                return False
             expected = (src + 32) if src is not None else None
             log(f"REJECTING PLANTER CANDIDATE {base:#x}: "
                 f"source+0x20={expected!r} (source pointer must be captured first)")
@@ -447,11 +450,14 @@ continue
 
 
 class PostMallocBP(gdb.Breakpoint):
-    """At 0xDD83B, RAX is malloc(0xC8)'s result, before it is saved to [RBP-3F8]."""
+    """At 0xDD83B, snapshot allocator buffers without installing software watchpoints."""
     def __init__(self):
         super().__init__(f"*{STATE['base'] + POST_MALLOC_RVA:#x}", gdb.BP_BREAKPOINT, internal=False)
         self.silent = True
         self.done = False
+        self.commands = """silent
+continue
+"""
 
     def stop(self):
         if self.done or STATE["active_op"] != TRANSFORM_OPCODE:
@@ -461,11 +467,35 @@ class PostMallocBP(gdb.Breakpoint):
         src = ptr_from_slot(rbp, -0x11A8)
         dst = rv("$rax")
         init_src = STATE["source_init"]
-        log(f"POST_MALLOC rva={POST_MALLOC_RVA:#x} rbp={rbp:#x} "
-            f"source=[rbp-0x11a8]={src:#x} source_at_0xdd511={init_src!r} "
+        STATE["src"] = src
+        STATE["dst"] = dst
+        log(f"POST_MALLOC rva={POST_MALLOC_RVA:#x} "
             f"source_pointer_unchanged={init_src is None or init_src == src} "
-            f"destination=rax={dst:#x}")
-        gdb.post_event(lambda s=src, d=dst, r=rbp: arm_buffers_and_continue(s, d, r))
+            f"destination_valid_200={ptr_ok(dst, 200)}")
+
+        early_source = STATE.get("source_initial")
+        if early_source is not None and ptr_ok(src, 256):
+            current_source = read_mem(src, 256)
+            changed = [i for i, (a, b) in enumerate(zip(early_source, current_source)) if a != b]
+            log(f"SOURCE DELTA to post-malloc: changed={len(changed)}/256; "
+                f"first_indices={[hex(i) for i in changed[:24]]}")
+            write_blob("source.at_postmalloc.bin", current_source)
+
+        if ptr_ok(dst, 256):
+            STATE["dst_span"] = 256
+            write_blob("staging.at_postmalloc.span_256.bin", read_mem(dst, 256))
+            log("STAGING INITIAL SNAPSHOT: 256 mapped bytes; bytes[200:256] remain adjacent memory, not proven allocation-owned")
+        elif ptr_ok(dst, 200):
+            STATE["dst_span"] = 200
+            write_blob("staging.at_postmalloc.span_200.bin", read_mem(dst, 200))
+            log("STAGING INITIAL SNAPSHOT: requested 200-byte span")
+        else:
+            STATE["dst_span"] = 0
+            log("STAGING INITIAL SNAPSHOT: skipped; destination is not a readable RW span")
+
+        slot = ptr_from_slot(rbp, -0x30)
+        log(f"PLANTER SLOT SNAPSHOT at post-malloc: mapped={ptr_ok(slot, PLANTER_SIZE)}; "
+            "mutable CFF carrier, not accepted as planter base")
         return True
 
 
@@ -568,7 +598,7 @@ class FirstMixerReadBP(gdb.Breakpoint):
 
 
 class PlanterBaseLoadBP(gdb.Breakpoint):
-    """At known mov reg,[rbp-0x30] sites, capture the pointer before stores."""
+    """Identify the planter base at a known load site without watchpoints."""
     def __init__(self, rva, reg_name):
         self.rva = rva
         self.reg_name = reg_name
@@ -576,23 +606,22 @@ class PlanterBaseLoadBP(gdb.Breakpoint):
         self.silent = True
 
     def stop(self):
-        if STATE["active_op"] != TRANSFORM_OPCODE or STATE["planter_watch_armed"]:
+        if STATE["active_op"] != TRANSFORM_OPCODE or STATE["planter"] is not None:
             return False
         rbp = rv("$rbp")
         slot = ptr_from_slot(rbp, -0x30)
         src = STATE["src"]
         relation_ok = src is not None and slot == src + 32
         if ptr_ok(slot, PLANTER_SIZE) and relation_ok:
-            log(f"PLANTER BASE-LOAD SITE rva={self.rva:#x} target_reg={self.reg_name} "
-                f"slot={slot:#x} source={src:#x} source_plus_32_match=True; arming before instruction")
-            gdb.post_event(lambda p=slot: arm_planter_and_continue(p))
-            return True
-        if ptr_ok(slot, PLANTER_SIZE) and src is None:
-            log(f"BASE-LOAD DEFERRED rva={self.rva:#x}: candidate {slot:#x} mapped, "
-                "but source pointer not known yet; wait for direct writer validation")
+            STATE["planter"] = slot
+            log(f"PLANTER BASE IDENTIFIED: method=base-load site={self.rva:#x} "
+                f"source_plus_0x20=True; snapshot=0x{PLANTER_SIZE:x}")
+            write_blob("planter.at_base_load.bin", read_mem(slot, PLANTER_SIZE))
             return False
-        log(f"BASE-LOAD REJECTED rva={self.rva:#x}: [rbp-0x30]={slot:#x} "
-            f"not a validated source+0x20 planter span")
+        if ptr_ok(slot, PLANTER_SIZE) and src is None:
+            log(f"BASE-LOAD DEFERRED rva={self.rva:#x}: mapped candidate; source pointer not known yet")
+            return False
+        log(f"BASE-LOAD REJECTED rva={self.rva:#x}: source+0x20 relation not validated")
         return False
 
 
@@ -781,7 +810,7 @@ with open(LOG, "w", encoding="utf-8") as f:
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v10", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v11", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},
