@@ -928,7 +928,11 @@ class FirstMixerReadBP(gdb.Breakpoint):
                     f.write(f"{name}: {st}\n")
         elif STATE["slot_anchor_dumped"]:
             log("MIXER SLOT OBJECT RETAINED: pointer anchor is verified; "
-                "legacy four-permutation signature is not satisfied in this session")
+                "legacy four-permutation signature is not satisfied in this session; continuing")
+            # This is an observation breakpoint, not a terminal capture point.
+            # Keep executing so the remaining mixer reads and ProvisioningStart
+            # complete; the slot-anchored dump has already been saved.
+            return False
         else:
             log("MIXER CANDIDATE REJECTED: no verified four-permutation planter; "
                 "retrying at next mixer-read site")
