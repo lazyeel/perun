@@ -359,6 +359,24 @@ jobs:
                       lines.append(f"| {name} | {a_text} | {b_text} |")
               else:
                   lines.append("No direct slot samples were recorded.")
+              lines += ["", "## Slot-anchored object capture", ""]
+              anchor_captured = "SLOT ANCHOR VERIFIED:" in log
+              lines.append("- Slot-anchored object captured: " +
+                           ("yes" if anchor_captured else "no"))
+              anchored_windows = {}
+              for trace_line in trace_lines:
+                  m = re.search(
+                      r"SLOT ANCHORED WINDOW ([A-Za-z0-9_]+): unique=(\d+)/256",
+                      trace_line)
+                  if m:
+                      anchored_windows[m.group(1)] = int(m.group(2))
+              if anchored_windows:
+                  lines += ["", "| Window | Unique values |",
+                            "|---|---:|"]
+                  for name, unique in sorted(anchored_windows.items()):
+                      lines.append(f"| {name} | {unique}/256 |")
+              else:
+                  lines.append("No slot-anchored window statistics were recorded.")
               lines.append("")
 
               install_stages = [
