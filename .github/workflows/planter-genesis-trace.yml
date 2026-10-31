@@ -377,6 +377,36 @@ jobs:
                       lines.append(f"| {name} | {unique}/256 |")
               else:
                   lines.append("No slot-anchored window statistics were recorded.")
+              slot_window_details = {}
+              for trace_line in trace_lines:
+                  detail = re.search(
+                      r"SLOT WINDOW DETAIL ([A-Za-z0-9_]+): unique=(\\d+)/256 "
+                      r"zero_count=(\\d+) max_multiplicity=(\\d+) "
+                      r"changed=(\\d+) changed_min=(-?\\d+) "
+                      r"changed_max=(-?\\d+) changed_runs=(\\d+)", trace_line)
+                  if detail:
+                      slot_window_details[detail.group(1)] = {
+                          "unique": int(detail.group(2)),
+                          "zero_count": int(detail.group(3)),
+                          "max_multiplicity": int(detail.group(4)),
+                          "changed": int(detail.group(5)),
+                          "changed_min": int(detail.group(6)),
+                          "changed_max": int(detail.group(7)),
+                          "changed_runs": int(detail.group(8)),
+                      }
+              lines += ["", "## Slot window index topology (first mixer read)", ""]
+              if slot_window_details:
+                  lines += ["| Window | Unique | Zero count | Max multiplicity | Changed | Changed index range | Runs |",
+                            "|---|---:|---:|---:|---:|---:|---:|"]
+                  for name, d in sorted(slot_window_details.items()):
+                      index_range = (f"{d['changed_min']}..{d['changed_max']}"
+                                     if d["changed"] else "—")
+                      lines.append(
+                          f"| {name} | {d['unique']}/256 | {d['zero_count']} | "
+                          f"{d['max_multiplicity']} | {d['changed']} | "
+                          f"{index_range} | {d['changed_runs']} |")
+              else:
+                  lines.append("No slot window index-topology metrics were recorded.")
               lines.append("")
 
               install_stages = [
