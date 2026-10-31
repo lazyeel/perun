@@ -122,6 +122,17 @@ def validate_partition(tables: dict[str, int] | None = None,
         print(f"WARNING: partition ends at {cursor:#x}, expected {PLANTER_SIZE:#x}")
 
 
+def load_planter_snapshot(root: Path) -> tuple[bytes | None, str | None]:
+    """Prefer a four-window-validated dump; otherwise use the active-slot capture."""
+    final_path = root / "planter.final.bin"
+    if final_path.is_file():
+        return final_path.read_bytes(), "final"
+    anchored_path = root / "planter.slot_anchored.bin"
+    if anchored_path.is_file():
+        return anchored_path.read_bytes(), "slot-anchored"
+    return None, None
+
+
 def extract_planter_base(root: Path) -> int | None:
     log = root / "trace.log"
     if not log.is_file():
@@ -221,7 +232,7 @@ def main() -> int:
     unknown = resolve_unknown_ranges(manifest)
     validate_partition(tables, unknown)
 
-    planter = (root / "planter.final.bin").read_bytes() if (root / "planter.final.bin").is_file() else None
+    planter, planter_kind = load_planter_snapshot(root)
     source = (root / "source.final.bin").read_bytes() if (root / "source.final.bin").is_file() else None
     if manifest:
         print(f"run={manifest.get('run_id')} version={manifest.get('script_version')} pid={manifest.get('pid')}")
@@ -229,12 +240,18 @@ def main() -> int:
         print("run.json absent: using default layout")
 
     if planter is None:
-        print("planter.final.bin absent: no valid first-mixer snapshot captured")
+        print("planter.final.bin and planter.slot_anchored.bin absent: no object snapshot captured")
     else:
-        print(f"planter.final.bin size={len(planter):#x}")
+        filename = "planter.final.bin" if planter_kind == "final" else "planter.slot_anchored.bin"
+        print(f"{filename} size={len(planter):#x} kind={planter_kind}")
+        if planter_kind == "slot-anchored":
+            print("  provenance: captured at active [RBP-0x30] slot when it matched source+0x20 and writer base")
+            print("  note: this does not assert the legacy four-window permutation signature")
         if len(planter) >= PLANTER_SIZE:
             for name, off in tables.items():
                 describe_bytes(name, planter[off:off + 256])
+            fifth = planter[0x1F30:0x1F30 + 256]
+            describe_bytes("fifth_1f30_candidate", fifth)
             for name, off, size in unknown:
                 region = planter[off:off + size]
                 describe_bytes(name, region)
@@ -265,10 +282,12 @@ def main() -> int:
     parse_writer_events(root, extract_planter_base(root))
     parse_change_coverage(root)
     parse_writer_stats(root)
-    if planter is None:
-        print("STATUS: partial capture")
+    if planter_kind == "final":
+        print("STATUS: same-session four-window-validated planter snapshot captured")
+    elif planter_kind == "slot-anchored":
+        print("STATUS: same-session active-slot-anchored object captured; legacy four-window signature not satisfied")
     else:
-        print("STATUS: same-session final planter snapshot captured")
+        print("STATUS: partial capture; no planter object snapshot captured")
     return 0
 
 
