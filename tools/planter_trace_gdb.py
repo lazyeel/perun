@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v8).
+"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v9).
 
 Canonical project copy: tools/planter_trace_gdb.py.
 
@@ -105,6 +105,7 @@ STATE = {
     "active_op": None,
     "source_init_bp": None,
     "source_init": None,
+    "source_initial": None,
     "postmalloc_bp": None,
     "copy_entry_bp": None,
     "writer_bps": [],
@@ -412,7 +413,7 @@ class WriterSiteBP(gdb.Breakpoint):
 
 
 class SourceSlotStoreBP(gdb.Breakpoint):
-    """Capture RCX before mov [RBP-0x11A8],RCX and watch source from its birth."""
+    """Capture RCX at 0xDD511; defer wide watchpoints until after malloc."""
     def __init__(self):
         super().__init__(f"*{STATE['base'] + SOURCE_SLOT_STORE_RVA:#x}",
                          gdb.BP_BREAKPOINT, internal=False)
@@ -430,27 +431,18 @@ class SourceSlotStoreBP(gdb.Breakpoint):
         STATE["src"] = src
         log(f"SOURCE SLOT STORE rva={SOURCE_SLOT_STORE_RVA:#x} "
             f"RCX_source={src:#x} prior_slot={slot_before:#x} rbp={rbp:#x}")
-        gdb.post_event(lambda p=src, f=rbp: arm_source_and_continue(p, f))
-        return True
-
-
-def arm_source_and_continue(src, rbp):
-    try:
-        STATE["src"] = src
         if ptr_ok(src, 256):
-            if STATE["planter_watch_armed"] and src + 32 == STATE["planter"]:
-                arm_region_watch("source_frame_prefix_32", src, 32)
-            else:
-                arm_region_watch("source_256", src, 256)
-            log("SOURCE WATCH ARMED AT 0xDD511 (before subsequent CFF source writes)")
+            initial = read_mem(src, 256)
+            STATE["source_initial"] = initial
+            write_blob("source.at_dd511.bin", initial)
+            log("SOURCE INITIAL SNAPSHOT: captured 256 bytes at the source-slot store")
         else:
-            log(f"SOURCE WATCH DEFERRED: RCX={src:#x} does not span 256 RW bytes")
-        # Observe the mutable CFF carrier from this early point, before malloc.
-        if not STATE["slot_watch_armed"]:
-            obj = arm_region_watch("frame_slot_rbp_minus_30", rbp - 0x30, 8)
-            STATE["slot_watch_armed"] = obj is not None
-    finally:
-        gdb.execute("continue")
+            log("SOURCE INITIAL SNAPSHOT: skipped; source is not a readable RW 256-byte span")
+        # Avoid installing a wide software watchpoint in the narrow interval
+        # between source capture and malloc return. Compare snapshots there,
+        # then arm source/staging/frame watches at PostMallocBP.
+        gdb.post_event(lambda: gdb.execute("continue"))
+        return True
 
 
 class PostMallocBP(gdb.Breakpoint):
@@ -650,6 +642,13 @@ def arm_buffers_and_continue(src, dst, rbp):
     try:
         STATE["src"] = src
         STATE["dst"] = dst
+        early_source = STATE.get("source_initial")
+        if early_source is not None and ptr_ok(src, 256):
+            current_source = read_mem(src, 256)
+            changed = [i for i, (a, b) in enumerate(zip(early_source, current_source)) if a != b]
+            log(f"SOURCE DELTA to post-malloc: changed={len(changed)}/256; "
+                f"first_indices={[hex(i) for i in changed[:24]]}")
+            write_blob("source.at_postmalloc.bin", current_source)
         if ptr_ok(src, 256):
             if STATE["planter_watch_armed"] and src + 32 == STATE["planter"]:
                 arm_region_watch("source_frame_prefix_32", src, 32)
@@ -781,7 +780,7 @@ with open(LOG, "w", encoding="utf-8") as f:
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v8", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v9", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},
