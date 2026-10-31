@@ -5,7 +5,7 @@ This note describes the live research instrumentation for the Android x86_64
 now completed a real Apple provisioning start: the native control and GDB run
 both reached `ProvisioningStart rc=0` with a 276-byte CPIM from a 347-byte SPIM.
 The live planter base is now identified by the active-frame slot
-`[RBP-0x30]`: run `41203130396` measured the same mapped object at all 160
+`[RBP-0x30]`: run `41203625495` measured the same mapped object at all 160
 mixer-read stops, with the slot equal to both `source+0x20` and the writer
 base, and no pointer transitions. The unresolved question is the object's
 internal table layout and the genesis of its session-dependent contents:
@@ -16,7 +16,7 @@ fresh session.
 
 Earlier corrected captures showed four 256-byte permutations. That remains a
 historical observation, not a universal acceptance predicate: fresh run
-`41203130396` directly anchored the active planter through `[RBP-0x30]`,
+`41203625495` directly anchored the active planter through `[RBP-0x30]`,
 while two of the four previously named windows were not permutations. The
 window values are therefore measured independently rather than used to reject
 an object whose base pointer is independently confirmed:
@@ -54,7 +54,7 @@ That establishes a permutation-shaped output for this run, but not yet its
 semantic role: it is a fifth S-box candidate, not a proven fifth member of the
 four-family mixer model.
 
-**Direct slot-anchor result (2026-10-31, run `41203130396`).**
+**Direct slot-anchor result (2026-10-31, run `41203625495`).**
 At the source-slot store (`0xDD511`), `[RBP-0x30]` had not yet become
 `source+0x20`; this is an initialization-order observation, not a rejection
 of the candidate. At every one of 160 later mixer-read samples, the
@@ -67,7 +67,7 @@ The same slot-anchored object measured `fam1=256/256`,
 `fam2=53/256`, `fam3=256/256`, `fam4=196/256`, and
 `+0x1F30=256/256` unique values. These counts remained stable through the
 160 samples. The base is therefore no longer ambiguous; the mismatch is in
-the older four-permutation structural model. Tracer v20 preserves this exact
+the older four-permutation structural model. Tracer v21 preserves this exact
 slot-anchored object as `planter.slot_anchored.bin` without falsely requiring
 all four historical windows to be bijections.
 
@@ -132,8 +132,10 @@ documented windows are each 256-byte permutations. The current implementation
 uses a fast 16-byte-aligned pass over RW mappings up to 16 MiB, followed (when
 needed) by a byte-aligned exhaustive pass over RW mappings up to 32 MiB. It
 prioritizes the active stack mapping and checks whether the candidate is
-referenced by `[RBP-0x30]`. Only a candidate passing all four windows becomes
-`planter.final.bin`; a merely readable `0x2700` region remains a candidate.
+referenced by `[RBP-0x30]`. Independently, when the live slot equals both `source+0x20`
+and the writer-base candidate, the tracer stores that exact object as
+`planter.slot_anchored.bin`, even if the old four-window predicate fails. Only
+a candidate passing all four windows becomes `planter.final.bin`.
 
 ## Output files
 
@@ -143,6 +145,10 @@ referenced by `[RBP-0x30]`. Only a candidate passing all four windows becomes
   address, index, old byte and new byte. This captures same-value stores that
   a value-change watchpoint would not report.
 - `run.json`: run id and the measured memory-layout partition.
+- `planter.slot_anchored.bin`: the full 0x2700-byte object captured at the
+  active `[RBP-0x30]` slot when it agrees with both `source+0x20` and the
+  writer-base candidate; it does not require all four legacy windows to be
+  permutations. This file is ephemeral and must not be committed.
 - `source.final.bin`, `staging.copy_entry.*.bin`, `staging.final.*.bin`,
   `planter.final.bin`, family snapshots and unknown-range snapshots: memory
   captures from this process only.
@@ -158,15 +164,17 @@ index coverage, and competing source/staging/fam1 relationships.
 - A `0x2700` readable span is only a mapped candidate. The four documented
   256-byte windows must each contain all 256 byte values before the tracer
   calls it a final planter.
-- Writer-base deltas of `+0x20` relative to source are useful correlation, not
-  proof of object identity. The direct byte-overlap check is required.
-- The `+0x1F30` writer is still unclassified. Its name in the CSV is a label
-  for the observed instruction site, not evidence that it is a fifth S-box.
+- A `+0x20` writer-base delta alone is only correlation. In run
+  `41203625495`, the stronger identity check held at all 160 mixer samples:
+  `[RBP-0x30] == source+0x20 == writer-base`, with no pointer transitions.
+- The `+0x1F30` writer covered all 256 indices (`0x00..0xFF`) and produced
+  256 unique bytes in the live run. It is therefore a fifth permutation-shaped
+  window in this session; its role in the mixer remains unproven.
 - The 56 bytes beyond the requested 200-byte allocation are recorded only
   when they are readable in the same RW mapping. This does not establish
   allocator ownership or prove an out-of-bounds bug.
-- The current no-watchpoint path is operationally verified for the live
-  provisioning start. The full-memory signature scan is still being validated;
+- The current no-software-watchpoint path is operationally verified for the
+  full live trace-only provisioning start. The full-memory signature scan is still being validated;
   a negative scan means the exact planter location or the four-window model
   remains unresolved, not that the current mapped candidate is the planter.
 - The trace logs register values and dumps stack/heap-adjacent memory. Treat
