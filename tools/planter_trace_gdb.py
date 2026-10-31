@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v16).
+"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v17).
 
 Canonical project copy: tools/planter_trace_gdb.py.
 
@@ -98,6 +98,8 @@ LOG = os.path.join(OUT, "trace.log")
 
 STATE = {
     "base": None,
+    "global_install_started": False,
+    "global_install_complete": False,
     "rva_install_started": False,
     "rva_install_complete": False,
     "entry_bp": None,
@@ -332,8 +334,8 @@ class WriterSiteBP(gdb.Breakpoint):
         self.silent = True
 
     def stop(self):
-        if STATE["active_op"] != TRANSFORM_OPCODE:
-            return False
+        # These static store sites are shared by preparatory/configuration
+        # vdfut768ig calls as well as the final transform. Record every opcode.
         base = None
         try:
             base = rv(self.base_reg)
@@ -975,49 +977,47 @@ def arm_buffers_and_continue(src, dst, rbp):
     gdb.execute("continue")
 
 
-def install_after_entry(base):
-    """Install trace breakpoints from a GDB breakpoint command list.
-
-    Breakpoint.stop() must not mutate GDB's breakpoint set. EntryBP therefore
-    only records state and returns True; its command list calls this function
-    after the stop callback has returned.
-    """
-    log("INSTALL STAGE: command list entered")
+def install_global_probes(base):
+    """Install source/allocator and direct byte-store probes before any prep opcode runs."""
+    log("GLOBAL INSTALL STAGE: command list entered")
     try:
         gdb.execute("set language c", to_string=True)
-        log("INSTALL STAGE: language configured")
-        # Wide arrays cannot fit x86 debug-register watchpoints. Force GDB's
-        # software implementation, which single-steps and compares the region.
-        gdb.execute("set can-use-hw-watchpoints 0", to_string=True)
-        log("INSTALL STAGE: software watchpoints selected")
+        log("GLOBAL INSTALL STAGE: language configured")
         STATE["source_init_bp"] = SourceSlotStoreBP()
-        log("INSTALL STAGE: source-slot breakpoint created")
+        log("GLOBAL INSTALL STAGE: source-slot breakpoint created")
         STATE["postmalloc_bp"] = PostMallocBP()
-        log("INSTALL STAGE: post-malloc breakpoint created")
+        log("GLOBAL INSTALL STAGE: post-malloc breakpoint created")
         STATE["copy_entry_bp"] = CopyEntryBP()
-        log("INSTALL STAGE: copy-entry breakpoint created")
-        for rva, reg_name in ((0xE243D, "$rdi"), (0xFAC8A, "$r12")):
-            bp = PlanterBaseLoadBP(rva, reg_name)
-            STATE["base_load_bps"].append(bp)
-            log(f"INSTALL STAGE: base-load breakpoint {rva:#x} created")
+        log("GLOBAL INSTALL STAGE: copy-entry breakpoint created")
         for rva, spec in WRITERS.items():
             bp = WriterSiteBP(rva, spec)
             STATE["writer_bps"].append(bp)
-            log(f"INSTALL STAGE: writer breakpoint {rva:#x} created")
+            log(f"GLOBAL INSTALL STAGE: writer breakpoint {rva:#x} created")
+        log(f"BASE={base:#x}; global source/allocator probes and "
+            f"{len(WRITERS)} writer sites armed for all vdfut768ig opcodes")
+        STATE["global_install_complete"] = True
+    except Exception as exc:
+        log(f"GLOBAL INSTALL ERROR: {type(exc).__name__}: {exc}")
+
+
+def install_transform_probes(base):
+    """Install the target transform's frame/base and mixer-read probes."""
+    log("TRANSFORM INSTALL STAGE: command list entered")
+    try:
+        for rva, reg_name in ((0xE243D, "$rdi"), (0xFAC8A, "$r12")):
+            bp = PlanterBaseLoadBP(rva, reg_name)
+            STATE["base_load_bps"].append(bp)
+            log(f"TRANSFORM INSTALL STAGE: base-load breakpoint {rva:#x} created")
         for rva in MIXER_READS:
             bp = FirstMixerReadBP(rva)
             STATE["mixer_bps"].append(bp)
-            log(f"INSTALL STAGE: mixer-read breakpoint {rva:#x} created")
-        log(f"BASE={base:#x}; armed source-slot @{SOURCE_SLOT_STORE_RVA:#x}, "
-            f"post-malloc @{POST_MALLOC_RVA:#x}, copy-entry @{COPY_ENTRY_RVA:#x}, "
-            f"base-load sites 0xe243d/0xfac8a, "
-            f"{len(WRITERS)} writer sites, "
-            f"{len(MIXER_READS)} mixer-read sites; "
-            f"unknown ranges={UNKNOWN_RANGES}")
+            log(f"TRANSFORM INSTALL STAGE: mixer-read breakpoint {rva:#x} created")
+        log(f"BASE={base:#x}; target transform armed with "
+            f"{len(STATE['base_load_bps'])} base-load sites and "
+            f"{len(MIXER_READS)} mixer-read sites")
         STATE["rva_install_complete"] = True
-    except Exception as e:
-        log(f"INSTALL ERROR: {e}")
-    log("INSTALL STAGE: return to command-list continue")
+    except Exception as exc:
+        log(f"TRANSFORM INSTALL ERROR: {type(exc).__name__}: {exc}")
 
 
 class EntryBP(gdb.Breakpoint):
@@ -1033,12 +1033,16 @@ class EntryBP(gdb.Breakpoint):
         # deferred breakpoint installation and resume operation.
         self.commands = """silent
 python
+if not STATE["global_install_started"]:
+    STATE["global_install_started"] = True
+    log("ENTRY COMMAND: installing global writer probes")
+    install_global_probes(STATE["base"])
 if STATE["active_op"] == TRANSFORM_OPCODE and not STATE["rva_install_started"]:
     STATE["rva_install_started"] = True
-    log("ENTRY COMMAND: installing target transform breakpoints")
-    install_after_entry(STATE["base"])
+    log("ENTRY COMMAND: installing target transform probes")
+    install_transform_probes(STATE["base"])
 else:
-    log(f"ENTRY COMMAND: skipped opcode={STATE['active_op']:#010x}")
+    log(f"ENTRY COMMAND: skipped opcode={STATE['active_op']:#010x}; global writer probes remain active")
 end
 continue
 """
@@ -1047,6 +1051,17 @@ continue
         pc = rv("$pc")
         opcode = rv("$rdi") & 0xFFFFFFFF
         STATE["active_op"] = opcode
+        STATE["src"] = None
+        STATE["source_init"] = None
+        STATE["source_initial"] = None
+        STATE["dst"] = None
+        STATE["dst_span"] = 0
+        STATE["writer_bases"] = {}
+        STATE["planter"] = None
+        if opcode == TRANSFORM_OPCODE:
+            STATE["final_dumped"] = False
+            STATE["planter_scan_done"] = False
+            STATE["planter_scan_base"] = None
         if not self.installed:
             base = pc - ENTRY_RVA
             STATE["base"] = base
@@ -1066,7 +1081,7 @@ with open(LOG, "w", encoding="utf-8") as f:
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v16", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v17", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},
