@@ -867,7 +867,7 @@ class FirstMixerReadBP(gdb.Breakpoint):
                 log(f"SLOT ANCHORED WINDOW fifth_1f30: unique={len(set(fifth))}/256")
                 with open(os.path.join(OUT, "writer_stats.txt"), "w", encoding="utf-8") as f:
                     for name, st in sorted(STATE["writer_stats"].items()):
-                        f.write(f"{name}: {st}\\n")
+                        f.write(f"{name}: {st}\n")
                 log("SLOT ANCHOR VERIFIED: rbp_minus_0x30 == source_plus_0x20 "
                     "== writer_base; contiguous_span=0x2700")
 
