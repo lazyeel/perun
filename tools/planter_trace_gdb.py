@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v13).
+"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v15).
 
 Canonical project copy: tools/planter_trace_gdb.py.
 
@@ -123,6 +123,8 @@ STATE = {
     "writer_stats": {},
     "writer_bases": {},
     "mixer_candidate_addrs": set(),
+    "planter_scan_done": False,
+    "planter_scan_base": None,
     "planter_mismatch": False,
     "signal_seen": False,
     "started": time.time(),
@@ -555,6 +557,149 @@ def has_planter_signature(addr):
         return False
 
 
+def scan_planter_memory(rbp, rsp, rva):
+    """Find the four-permutation planter signature in mapped RW memory.
+
+    Mirrors tools/planter_scan.py but prefers a pointer referenced from the
+    active frame. Raw candidates are written only to the ephemeral run dir.
+    """
+    if STATE["planter_scan_done"]:
+        return STATE["planter_scan_base"]
+    STATE["planter_scan_done"] = True
+
+    inf = gdb.selected_inferior()
+    pid = inf.pid
+    stack_refs = {}
+    stack_map = None
+    try:
+        stack_low = rsp & ~0xFFF
+        stack_high = rbp + 0x200
+        if stack_high > stack_low and ptr_ok(stack_low, stack_high - stack_low):
+            stack_data = bytes(inf.read_memory(stack_low, stack_high - stack_low))
+            for offset in range(0, len(stack_data) - 7, 8):
+                value = int.from_bytes(stack_data[offset:offset + 8], "little")
+                stack_refs.setdefault(value, []).append(stack_low + offset - rbp)
+    except Exception as exc:
+        log(f"PLANTER SCAN: stack pointer-hunt unavailable ({type(exc).__name__})")
+
+    mappings = []
+    try:
+        with open(f"/proc/{pid}/maps", "r", encoding="ascii", errors="replace") as maps_file:
+            for line in maps_file:
+                if "rw-p" not in line:
+                    continue
+                parts = line.split()
+                bounds = parts[0].split("-", 1)
+                low, high = int(bounds[0], 16), int(bounds[1], 16)
+                size = high - low
+                if size < PLANTER_SIZE or size > 0x1000000:
+                    continue
+                name = parts[-1] if len(parts) > 5 else "anonymous"
+                mapping = (low, high, name)
+                if low <= rbp < high or low <= rsp < high:
+                    stack_map = mapping
+                mappings.append(mapping)
+    except Exception as exc:
+        log(f"PLANTER SCAN: maps unavailable ({type(exc).__name__})")
+        return None
+
+    # Search the active stack mapping first, then all remaining RW regions.
+    mappings.sort(key=lambda item: 0 if item == stack_map else 1)
+    scanned_regions = 0
+    scanned_bytes = 0
+    matches = []
+    chosen = None
+    for low, high, name in mappings:
+        size = high - low
+        try:
+            data = bytes(inf.read_memory(low, size))
+        except Exception:
+            continue
+        scanned_regions += 1
+        scanned_bytes += size
+        last = size - PLANTER_SIZE
+        for offset in range(0, last + 1, 16):
+            valid = True
+            for _family, table_offset in TABLES:
+                window = data[offset + table_offset:offset + table_offset + WINDOW_SIZE]
+                if len(window) != WINDOW_SIZE or len(set(window)) != WINDOW_SIZE:
+                    valid = False
+                    break
+            if not valid:
+                continue
+
+            candidate = low + offset
+            refs = stack_refs.get(candidate, [])
+            relative = candidate - STATE["src"] if STATE["src"] is not None else None
+            log(f"PLANTER SCAN MATCH: rva={rva:#x} source_relative_base="
+                f"{relative if relative is not None else 'unknown'} "
+                f"stack_ref_rbp_deltas={[hex(x) for x in refs[:8]]}")
+            matches.append((candidate, data[offset:offset + PLANTER_SIZE], refs, name))
+            if -0x30 in refs or candidate == ptr_from_slot(rbp, -0x30):
+                chosen = matches[-1]
+                break
+            if len(matches) >= 8:
+                break
+        if chosen is not None or len(matches) >= 8:
+            break
+
+    # If the coarse aligned scan missed, exhaustively inspect the active frame.
+    # The frame is about 0x44a8 bytes; ±0x10000 covers it with margin.
+    if not matches and stack_map is not None:
+        map_low, map_high, _ = stack_map
+        low = max(map_low, rbp - 0x10000)
+        high = min(map_high, rbp + 0x200)
+        size = high - low
+        if size >= PLANTER_SIZE:
+            try:
+                data = bytes(inf.read_memory(low, size))
+                scanned_bytes += size
+                for offset in range(0, size - PLANTER_SIZE + 1):
+                    valid = True
+                    for _family, table_offset in TABLES:
+                        window = data[offset + table_offset:offset + table_offset + WINDOW_SIZE]
+                        if len(window) != WINDOW_SIZE or len(set(window)) != WINDOW_SIZE:
+                            valid = False
+                            break
+                    if valid:
+                        candidate = low + offset
+                        refs = stack_refs.get(candidate, [])
+                        relative = candidate - STATE["src"] if STATE["src"] is not None else None
+                        log(f"PLANTER SCAN MATCH (unaligned stack): rva={rva:#x} "
+                            f"source_relative_base={relative if relative is not None else 'unknown'} "
+                            f"stack_ref_rbp_deltas={[hex(x) for x in refs[:8]]}")
+                        matches.append((candidate, data[offset:offset + PLANTER_SIZE], refs, "stack-frame"))
+                        chosen = matches[-1]
+                        break
+            except Exception as exc:
+                log(f"PLANTER SCAN: frame fallback unavailable ({type(exc).__name__})")
+
+    if chosen is None and matches:
+        # Four independent bijective windows are an overwhelming signature.
+        chosen = next((item for item in matches if -0x30 in item[2]), matches[0])
+
+    if chosen is None:
+        log(f"PLANTER SCAN: no four-permutation candidate; "
+            f"regions={scanned_regions} bytes={scanned_bytes}")
+        return None
+
+    candidate, blob, refs, map_name = chosen
+    STATE["planter_scan_base"] = candidate
+    STATE["planter"] = candidate
+    write_blob(f"mixer_scan_candidate_{rva:x}.bin", blob)
+    source_overlap = "unknown"
+    if STATE["src"] is not None and ptr_ok(STATE["src"], 256):
+        source_bytes = read_mem(STATE["src"], 256)
+        mismatches = sum(a != b for a, b in zip(source_bytes[32:256], blob[:224]))
+        source_overlap = f"{mismatches}/224 mismatches"
+    log(f"PLANTER SCAN SELECTED: source_relative_base="
+        f"{candidate - STATE['src'] if STATE['src'] is not None else 'unknown'} "
+        f"source_overlap={source_overlap} pointer_at_rbp_minus_0x30="
+        f"{(-0x30 in refs or candidate == ptr_from_slot(rbp, -0x30))} "
+        f"matches={len(matches)}")
+    return candidate
+
+
 class FirstMixerReadBP(gdb.Breakpoint):
     def __init__(self, rva):
         self.rva = rva
@@ -610,6 +755,10 @@ class FirstMixerReadBP(gdb.Breakpoint):
             f"slot_mapped={ptr_ok(slot_ptr, PLANTER_SIZE)} slot_signature={slot_signature} "
             f"writer_base_signature={has_planter_signature(STATE['planter'])} "
             f"selected_planter={p or 0:#x}")
+        if p is None:
+            scanned = scan_planter_memory(rbp, rv("$rsp"), self.rva)
+            if scanned is not None:
+                p = scanned
         if p and has_planter_signature(p):
             STATE["final_dumped"] = True
             data = read_mem(p, PLANTER_SIZE)
@@ -864,7 +1013,7 @@ with open(LOG, "w", encoding="utf-8") as f:
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v14", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v15", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},
