@@ -37,6 +37,13 @@ class PlanterTraceTests(unittest.TestCase):
     def test_duplicate_byte_is_not_permutation(self):
         self.assertIsNone(ANALYZER.cycle_lengths(bytes(256)))
 
+    def test_whole_object_scan_finds_shifted_window(self):
+        data = bytearray(ANALYZER.PLANTER_SIZE)
+        offset = 0x1ACC
+        data[offset:offset + 256] = bytes(range(256))
+        hits = ANALYZER.scan_bijections(bytes(data))
+        self.assertIn(offset, [candidate for candidate, _ in hits])
+
     def test_unknown_scan(self):
         data = b"prefix" + bytes(range(256)) + b"suffix"
         hits = ANALYZER.scan_bijections(data)
