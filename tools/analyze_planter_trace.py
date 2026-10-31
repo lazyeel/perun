@@ -248,6 +248,10 @@ def main() -> int:
             print("  provenance: captured at active [RBP-0x30] slot when it matched source+0x20 and writer base")
             print("  note: this does not assert the legacy four-window permutation signature")
         if len(planter) >= PLANTER_SIZE:
+            full_object_bijections = scan_bijections(planter)
+            print(f"full-object byte-aligned 256-byte bijections: {len(full_object_bijections)}")
+            for offset, cycles in full_object_bijections:
+                print(f"  object_offset={offset:#06x} cycles={dict(sorted(cycles.items()))}")
             for name, off in tables.items():
                 describe_bytes(name, planter[off:off + 256])
             fifth = planter[0x1F30:0x1F30 + 256]
