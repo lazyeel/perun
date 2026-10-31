@@ -1,14 +1,17 @@
 # Android CoreADI planter-genesis trace
 
-This note describes the research instrumentation for the Android x86_64
-`libCoreADI.so` build used by the `adi-android` harness. It is not a claim that
-the current trace has completed successfully: the GDB script has been syntax-
-checked and startup-smoke-tested against a small GDB API stub, but a live run
-against Apple's shared object is still required.
+This note describes the live research instrumentation for the Android x86_64
+`libCoreADI.so` build used by the `adi-android` harness. The GDB 12.1 path has
+now completed a real Apple provisioning start: the native control and GDB run
+both reached `ProvisioningStart rc=0` with a 276-byte CPIM from a 347-byte SPIM.
+The current unresolved question is the exact in-memory planter base: candidate
+buffers have not yet passed the four-window signature check.
 
 ## Current measured model
 
-The family windows observed at the first mixer are four 256-byte permutations:
+The working signature from prior corrected captures is four 256-byte
+permutations. A fresh live run must independently pass all four windows before
+a buffer is labeled the final planter:
 
 | Family | Planter offset | First known writer site(s) |
 |---|---:|---|
@@ -87,17 +90,25 @@ The tracer is intended for the same Bionic x86_64 `adi_native` process used by
    ```
 
 The script arms breakpoints at the function entry, source-slot store,
-post-malloc point, known planter-base loads, all known family/tail writer
-sites, and all sixteen known mixer-read sites. At the first verified planter
-base it installs software watchpoints over a non-overlapping partition of the
-entire `0x2700` object: the head, four known windows, and five unknown gaps.
-The mutable `[RBP-0x30]` frame slot is watched starting at the earlier
-`0xDD511` source-pointer point.
+post-malloc point, known base-load sites, all known family/tail writer sites,
+and all sixteen known mixer-read sites. The active capture deliberately uses
+**no software watchpoints** and no `gdb.post_event(...continue...)`: tests showed
+that the wide software-watchpoint path destabilized the inferior, while direct
+RVA breakpoints with GDB command-list continuation produced stable CPIM output.
+
+At a mixer-read breakpoint, the tracer first captures mapped candidates, then
+scans `rw-p` process mappings for a contiguous `0x2700` object whose four
+documented windows are each 256-byte permutations. The current implementation
+uses a fast 16-byte-aligned pass over RW mappings up to 16 MiB, followed (when
+needed) by a byte-aligned exhaustive pass over RW mappings up to 32 MiB. It
+prioritizes the active stack mapping and checks whether the candidate is
+referenced by `[RBP-0x30]`. Only a candidate passing all four windows becomes
+`planter.final.bin`; a merely readable `0x2700` region remains a candidate.
 
 ## Output files
 
-- `trace.log`: timestamped breakpoints, watchpoint deltas, register snapshots,
-  and validation decisions.
+- `trace.log`: timestamped breakpoints, direct writer events, scan decisions,
+  register snapshots, and validation decisions.
 - `writer_events.csv`: one row per known direct store, including effective
   address, index, old byte and new byte. This captures same-value stores that
   a value-change watchpoint would not report.
@@ -105,8 +116,8 @@ The mutable `[RBP-0x30]` frame slot is watched starting at the earlier
 - `source.final.bin`, `staging.copy_entry.*.bin`, `staging.final.*.bin`,
   `planter.final.bin`, family snapshots and unknown-range snapshots: memory
   captures from this process only.
-- `writer_stats.txt`: direct-writer coverage once a valid first-mixer snapshot
-  has been obtained.
+- `writer_stats.txt`: direct-writer coverage once a valid four-window
+  planter signature has been obtained.
 
 The analyzer checks the four known permutations, cycle lengths, byte-level
 source/planter overlap, candidate bijection windows in unknown ranges, writer
@@ -114,24 +125,20 @@ index coverage, and competing source/staging/fam1 relationships.
 
 ## Interpretation and limitations
 
-- Software watchpoints are implemented by single-stepping and comparing the
-  watched expression. They can be dramatically slower than ordinary execution
-  and report value changes, not every store. This is why exact writer-site
-  breakpoints and `writer_events.csv` are also present.
-- GDB's software watchpoint callback reports the next statement/PC after the
-  observed change; the script labels it `pc_after` and does not misattribute it
-  to the exact store instruction.
-- The watchpoint regions partition the full `0x2700` planter without overlap.
-  The `+0x1F30` writer may index into the fam3 region or another region; the
-  direct writer log, not its comment/name, determines the real effective
-  address.
+- A `0x2700` readable span is only a mapped candidate. The four documented
+  256-byte windows must each contain all 256 byte values before the tracer
+  calls it a final planter.
+- Writer-base deltas of `+0x20` relative to source are useful correlation, not
+  proof of object identity. The direct byte-overlap check is required.
+- The `+0x1F30` writer is still unclassified. Its name in the CSV is a label
+  for the observed instruction site, not evidence that it is a fifth S-box.
 - The 56 bytes beyond the requested 200-byte allocation are recorded only
   when they are readable in the same RW mapping. This does not establish
   allocator ownership or prove an out-of-bounds bug.
-- GDB's `gdb.post_event` callback and automatic `continue` sequence has not yet
-  been exercised against the target Bionic process in this environment. A
-  real target run is still needed before treating the capture as operationally
-  verified.
+- The current no-watchpoint path is operationally verified for the live
+  provisioning start. The full-memory signature scan is still being validated;
+  a negative scan means the exact planter location or the four-window model
+  remains unresolved, not that the current mapped candidate is the planter.
 - The trace logs register values and dumps stack/heap-adjacent memory. Treat
   generated run directories as sensitive research artifacts; keep them local
   and inspect/redact before sharing.
