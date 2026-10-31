@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v17).
+"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v18).
 
 Canonical project copy: tools/planter_trace_gdb.py.
 
@@ -118,6 +118,8 @@ STATE = {
     "dst_size": 200,  # allocator request; not the observed access span
     "dst_span": 256,
     "planter": None,
+    "pre_planter_base": None,
+    "pre_planter_snapshot": None,
     "planter_watch_armed": False,
     "final_dumped": False,
     "postmalloc_seen": False,
@@ -463,6 +465,21 @@ continue
             log("SOURCE INITIAL SNAPSHOT: captured 256 bytes at the source-slot store")
         else:
             log("SOURCE INITIAL SNAPSHOT: skipped; source is not a readable RW 256-byte span")
+
+        # Preserve the full source+0x20 candidate before the transform writes
+        # its tables. The 256-byte source overlap alone cannot distinguish a
+        # true planter from a similarly shaped CFF object.
+        early_base = src + 0x20
+        if ptr_ok(early_base, PLANTER_SIZE):
+            STATE["pre_planter_base"] = early_base
+            STATE["pre_planter_snapshot"] = read_mem(early_base, PLANTER_SIZE)
+            write_blob("planter.source_plus_20.at_dd511.bin",
+                       STATE["pre_planter_snapshot"])
+            slot_now = ptr_from_slot(rbp, -0x30)
+            log(f"EARLY PLANTER SOURCE-ANCHOR: mapped=True "
+                f"slot_eq_source_plus_0x20={slot_now == early_base}")
+        else:
+            log("EARLY PLANTER SOURCE-ANCHOR: mapped=False")
         return True
 
 
@@ -810,6 +827,29 @@ class FirstMixerReadBP(gdb.Breakpoint):
             f"slot_mapped={ptr_ok(slot_ptr, PLANTER_SIZE)} slot_signature={slot_signature} "
             f"writer_base_signature={has_planter_signature(STATE['planter'])} "
             f"selected_planter={p or 0:#x}")
+
+        # Compare the candidate at every mixer-read stop with its pre-transform
+        # image. This is the decisive way to tell whether incomplete windows
+        # are still being filled, or whether the old four-window layout is wrong
+        # for this live route. Only counts/uniqueness are emitted to trace.log.
+        early = STATE.get("pre_planter_snapshot")
+        early_base = STATE.get("pre_planter_base")
+        candidate_base = STATE.get("planter") or (STATE["src"] + 0x20 if STATE["src"] else None)
+        if (early is not None and candidate_base == early_base
+                and ptr_ok(candidate_base, PLANTER_SIZE)):
+            current = read_mem(candidate_base, PLANTER_SIZE)
+            compare_windows = list(TABLES) + [("fifth_1f30", 0x1F30)]
+            for name, off in compare_windows:
+                old = early[off:off + WINDOW_SIZE]
+                now = current[off:off + WINDOW_SIZE]
+                changed = sum(a != b for a, b in zip(old, now))
+                log(f"PLANTER DELTA {name}: changed={changed}/256 "
+                    f"pre_unique={len(set(old))}/256 "
+                    f"now_unique={len(set(now))}/256 "
+                    f"now_permutation={len(set(now)) == 256}")
+        elif early is not None:
+            log("PLANTER DELTA: candidate base differs from pre-transform source+0x20 anchor")
+
         if p is None:
             scanned = scan_planter_memory(rbp, rv("$rsp"), self.rva)
             if scanned is not None:
@@ -1058,6 +1098,8 @@ continue
         STATE["dst_span"] = 0
         STATE["writer_bases"] = {}
         STATE["planter"] = None
+        STATE["pre_planter_base"] = None
+        STATE["pre_planter_snapshot"] = None
         if opcode == TRANSFORM_OPCODE:
             STATE["final_dumped"] = False
             STATE["planter_scan_done"] = False
@@ -1081,7 +1123,7 @@ with open(LOG, "w", encoding="utf-8") as f:
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v17", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v18", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},
