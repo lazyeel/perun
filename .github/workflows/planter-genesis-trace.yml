@@ -568,12 +568,14 @@ jobs:
                   except Exception:
                       lines.append(f"| {name} | {len(rows)} | n/a | n/a | n/a |")
               lines += ["", "## Status", ""]
-              if len(planter) >= 0x2700:
-                  lines.append("A complete 0x2700-byte planter snapshot was captured in one process.")
+              if planter_path.exists() and len(planter) >= 0x2700:
+                  lines.append("A final 0x2700-byte planter snapshot passed the four-permutation signature check.")
+              elif candidate_files:
+                  lines.append(f"Captured {len(candidate_files)} mapped 0x2700-byte candidate snapshots, but no final four-permutation planter signature was validated.")
               elif run_rc == "0":
-                  lines.append("The harness exited successfully, but no complete planter snapshot was recorded.")
+                  lines.append("The harness exited successfully, but no mapped planter candidate or final snapshot was recorded.")
               else:
-                  lines.append("The run did not produce a complete planter snapshot. Raw traces remain on the ephemeral runner and are not published.")
+                  lines.append("The run did not produce a validated planter snapshot. Raw traces remain on the ephemeral runner and are not published.")
               lines.append("")
           report.parent.mkdir(parents=True, exist_ok=True)
           report.write_text("\n".join(lines), encoding="utf-8")
