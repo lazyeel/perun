@@ -161,16 +161,24 @@ jobs:
           export ADI_RESOLVE="gsa.apple.com:443:$GSA_IP,buy.itunes.apple.com:443:$BUY_IP"
           export ANDROID_ROOT=/system ANDROID_DATA=/data
           export PERUN_TRACE_DIR="$WORK/traces"
-          export ADI_GDB=1
-          # Force the pure local SPIM -> CPIM call even when this anonymous
-          # machine reports login-code 0; exit immediately after pStart so
-          # this trace never calls midFinishProvisioning/pEnd.
           export ADI_FORCE_START=1
           export ADI_TRACE_START_ONLY=1
           export GDB_SCRIPT="$GITHUB_WORKSPACE/tools/planter_trace_gdb.py"
 
-          echo "Using GDB: $(gdb --version | head -1)"
           echo "Android NDK compiler: $CC"
+          echo "Running non-GDB control first; persisted random identity is reused below."
+          export ADI_GDB=0
+          set +e
+          timeout --signal=TERM 15m bash "$GITHUB_WORKSPACE/crates/perun-cli/examples/adi-android/run-native.sh" \
+            > "$WORK/native-console.log" 2>&1
+          NATIVE_RC=$?
+          set -e
+          echo "$NATIVE_RC" > "$WORK/native-exit-code.txt"
+          echo "Native control exit code: $NATIVE_RC"
+
+          echo "Using GDB: $(gdb --version | head -1)"
+          echo "Running identical harness under GDB with the same working directory/identity."
+          export ADI_GDB=1
           set +e
           timeout --signal=TERM 50m bash "$GITHUB_WORKSPACE/crates/perun-cli/examples/adi-android/run-native.sh" \
             > "$WORK/gdb-console.log" 2>&1
@@ -179,6 +187,7 @@ jobs:
           echo "$RC" > "$WORK/run-exit-code.txt"
           echo "RUN_WORK=$WORK" >> "$GITHUB_ENV"
           echo "TRACE_RUN_RC=$RC" >> "$GITHUB_ENV"
+          echo "NATIVE_CONTROL_RC=$NATIVE_RC" >> "$GITHUB_ENV"
           echo "Harness/GDB exit code: $RC"
           exit 0
 
@@ -392,6 +401,34 @@ jobs:
                           console_diagnostics.append("GDB Python exception reported")
                       elif "segmentation fault" in low:
                           console_diagnostics.append("Segmentation fault reported by launcher/child")
+              native_log = Path(os.environ.get("RUN_WORK", "")) / "native-console.log"
+              native_rc_file = Path(os.environ.get("RUN_WORK", "")) / "native-exit-code.txt"
+              native_rc = native_rc_file.read_text().strip() if native_rc_file.is_file() else "not-run"
+              native_start_results = []
+              native_spim_lengths = []
+              native_fatals = []
+              if native_log.is_file():
+                  for raw in native_log.read_text(errors="replace").splitlines():
+                      start_match = re.search(r"TRACE-ONLY start rc=(-?\d+) cpim_len=(\d+)", raw)
+                      if start_match:
+                          native_start_results.append((int(start_match.group(1)), int(start_match.group(2))))
+                      spim_match = re.search(r"spim received \((\d+) bytes decoded\)", raw, re.I)
+                      if spim_match:
+                          native_spim_lengths.append(int(spim_match.group(1)))
+                      signal_match = re.search(r"\[FATAL\] signal (\d+)", raw, re.I)
+                      if signal_match:
+                          native_fatals.append(int(signal_match.group(1)))
+              lines += ["", "## Native non-GDB control", ""]
+              lines.append(f"- Exit code: {native_rc}")
+              lines.append("- SPIM decoded lengths: " +
+                           (", ".join(str(n) + " bytes" for n in native_spim_lengths)
+                            if native_spim_lengths else "not observed"))
+              lines.append("- ProvisioningStart results: " +
+                           (", ".join(f"rc={rc}, cpim_len={n}" for rc, n in native_start_results)
+                            if native_start_results else "not observed"))
+              lines.append("- C harness signal handler: " +
+                           (", ".join("signal " + str(n) for n in native_fatals)
+                            if native_fatals else "not observed"))
               lines += ["", "## Apple network/provisioning progression", ""]
               lines.append("- HTTP responses: " +
                            (" -> ".join(f"{code} ({size} bytes)" for code, size in http_responses)
