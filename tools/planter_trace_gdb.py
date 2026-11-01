@@ -196,11 +196,14 @@ def capture_mixer_memory_operands(site_rva, object_base):
                     "mapping_label", "mapping_kind", "mapped_offset",
                     "mapped_base_offset", "mapped_anchor_register",
                     "mapped_index_offset", "mapped_index_registers",
+                    "module_base_offset", "module_anchor_register",
+                    "module_index_offset", "module_index_registers",
                     "operand_expression", "width", "instruction",
                 ])
             for number, (expression, width) in enumerate(operands):
                 result = analyze_intel_address(
-                    expression, registers, object_base, PLANTER_SIZE
+                    expression, registers, object_base, PLANTER_SIZE,
+                    module_base=STATE["base"], module_size=MODULE_RVA_LIMIT,
                 )
                 if result is None:
                     writer.writerow([
@@ -222,7 +225,7 @@ def capture_mixer_memory_operands(site_rva, object_base):
                 if mapping_info and mapping_info.get("mapping") is not None:
                     result = analyze_intel_address(
                         expression, registers, object_base, PLANTER_SIZE,
-                        mapping_info["mapping"],
+                        mapping_info["mapping"], STATE["base"], MODULE_RVA_LIMIT,
                     )
                 object_offset = result["object_offset"]
                 table_base = result["table_base_offset"]
@@ -242,12 +245,19 @@ def capture_mixer_memory_operands(site_rva, object_base):
                     result["mapped_anchor_register"] or "na",
                     f"{mapped_index:+#x}" if mapped_index is not None else "na",
                     ",".join(result["mapped_index_registers"]) or "na",
+                    f"{result['module_base_offset']:+#x}" if result["module_base_offset"] is not None else "na",
+                    result["module_anchor_register"] or "na",
+                    f"{result['module_index_offset']:+#x}" if result["module_index_offset"] is not None else "na",
+                    ",".join(result["module_index_registers"]) or "na",
                     expression, width or "na", instruction,
                 ])
                 offset_text = f"{object_offset:#x}" if object_offset is not None else "outside"
                 if table_base is not None:
                     target_text = f"planter{table_base:+#x}"
                     index_text = f"{index_offset:+#x}"
+                elif result["module_base_offset"] is not None:
+                    target_text = f"libCoreADI.so{result['module_base_offset']:+#x}"
+                    index_text = f"{result['module_index_offset']:+#x}"
                 elif mapped_base is not None:
                     target_text = f"{mapping_label}:{mapped_base:+#x}"
                     index_text = f"{mapped_index:+#x}"
@@ -1325,7 +1335,7 @@ with open(LOG, "w", encoding="utf-8") as f:
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v24", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v25", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},

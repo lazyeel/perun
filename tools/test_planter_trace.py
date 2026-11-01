@@ -171,5 +171,29 @@ class ProcessMapTests(unittest.TestCase):
         self.assertEqual(result["mapped_anchor_register"], "rdi")
 
 
+
+
+class MaskedModulePointerTests(unittest.TestCase):
+    def test_module_relative_base_with_encoded_register(self):
+        module_base = 0x70000000
+        mask = 0x6DA8B117
+        registers = {
+            "r14": module_base + 0x31080 + mask,
+            "rax": 0x2a,
+        }
+        result = ACCESS.analyze_intel_address(
+            "r14+rax*1-0x6da8b117",
+            registers,
+            module_base=module_base,
+            module_size=0x200000,
+        )
+        self.assertEqual(result["effective_address"], module_base + 0x310aa)
+        self.assertEqual(result["module_base_offset"], 0x31080)
+        self.assertEqual(result["module_anchor_register"], "r14")
+        self.assertEqual(result["module_index_offset"], 0x2a)
+        self.assertEqual(result["module_index_registers"], ("rax",))
+
+
+
 if __name__ == "__main__":
     unittest.main()

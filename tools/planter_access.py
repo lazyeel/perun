@@ -103,7 +103,9 @@ def _address_terms(expression: str):
 def analyze_intel_address(expression: str, registers: Mapping[str, int],
                           object_base: int | None = None,
                           object_size: int = 0x2700,
-                          mapping: Mapping | None = None) -> dict | None:
+                          mapping: Mapping | None = None,
+                          module_base: int | None = None,
+                          module_size: int = 0x200000) -> dict | None:
     """Resolve address; infer planter-relative or mapping-relative base/index."""
     terms = _address_terms(expression)
     if terms is None:
@@ -171,6 +173,24 @@ def analyze_intel_address(expression: str, registers: Mapping[str, int],
                     if name != mapped_anchor_register:
                         mapped_index_offset += contribution
                         mapped_index_registers.append(name if sign > 0 else "-" + name)
+    module_base_offset = None
+    module_anchor_register = None
+    module_index_offset = None
+    module_index_registers = []
+    if module_base is not None:
+        module_anchors = [
+            (name, int(registers[name]) + constant - module_base)
+            for name, sign, scale, _ in register_terms
+            if sign == 1 and scale == 1
+            and module_base <= int(registers[name]) + constant < module_base + module_size
+        ]
+        if len(module_anchors) == 1:
+            module_anchor_register, module_base_offset = module_anchors[0]
+            module_index_offset = 0
+            for name, sign, _scale, contribution in register_terms:
+                if name != module_anchor_register:
+                    module_index_offset += contribution
+                    module_index_registers.append(name if sign > 0 else "-" + name)
     return {
         "effective_address": effective,
         "object_offset": object_offset,
@@ -183,4 +203,8 @@ def analyze_intel_address(expression: str, registers: Mapping[str, int],
         "mapped_anchor_register": mapped_anchor_register,
         "mapped_index_offset": mapped_index_offset,
         "mapped_index_registers": tuple(mapped_index_registers),
+        "module_base_offset": module_base_offset,
+        "module_anchor_register": module_anchor_register,
+        "module_index_offset": module_index_offset,
+        "module_index_registers": tuple(module_index_registers),
     }

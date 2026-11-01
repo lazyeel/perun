@@ -779,11 +779,18 @@ jobs:
                               label = row.get("mapping_label", "mapping")
                               try: bases[f"{label}{int(raw_base, 0):+#x}"] += 1
                               except ValueError: pass
+                      for row in external_rows:
+                          raw_base = row.get("module_base_offset", "na")
+                          if raw_base not in ("na", ""):
+                              try: bases[f"libCoreADI.so{int(raw_base, 0):+#x}"] += 1
+                              except ValueError: pass
                       indices = []
                       for row in rows:
                           raw_index = row.get("index_offset", "na")
                           if raw_index in ("na", ""):
                               raw_index = row.get("mapped_index_offset", "na")
+                          if raw_index in ("na", ""):
+                              raw_index = row.get("module_index_offset", "na")
                           if raw_index not in ("na", ""):
                               try: indices.append(int(raw_index, 0))
                               except ValueError: pass
