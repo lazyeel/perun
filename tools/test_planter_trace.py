@@ -78,5 +78,52 @@ class PlanterTraceTests(unittest.TestCase):
         self.assertNotIn("WARNING", out.getvalue())
 
 
+
+
+class IntelAddressTests(unittest.TestCase):
+    def test_scaled_index_and_table_base(self):
+        result = ACCESS.analyze_intel_address(
+            "rdi+rax*4+0x1f30",
+            {"rdi": 0x100000, "rax": 5},
+            object_base=0x100000,
+        )
+        self.assertEqual(result["effective_address"], 0x101f44)
+        self.assertEqual(result["object_offset"], 0x1f44)
+        self.assertEqual(result["table_base_offset"], 0x1f30)
+        self.assertEqual(result["index_offset"], 20)
+        self.assertEqual(result["anchor_register"], "rdi")
+
+    def test_negative_displacement(self):
+        result = ACCESS.analyze_intel_address(
+            "rbp-0x30", {"rbp": 0x700000}, object_base=0x700000
+        )
+        self.assertEqual(result["effective_address"], 0x6ffff0)
+        self.assertIsNone(result["object_offset"])
+
+    def test_adjusted_object_pointer(self):
+        result = ACCESS.analyze_intel_address(
+            "r12+rcx+0x20",
+            {"r12": 0x200100, "rcx": 7},
+            object_base=0x200000,
+        )
+        self.assertEqual(result["object_offset"], 0x127)
+        self.assertEqual(result["table_base_offset"], 0x120)
+        self.assertEqual(result["index_offset"], 7)
+
+    def test_rip_relative_is_not_guessed(self):
+        self.assertIsNone(
+            ACCESS.analyze_intel_address(
+                "rip+0x1234", {"rip": 0x100000}, object_base=0x100000
+            )
+        )
+
+    def test_intel_operand_width(self):
+        operands = ACCESS.parse_intel_memory_operands(
+            "movzx eax, BYTE PTR [rdi+rax+0x2460]"
+        )
+        self.assertEqual(operands, [("rdi+rax+0x2460", 1)])
+
+
+
 if __name__ == "__main__":
     unittest.main()

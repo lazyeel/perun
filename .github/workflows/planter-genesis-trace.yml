@@ -34,7 +34,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m py_compile tools/planter_trace_gdb.py tools/analyze_planter_trace.py
+          python3 -m py_compile tools/planter_trace_gdb.py tools/planter_access.py tools/analyze_planter_trace.py
           python3 -m unittest tools/test_planter_trace.py -v
 
       - name: Install GDB and filesystem tools
@@ -750,6 +750,42 @@ jobs:
                       lines.append(f"| {name} | {size:#x} | {len(set(data)) if data else 'n/a'} |")
                   except Exception:
                       continue
+              lines += ["", "## Dynamic mixer memory operands", ""]
+              reader_path = run / "reader_events.csv"
+              reader_groups = defaultdict(list)
+              if reader_path.is_file():
+                  with reader_path.open(newline="") as stream:
+                      for row in csv.DictReader(stream):
+                          reader_groups[row.get("site_rva", "unknown")].append(row)
+              if reader_groups:
+                  lines += ["| Read site | Operands | Inside object | Candidate table base(s) | Index range | Unique indices | Width(s) |",
+                            "|---|---:|---:|---|---:|---:|---|"]
+                  for site, rows in sorted(reader_groups.items()):
+                      inside = [row for row in rows if row.get("object_offset") not in ("na", "outside", "")]
+                      bases = Counter()
+                      indices = []
+                      widths = sorted({row.get("width", "na") for row in rows})
+                      for row in inside:
+                          raw_base = row.get("table_base_offset", "na")
+                          if raw_base not in ("na", ""):
+                              try: bases[int(raw_base, 0)] += 1
+                              except ValueError: pass
+                          raw_index = row.get("index_offset", "na")
+                          if raw_index not in ("na", ""):
+                              try: indices.append(int(raw_index, 0))
+                              except ValueError: pass
+                      base_text = ", ".join(
+                          f"{value:+#x} ({count})" for value, count in sorted(bases.items())
+                      ) if bases else "unresolved"
+                      index_span = (f"{min(indices):+#x}..{max(indices):+#x}"
+                                    if indices else "n/a")
+                      unique_indices = len(set(indices)) if indices else 0
+                      lines.append(
+                          f"| {site} | {len(rows)} | {len(inside)} | {base_text} | "
+                          f"{index_span} | {unique_indices} | {', '.join(widths)} |"
+                      )
+              else:
+                  lines.append("No dynamic memory-operand samples were recorded.")
               lines += ["", "## Direct writer coverage by opcode", "",
                         "| Writer | vdfut opcode | Hits | Distinct indices | Index min..max | Base−source delta |",
                         "|---|---|---:|---:|---:|---:|"]

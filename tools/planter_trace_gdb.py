@@ -30,9 +30,15 @@ known static writer sites are instrumented directly, and the mutable frame
 slot is sampled at the sixteen mixer-read instruction sites.
 """
 
+import csv
 import gdb
 import os
+import re
+import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from planter_access import analyze_intel_address, parse_intel_memory_operands
 
 ENTRY_RVA = 0x87554
 SOURCE_SLOT_STORE_RVA = 0xDD511
@@ -132,6 +138,7 @@ STATE = {
     "writer_stats": {},
     "writer_bases": {},
     "mixer_candidate_addrs": set(),
+    "reader_hits": {},
     "planter_scan_done": False,
     "planter_scan_base": None,
     "planter_mismatch": False,
@@ -150,6 +157,77 @@ def log(message):
 
 def rv(expr):
     return int(gdb.parse_and_eval(expr)) & 0xFFFFFFFFFFFFFFFF
+
+
+def capture_mixer_memory_operands(site_rva, object_base):
+    """Record dynamic effective addresses used by the 16 mixer-read sites."""
+    try:
+        disassembly = gdb.execute("x/i $pc", to_string=True).strip()
+        instruction = disassembly.split(":", 1)[1].strip() if ":" in disassembly else disassembly
+        operands = parse_intel_memory_operands(instruction)
+        hit = STATE["reader_hits"].get(site_rva, 0) + 1
+        STATE["reader_hits"][site_rva] = hit
+        if not operands:
+            log(f"MIXER ACCESS site={site_rva:#x} hit={hit}: no Intel memory operand parsed")
+            return
+
+        register_names = (
+            "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
+            "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+        )
+        registers = {}
+        for name in register_names:
+            try:
+                registers[name] = rv("$" + name)
+            except Exception:
+                pass
+
+        path = os.path.join(OUT, "reader_events.csv")
+        new_file = not os.path.exists(path)
+        with open(path, "a", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream)
+            if new_file:
+                writer.writerow([
+                    "site_rva", "hit", "operand_number", "expression",
+                    "effective_address", "object_offset", "anchor_register",
+                    "table_base_offset", "index_offset", "index_registers",
+                    "width", "instruction",
+                ])
+            for number, (expression, width) in enumerate(operands):
+                result = analyze_intel_address(
+                    expression, registers, object_base, PLANTER_SIZE
+                )
+                if result is None:
+                    writer.writerow([
+                        f"{site_rva:#x}", hit, number, expression, "na", "na",
+                        "na", "na", "na", "na", width or "na", instruction,
+                    ])
+                    log(f"MIXER ACCESS site={site_rva:#x} hit={hit} "
+                        f"operand={number} parse=unsupported width={width or 'unknown'}")
+                    continue
+
+                effective = result["effective_address"]
+                object_offset = result["object_offset"]
+                table_base = result["table_base_offset"]
+                index_offset = result["index_offset"]
+                writer.writerow([
+                    f"{site_rva:#x}", hit, number, expression, f"{effective:#x}",
+                    f"{object_offset:#x}" if object_offset is not None else "outside",
+                    result["anchor_register"] or "na",
+                    f"{table_base:+#x}" if table_base is not None else "na",
+                    f"{index_offset:+#x}" if index_offset is not None else "na",
+                    ",".join(result["index_registers"]) or "na",
+                    width or "na", instruction,
+                ])
+                offset_text = f"{object_offset:#x}" if object_offset is not None else "outside"
+                base_text = f"{table_base:+#x}" if table_base is not None else "unresolved"
+                index_text = f"{index_offset:+#x}" if index_offset is not None else "unresolved"
+                log(f"MIXER ACCESS site={site_rva:#x} hit={hit} operand={number} "
+                    f"table_base={base_text} index={index_text} "
+                    f"object_offset={offset_text} width={width or 'unknown'} "
+                    f"anchor={result['anchor_register'] or 'none'}")
+    except Exception as exc:
+        log(f"MIXER ACCESS ERROR site={site_rva:#x}: {type(exc).__name__}: {exc}")
 
 
 def on_inferior_stop(event):
@@ -788,6 +866,7 @@ class FirstMixerReadBP(gdb.Breakpoint):
             return False
         rbp = rv("$rbp")
         slot_ptr = ptr_from_slot(rbp, -0x30)
+        capture_mixer_memory_operands(self.rva, slot_ptr)
         p = STATE["planter"] if has_planter_signature(STATE["planter"]) else None
         slot_signature = has_planter_signature(slot_ptr)
         if p is None and slot_signature:
@@ -1214,7 +1293,7 @@ with open(LOG, "w", encoding="utf-8") as f:
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v22", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v23", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},
@@ -1222,6 +1301,7 @@ with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
 
 gdb.execute("set confirm off", to_string=True)
 gdb.execute("set pagination off", to_string=True)
+gdb.execute("set disassembly-flavor intel", to_string=True)
 gdb.execute("set breakpoint pending on", to_string=True)
 for _signal in ("SIGSEGV", "SIGBUS", "SIGILL", "SIGABRT"):
     gdb.execute(f"handle {_signal} stop print nopass", to_string=True)
