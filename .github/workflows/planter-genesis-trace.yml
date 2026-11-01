@@ -807,6 +807,30 @@ jobs:
                       )
               else:
                   lines.append("No dynamic memory-operand samples were recorded.")
+              lines += ["", "## Runtime zone-data comparison", ""]
+              zone_capture = run / "module_region_24070.bin"
+              zone_dir = Path(os.environ["GITHUB_WORKSPACE"]) / "crates/perun-adi-core/zone_data"
+              if zone_capture.is_file():
+                  comparison = compare_zone_regions(zone_capture.read_bytes(), zone_dir)
+                  lines += [
+                      f"- Runtime capture: {comparison['runtime_size']:#x} bytes at libCoreADI.so+0x24070",
+                      f"- Runtime region SHA-256: {comparison['runtime_sha256']}",
+                      f"- First 256-byte lookup table SHA-256: {comparison['table_sha256']}",
+                      "",
+                      "| Baked zone | Size | Exact 256-byte window offsets | Best equal bytes / 256 | Best offset | Whole 768-byte exact |",
+                      "|---|---:|---|---:|---:|---|",
+                  ]
+                  for item in comparison["zones"]:
+                      offsets = ", ".join(f"{offset:#x}" for offset in item["table_exact_offsets"]) or "none"
+                      best = (f"{item['best_equal_bytes']}/256"
+                              if item["best_equal_bytes"] >= 0 else "n/a")
+                      best_offset = f"{item['best_offset']:#x}" if item["best_offset"] >= 0 else "n/a"
+                      lines.append(
+                          f"| {item['file']} | {item['size']:#x} | {offsets} | "
+                          f"{best} | {best_offset} | {'yes' if item['whole_region_exact'] else 'no'} |"
+                      )
+              else:
+                  lines.append("The live module-relative region was not captured.")
               lines += ["", "## Direct writer coverage by opcode", "",
                         "| Writer | vdfut opcode | Hits | Distinct indices | Index min..max | Base−source delta |",
                         "|---|---|---:|---:|---:|---:|"]

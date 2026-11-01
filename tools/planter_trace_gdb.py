@@ -47,6 +47,8 @@ POST_MALLOC_RVA = 0xDD83B
 COPY_ENTRY_RVA = 0xFB022
 TRANSFORM_OPCODE = 0x716BD86C
 MODULE_RVA_LIMIT = 0x200000
+ZONE_PROBE_RVA = 0x24070
+ZONE_PROBE_SIZE = 0x300
 
 # Exact writer sites observed in the Android x86_64 libCoreADI.so.
 # Each tuple: (name, base-register, index-register, displacement, value-register).
@@ -106,6 +108,7 @@ LOG = os.path.join(OUT, "trace.log")
 
 STATE = {
     "base": None,
+    "module_region_24070_dumped": False,
     "global_install_started": False,
     "global_install_complete": False,
     "rva_install_started": False,
@@ -158,6 +161,25 @@ def log(message):
 
 def rv(expr):
     return int(gdb.parse_and_eval(expr)) & 0xFFFFFFFFFFFFFFFF
+
+
+def capture_zone_probe_region():
+    """Capture 0x300 bytes around the live module-relative fourth-family read base."""
+    if STATE["module_region_24070_dumped"]:
+        return
+    try:
+        module_base = STATE.get("base")
+        if module_base is None:
+            return
+        address = module_base + ZONE_PROBE_RVA
+        data = bytes(gdb.selected_inferior().read_memory(address, ZONE_PROBE_SIZE))
+        path = os.path.join(OUT, "module_region_24070.bin")
+        with open(path, "wb") as stream:
+            stream.write(data)
+        STATE["module_region_24070_dumped"] = True
+        log(f"MODULE REGION CAPTURE: rva=+{ZONE_PROBE_RVA:#x} size={len(data):#x}")
+    except Exception as exc:
+        log(f"MODULE REGION CAPTURE ERROR: {type(exc).__name__}: {exc}")
 
 
 def capture_mixer_memory_operands(site_rva, object_base):
@@ -216,6 +238,8 @@ def capture_mixer_memory_operands(site_rva, object_base):
                         f"operand={number} parse=unsupported width={width or 'unknown'}")
                     continue
                 effective = result["effective_address"]
+                if result["module_base_offset"] == ZONE_PROBE_RVA:
+                    capture_zone_probe_region()
                 mapping_info = classify_mapped_address(
                     effective, mappings, STATE["base"], MODULE_RVA_LIMIT
                 )
@@ -1335,7 +1359,7 @@ with open(LOG, "w", encoding="utf-8") as f:
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v25", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v26", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},

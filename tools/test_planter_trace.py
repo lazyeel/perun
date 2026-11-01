@@ -20,6 +20,12 @@ assert ACCESS_SPEC and ACCESS_SPEC.loader
 ACCESS = importlib.util.module_from_spec(ACCESS_SPEC)
 ACCESS_SPEC.loader.exec_module(ACCESS)
 
+COMPARE_SOURCE = Path(__file__).with_name("compare_zone_regions.py")
+COMPARE_SPEC = importlib.util.spec_from_file_location("compare_zone_regions", COMPARE_SOURCE)
+assert COMPARE_SPEC and COMPARE_SPEC.loader
+COMPARE = importlib.util.module_from_spec(COMPARE_SPEC)
+COMPARE_SPEC.loader.exec_module(COMPARE)
+
 
 class PlanterTraceTests(unittest.TestCase):
     def test_partition_exact(self):
@@ -178,7 +184,7 @@ class MaskedModulePointerTests(unittest.TestCase):
         module_base = 0x70000000
         mask = 0x6DA8B117
         registers = {
-            "r14": module_base + 0x31080 + mask,
+            "r14": module_base + 0x24070 + mask,
             "rax": 0x2a,
         }
         result = ACCESS.analyze_intel_address(
@@ -187,11 +193,43 @@ class MaskedModulePointerTests(unittest.TestCase):
             module_base=module_base,
             module_size=0x200000,
         )
-        self.assertEqual(result["effective_address"], module_base + 0x310aa)
-        self.assertEqual(result["module_base_offset"], 0x31080)
+        self.assertEqual(result["effective_address"], module_base + 0x2409a)
+        self.assertEqual(result["module_base_offset"], 0x24070)
         self.assertEqual(result["module_anchor_register"], "r14")
         self.assertEqual(result["module_index_offset"], 0x2a)
         self.assertEqual(result["module_index_registers"], ("rax",))
+
+
+
+
+
+class ZoneRegionComparisonTests(unittest.TestCase):
+    def test_exact_table_match_inside_family_zone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            table = bytes((i * 17) & 0xff for i in range(256))
+            (root / "fam4_zone.bin").write_bytes(b"prefix" + table + b"suffix")
+            (root / "fam1_zone.bin").write_bytes(bytes(768))
+            result = COMPARE.compare_zone_regions(table + bytes(512), root)
+            fam4 = next(x for x in result["zones"] if x["file"] == "fam4_zone.bin")
+            self.assertEqual(fam4["table_exact_offsets"], [6])
+            self.assertEqual(fam4["best_equal_bytes"], 256)
+            self.assertEqual(fam4["best_offset"], 6)
+            self.assertEqual(result["table_size"], 256)
+            self.assertEqual(len(result["table_sha256"]), 64)
+
+    def test_near_match_reports_score_without_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            table = bytes(range(256))
+            mutated = bytearray(table)
+            mutated[100] ^= 0xff
+            (root / "fam2_zone.bin").write_bytes(bytes(mutated) + bytes(512))
+            result = COMPARE.compare_zone_regions(table, root)
+            row = result["zones"][0]
+            self.assertEqual(row["best_equal_bytes"], 255)
+            self.assertEqual(row["best_offset"], 0)
+            self.assertNotIn("data", row)
 
 
 
