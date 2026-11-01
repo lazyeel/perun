@@ -197,9 +197,11 @@ jobs:
             GDB_VERSION="$(gdb --version | head -1 2>/dev/null || echo unavailable)" \
             GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_SHA="$GITHUB_SHA" \
             python3 - <<'PY'
-          import csv, json, os, re
+          import csv, json, os, re, sys
           from collections import Counter, defaultdict
           from pathlib import Path
+          sys.path.insert(0, str(Path(os.environ['GITHUB_WORKSPACE']) / 'tools'))
+          from compare_zone_regions import compare_zone_regions
 
           root = Path(os.environ["TRACE_ROOT"])
           report = Path(os.environ["REPORT"])
