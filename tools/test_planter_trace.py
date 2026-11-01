@@ -14,6 +14,12 @@ assert SPEC and SPEC.loader
 ANALYZER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ANALYZER)
 
+ACCESS_SOURCE = Path(__file__).with_name("planter_access.py")
+ACCESS_SPEC = importlib.util.spec_from_file_location("planter_access", ACCESS_SOURCE)
+assert ACCESS_SPEC and ACCESS_SPEC.loader
+ACCESS = importlib.util.module_from_spec(ACCESS_SPEC)
+ACCESS_SPEC.loader.exec_module(ACCESS)
+
 
 class PlanterTraceTests(unittest.TestCase):
     def test_partition_exact(self):
@@ -97,7 +103,7 @@ class IntelAddressTests(unittest.TestCase):
         result = ACCESS.analyze_intel_address(
             "rbp-0x30", {"rbp": 0x700000}, object_base=0x700000
         )
-        self.assertEqual(result["effective_address"], 0x6ffff0)
+        self.assertEqual(result["effective_address"], 0x6fffd0)
         self.assertIsNone(result["object_offset"])
 
     def test_adjusted_object_pointer(self):
