@@ -38,7 +38,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from planter_access import analyze_intel_address, parse_intel_memory_operands
+from planter_access import (analyze_intel_address, classify_mapped_address,
+                            parse_intel_memory_operands, parse_proc_maps)
 
 ENTRY_RVA = 0x87554
 SOURCE_SLOT_STORE_RVA = 0xDD511
@@ -160,7 +161,7 @@ def rv(expr):
 
 
 def capture_mixer_memory_operands(site_rva, object_base):
-    """Record dynamic effective addresses used by the 16 mixer-read sites."""
+    """Record dynamic effective addresses and classify their backing mappings."""
     try:
         disassembly = gdb.execute("x/i $pc", to_string=True).strip()
         instruction = disassembly.split(":", 1)[1].strip() if ":" in disassembly else disassembly
@@ -170,7 +171,6 @@ def capture_mixer_memory_operands(site_rva, object_base):
         if not operands:
             log(f"MIXER ACCESS site={site_rva:#x} hit={hit}: no Intel memory operand parsed")
             return
-
         register_names = (
             "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
             "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
@@ -181,7 +181,9 @@ def capture_mixer_memory_operands(site_rva, object_base):
                 registers[name] = rv("$" + name)
             except Exception:
                 pass
-
+        pid = gdb.selected_inferior().pid
+        with open(f"/proc/{pid}/maps", "r", encoding="ascii", errors="replace") as maps_file:
+            mappings = parse_proc_maps(maps_file.read())
         path = os.path.join(OUT, "reader_events.csv")
         new_file = not os.path.exists(path)
         with open(path, "a", newline="", encoding="utf-8") as stream:
@@ -191,7 +193,10 @@ def capture_mixer_memory_operands(site_rva, object_base):
                     "site_rva", "hit", "operand_number", "expression",
                     "effective_address", "object_offset", "anchor_register",
                     "table_base_offset", "index_offset", "index_registers",
-                    "width", "instruction",
+                    "mapping_label", "mapping_kind", "mapped_offset",
+                    "mapped_base_offset", "mapped_anchor_register",
+                    "mapped_index_offset", "mapped_index_registers",
+                    "operand_expression", "width", "instruction",
                 ])
             for number, (expression, width) in enumerate(operands):
                 result = analyze_intel_address(
@@ -200,16 +205,30 @@ def capture_mixer_memory_operands(site_rva, object_base):
                 if result is None:
                     writer.writerow([
                         f"{site_rva:#x}", hit, number, expression, "na", "na",
-                        "na", "na", "na", "na", width or "na", instruction,
+                        "na", "na", "na", "na", "unresolved", "unresolved",
+                        "na", "na", "na", "na", "na", expression,
+                        width or "na", instruction,
                     ])
                     log(f"MIXER ACCESS site={site_rva:#x} hit={hit} "
                         f"operand={number} parse=unsupported width={width or 'unknown'}")
                     continue
-
                 effective = result["effective_address"]
+                mapping_info = classify_mapped_address(
+                    effective, mappings, STATE["base"], MODULE_RVA_LIMIT
+                )
+                mapping_label = mapping_info["label"] if mapping_info else "unmapped"
+                mapping_kind = mapping_info["kind"] if mapping_info else "unmapped"
+                mapping_offset = mapping_info["offset"] if mapping_info else None
+                if mapping_info and mapping_info.get("mapping") is not None:
+                    result = analyze_intel_address(
+                        expression, registers, object_base, PLANTER_SIZE,
+                        mapping_info["mapping"],
+                    )
                 object_offset = result["object_offset"]
                 table_base = result["table_base_offset"]
                 index_offset = result["index_offset"]
+                mapped_base = result["mapped_base_offset"]
+                mapped_index = result["mapped_index_offset"]
                 writer.writerow([
                     f"{site_rva:#x}", hit, number, expression, f"{effective:#x}",
                     f"{object_offset:#x}" if object_offset is not None else "outside",
@@ -217,15 +236,28 @@ def capture_mixer_memory_operands(site_rva, object_base):
                     f"{table_base:+#x}" if table_base is not None else "na",
                     f"{index_offset:+#x}" if index_offset is not None else "na",
                     ",".join(result["index_registers"]) or "na",
-                    width or "na", instruction,
+                    mapping_label, mapping_kind,
+                    f"{mapping_offset:#x}" if mapping_offset is not None else "na",
+                    f"{mapped_base:+#x}" if mapped_base is not None else "na",
+                    result["mapped_anchor_register"] or "na",
+                    f"{mapped_index:+#x}" if mapped_index is not None else "na",
+                    ",".join(result["mapped_index_registers"]) or "na",
+                    expression, width or "na", instruction,
                 ])
                 offset_text = f"{object_offset:#x}" if object_offset is not None else "outside"
-                base_text = f"{table_base:+#x}" if table_base is not None else "unresolved"
-                index_text = f"{index_offset:+#x}" if index_offset is not None else "unresolved"
+                if table_base is not None:
+                    target_text = f"planter{table_base:+#x}"
+                    index_text = f"{index_offset:+#x}"
+                elif mapped_base is not None:
+                    target_text = f"{mapping_label}:{mapped_base:+#x}"
+                    index_text = f"{mapped_index:+#x}"
+                else:
+                    target_text = f"{mapping_label}@{mapping_offset if mapping_offset is not None else 'na'}"
+                    index_text = "unresolved"
                 log(f"MIXER ACCESS site={site_rva:#x} hit={hit} operand={number} "
-                    f"table_base={base_text} index={index_text} "
+                    f"target={target_text} index={index_text} "
                     f"object_offset={offset_text} width={width or 'unknown'} "
-                    f"anchor={result['anchor_register'] or 'none'}")
+                    f"expression={expression}")
     except Exception as exc:
         log(f"MIXER ACCESS ERROR site={site_rva:#x}: {type(exc).__name__}: {exc}")
 
@@ -1293,7 +1325,7 @@ with open(LOG, "w", encoding="utf-8") as f:
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v23", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v24", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},

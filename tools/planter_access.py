@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Small, testable helpers for resolving Intel-syntax x86-64 memory operands."""
+"""Parse and resolve Intel-syntax x86-64 memory operands for GDB traces."""
 from __future__ import annotations
-
+import os
 import re
 from typing import Mapping
 
@@ -11,32 +11,70 @@ _REGISTERS = {
 }
 _OPERAND = re.compile(
     r"(?:(byte|word|dword|qword|tbyte|xmmword|ymmword|zmmword)\s+ptr\s*)?"
-    r"\[([^\]]+)\]",
-    re.IGNORECASE,
+    r"\[([^\]]+)\]", re.IGNORECASE,
 )
-_WIDTHS = {
-    "byte": 1, "word": 2, "dword": 4, "qword": 8, "tbyte": 10,
-    "xmmword": 16, "ymmword": 32, "zmmword": 64,
-}
+_WIDTHS = {"byte": 1, "word": 2, "dword": 4, "qword": 8,
+           "tbyte": 10, "xmmword": 16, "ymmword": 32, "zmmword": 64}
 
 
 def parse_intel_memory_operands(instruction: str) -> list[tuple[str, int | None]]:
-    """Return (address expression, access width) for bracketed Intel operands."""
     result = []
     for match in _OPERAND.finditer(instruction):
         kind, expression = match.groups()
-        width = _WIDTHS.get(kind.lower()) if kind else None
-        result.append((expression.strip(), width))
+        result.append((expression.strip(), _WIDTHS.get(kind.lower()) if kind else None))
     return result
+
+
+def parse_proc_maps(text: str) -> list[dict]:
+    """Parse /proc/PID/maps without retaining directory paths."""
+    mappings = []
+    for line in text.splitlines():
+        fields = line.split(maxsplit=5)
+        if len(fields) < 5:
+            continue
+        try:
+            low_s, high_s = fields[0].split("-", 1)
+            low, high = int(low_s, 16), int(high_s, 16)
+            file_offset = int(fields[2], 16)
+        except (ValueError, IndexError):
+            continue
+        raw_name = fields[5].strip() if len(fields) == 6 else "anonymous"
+        label = os.path.basename(raw_name) if raw_name.startswith("/") else raw_name
+        mappings.append({
+            "start": low, "end": high, "perms": fields[1],
+            "file_offset": file_offset, "label": label,
+            "file_backed": len(fields) == 6 and raw_name.startswith("/"),
+        })
+    return mappings
+
+
+def classify_mapped_address(address: int, mappings: list[dict],
+                            module_base: int | None = None,
+                            module_size: int = 0x200000) -> dict | None:
+    """Map an address to a stable module/file offset or anonymous-map offset."""
+    if module_base is not None and module_base <= address < module_base + module_size:
+        return {"label": "libCoreADI.so", "offset": address - module_base,
+                "kind": "module-rva", "mapping": None}
+    for mapping in mappings:
+        if mapping["start"] <= address < mapping["end"]:
+            offset = (
+                mapping["file_offset"] + address - mapping["start"]
+                if mapping["file_backed"] else address - mapping["start"]
+            )
+            return {
+                "label": mapping["label"], "offset": offset,
+                "kind": "file-offset" if mapping["file_backed"] else "mapping-offset",
+                "mapping": mapping,
+            }
+    return None
 
 
 def _address_terms(expression: str):
     compact = expression.strip().lower().replace(" ", "")
     if not compact or ":" in compact or "rip" in compact or "eip" in compact:
         return None
-    terms = re.findall(r"[+-]?[^+-]+", compact)
     parsed = []
-    for raw in terms:
+    for raw in re.findall(r"[+-]?[^+-]+", compact):
         sign = -1 if raw.startswith("-") else 1
         body = raw.lstrip("+-")
         if not body:
@@ -62,24 +100,15 @@ def _address_terms(expression: str):
     return parsed
 
 
-def analyze_intel_address(
-    expression: str,
-    registers: Mapping[str, int],
-    object_base: int | None = None,
-    object_size: int = 0x2700,
-) -> dict | None:
-    """Resolve an Intel address and, when possible, split table base from index.
-
-    A register whose current value lies inside the anchored object is treated as
-    the object-relative base term only when exactly one such register occurs and
-    it has a positive unit coefficient. Remaining register terms form the index.
-    """
+def analyze_intel_address(expression: str, registers: Mapping[str, int],
+                          object_base: int | None = None,
+                          object_size: int = 0x2700,
+                          mapping: Mapping | None = None) -> dict | None:
+    """Resolve address; infer planter-relative or mapping-relative base/index."""
     terms = _address_terms(expression)
     if terms is None:
         return None
-
-    effective = 0
-    constant = 0
+    effective = constant = 0
     register_terms = []
     for kind, sign, value, scale in terms:
         if kind == "const":
@@ -92,31 +121,56 @@ def analyze_intel_address(
             contribution = sign * int(registers[value]) * scale
             effective += contribution
             register_terms.append((value, sign, scale, contribution))
-
     effective &= (1 << 64) - 1
+
     object_offset = None
-    anchor_register = None
     table_base_offset = None
+    anchor_register = None
     index_offset = None
     index_registers = []
     if object_base is not None and object_base <= effective < object_base + object_size:
         object_offset = effective - object_base
-
-    anchors = []
-    if object_base is not None:
-        for name, sign, scale, contribution in register_terms:
-            value = int(registers[name])
-            if object_base <= value < object_base + object_size and sign == 1 and scale == 1:
-                anchors.append((name, value - object_base))
+    anchors = [
+        (name, int(registers[name]) - object_base)
+        for name, sign, scale, _ in register_terms
+        if object_base is not None and object_base <= int(registers[name]) < object_base + object_size
+        and sign == 1 and scale == 1
+    ]
     if len(anchors) == 1:
         anchor_register, anchor_delta = anchors[0]
         table_base_offset = anchor_delta + constant
         index_offset = 0
-        for name, sign, scale, contribution in register_terms:
-            if name == anchor_register:
-                continue
-            index_offset += contribution
-            index_registers.append(name if sign > 0 else "-" + name)
+        for name, sign, _scale, contribution in register_terms:
+            if name != anchor_register:
+                index_offset += contribution
+                index_registers.append(name if sign > 0 else "-" + name)
+
+    mapped_offset = mapped_base_offset = mapped_index_offset = None
+    mapped_anchor_register = None
+    mapped_index_registers = []
+    if mapping is not None:
+        start, end = int(mapping["start"]), int(mapping["end"])
+        if start <= effective < end:
+            mapped_offset = (
+                int(mapping["file_offset"]) + effective - start
+                if mapping["file_backed"] else effective - start
+            )
+            map_anchors = [
+                (name, int(registers[name]) - start)
+                for name, sign, scale, _ in register_terms
+                if start <= int(registers[name]) < end and sign == 1 and scale == 1
+            ]
+            if len(map_anchors) == 1:
+                mapped_anchor_register, anchor_delta = map_anchors[0]
+                mapped_base_offset = (
+                    (int(mapping["file_offset"]) if mapping["file_backed"] else 0)
+                    + anchor_delta + constant
+                )
+                mapped_index_offset = 0
+                for name, sign, _scale, contribution in register_terms:
+                    if name != mapped_anchor_register:
+                        mapped_index_offset += contribution
+                        mapped_index_registers.append(name if sign > 0 else "-" + name)
     return {
         "effective_address": effective,
         "object_offset": object_offset,
@@ -124,4 +178,9 @@ def analyze_intel_address(
         "table_base_offset": table_base_offset,
         "index_offset": index_offset,
         "index_registers": tuple(index_registers),
+        "mapped_offset": mapped_offset,
+        "mapped_base_offset": mapped_base_offset,
+        "mapped_anchor_register": mapped_anchor_register,
+        "mapped_index_offset": mapped_index_offset,
+        "mapped_index_registers": tuple(mapped_index_registers),
     }

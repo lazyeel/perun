@@ -131,5 +131,45 @@ class IntelAddressTests(unittest.TestCase):
 
 
 
+
+
+class ProcessMapTests(unittest.TestCase):
+    def test_classify_file_backed_and_anonymous_mappings(self):
+        mappings = ACCESS.parse_proc_maps(
+            "1000-2000 r--p 00001000 08:01 10 /system/lib64/libfoo.so\n"
+            "3000-5000 rw-p 00000000 00:00 0 [heap]\n"
+        )
+        file_info = ACCESS.classify_mapped_address(0x1123, mappings)
+        self.assertEqual(file_info["label"], "libfoo.so")
+        self.assertEqual(file_info["offset"], 0x1123)
+        self.assertEqual(file_info["kind"], "file-offset")
+        heap_info = ACCESS.classify_mapped_address(0x3456, mappings)
+        self.assertEqual(heap_info["label"], "[heap]")
+        self.assertEqual(heap_info["offset"], 0x456)
+        self.assertEqual(heap_info["kind"], "mapping-offset")
+
+    def test_module_rva_precedes_maps(self):
+        info = ACCESS.classify_mapped_address(
+            0x500123, [], module_base=0x500000
+        )
+        self.assertEqual(info["label"], "libCoreADI.so")
+        self.assertEqual(info["offset"], 0x123)
+        self.assertEqual(info["kind"], "module-rva")
+
+    def test_mapping_relative_table_base_and_index(self):
+        mapping = {
+            "start": 0x3000, "end": 0x5000, "file_offset": 0,
+            "file_backed": False, "label": "[heap]",
+        }
+        result = ACCESS.analyze_intel_address(
+            "rdi+rax+0x120", {"rdi": 0x3400, "rax": 7},
+            object_base=0x100000, mapping=mapping,
+        )
+        self.assertEqual(result["mapped_offset"], 0x527)
+        self.assertEqual(result["mapped_base_offset"], 0x520)
+        self.assertEqual(result["mapped_index_offset"], 7)
+        self.assertEqual(result["mapped_anchor_register"], "rdi")
+
+
 if __name__ == "__main__":
     unittest.main()

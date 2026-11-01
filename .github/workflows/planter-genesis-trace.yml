@@ -758,31 +758,45 @@ jobs:
                       for row in csv.DictReader(stream):
                           reader_groups[row.get("site_rva", "unknown")].append(row)
               if reader_groups:
-                  lines += ["| Read site | Operands | Inside object | Candidate table base(s) | Index range | Unique indices | Width(s) |",
-                            "|---|---:|---:|---|---:|---:|---|"]
+                  lines += ["| Read site | Operands | Planter reads | External mapped reads | Location(s) | Base/index evidence | Width(s) | Expressions |",
+                            "|---|---:|---:|---:|---|---|---|---|"]
                   for site, rows in sorted(reader_groups.items()):
-                      inside = [row for row in rows if row.get("object_offset") not in ("na", "outside", "")]
+                      object_rows = [row for row in rows if row.get("object_offset") not in ("na", "outside", "")]
+                      external_rows = [row for row in rows if row.get("object_offset") == "outside"]
+                      locations = Counter(
+                          f"{row.get('mapping_label', 'unknown')}:{row.get('mapping_kind', 'unknown')}"
+                          for row in external_rows
+                      )
                       bases = Counter()
-                      indices = []
-                      widths = sorted({row.get("width", "na") for row in rows})
-                      for row in inside:
+                      for row in object_rows:
                           raw_base = row.get("table_base_offset", "na")
                           if raw_base not in ("na", ""):
-                              try: bases[int(raw_base, 0)] += 1
+                              try: bases[f"planter{int(raw_base, 0):+#x}"] += 1
                               except ValueError: pass
+                      for row in external_rows:
+                          raw_base = row.get("mapped_base_offset", "na")
+                          if raw_base not in ("na", ""):
+                              label = row.get("mapping_label", "mapping")
+                              try: bases[f"{label}{int(raw_base, 0):+#x}"] += 1
+                              except ValueError: pass
+                      indices = []
+                      for row in rows:
                           raw_index = row.get("index_offset", "na")
+                          if raw_index in ("na", ""):
+                              raw_index = row.get("mapped_index_offset", "na")
                           if raw_index not in ("na", ""):
                               try: indices.append(int(raw_index, 0))
                               except ValueError: pass
-                      base_text = ", ".join(
-                          f"{value:+#x} ({count})" for value, count in sorted(bases.items())
-                      ) if bases else "unresolved"
-                      index_span = (f"{min(indices):+#x}..{max(indices):+#x}"
-                                    if indices else "n/a")
-                      unique_indices = len(set(indices)) if indices else 0
+                      widths = sorted({row.get("width", "na") for row in rows})
+                      expressions = sorted({row.get("operand_expression", "") for row in rows})
+                      loc_text = ", ".join(f"{name} ({count})" for name, count in sorted(locations.items())) or "planter only"
+                      base_text = ", ".join(f"{name} ({count})" for name, count in sorted(bases.items())) or "unresolved"
+                      index_text = (f"{min(indices):+#x}..{max(indices):+#x}, {len(set(indices))} unique"
+                                    if indices else "unresolved")
                       lines.append(
-                          f"| {site} | {len(rows)} | {len(inside)} | {base_text} | "
-                          f"{index_span} | {unique_indices} | {', '.join(widths)} |"
+                          f"| {site} | {len(rows)} | {len(object_rows)} | {len(external_rows)} | "
+                          f"{loc_text} | {base_text}; indices {index_text} | "
+                          f"{', '.join(widths)} | {', '.join(expressions)} |"
                       )
               else:
                   lines.append("No dynamic memory-operand samples were recorded.")
