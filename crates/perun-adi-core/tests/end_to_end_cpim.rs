@@ -5,22 +5,24 @@
 //! from the generated depot zone plus the measured session fields,
 //! compared byte for byte against the live oracle's own CPIM.
 //!
-//! What is GENERATED here (the crate's own math, live-verified):
-//!   - all 160 body-A bytes: sixteen mixers over the one-session
-//!     giant tape, with m12/m4/m15 selector backfills and the
-//!     session-invariant zones;
-//!   - the digest: the eight BE sums, all 32 bytes, zero gates;
-//!   - the container's structure fields: the version word 5, the
-//!     body lengths 0xa0/0x34, the body B version 4 (the measured
-//!     anatomy, written by the generator, not copied).
+//! What is reconstructed or computed from same-session measurements:
+//!   - 150 body-A bytes: mixer formulas over giant/selector tapes and
+//!     the four baked, load-stable zones;
+//!   - 10 body-A bytes: M14's completed post-tail outputs, carried
+//!     from the same-session giant tape (the tail is not recomputed);
+//!   - the 32-byte digest: Rust arithmetic over word-tape candidates,
+//!     whose selection is anchored to the live CPIM's eight sums;
+//!   - 16 structural bytes: the measured container constants.
 //!
-//! What is CARRIED from the reference (the named boundaries, not
-//! derivations): the session block (16 bytes) and body B (52).
-//! The three known missing giant-hit rows are reconstructed from
-//! the same-session selector tape; they are not copied from CPIM.
+//! What is copied unchanged from the reference CPIM: session (16 bytes)
+//! and body B (52 bytes). Missing M4/M12/M15 giant-hit inputs are
+//! backfilled from the same-session selector tape, not CPIM.
 //!
-//! The verdict line reports the container parity AND the split:
-//!   "CPIM e2e: 276/276 container bytes; N generated, M carried"
+//! This test proves byte-for-byte parity, not SPIM-only autonomy:
+//! session data, M14 post-tail values, and digest-word resolution still
+//! have measured/oracle-anchored inputs. The accounting keeps those
+//! boundaries separate instead of calling all assembled body-A bytes
+//! independently formula-generated.
 
 use perun_adi_core::body_a::generate_body_from_tapes;
 
@@ -42,7 +44,7 @@ fn cpim_end_to_end() {
     let Ok((depot, body_bytes)) = generate_body_from_tapes(&dir) else {
         panic!("the body-a tapes did not assemble under {dir}");
     };
-    assert_eq!(body_bytes, 160, "the tape assembler must generate all body-A bytes");
+    assert_eq!(body_bytes, 160, "the tape assembler must fill all body-A positions");
 
     // THE CONTAINER, per the measured anatomy:
     //   [0..4) version 5 | [4..0x14) session | [0x14..0x18) 0xa0
@@ -64,8 +66,17 @@ fn cpim_end_to_end() {
         assert_eq!(out[i], cpim[i], "container+{i:#05x}");
         equal += 1;
     }
-    // the split: generated positions vs carried
-    let carried = 16 + 52; // session + body B; all body-A bytes and digest are generated
-    eprintln!("CPIM e2e: {equal}/276 container bytes; {} generated, {carried} carried (session 16, body B 52)",
-              276 - carried);
+    // Separate formula-computed mixer bytes from finalized M14 tape outputs.
+    use perun_adi_core::body_a::BODY_A_M14_TAPE_RESULTS;
+    let body_a_formula = body_bytes - BODY_A_M14_TAPE_RESULTS;
+    let digest_formula = 32; // arithmetic is Rust; word selection is CPIM-sum anchored
+    let structure_formula = 16; // four measured constants/length/version words
+    let tape_finalized = BODY_A_M14_TAPE_RESULTS;
+    let cpim_carried = 16 + 52; // session + body B
+    assert_eq!(body_a_formula, 150);
+    assert_eq!(body_a_formula + digest_formula + structure_formula
+               + tape_finalized + cpim_carried, 276);
+    eprintln!(
+        "CPIM e2e: {equal}/276 parity; body-A formula={body_a_formula}, digest arithmetic={digest_formula} (word selection CPIM-anchored), structure={structure_formula}; M14 post-tail tape={tape_finalized}; CPIM copied={cpim_carried} (session 16 + body B 52)"
+    );
 }

@@ -146,6 +146,7 @@ STATE = {
     "postmalloc_seen": False,
     "slot_watch_armed": False,
     "writer_stats": {},
+    "writer_callback_hits": {},
     "writer_bases": {},
     "mixer_candidate_addrs": set(),
     "reader_hits": {},
@@ -163,6 +164,24 @@ def log(message):
     with open(LOG, "a", encoding="utf-8") as f:
         f.write(line + "\n")
     gdb.write(line + "\n")
+
+
+def writer_callback_event(event, rva, name, status):
+    """Audit direct writer breakpoint lifecycle independently of writer_events."""
+    try:
+        pc = rv("$pc")
+        base = STATE.get("base")
+        pc_rva = f"{pc - base:#x}" if base is not None and pc >= base else "na"
+        opcode = STATE.get("active_op")
+        path = os.path.join(OUT, "writer_callback_events.csv")
+        with open(path, "a", newline="", encoding="utf-8") as stream:
+            csv.writer(stream).writerow([
+                event, f"{rva:#x}", name,
+                f"{opcode:#x}" if opcode is not None else "na",
+                pc_rva, status,
+            ])
+    except Exception as exc:
+        log(f"WRITER CALLBACK AUDIT ERROR: {name} {type(exc).__name__}: {exc}")
 
 
 def rv(expr):
@@ -491,6 +510,14 @@ class WriterSiteBP(gdb.Breakpoint):
         self.silent = True
 
     def stop(self):
+        # Count callback entry before register/memory reads. This separates
+        # "breakpoint never fired" from "callback fired but sampling failed".
+        STATE["writer_callback_hits"][self.name] = (
+            STATE["writer_callback_hits"].get(self.name, 0) + 1
+        )
+        writer_callback_event("enter", self.rva, self.name, "entered")
+        log(f"WRITER CALLBACK ENTER: name={self.name} rva={self.rva:#x} "
+            f"hit={STATE['writer_callback_hits'][self.name]}")
         # These static store sites are shared by preparatory/configuration
         # vdfut768ig calls as well as the final transform. Record every opcode.
         base = None
@@ -553,8 +580,10 @@ class WriterSiteBP(gdb.Breakpoint):
                 f"staging_base_match={staging_match} staging_index_ok={staging_index_ok}")
             if before_s != "??" and int(before_s, 16) != value:
                 st["changed"] += 1
+            writer_callback_event("sampled", self.rva, self.name, "ok")
         except Exception as e:
-            log(f"STORE_SITE ERROR rva={self.rva:#x}: {e}")
+            writer_callback_event("sample-error", self.rva, self.name, "callback-error")
+            log(f"STORE_SITE ERROR rva={self.rva:#x}: {type(e).__name__}: {e}")
 
         # The first two sites write the malloc staging buffer, not the planter.
         # Only the six statically identified family/tail stores may nominate a
@@ -607,15 +636,51 @@ class SparseWindowWriteBP(gdb.Breakpoint):
             pc = rv("$pc")
             base = STATE.get("base")
             pc_rva = f"{pc - base:#x}" if base is not None and pc >= base else "na"
+            expected_rva = next(
+                (rva for rva, spec in WRITERS.items() if spec[0] == self.name),
+                None,
+            )
+            instruction = "na"
+            effective_address_match = "na"
+            software_bp_enabled = "na"
+            if expected_rva is not None and base is not None:
+                try:
+                    dis = gdb.execute(
+                        f"x/i {base + expected_rva:#x}", to_string=True
+                    ).strip().splitlines()
+                    if dis:
+                        instruction = dis[-1].rsplit(":", 1)[-1].strip()
+                except Exception as exc:
+                    instruction = f"disassembly-error:{type(exc).__name__}"
+                candidate_bp = next(
+                    (bp for bp in STATE["writer_bps"]
+                     if getattr(bp, "rva", None) == expected_rva),
+                    None,
+                )
+                if candidate_bp is not None:
+                    software_bp_enabled = "yes" if candidate_bp.enabled else "no"
+                try:
+                    spec = WRITERS[expected_rva]
+                    candidate_base = rv(spec[1])
+                    candidate_index = rv(spec[2])
+                    candidate_ea = (candidate_base + candidate_index + spec[3]) & 0xFFFFFFFFFFFFFFFF
+                    effective_address_match = "yes" if candidate_ea == self.address else "no"
+                except Exception:
+                    effective_address_match = "unavailable"
             path = os.path.join(OUT, "sparse_write_events.csv")
             with open(path, "a", newline="", encoding="utf-8") as stream:
                 csv.writer(stream).writerow([
                     "hit", "ok", self.name, f"{self.object_offset:#x}",
                     count, pc_rva,
+                    f"{expected_rva:#x}" if expected_rva is not None else "na",
+                    instruction, software_bp_enabled, effective_address_match,
                 ])
             log(f"SPARSE WRITE PROBE HIT: name={self.name} "
                 f"object_offset={self.object_offset:#x} hit={count} "
-                f"pc_after_rva={pc_rva}")
+                f"pc_after_rva={pc_rva} candidate_store_rva={expected_rva!r} "
+                f"candidate_instruction={instruction!r} "
+                f"software_bp_enabled={software_bp_enabled} "
+                f"candidate_ea_matches_watch_address={effective_address_match}")
         except Exception as exc:
             log(f"SPARSE WRITE PROBE CALLBACK ERROR: name={self.name} "
                 f"{type(exc).__name__}: {exc}")
@@ -628,12 +693,15 @@ def arm_sparse_window_write_probes():
     with open(path, "w", newline="", encoding="utf-8") as stream:
         csv.writer(stream).writerow([
             "event", "status", "name", "object_offset", "hit", "pc_after_rva",
+            "candidate_writer_rva", "candidate_instruction", "software_bp_enabled",
+            "candidate_ea_matches_watch_address",
         ])
 
     def record_setup(name, status, offset):
         with open(path, "a", newline="", encoding="utf-8") as stream:
             csv.writer(stream).writerow([
                 "setup", status, name, f"{offset:#x}", 0, "na",
+                "na", "na", "na", "na",
             ])
 
     source = STATE.get("src")
@@ -1376,7 +1444,13 @@ def install_global_probes(base):
         for rva, spec in WRITERS.items():
             bp = WriterSiteBP(rva, spec)
             STATE["writer_bps"].append(bp)
-            log(f"GLOBAL INSTALL STAGE: writer breakpoint {rva:#x} created")
+            writer_callback_event("setup", rva, spec[0],
+                                  "enabled" if bp.enabled else "disabled")
+            details = gdb.execute(f"info breakpoints {bp.number}", to_string=True)
+            resolved = "pending" if "<PENDING>" in details.upper() else "resolved"
+            writer_callback_event("resolution", rva, spec[0], resolved)
+            log(f"GLOBAL INSTALL STAGE: writer breakpoint {rva:#x} "
+                f"created enabled={bp.enabled} resolution={resolved}")
         log(f"BASE={base:#x}; global source/allocator probes and "
             f"{len(WRITERS)} writer sites armed for all vdfut768ig opcodes")
         STATE["global_install_complete"] = True
@@ -1467,6 +1541,12 @@ continue
 # Keep a handle to the entry BP and initialize a clean log.
 with open(LOG, "w", encoding="utf-8") as f:
     f.write("planter trace started\n")
+
+with open(os.path.join(OUT, "writer_callback_events.csv"), "w",
+          newline="", encoding="utf-8") as f:
+    csv.writer(f).writerow([
+        "event", "rva", "name", "active_opcode", "pc_rva", "status",
+    ])
 
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json

@@ -40,6 +40,10 @@ pub struct MixerInputs {
 }
 
 /// The sixteen mixers in block order (store RVAs of the census).
+pub const BODY_A_ROUNDS: usize = 10;
+/// One M14 post-tail byte per round is carried from the same-session giant tape.
+pub const BODY_A_M14_TAPE_RESULTS: usize = BODY_A_ROUNDS;
+
 pub const STORES: [u32; 16] = [0xE6B9D, 0xE6BE2, 0xE6C47, 0xE6CA0, 0xE6D06, 0xE6D3E,
                                0xE6D8B, 0xE6DC1, 0xE6E28, 0xE6E5F, 0xE6EAA, 0xE6EE4,
                                0xE6F42, 0xE6F73, 0xE6FC4, 0xE7023];
@@ -247,10 +251,10 @@ pub fn selectors(f: &WeaveFeeds, planter_1390: &[u8; 256]) -> [u8; 16] {
 // ---------------------------------------------------------------------------
 
 /// Assemble the 192-byte depot zone of one session from its tapes:
-/// the body A rows (giant tape + sel backfills + session zones) and
-/// the caller lays the digest in. Returns the depot array and the
-/// count of assembled body bytes (the m15 rows are the named gap
-/// until their capture lands).
+/// body A is reconstructed from giant/selector tapes and the baked
+/// session-invariant zones; the digest uses measured word-tape inputs.
+/// Returns the depot and the number of filled body-A positions. M14's
+/// post-tail output is read from tape directly, not recomputed here.
 pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String> {
     let mut zones = Zones::from_files(dir)?;
     let tape = std::fs::read_to_string(format!("{dir}/zone26_tape.txt")).map_err(|e| e.to_string())?;
@@ -341,7 +345,7 @@ pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String
                 rnd.push((11, MixerInputs { lane_value: sr[11], mul: 0, m4_round1: false }));
             }
             if !rnd.iter().any(|(j, _)| *j == 3) {
-                rnd.push((3, MixerInputs { lane_value: sr[3], mul: 0, m4_round1: true }));
+                rnd.push((3, MixerInputs { lane_value: sr[3], mul: 0, m4_round1: false }));
             }
             if !rnd.iter().any(|(j, _)| *j == 14) {
                 // m15's tail takes the SELECTOR as v (the family-3 law's
@@ -352,12 +356,8 @@ pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String
             }
         }
     }
-    // the opening round's m4 runs the alternate tail branch (measured)
-    if let Some(r0) = rounds_raw.first_mut() {
-        for (j, inp) in r0.iter_mut() {
-            if *j == 3 { inp.m4_round1 = true; }
-        }
-    }
+    // m4_round1 is a legacy tape field retained for compatibility;
+    // mixer_byte() does not branch on it (cross-session result).
 
     // the depot zone: body A rows (m14's row IS the finished byte)
     let mut depot = [0u8; 0xC0];
@@ -399,8 +399,11 @@ pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String
     Ok((depot, body_bytes))
 }
 
-/// The 32-byte digest zone from the watchpoint word tape: each
-/// block resolved from a MEASURED register value at its own store.
+/// The 32-byte digest zone from measured word-tape candidates.
+/// For each block, the candidate register word is selected by checking
+/// candidate + the measured block constant against the corresponding
+/// sum in live_prov_out.bin. Rust performs the digest arithmetic, but
+/// candidate selection is oracle-anchored rather than SPIM-only.
 pub fn generate_digest_from_tapes(dir: &str) -> Result<[u8; 32], String> {
     use crate::digest::{generate_digest, DigestInputs, K_HIGH, K_LOW};
     let ttxt = std::fs::read_to_string(format!("{dir}/pair_wp_words.txt")).map_err(|e| e.to_string())?;
@@ -730,7 +733,7 @@ mod tests {
                     rnd.push((11, MixerInputs { lane_value: sr[11], mul: 0, m4_round1: false }));
                 }
                 if !rnd.iter().any(|(j, _)| *j == 3) {
-                    rnd.push((3, MixerInputs { lane_value: sr[3], mul: 0, m4_round1: true }));
+                    rnd.push((3, MixerInputs { lane_value: sr[3], mul: 0, m4_round1: false }));
                 }
                 if !rnd.iter().any(|(j, _)| *j == 14) {
                     // m15 is a lane-C exception: its tail consumes the
@@ -899,7 +902,7 @@ mod tests {
                     rnd.push((11, MixerInputs { lane_value: sr[11], mul: 0, m4_round1: false }));
                 }
                 if !rnd.iter().any(|(j, _)| *j == 3) {
-                    rnd.push((3, MixerInputs { lane_value: sr[3], mul: 0, m4_round1: true }));
+                    rnd.push((3, MixerInputs { lane_value: sr[3], mul: 0, m4_round1: false }));
                 }
                 if !rnd.iter().any(|(j, _)| *j == 14) {
                     // m15 is a lane-C exception: its tail consumes the

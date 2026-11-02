@@ -880,8 +880,45 @@ jobs:
                       "- A post-write stop RVA is the instruction pointer observed after the watched write; "
                       "it is not asserted to be the store instruction's own RVA."
                   )
+                  for row in sparse_rows:
+                      if row.get("event") != "hit":
+                          continue
+                      lines.append(
+                          "- " + row.get("name", "unknown")
+                          + ": candidate writer " + row.get("candidate_writer_rva", "na")
+                          + ", instruction " + row.get("candidate_instruction", "na")
+                          + ", software breakpoint enabled "
+                          + row.get("software_bp_enabled", "na")
+                          + ", candidate EA equals watched byte "
+                          + row.get("candidate_ea_matches_watch_address", "na")
+                      )
               else:
                   lines.append("Sparse-window watchpoint event file was not created; no conclusion about writes is available.")
+              lines += ["", "## Direct writer breakpoint callback audit", ""]
+              callback_path = run / "writer_callback_events.csv"
+              if callback_path.is_file():
+                  with callback_path.open(newline="") as stream:
+                      callback_rows = list(csv.DictReader(stream))
+                  for name in ("fam2", "fam4", "fam3", "fifth_1f30"):
+                      rows = [row for row in callback_rows if row.get("name") == name]
+                      setup = next((row.get("status") for row in rows if row.get("event") == "setup"), "missing")
+                      resolution = next((row.get("status") for row in rows if row.get("event") == "resolution"), "missing")
+                      enter_rows = [row for row in rows if row.get("event") == "enter"]
+                      entered = len(enter_rows)
+                      target_entered = sum(row.get("active_opcode") == "0x716bd86c" for row in enter_rows)
+                      other_entered = entered - target_entered
+                      sampled = sum(row.get("event") == "sampled" for row in rows)
+                      errors = sum(row.get("event") == "sample-error" for row in rows)
+                      lines.append(
+                          "- " + name + ": setup " + setup + ", resolution " + resolution
+                          + ", callback enters " + str(entered)
+                          + " (target transform " + str(target_entered)
+                          + ", other opcodes " + str(other_entered) + ")"
+                          + ", samples " + str(sampled)
+                          + ", sample errors " + str(errors)
+                      )
+              else:
+                  lines.append("Writer callback audit file was not created; callback invocation counts are unavailable.")
               lines += ["", "## Status", ""]
               if planter_path.exists() and len(planter) >= 0x2700:
                   lines.append("A final 0x2700-byte planter snapshot passed the four-permutation signature check.")
