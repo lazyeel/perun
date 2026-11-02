@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v29).
+"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v30).
 
 Canonical project copy: tools/planter_trace_gdb.py.
 
@@ -61,11 +61,11 @@ WRITERS = {
     0xFA9C1: ("staging_write_a", "$r9",  "$rsi", 0,      "$rbx"),
     0xFAA8F: ("staging_write_b", "$r11", "$rdx", 0,      "$rsi"),
     0xE24C9: ("fifth_1f30", "$rdi", "$r15", 0x1F30, "$rcx"),
-    # Provisional fam2 store hypothesis from the repeated post-write PC at
-    # 0xE2510: the immediately preceding local decode is
-    # mov BYTE PTR [rdi+rcx+0x1a00],r14b at 0xE2508. Keep it explicitly
-    # provisional until this breakpoint's EA matches the hardware probe.
+    # Hardware tail probe at +0x1AFF confirmed this store by matching
+    # its effective address and PC-after boundary in run 41378982858.
     0xE2508: ("fam2",       "$rdi", "$rcx", 0x1A00, "$r14"),
+    # Hardware tail probe at +0x148F identified this exact byte store.
+    0xE26AA: ("fam4",       "$r8",  "$rax", 0x1390, "$r13"),
     0xE25C2: ("fam3",       "$rdi", "$rax", 0x2460, "$r8"),
     0xFB05B: ("fam1_a",     "$r12", "$rsi", 0x0D60, "$rdx"),
     0xFB075: ("fam1_b",     "$r12", "$rsi", 0x0D60, "$rdx"),
@@ -592,7 +592,7 @@ class WriterSiteBP(gdb.Breakpoint):
         # Only the six statically identified family/tail stores may nominate a
         # planter base. This avoids mistaking a large RW heap VMA for an object:
         # ptr_ok() alone proves mapping, not allocation identity.
-        planter_writer_sites = {0xE24C9, 0xE2508, 0xE25C2, 0xFB05B, 0xFB075}
+        planter_writer_sites = {0xE24C9, 0xE2508, 0xE25C2, 0xE26AA, 0xFB05B, 0xFB075}
         if (self.rva in planter_writer_sites and base is not None
                 and STATE["planter"] is None and ptr_ok(base, PLANTER_SIZE)):
             rbp = rv("$rbp")
@@ -1727,7 +1727,7 @@ with open(os.path.join(OUT, "writer_callback_events.csv"), "w",
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v29", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v30", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},
