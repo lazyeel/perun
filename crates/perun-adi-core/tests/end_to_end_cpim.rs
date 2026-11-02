@@ -6,19 +6,18 @@
 //! compared byte for byte against the live oracle's own CPIM.
 //!
 //! What is GENERATED here (the crate's own math, live-verified):
-//!   - the body A bytes: the sixteen mixers over the one-session
-//!     giant tape, the sel-tape backfills, the session-invariant
-//!     zones -- all ten rounds, every checkable position;
+//!   - all 160 body-A bytes: sixteen mixers over the one-session
+//!     giant tape, with m12/m4/m15 selector backfills and the
+//!     session-invariant zones;
 //!   - the digest: the eight BE sums, all 32 bytes, zero gates;
 //!   - the container's structure fields: the version word 5, the
 //!     body lengths 0xa0/0x34, the body B version 4 (the measured
 //!     anatomy, written by the generator, not copied).
 //!
 //! What is CARRIED from the reference (the named boundaries, not
-//! derivations): the session block (16 bytes), the body B (52),
-//! and the ten m15 body rows whose giant hits the pair36 tape did
-//! not carry (the next capture closes them; every carried byte is
-//! counted and named in the verdict).
+//! derivations): the session block (16 bytes) and body B (52).
+//! The three known missing giant-hit rows are reconstructed from
+//! the same-session selector tape; they are not copied from CPIM.
 //!
 //! The verdict line reports the container parity AND the split:
 //!   "CPIM e2e: 276/276 container bytes; N generated, M carried"
@@ -43,6 +42,7 @@ fn cpim_end_to_end() {
     let Ok((depot, body_bytes)) = generate_body_from_tapes(&dir) else {
         panic!("the body-a tapes did not assemble under {dir}");
     };
+    assert_eq!(body_bytes, 160, "the tape assembler must generate all body-A bytes");
 
     // THE CONTAINER, per the measured anatomy:
     //   [0..4) version 5 | [4..0x14) session | [0x14..0x18) 0xa0
@@ -65,7 +65,7 @@ fn cpim_end_to_end() {
         equal += 1;
     }
     // the split: generated positions vs carried
-    let carried = 16 + 52 + (160 - body_bytes); // session + body B + the m15 rows
-    eprintln!("CPIM e2e: {equal}/276 container bytes; {} generated, {carried} carried (session 16, body B 52, m15 body rows {})",
-              276 - carried, 160 - body_bytes);
+    let carried = 16 + 52; // session + body B; all body-A bytes and digest are generated
+    eprintln!("CPIM e2e: {equal}/276 container bytes; {} generated, {carried} carried (session 16, body B 52)",
+              276 - carried);
 }
