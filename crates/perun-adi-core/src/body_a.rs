@@ -7,11 +7,11 @@
 //! digest node). Every mixer: a planter row selected through a
 //! key byte, the row byte feeding a lane-specific tail, plus a
 //! masked read from the lane's zone. The formulas are
-//! live-verified -- every checkable mixer of every cycle of the
-//! run-26 tape reproduces its CPIM byte exactly (122/122,
-//! `tools/verify_body_a2.py` carries the same conveyor in
-//! Python; the three excluded passes are named there and in the
-//! test below).
+//! live-verified at the tail level against same-session captures.
+//! The older run-26 result (122/122) covered only the rows that the
+//! legacy fixed-offset verifier considered checkable; it is not a
+//! proof of complete 160-byte coverage. The current live tests below
+//! require all sixteen mixer positions in each of ten body-A rounds.
 //!
 //! The lane tails (per-mixer final xors; the planter-derived
 //! lanes value `c` / `c3` / `c4` is the input here):
@@ -33,10 +33,9 @@ pub struct MixerInputs {
     pub lane_value: u8,
     /// The mul operand (lanes A/B only; unused by the C/D tails).
     pub mul: u8,
-    /// The m4 first-round flag: the opening round's m4 tail runs the
-    /// ALTERNATE CFF branch -- the same or-fold WITHOUT the final
-    /// xor (measured: the live depot[0] equals the bare or-fold;
-    /// rounds two to ten take the xor). Defaults to the main branch.
+    /// Legacy tape-structure field retained for input compatibility.
+    /// The cross-session measurement disproved the proposed m4 first-round
+    /// alternate branch; current mixer arithmetic does not read this flag.
     pub m4_round1: bool,
 }
 
@@ -129,16 +128,21 @@ pub fn mixer_byte(mixer: usize, inp: &MixerInputs, zones: &Zones) -> Option<u8> 
     }
 }
 
-/// Assemble the body A (160 bytes) from ten rounds of measured
-/// mixer inputs. `None` for a position whose zone read is out of
-/// the dumped window leaves that byte as 0 -- the parity test
-/// skips exactly those.
+/// Assemble body A from ten rounds whose entries are in mixer order.
+/// `ROW_POS` is the destination permutation, not a mixer identifier.
+/// Mixer 14's tape hit is after its tail, so `mul` already contains its
+/// final output byte and must not be sent through `mixer_byte` again.
 pub fn generate_body_a(rounds: &[[MixerInputs; 16]; 10], zones: &Zones) -> [u8; 160] {
     let mut body = [0u8; 160];
     for (k, round) in rounds.iter().enumerate() {
-        for (inp, row_pos) in round.iter().zip(ROW_POS.iter()) {
-            if let Some(b) = mixer_byte(*row_pos, inp, zones) {
-                let pos = row_pos + 0x10 * k;
+        for (mixer, inp) in round.iter().enumerate() {
+            let out = if mixer == 13 {
+                Some(inp.mul)
+            } else {
+                mixer_byte(mixer, inp, zones)
+            };
+            if let Some(b) = out {
+                let pos = ROW_POS[mixer] + 0x10 * k;
                 body[pos] = b;
             }
         }
@@ -576,13 +580,12 @@ pub fn generate_cpim(inputs: &SessionInputs) -> [u8; 0x114] {
 mod tests {
     use super::*;
 
-    /// The live parity: the run-26 tape (the zone-read registers of
-    /// every mixer of every round) drives the transcribed tails and
-    /// the result must match the same run's CPIM body A byte for
-    /// byte -- 122 checkable passes, all green. The three defective
-    /// tape rows (m12's BP landed mid-instruction, m14's after the
-    /// final xor, and m4's first round) are skipped with their
-    /// causes; this mirrors tools/verify_body_a2.py exactly.
+    /// The live parity: same-session zone-read and selector tapes are
+    /// joined to reconstruct all sixteen mixer inputs in each of ten
+    /// rounds. m12, m4 and m15 are backfilled from the selector tape
+    /// where their giant-read breakpoint is absent; m14 carries its
+    /// already-finished output byte. Every one of the 160 body-A bytes
+    /// must match the same session's CPIM.
     #[test]
     fn live_body_a_parity() {
         let dir = std::env::var("PERUN_LIVE_DIR").unwrap_or_else(|_| "/opt/data/adi-re".into());
@@ -681,11 +684,9 @@ mod tests {
             rounds_raw.push(cur);
         }
 
-        // THE SEL-TAPE BACKFILL: m12's giant breakpoint sits inside an
-        // instruction (never fires) and the m4 first round is the named
-        // anomaly -- but the planter tape carries every round complete,
-        // and for the fam4 lanes the lane_value IS the selector (rax
-        // right after the s-box xor, measured).
+        // THE SEL-TAPE BACKFILL: m12 and m4 have known breakpoint gaps;
+        // m15's lane-C input is the post-S-box selector (measured at
+        // the selector tape), not the pre-xor register from the giant hit.
         if let Ok(st) = std::fs::read_to_string(format!("{dir}/sel34_tape.txt")) {
             let mut sel_rounds: Vec<Vec<u8>> = Vec::new();
             let mut srow: Vec<u8> = Vec::new();
@@ -711,21 +712,18 @@ mod tests {
                 if !rnd.iter().any(|(j, _)| *j == 3) {
                     rnd.push((3, MixerInputs { lane_value: sr[3], mul: 0, m4_round1: true }));
                 }
+                if !rnd.iter().any(|(j, _)| *j == 14) {
+                    // m15 is a lane-C exception: its tail consumes the
+                    // selector after the 0x28 S-box xor, captured on sel tape.
+                    rnd.push((14, MixerInputs { lane_value: sr[14], mul: 0, m4_round1: false }));
+                }
             }
         }
-        // The m4 first round: one session matched the bare fold and the
-        // raw branch was inferred -- the next session's live byte
-        // DISPROVED it (the xor branch, like every round); the field
-        // stays for input compatibility, the branch is gone.
         let mut checked = 0;
         let mut ok = 0;
         let mut skipped_named = 0;
         for (k, round) in rounds_raw.iter().take(10).enumerate() {
             for (j, inp) in round {
-                if *j == 11 && inp.mul == 0 {
-                    skipped_named += 1; // m12 row without the sel-tape backfill
-                    continue;
-                }
                 let pos = ROW_POS[*j] + 0x10 * k;
                 let expect = cpim[0x18 + pos];
                 // m14's breakpoint (0xe6f6c) sits AFTER its tail -- the
@@ -742,10 +740,8 @@ mod tests {
                 }
             }
         }
-        // the live tape carries ten rounds; the checkable count is the
-        // campaign's 122 -- the test must not pass on a short read
-        assert!(checked >= 100, "suspiciously few checkable rows ({checked})");
-        assert_eq!(ok, checked, "every checkable byte must match");
+        assert_eq!(checked, 160, "all ten body-A rounds must be fully covered");
+        assert_eq!(ok, 160, "every body-A byte must match the same-session CPIM");
         eprintln!("BODY A live parity: {ok}/{checked} (named skips: {skipped_named})");
     }
 
@@ -848,11 +844,9 @@ mod tests {
         if !cur.is_empty() {
             rounds_raw.push(cur);
         }
-// THE SEL-TAPE BACKFILL: m12's giant breakpoint sits inside an
-        // instruction (never fires) and the m4 first round is the named
-        // anomaly -- but the planter tape carries every round complete,
-        // and for the fam4 lanes the lane_value IS the selector (rax
-        // right after the s-box xor, measured).
+// THE SEL-TAPE BACKFILL: m12 and m4 have known breakpoint gaps;
+        // m15's lane-C input is the post-S-box selector (measured at
+        // the selector tape), not the pre-xor register from the giant hit.
         if let Ok(st) = std::fs::read_to_string(format!("{dir}/sel34_tape.txt")) {
             let mut sel_rounds: Vec<Vec<u8>> = Vec::new();
             let mut srow: Vec<u8> = Vec::new();
@@ -878,18 +872,16 @@ mod tests {
                 if !rnd.iter().any(|(j, _)| *j == 3) {
                     rnd.push((3, MixerInputs { lane_value: sr[3], mul: 0, m4_round1: true }));
                 }
+                if !rnd.iter().any(|(j, _)| *j == 14) {
+                    // m15 is a lane-C exception: its tail consumes the
+                    // selector after the 0x28 S-box xor, captured on sel tape.
+                    rnd.push((14, MixerInputs { lane_value: sr[14], mul: 0, m4_round1: false }));
+                }
             }
         }
-        // The m4 first round: one session matched the bare fold and the
-        // raw branch was inferred -- the next session's live byte
-        // DISPROVED it (the xor branch, like every round); the field
-        // stays for input compatibility, the branch is gone.
         let mut body_bytes = 0;
         for (k, round) in rounds_raw.iter().take(10).enumerate() {
             for (j, inp) in round {
-                if *j == 11 && inp.mul == 0 && inp.lane_value == 0 {
-                    continue; // an unfilled m12 backfill row stays unseen
-                }
                 let pos = ROW_POS[*j] + 0x10 * k;
                 // m14's row carries the finished byte (the breakpoint
                 // sits after the tail, measured 10/10).
@@ -901,6 +893,8 @@ mod tests {
                 }
             }
         }
+        assert_eq!(body_bytes, 160, "the assembled body A must cover all ten rounds");
+        assert!(seen[..0xA0].iter().all(|&v| v), "no body-A position may remain unassembled");
         // the digest: resolve the eight words from measured hits
         let mut rows: Vec<Vec<(String, u32)>> = Vec::new();
         for line in wtape.lines() {
@@ -1048,6 +1042,49 @@ mod tests {
         }
         assert_eq!(total, 160, "ten complete rounds");
         eprintln!("WEAVE live parity: {ok}/160 selectors across ten rounds");
+    }
+
+
+    /// Regression: a mixer ordinal and its destination row are different
+    /// coordinate systems. Also pin mixer 14's post-tail tape semantics.
+    #[test]
+    fn body_a_uses_mixer_ids_then_applies_the_row_ladder() {
+        let zones = Zones {
+            a: [0x13; ZONE_WINDOW],
+            b: [0x27; ZONE_WINDOW],
+            c: [0x39; ZONE_WINDOW],
+            d: [0x4B; ZONE_WINDOW],
+            c1a: 0x12,
+            c1b: 0x34,
+            c1c: 0x56,
+            c1d: 0x78,
+        };
+        let mut rounds = [[MixerInputs {
+            lane_value: 0,
+            mul: 0,
+            m4_round1: false,
+        }; 16]; 10];
+        for (round_no, round) in rounds.iter_mut().enumerate() {
+            for (mixer, input) in round.iter_mut().enumerate() {
+                input.lane_value = (round_no * 31 + mixer * 17 + 3) as u8;
+                input.mul = (round_no * 13 + mixer * 7 + 1) as u8;
+            }
+        }
+
+        let mut expected = [0u8; 160];
+        for (round_no, round) in rounds.iter().enumerate() {
+            for (mixer, input) in round.iter().enumerate() {
+                let out = if mixer == 13 {
+                    Some(input.mul)
+                } else {
+                    mixer_byte(mixer, input, &zones)
+                }
+                .expect("a u8 lane value always indexes the 0x300-byte dynamic window");
+                expected[ROW_POS[mixer] + 0x10 * round_no] = out;
+            }
+        }
+
+        assert_eq!(generate_body_a(&rounds, &zones), expected);
     }
 
     /// The ladder invariant, pinned without any live files: every
