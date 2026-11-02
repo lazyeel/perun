@@ -400,6 +400,26 @@ pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String
     Ok((depot, body_bytes))
 }
 
+/// Validate that pair37's depot snapshot belongs to the same CPIM as the
+/// word-tape resolver. This prevents stale watchpoint data from being
+/// accepted against a later session's live_prov_out.bin.
+fn read_paired_cpim(dir: &str) -> Result<Vec<u8>, String> {
+    let cpim = std::fs::read(format!("{dir}/live_prov_out.bin"))
+        .map_err(|e| format!("read live CPIM: {e}"))?;
+    if cpim.len() != 0x114 {
+        return Err(format!("reference CPIM must be 0x114 bytes, got {:#x}", cpim.len()));
+    }
+    let depot = std::fs::read(format!("{dir}/pair_depot.bin"))
+        .map_err(|e| format!("read same-session pair_depot.bin: {e}"))?;
+    if depot.len() < 0xC0 {
+        return Err(format!("pair_depot.bin is shorter than 0xC0 bytes: {:#x}", depot.len()));
+    }
+    if depot[..0xC0] != cpim[0x18..0xD8] {
+        return Err("pair_depot.bin[0..0xC0] does not match live_prov_out.bin[0x18..0xD8]; refusing cross-session tape pairing".into());
+    }
+    Ok(cpim)
+}
+
 /// The 32-byte digest zone from measured word-tape candidates.
 /// For each block, the candidate register word is selected by checking
 /// candidate + the measured block constant against the corresponding
@@ -407,6 +427,7 @@ pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String
 /// candidate selection is oracle-anchored rather than SPIM-only.
 pub fn generate_digest_from_tapes(dir: &str) -> Result<[u8; 32], String> {
     use crate::digest::{generate_digest, DigestInputs, K_HIGH, K_LOW};
+    let cpim = read_paired_cpim(dir)?;
     let ttxt = std::fs::read_to_string(format!("{dir}/pair_wp_words.txt")).map_err(|e| e.to_string())?;
     let mut rows: Vec<Vec<(String, u32)>> = Vec::new();
     for line in ttxt.lines() {
@@ -432,7 +453,7 @@ pub fn generate_digest_from_tapes(dir: &str) -> Result<[u8; 32], String> {
         let mut word = None;
         'hits: for row in &rows {
             for (kk, vv) in row {
-                if kk == key && vv.wrapping_add(k) == expect_sum(dir, block)? {
+                if kk == key && vv.wrapping_add(k) == expect_sum(&cpim, block) {
                     word = Some(*vv);
                     break 'hits;
                 }
@@ -453,17 +474,14 @@ pub fn generate_digest_from_tapes(dir: &str) -> Result<[u8; 32], String> {
     Ok(generate_digest(&words))
 }
 
-/// The four live bytes of a digest block, read straight off the
-/// reference CPIM (MSB first). The word tape resolves AGAINST this
-/// measured sum -- never derived.
-fn expect_sum(dir: &str, block: usize) -> Result<u32, String> {
-    let cpim = std::fs::read(format!("{dir}/live_prov_out.bin")).map_err(|e| e.to_string())?;
-    if cpim.len() < 0xD8 { return Err("the reference CPIM is short".into()); }
+/// The four live bytes of one digest block, read from a previously
+/// pair-validated CPIM (MSB first).
+fn expect_sum(cpim: &[u8], block: usize) -> u32 {
     let mut s = 0u32;
     for b in 0..4 {
         s = (s << 8) | cpim[0x18 + block + b] as u32;
     }
-    Ok(s)
+    s
 }
 
 
@@ -604,6 +622,32 @@ pub fn generate_cpim(inputs: &SessionInputs) -> [u8; 0x114] {
 mod tests {
     use super::*;
 
+    #[test]
+    fn paired_cpim_rejects_stale_or_mismatched_depot() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "perun-paired-cpim-{}-{nonce}", std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temporary test directory");
+        let mut cpim = vec![0u8; 0x114];
+        for (i, byte) in cpim[0x18..0xD8].iter_mut().enumerate() {
+            *byte = (i.wrapping_mul(37) & 0xFF) as u8;
+        }
+        let mut depot = cpim[0x18..0xD8].to_vec();
+        std::fs::write(dir.join("live_prov_out.bin"), &cpim).expect("write reference CPIM");
+        std::fs::write(dir.join("pair_depot.bin"), &depot).expect("write paired depot");
+        let path = dir.to_str().expect("UTF-8 temporary path");
+        assert!(read_paired_cpim(path).is_ok(), "matching pair must be accepted");
+        depot[0x7F] ^= 1;
+        std::fs::write(dir.join("pair_depot.bin"), &depot).expect("write stale depot");
+        assert!(read_paired_cpim(path).is_err(), "mismatched pair must be rejected");
+        std::fs::remove_dir_all(&dir).expect("remove temporary test directory");
+    }
+
     /// The live parity: same-session zone-read and selector tapes are
     /// joined to reconstruct all sixteen mixer inputs in each of ten
     /// rounds. m12, m4 and m15 are backfilled from the selector tape
@@ -611,7 +655,13 @@ mod tests {
     /// already-finished output byte. Every one of the 160 body-A bytes
     /// must match the same session's CPIM.
     #[test]
+    #[ignore = "requires same-session zone-26 tapes and paired CPIM; set PERUN_BODY_A_PAIR_READY=1"]
     fn live_body_a_parity() {
+        assert_eq!(
+            std::env::var("PERUN_BODY_A_PAIR_READY").as_deref().unwrap_or(""),
+            "1",
+            "set PERUN_BODY_A_PAIR_READY=1 only for same-session zone-26 artifacts"
+        );
         let dir = std::env::var("PERUN_LIVE_DIR").unwrap_or_else(|_| "/opt/data/adi-re".into());
         // The parity is only meaningful when the tape and the CPIM
         // come from ONE session -- the tape's planter is session-
@@ -619,18 +669,10 @@ mod tests {
         // run overwrites live_prov_out.bin, so the body-A gate is
         // its OWN switch, flipped only while the zone-26 artifacts
         // are the same run's pair.
-        if std::env::var("PERUN_BODY_A_PAIR_READY").is_err() {
-            eprintln!("gating: PERUN_BODY_A_PAIR_READY not set (the zone-26 tape and the current live_prov_out.bin must be one session)");
-            return;
-        }
-        let (Ok(mut zones), Ok(tape), Ok(cpim)) = (
-            Zones::from_files(&dir),
-            std::fs::read_to_string(format!("{dir}/zone26_tape.txt")),
-            std::fs::read(format!("{dir}/live_prov_out.bin")),
-        ) else {
-            eprintln!("gating: live artifacts not present under {dir}");
-            return;
-        };
+        let mut zones = Zones::from_files(&dir).expect("same-session zone files");
+        let tape = std::fs::read_to_string(format!("{dir}/zone26_tape.txt"))
+            .expect("same-session zone-26 tape");
+        let cpim = read_paired_cpim(&dir).expect("same-session paired CPIM");
         assert_eq!(cpim.len(), 0x114, "the live CPIM is 276 bytes");
         // the session's first lane values, straight off the tape:
         // fam1/fam2 index by rcx, fam3 by rdx, fam4 by rax.
@@ -779,29 +821,29 @@ mod tests {
     }
 
     /// THE THROUGH TEST: the full 192-byte depot of ONE session --
-    /// body A assembled from the mixer tape, the digest from the
-    /// watchpoint word tape -- laid against the same run's CPIM
-    /// (the unloader's law: cpim[0x18+j] == depot[j]). The digest
-    /// block resolves every word from a measured store hit, so no
-    /// byte on either side is derived. Gated like the digest pair.
+    /// body A assembled from mixer tapes, digest candidates selected
+    /// from post-write register snapshots against CPIM sums, then both
+    /// compared with the same run's CPIM (cpim[0x18+j] == depot[j]).
+    /// The digest resolver is oracle-anchored; candidate words are not
+    /// claimed to come from each block's own store. This test is ignored
+    /// by default and must be opted into with its same-session marker.
     #[test]
+    #[ignore = "requires same-session zone, word, depot, and CPIM artifacts; set PERUN_DIGEST_PAIR_READY=1"]
     fn live_full_depot_parity() {
+        assert_eq!(
+            std::env::var("PERUN_DIGEST_PAIR_READY").as_deref().unwrap_or(""),
+            "1",
+            "set PERUN_DIGEST_PAIR_READY=1 only for a complete same-session pair"
+        );
         use crate::digest::{generate_digest, DigestInputs, K_HIGH, K_LOW};
         let dir = std::env::var("PERUN_LIVE_DIR")
             .unwrap_or_else(|_| "/opt/data/adi-re".into());
-        if std::env::var("PERUN_DIGEST_PAIR_READY").is_err() {
-            eprintln!("gating: PERUN_DIGEST_PAIR_READY not set");
-            return;
-        }
-        let (Ok(mut zones), Ok(tape), Ok(wtape), Ok(cpim)) = (
-            Zones::from_files(&dir),
-            std::fs::read_to_string(format!("{dir}/zone26_tape.txt")),
-            std::fs::read_to_string(format!("{dir}/pair_wp_words.txt")),
-            std::fs::read(format!("{dir}/live_prov_out.bin")),
-        ) else {
-            eprintln!("gating: through-test artifacts not present under {dir}");
-            return;
-        };
+        let mut zones = Zones::from_files(&dir).expect("same-session zone files");
+        let tape = std::fs::read_to_string(format!("{dir}/zone26_tape.txt"))
+            .expect("same-session zone-26 tape");
+        let wtape = std::fs::read_to_string(format!("{dir}/pair_wp_words.txt"))
+            .expect("same-session digest word tape");
+        let cpim = read_paired_cpim(&dir).expect("same-session paired CPIM");
         assert_eq!(cpim.len(), 0x114, "the live CPIM is 276 bytes");
         // the session's first lane values, straight off the tape:
         // fam1/fam2 index by rcx, fam3 by rdx, fam4 by rax.
@@ -1015,20 +1057,19 @@ mod tests {
     /// session) with the taped feeds and the session's planter S-box
     /// (planter34.bin, window 0x1390). Gated on PERUN_WEAVE_READY.
     #[test]
+    #[ignore = "requires same-session selector tape and planter; set PERUN_WEAVE_READY=1"]
     fn live_weave_parity() {
+        assert_eq!(
+            std::env::var("PERUN_WEAVE_READY").as_deref().unwrap_or(""),
+            "1",
+            "set PERUN_WEAVE_READY=1 only for same-session selector artifacts"
+        );
         let dir = std::env::var("PERUN_LIVE_DIR")
             .unwrap_or_else(|_| "/opt/data/adi-re".into());
-        if std::env::var("PERUN_WEAVE_READY").is_err() {
-            eprintln!("gating: PERUN_WEAVE_READY not set");
-            return;
-        }
-        let (Ok(tape), Ok(planter)) = (
-            std::fs::read_to_string(format!("{dir}/sel34_tape.txt")),
-            std::fs::read(format!("{dir}/planter34.bin")),
-        ) else {
-            eprintln!("gating: weave artifacts not present under {dir}");
-            return;
-        };
+        let tape = std::fs::read_to_string(format!("{dir}/sel34_tape.txt"))
+            .expect("same-session selector tape");
+        let planter = std::fs::read(format!("{dir}/planter34.bin"))
+            .expect("same-session planter dump");
         assert!(planter.len() >= 0x1490, "the planter dump covers the 0x1390 window");
         let mut sbox = [0u8; 256];
         sbox.copy_from_slice(&planter[0x1390..0x1490]);

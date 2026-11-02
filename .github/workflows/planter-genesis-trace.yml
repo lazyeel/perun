@@ -905,6 +905,9 @@ jobs:
                           + " " + row.get("observed_store_instruction", "na")
                           + ", width " + row.get("observed_store_width", "na")
                           + ", EA match " + row.get("observed_store_ea_match", "na")
+                          + ", method " + row.get("observed_store_method", "na")
+                          + ", PC instruction " + row.get("pc_instruction", "na")
+                          + ", nearby decode " + row.get("near_pc_disassembly", "na")
                       )
               else:
                   lines.append("Sparse-window watchpoint event file was not created; no conclusion about writes is available.")

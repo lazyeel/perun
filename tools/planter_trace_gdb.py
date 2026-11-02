@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v27).
+"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v28).
 
 Canonical project copy: tools/planter_trace_gdb.py.
 
@@ -693,56 +693,138 @@ class SparseWindowWriteBP(gdb.Breakpoint):
                 except Exception:
                     effective_address_match = "unavailable"
 
-            # Recover the instruction immediately preceding the hardware
-            # watchpoint stop. On x86, the debug exception reports post-write
-            # RIP. Sweep the preceding 15 bytes (maximum instruction length),
-            # retaining only decodes that end at RIP and whose explicit
-            # memory operand covers the watched byte.
-            try:
-                register_values = {
-                    name: rv("$" + name)
-                    for name in ("rax", "rbx", "rcx", "rdx", "rsi", "rdi",
-                                 "rbp", "rsp", "r8", "r9", "r10", "r11",
-                                 "r12", "r13", "r14", "r15")
-                }
-                actual_candidates = []
-                for back in range(1, 16):
-                    start = pc - back
-                    dis = gdb.execute(f"x/2i {start:#x}", to_string=True).strip().splitlines()
-                    decoded = []
-                    for line in dis:
-                        match = re.match(
-                            r"^\s*(?:=>\s*)?(0x[0-9a-fA-F]+)(?:\s+<[^>]+>)?:\s*(.*)$",
-                            line,
-                        )
-                        if match:
-                            decoded.append((int(match.group(1), 16), match.group(2).strip()))
-                    if len(decoded) < 2 or decoded[1][0] != pc:
+            # Resolve the store using a trusted instruction boundary first.
+            # E24C9 is a confirmed instruction start (fifth_1f30 writer BP).
+            # Linear disassembly from there avoids accepting arbitrary x86
+            # decodes that begin in the middle of another instruction.
+            register_values = {
+                name: rv("$" + name)
+                for name in ("rax", "rbx", "rcx", "rdx", "rsi", "rdi",
+                             "rbp", "rsp", "r8", "r9", "r10", "r11",
+                             "r12", "r13", "r14", "r15", "eflags")
+            }
+            observed_store_method = "not-found"
+            pc_instruction = "na"
+            near_pc_disassembly = "na"
+            actual_candidates = []
+
+            def parse_disassembly(output):
+                decoded = []
+                for line in output.splitlines():
+                    match = re.match(
+                        r"^\s*(?:=>\s*)?(0x[0-9a-fA-F]+)(?:\s+<[^>]+>)?:\s*(.*)$",
+                        line,
+                    )
+                    if match:
+                        decoded.append((int(match.group(1), 16), match.group(2).strip()))
+                return decoded
+
+            def candidate_for_instruction(start_pc, asm):
+                for expression, width in parse_intel_memory_operands(asm):
+                    resolved = analyze_intel_address(expression, register_values)
+                    if resolved is None:
                         continue
-                    for expression, width in parse_intel_memory_operands(decoded[0][1]):
-                        resolved = analyze_intel_address(expression, register_values)
-                        if resolved is None:
+                    ea = resolved["effective_address"]
+                    size = width or 1
+                    if ea <= self.address < ea + size:
+                        return (start_pc, asm, width, ea, "explicit")
+                # REP string stores can leave RIP on the instruction itself;
+                # their implicit destination is ES:RDI and RDI is advanced
+                # after the element that triggered the debug exception.
+                tokens = asm.lower().replace(",", " ").split()
+                while tokens and tokens[0] in (
+                    "rep", "repe", "repz", "repne", "repnz", "lock"
+                ):
+                    tokens.pop(0)
+                if tokens:
+                    mnemonic = tokens[0]
+                    string_widths = {
+                        "stosb": 1, "stosw": 2, "stosd": 4, "stosq": 8,
+                        "movsb": 1, "movsw": 2, "movsd": 4, "movsq": 8,
+                    }
+                    width = string_widths.get(mnemonic)
+                    if width is not None:
+                        direction = -1 if register_values["eflags"] & 0x400 else 1
+                        last_ea = (
+                            register_values["rdi"] - direction * width
+                        ) & 0xFFFFFFFFFFFFFFFF
+                        if last_ea <= self.address < last_ea + width:
+                            return (start_pc, asm, width, last_ea, "implicit-string")
+                return None
+
+            try:
+                current = parse_disassembly(
+                    gdb.execute(f"x/1i {pc:#x}", to_string=True)
+                )
+                if current:
+                    pc_instruction = current[0][1]
+                near = parse_disassembly(
+                    gdb.execute(f"x/12i {max(0, pc - 0x30):#x}", to_string=True)
+                )
+                near_pc_disassembly = "; ".join(
+                    f"{addr - base:+#x} {asm}" if addr >= base else f"{addr:#x} {asm}"
+                    for addr, asm in near
+                )
+
+                # E24C9 is a directly observed, enabled writer instruction and
+                # lies before all three current watchpoint PCs in this function.
+                anchor = base + 0xE24C9
+                anchored = parse_disassembly(
+                    gdb.execute(f"x/256i {anchor:#x}", to_string=True)
+                )
+                anchored_matches = []
+                for index, (addr, asm) in enumerate(anchored):
+                    next_is_pc = (
+                        index + 1 < len(anchored)
+                        and anchored[index + 1][0] == pc
+                    )
+                    same_pc_rep = addr == pc
+                    if not (next_is_pc or same_pc_rep):
+                        continue
+                    candidate = candidate_for_instruction(addr, asm)
+                    if candidate is not None:
+                        anchored_matches.append(candidate)
+
+                if anchored_matches:
+                    actual_candidates.extend(anchored_matches)
+                    observed_store_method = "linear-from-confirmed-E24C9"
+                else:
+                    # Fallback only: a local backwards sweep is useful for
+                    # diagnostics but is not treated as a trusted boundary.
+                    for back in range(1, 16):
+                        candidate_pc = pc - back
+                        decoded = parse_disassembly(
+                            gdb.execute(f"x/2i {candidate_pc:#x}", to_string=True)
+                        )
+                        if len(decoded) < 2 or decoded[1][0] != pc:
                             continue
-                        ea = resolved["effective_address"]
-                        size = width or 1
-                        if ea <= self.address < ea + size:
-                            actual_candidates.append((
-                                start, decoded[0][1], width, ea
-                            ))
-                unique = {(item[0], item[1], item[2], item[3]) for item in actual_candidates}
+                        candidate = candidate_for_instruction(decoded[0][0], decoded[0][1])
+                        if candidate is not None:
+                            actual_candidates.append(candidate)
+                    if actual_candidates:
+                        observed_store_method = "unaligned-local-backscan"
+
+                unique = {
+                    (item[0], item[1], item[2], item[3], item[4])
+                    for item in actual_candidates
+                }
                 if len(unique) == 1:
-                    start, asm, width, _ea = next(iter(unique))
-                    observed_store_rva = f"{start - base:#x}" if start >= base else "outside-module"
+                    start_pc, asm, width, _ea, kind = next(iter(unique))
+                    observed_store_rva = (
+                        f"{start_pc - base:#x}" if start_pc >= base else "outside-module"
+                    )
                     observed_store_instruction = asm
                     observed_store_width = str(width) if width is not None else "unknown"
                     observed_store_ea_match = "yes"
+                    observed_store_method += ":" + kind
                 elif len(unique) > 1:
                     observed_store_rva = f"ambiguous:{len(unique)}"
                     observed_store_ea_match = "ambiguous"
                 else:
-                    observed_store_ea_match = "no-explicit-operand-match"
+                    observed_store_ea_match = "no-store-candidate-matched"
             except Exception as exc:
                 observed_store_ea_match = f"scan-error:{type(exc).__name__}"
+                observed_store_method = "scan-error"
             path = os.path.join(OUT, "sparse_write_events.csv")
             with open(path, "a", newline="", encoding="utf-8") as stream:
                 csv.writer(stream).writerow([
@@ -752,7 +834,8 @@ class SparseWindowWriteBP(gdb.Breakpoint):
                     instruction, software_bp_enabled, effective_address_match,
                     pc_after_matches_next, observed_store_rva,
                     observed_store_instruction, observed_store_width,
-                    observed_store_ea_match,
+                    observed_store_ea_match, observed_store_method,
+                    pc_instruction, near_pc_disassembly,
                 ])
             log(f"SPARSE WRITE PROBE HIT: name={self.name} "
                 f"object_offset={self.object_offset:#x} hit={count} "
@@ -764,7 +847,10 @@ class SparseWindowWriteBP(gdb.Breakpoint):
                 f"observed_store_rva={observed_store_rva} "
                 f"observed_store_instruction={observed_store_instruction!r} "
                 f"observed_store_width={observed_store_width} "
-                f"observed_store_ea_match={observed_store_ea_match}")
+                f"observed_store_ea_match={observed_store_ea_match} "
+                f"observed_store_method={observed_store_method} "
+                f"pc_instruction={pc_instruction!r} "
+                f"near_pc_disassembly={near_pc_disassembly!r}")
         except Exception as exc:
             log(f"SPARSE WRITE PROBE CALLBACK ERROR: name={self.name} "
                 f"{type(exc).__name__}: {exc}")
@@ -780,14 +866,15 @@ def arm_sparse_window_write_probes():
             "candidate_writer_rva", "candidate_instruction", "software_bp_enabled",
             "candidate_ea_matches_watch_address", "pc_after_matches_next_instruction",
             "observed_store_rva", "observed_store_instruction", "observed_store_width",
-            "observed_store_ea_match",
+            "observed_store_ea_match", "observed_store_method",
+            "pc_instruction", "near_pc_disassembly",
         ])
 
     def record_setup(name, status, offset):
         with open(path, "a", newline="", encoding="utf-8") as stream:
             csv.writer(stream).writerow([
                 "setup", status, name, f"{offset:#x}", 0, "na",
-                "na", "na", "na", "na", "na", "na", "na", "na", "na",
+                "na", "na", "na", "na", "na", "na", "na", "na", "na", "na", "na", "na",
             ])
 
     source = STATE.get("src")
@@ -1637,7 +1724,7 @@ with open(os.path.join(OUT, "writer_callback_events.csv"), "w",
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v27", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v28", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},

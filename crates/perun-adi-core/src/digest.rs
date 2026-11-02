@@ -1,10 +1,10 @@
 //! The digest node, transcribed from the live Android oracle
 //! (+0xfbdf0..+0xfc110: the digest prologue and the stage-two node
 //! writing depot rows 0xA0..0xBF). Measured live across two runs
-//! (31/32) and closed to ALL EIGHT blocks in one run (`pair32.py`:
-//! three hardware watchpoints over the depot windows 0xA0/0xA8/0xB0,
-//! the eight channel words logged at every store, plus the same
-//! run's CPIM).
+//! (31/32) and closed to ALL EIGHT blocks in one run (`pair37.py`:
+//! three hardware watchpoints over 8-byte depot spans at 0xA0/0xA8/0xB0;
+//! each stop records the eight carrier-register candidates, a post-write
+//! instruction pointer, and the run's CPIM/depot slice).
 //!
 //! THE MEASURED LAW: the digest zone depot[0xA0..0xC0) is the
 //! BIG-ENDIAN layout of EIGHT 32-bit sums, four bytes per block:
@@ -30,10 +30,13 @@
 //!
 //! The words are PHASE-LIVE: registers evolve across the node's
 //! stores (r13 walked three values, r14 two, rcx and rdx a dozen
-//! in the measured run). The parity test therefore resolves each
-//! block from the word AT ITS OWN STORE -- every candidate hit on
-//! the tape is tried, and the block must come out of a measured
-//! register value, never a derived constant.
+//! in the measured run). The pair37 tape is a sequence of post-write
+//! register snapshots triggered by watchpoints on the 8-byte spans
+//! at 0xA0, 0xA8, and 0xB0. It does NOT identify each candidate word
+//! as captured at that word's own 4-byte store. The resolver searches
+//! all snapshots for a register value whose sum matches the corresponding
+//! CPIM block; this is oracle-anchored candidate lookup, not independent
+//! store-time provenance.
 
 /// The digest zone length in depot coordinates: depot[0xA0..0xC0).
 pub const DIGEST_LEN: usize = 32;
@@ -46,7 +49,8 @@ pub const K_LOW: u32 = 0x3ADA8A5E;
 pub const K_HIGH: u32 = 0x9B169662;
 
 /// The eight channel words, one per block, each named by its
-/// live carrier register (the value at the block's own store).
+/// measured carrier register. The current resolver selects among
+/// post-write snapshots using the reference CPIM sums.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DigestInputs {
     pub a0: u32, // rcx, prologue phase
@@ -114,26 +118,26 @@ mod tests {
         assert_eq!(inp.sums().len() * 4, DIGEST_LEN);
     }
 
-    /// The live parity, gated on the pair marker: every one of the
-    /// eight blocks must resolve from a MEASURED word on the tape
-    /// (the register value at a store hit), against the same
-    /// session's CPIM. 32/32 bytes.
+    /// Live parity against the same-session CPIM/depot pair. The
+    /// word candidates are post-write register snapshots, not asserted
+    /// to be captured at each block's own store.
     #[test]
+    #[ignore = "requires same-session digest word tape, depot slice and CPIM; set PERUN_DIGEST_PAIR_READY=1"]
     fn live_digest_parity() {
+        assert_eq!(
+            std::env::var("PERUN_DIGEST_PAIR_READY").as_deref().unwrap_or(""),
+            "1",
+            "set PERUN_DIGEST_PAIR_READY=1 only for a complete same-session digest pair"
+        );
         let dir = std::env::var("PERUN_LIVE_DIR")
             .unwrap_or_else(|_| "/opt/data/adi-re".into());
         let tape = format!("{dir}/pair_wp_words.txt");
         let cpim_path = format!("{dir}/live_prov_out.bin");
-        let (Ok(ttxt), Ok(cpim)) = (std::fs::read_to_string(&tape), std::fs::read(&cpim_path))
-        else {
-            eprintln!("gating: no live word-tape + cpim under {dir}");
-            return;
-        };
-        if std::env::var("PERUN_DIGEST_PAIR_READY").is_err() {
-            eprintln!("gating: PERUN_DIGEST_PAIR_READY not set");
-            return;
-        }
-        assert!(cpim.len() >= 0xD8, "the live CPIM is at least 276 bytes");
+        let ttxt = std::fs::read_to_string(&tape)
+            .expect("same-session digest word tape is required");
+        let cpim = std::fs::read(&cpim_path)
+            .expect("same-session live CPIM is required");
+        assert_eq!(cpim.len(), 0x114, "the live CPIM is 276 bytes");
         // parse the tape rows: channel words per hit
         let mut rows: Vec<Vec<(String, u32)>> = Vec::new();
         for line in ttxt.lines() {
@@ -155,6 +159,7 @@ mod tests {
         // depot window -- if the two disagree the artifacts are from
         // different runs and the parity must not fire.
         if let Ok(dump) = std::fs::read(format!("{dir}/pair_depot.bin")) {
+            assert!(dump.len() >= 0xC0, "the paired depot dump must contain 0xC0 bytes");
             assert_eq!(&dump[..0xC0], &cpim[0x18..0x18 + 0xC0],
                        "the depot slice and the CPIM must be one session");
         } else {
