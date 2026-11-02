@@ -1,32 +1,34 @@
 # Android CoreADI planter-genesis trace
 
 This note describes the live research instrumentation for the Android x86_64
-`libCoreADI.so` build used by the `adi-android` harness. The GDB 12.1 path has
-now completed a real Apple provisioning start: the native control and GDB run
-both reached `ProvisioningStart rc=0` with a 276-byte CPIM from a 347-byte SPIM.
-The live planter base is now identified by the active-frame slot
-`[RBP-0x30]`: run `41203625495` measured the same mapped object at all 160
-mixer-read stops, with the slot equal to both `source+0x20` and the writer
-base, and no pointer transitions. The unresolved question is the object's
-internal table layout and the genesis of its session-dependent contents:
-the older four-permutation signature does not hold for two windows in this
-fresh session.
+`libCoreADI.so` build used by the `adi-android` harness. Earlier GDB 12.1
+captures completed trace-only `ProvisioningStart rc=0` with a 276-byte CPIM
+from a 347-byte SPIM (run `41363826141`). The latest v30 run
+`41379301060` reached the first mixer read and captured all four canonical
+tables as permutations, but its GDB-side `ProvisioningStart` result was not
+observed. The native non-GDB control returned `rc=0`, `cpim_len=276`.
+The active planter base is identified independently of table shape by the
+`[RBP-0x30]` slot, its equality to `source+0x20`, and the writer base.
+Window shape is capture-dependent: earlier runs had sparse fam2/fam4
+snapshots; the latest v30 snapshot has 256/256 unique bytes in all four
+canonical windows.
 
 ## Current measured model
 
-Earlier corrected captures showed four 256-byte permutations. That remains a
-historical observation, not a universal acceptance predicate: fresh run
-`41203625495` directly anchored the active planter through `[RBP-0x30]`,
-while two of the four previously named windows were not permutations. The
-window values are therefore measured independently rather than used to reject
-an object whose base pointer is independently confirmed:
+The four-window permutation signature is not an invariant of every capture.
+Run `41203625495` directly anchored the active planter through
+`[RBP-0x30]`, while fam2 and fam4 were sparse; run `41379301060` later
+captured all four canonical windows as 256/256 permutations. Therefore
+window contents must be recorded independently of object identity: the
+signature is useful as a per-capture property, not as the sole acceptance
+predicate for the active planter.
 
 | Family | Planter offset | First known writer site(s) |
 |---|---:|---|
 | fam1 | `0xD60` | `0xFB05B`, `0xFB075` |
-| fam2 | `0x1A00` | `0xE2508` (provisional; direct EA check pending) |
+| fam2 | `0x1A00` | `0xE2508` (confirmed) |
 | fam3 | `0x2460` | `0xE25C2` (confirmed) |
-| fam4 | `0x1390` | unresolved |
+| fam4 | `0x1390` | `0xE26AA` (confirmed) |
 
 **Sparse-window writer audit (six runs, 2026-11-02).** The new one-byte
 hardware probes were armed on the final byte of fam2 (`+0x1AFF`), fam4
@@ -41,21 +43,50 @@ address.
 The previous fam2 candidate `0xE250C` is rejected: it decodes as
 `add BYTE PTR [rdx],bl`, its computed effective address does not equal the
 watched byte, and the PC-after check does not place the stop immediately
-after that instruction. In run `41369189704`, a local decode immediately
-before the fam2 stop shows a plausible instruction at `0xE2508`:
-`mov BYTE PTR [rdi+rcx*1+0x1a00],r14b`, ending at `0xE2510`. This is now
-instrumented as a **provisional** fam2 writer candidate; it is not promoted
-to confirmed until its direct breakpoint records the expected planter base,
-index and exact effective-address match.
+after that instruction. The actual fam2 writer is `0xE2508`:
+`mov BYTE PTR [rdi+rcx*1+0x1a00],r14b`. Run `41378982858` matched its
+effective address to the hardware probe at `+0x1AFF`; run
+`41379301060` then observed 256 direct-breakpoint callbacks, 256 unique
+indices `0x00..0xFF`, and base-minus-source delta `+0x20`.
 
 The previous fam4 candidate `0xE26AE` is also rejected: it decodes as
 `nop`, and its candidate effective address does not equal the watched byte.
-The fam4 tail probe proves that `+0x148F` is written, but the writer
-instruction remains unidentified. By contrast, fam3's `0xE25C2` remains
-confirmed: its decoded byte store's effective address matches the watched
-`+0x255F` byte. These probes establish writes at three selected bytes only;
-they do not establish complete write coverage or table semantics for either
-sparse window.
+The actual fam4 writer is `0xE26AA`:
+`mov BYTE PTR [r8+rax*1+0x1390],r13b`. Run `41378982858` matched its
+effective address to the hardware probe at `+0x148F`; run
+`41379301060` recorded 256 direct-breakpoint callbacks, 256 unique indices
+`0x00..0xFF`, and base-minus-source delta `+0x20`. Fam3's `0xE25C2`
+was independently matched to the `+0x255F` control probe and also recorded
+256 callbacks over 256 indices in the final run. The exact store sites for
+fam2/fam3/fam4 are now established. These measurements identify the byte
+stores and their index coverage; they do not yet derive the register
+recurrences that generate each index and stored value.
+
+**Latest v30 capture (2026-11-02, run `41379301060`).** All four
+canonical windows were 256/256 unique in the slot-anchored
+`0x2700)-byte object: fam1 `+0xD60`, fam2 `+0x1A00`, fam3 `+0x2460`,
+fam4 `+0x1390`; the fifth `+0x1F30` window was also a permutation.
+The byte-aligned scan found seven 256-byte permutations at
+`+0x0C50`, `+0x0D60`, `+0x1280`, `+0x1390`, `+0x1A00`,
+`+0x1F30`, and `+0x2460`. The extra windows at `+0x0C50` and
+`+0x1280` have no established role.
+
+Direct writer callback audit: fam2 `0xE2508`, fam3 `0xE25C2`, fam4
+`0xE26AA`, and fifth `0xE24C9` each resolved and fired 256 times in the
+target transform, with 256 unique indices and zero sample errors. All four
+writer bases were `source+0x20`. The fam1 window was present in the
+slot-anchored final snapshot, but this run's direct-writer summary does not
+claim an equivalent 256-hit direct-site census for the fam1 transport loop.
+
+**Sampling boundary.** This run reached only one of sixteen mixer-read
+sites/samples; it is not a replacement for the earlier 160-stop census.
+No GDB signal location was recorded, and the GDB-side trace-only
+`ProvisioningStart` result was not observed. Native control independently
+exited 0 with `ProvisioningStart rc=0` and `cpim_len=276`; Apple returned
+HTTP 200 twice and the SPIM decoded to 347 bytes. The global process-memory
+signature scan did not run, although the captured 9984-byte object itself
+was scanned byte-aligned. Workflow success therefore validates the run
+and its redacted artifact, not a full GDB-side provisioning completion.
 
 The source pointer is first saved at `0xDD511` from `RCX` into
 `[RBP-0x11A8]`. The measured relation in the corrected capture is
@@ -216,9 +247,11 @@ index coverage, and competing source/staging/fam1 relationships.
 
 ## Interpretation and limitations
 
-- A `0x2700` readable span is only a mapped candidate. The four documented
-  256-byte windows must each contain all 256 byte values before the tracer
-  calls it a final planter.
+- A `0x2700` readable span is only a mapped candidate. The primary active
+  object anchor is the independently correlated `[RBP-0x30]` slot,
+  `source+0x20`, and writer base. Four-window permutation status is
+  capture-dependent (sparse in some sessions, complete in run
+  `41379301060`) and must not be used as the sole object-identity filter.
 - A `+0x20` writer-base delta alone is only correlation. In run
   `41203625495`, the stronger identity check held at all 160 mixer samples:
   `[RBP-0x30] == source+0x20 == writer-base`, with no pointer transitions.
@@ -228,10 +261,11 @@ index coverage, and competing source/staging/fam1 relationships.
 - The 56 bytes beyond the requested 200-byte allocation are recorded only
   when they are readable in the same RW mapping. This does not establish
   allocator ownership or prove an out-of-bounds bug.
-- The current no-software-watchpoint path is operationally verified for the
-  full live trace-only provisioning start. The full-memory signature scan is still being validated;
-  a negative scan means the exact planter location or the four-window model
-  remains unresolved, not that the current mapped candidate is the planter.
+- The no-software-watchpoint path has completed a full live trace-only
+  provisioning start in earlier run `41363826141`. Latest run
+  `41379301060` reached the first mixer read but did not record the GDB-side
+  ProvisioningStart result. The global process-memory signature scan remains
+  distinct from the byte-aligned scan of the already anchored 0x2700 object.
 - The trace logs register values and dumps stack/heap-adjacent memory. Treat
   generated run directories as sensitive research artifacts; keep them local
   and inspect/redact before sharing.
