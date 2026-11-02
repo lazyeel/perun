@@ -24,9 +24,38 @@ an object whose base pointer is independently confirmed:
 | Family | Planter offset | First known writer site(s) |
 |---|---:|---|
 | fam1 | `0xD60` | `0xFB05B`, `0xFB075` |
-| fam2 | `0x1A00` | `0xE250C` |
-| fam3 | `0x2460` | `0xE25C2` |
-| fam4 | `0x1390` | `0xE26AE` |
+| fam2 | `0x1A00` | `0xE2508` (provisional; direct EA check pending) |
+| fam3 | `0x2460` | `0xE25C2` (confirmed) |
+| fam4 | `0x1390` | unresolved |
+
+**Sparse-window writer audit (six runs, 2026-11-02).** The new one-byte
+hardware probes were armed on the final byte of fam2 (`+0x1AFF`), fam4
+(`+0x148F`), and the dense fam3 control (`+0x255F`). Across runs
+`41366750762`, `41367491679`, `41367797173`, `41368451440`,
+`41369189704`, and `41369503883`, each probe was confirmed as a hardware
+watchpoint and fired once. The post-write stop RVAs were stable:
+fam2 `0xE2510`, fam4 `0xE26B2`, and fam3 `0xE25CA`. A stop RVA is
+the observed post-write instruction pointer, not the store instruction's
+address.
+
+The previous fam2 candidate `0xE250C` is rejected: it decodes as
+`add BYTE PTR [rdx],bl`, its computed effective address does not equal the
+watched byte, and the PC-after check does not place the stop immediately
+after that instruction. In run `41369189704`, a local decode immediately
+before the fam2 stop shows a plausible instruction at `0xE2508`:
+`mov BYTE PTR [rdi+rcx*1+0x1a00],r14b`, ending at `0xE2510`. This is now
+instrumented as a **provisional** fam2 writer candidate; it is not promoted
+to confirmed until its direct breakpoint records the expected planter base,
+index and exact effective-address match.
+
+The previous fam4 candidate `0xE26AE` is also rejected: it decodes as
+`nop`, and its candidate effective address does not equal the watched byte.
+The fam4 tail probe proves that `+0x148F` is written, but the writer
+instruction remains unidentified. By contrast, fam3's `0xE25C2` remains
+confirmed: its decoded byte store's effective address matches the watched
+`+0x255F` byte. These probes establish writes at three selected bytes only;
+they do not establish complete write coverage or table semantics for either
+sparse window.
 
 The source pointer is first saved at `0xDD511` from `RCX` into
 `[RBP-0x11A8]`. The measured relation in the corrected capture is
@@ -165,6 +194,11 @@ a candidate passing all four windows becomes `planter.final.bin`.
 - `writer_events.csv`: one row per known direct store, including effective
   address, index, old byte and new byte. This captures same-value stores that
   a value-change watchpoint would not report.
+- `writer_callback_events.csv`: setup, resolution, callback entry and result
+  for each direct writer breakpoint, separating an unhit breakpoint from a
+  callback that failed during sampling.
+- `sparse_write_events.csv`: setup and hit records for the three one-byte
+  hardware probes, including post-write PC and candidate-store diagnostics.
 - `run.json`: run id and the measured memory-layout partition.
 - `planter.slot_anchored.bin`: the full 0x2700-byte object captured at the
   active `[RBP-0x30]` slot when it agrees with both `source+0x20` and the
