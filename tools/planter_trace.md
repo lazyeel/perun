@@ -64,7 +64,7 @@ recurrences that generate each index and stored value.
 
 **Latest v30 capture (2026-11-02, run `41379301060`).** All four
 canonical windows were 256/256 unique in the slot-anchored
-`0x2700)-byte object: fam1 `+0xD60`, fam2 `+0x1A00`, fam3 `+0x2460`,
+`0x2700`-byte object: fam1 `+0xD60`, fam2 `+0x1A00`, fam3 `+0x2460`,
 fam4 `+0x1390`; the fifth `+0x1F30` window was also a permutation.
 The byte-aligned scan found seven 256-byte permutations at
 `+0x0C50`, `+0x0D60`, `+0x1280`, `+0x1390`, `+0x1A00`,
