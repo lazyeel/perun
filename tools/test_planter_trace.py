@@ -89,6 +89,15 @@ class PlanterTraceTests(unittest.TestCase):
         self.assertIn("contiguous, non-overlapping", out.getvalue())
         self.assertNotIn("WARNING", out.getvalue())
 
+    def test_sparse_write_probe_offsets_target_window_tails(self):
+        expected = {
+            "fam2_tail": ANALYZER.DEFAULT_TABLES["fam2"] + 0xFF,
+            "fam4_tail": ANALYZER.DEFAULT_TABLES["fam4"] + 0xFF,
+            "fam3_control_tail": ANALYZER.DEFAULT_TABLES["fam3"] + 0xFF,
+        }
+        self.assertEqual(dict(ACCESS.SPARSE_WRITE_PROBE_OFFSETS), expected)
+        self.assertTrue(all(0 <= offset < ANALYZER.PLANTER_SIZE
+                            for offset in expected.values()))
 
 
 

@@ -858,6 +858,30 @@ jobs:
                       lines.append(f"| {name} | {opcode} | {len(rows)} | {len(set(indexes))} | {span} | {delta_span} |")
                   except Exception:
                       lines.append(f"| {name} | {opcode} | {len(rows)} | n/a | n/a | n/a |")
+              lines += ["", "## Sparse-window hardware write probes", ""]
+              sparse_path = run / "sparse_write_events.csv"
+              if sparse_path.is_file():
+                  with sparse_path.open(newline="") as stream:
+                      sparse_rows = list(csv.DictReader(stream))
+                  for name in ("fam2_tail", "fam4_tail", "fam3_control_tail"):
+                      rows = [row for row in sparse_rows if row.get("name") == name]
+                      setup = next((row for row in rows if row.get("event") == "setup"), None)
+                      hits = [row for row in rows if row.get("event") == "hit"]
+                      status = setup.get("status", "not-armed") if setup else "not-armed"
+                      stop_rvas = sorted({row.get("pc_after_rva", "na") for row in hits})
+                      stop_text = ", ".join(stop_rvas) if stop_rvas else "none"
+                      offset = setup.get("object_offset", "n/a") if setup else "n/a"
+                      lines.append(
+                          "- " + name + ": offset " + offset + ", setup " + status
+                          + ", write hits " + str(len(hits))
+                          + ", distinct post-write stop RVAs: " + stop_text
+                      )
+                  lines.append(
+                      "- A post-write stop RVA is the instruction pointer observed after the watched write; "
+                      "it is not asserted to be the store instruction's own RVA."
+                  )
+              else:
+                  lines.append("Sparse-window watchpoint event file was not created; no conclusion about writes is available.")
               lines += ["", "## Status", ""]
               if planter_path.exists() and len(planter) >= 0x2700:
                   lines.append("A final 0x2700-byte planter snapshot passed the four-permutation signature check.")

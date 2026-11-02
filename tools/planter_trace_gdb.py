@@ -25,9 +25,11 @@ The entry breakpoint tracks vdfut768ig opcodes, so init/config calls are not
 mistaken for the provisioning transform.
 
 Wide software watchpoints are deliberately disabled on the production trace
-path: experiments showed that they destabilize the Bionic inferior. Instead,
-known static writer sites are instrumented directly, and the mutable frame
-slot is sampled at the sixteen mixer-read instruction sites.
+path: experiments showed that they destabilize the Bionic inferior. A bounded
+set of three one-byte write probes is used only for sparse-window provenance;
+each is retained only when GDB confirms a hardware watchpoint, with no software
+fallback. Known static writer sites remain instrumented directly, and the
+mutable frame slot is sampled at the sixteen mixer-read instruction sites.
 """
 
 import csv
@@ -38,8 +40,9 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from planter_access import (analyze_intel_address, classify_mapped_address,
-                            parse_intel_memory_operands, parse_proc_maps)
+from planter_access import (SPARSE_WRITE_PROBE_OFFSETS, analyze_intel_address,
+                            classify_mapped_address, parse_intel_memory_operands,
+                            parse_proc_maps)
 
 ENTRY_RVA = 0x87554
 SOURCE_SLOT_STORE_RVA = 0xDD511
@@ -124,6 +127,9 @@ STATE = {
     "writer_bps": [],
     "mixer_bps": [],
     "watchers": [],
+    "sparse_write_bps": [],
+    "sparse_write_probe_status": {},
+    "sparse_write_hits": {},
     "src": None,
     "dst": None,
     "dst_size": 200,  # allocator request; not the observed access span
@@ -583,6 +589,109 @@ class WriterSiteBP(gdb.Breakpoint):
         return False
 
 
+class SparseWindowWriteBP(gdb.Breakpoint):
+    """Single-byte write probe; reject GDB's software-watchpoint fallback."""
+    def __init__(self, name, object_offset, address):
+        self.name = name
+        self.object_offset = object_offset
+        self.address = address
+        super().__init__(f"*(unsigned char *)0x{address:x}",
+                         gdb.BP_WATCHPOINT, gdb.WP_WRITE, internal=False)
+        self.silent = True
+        STATE["sparse_write_hits"][name] = 0
+
+    def stop(self):
+        try:
+            count = STATE["sparse_write_hits"].get(self.name, 0) + 1
+            STATE["sparse_write_hits"][self.name] = count
+            pc = rv("$pc")
+            base = STATE.get("base")
+            pc_rva = f"{pc - base:#x}" if base is not None and pc >= base else "na"
+            path = os.path.join(OUT, "sparse_write_events.csv")
+            with open(path, "a", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerow([
+                    "hit", "ok", self.name, f"{self.object_offset:#x}",
+                    count, pc_rva,
+                ])
+            log(f"SPARSE WRITE PROBE HIT: name={self.name} "
+                f"object_offset={self.object_offset:#x} hit={count} "
+                f"pc_after_rva={pc_rva}")
+        except Exception as exc:
+            log(f"SPARSE WRITE PROBE CALLBACK ERROR: name={self.name} "
+                f"{type(exc).__name__}: {exc}")
+        return False
+
+
+def arm_sparse_window_write_probes():
+    """Arm three 1-byte hardware probes after the pre-transform anchor exists."""
+    path = os.path.join(OUT, "sparse_write_events.csv")
+    with open(path, "w", newline="", encoding="utf-8") as stream:
+        csv.writer(stream).writerow([
+            "event", "status", "name", "object_offset", "hit", "pc_after_rva",
+        ])
+
+    def record_setup(name, status, offset):
+        with open(path, "a", newline="", encoding="utf-8") as stream:
+            csv.writer(stream).writerow([
+                "setup", status, name, f"{offset:#x}", 0, "na",
+            ])
+
+    source = STATE.get("src")
+    early = STATE.get("pre_planter_snapshot")
+    base = source + 0x20 if source is not None else None
+    if base is None or early is None or len(early) != PLANTER_SIZE:
+        log("SPARSE WRITE PROBES NOT ARMED: pre-transform source+0x20 snapshot unavailable")
+        for name, offset in SPARSE_WRITE_PROBE_OFFSETS:
+            STATE["sparse_write_probe_status"][name] = "no-anchor"
+            record_setup(name, "no-anchor", offset)
+        return
+
+    try:
+        gdb.execute("set can-use-hw-watchpoints 1", to_string=True)
+    except Exception as exc:
+        log(f"SPARSE WRITE PROBES NOT ARMED: hardware-watchpoint setting failed "
+            f"({type(exc).__name__})")
+        for name, offset in SPARSE_WRITE_PROBE_OFFSETS:
+            STATE["sparse_write_probe_status"][name] = "setting-error"
+            record_setup(name, "setting-error", offset)
+        return
+
+    for name, offset in SPARSE_WRITE_PROBE_OFFSETS:
+        address = base + offset
+        if not ptr_ok(address, 1):
+            STATE["sparse_write_probe_status"][name] = "unmapped"
+            record_setup(name, "unmapped", offset)
+            log(f"SPARSE WRITE PROBE NOT ARMED: name={name} "
+                f"object_offset={offset:#x} byte_not_mapped")
+            continue
+        bp = None
+        try:
+            bp = SparseWindowWriteBP(name, offset, address)
+            details = gdb.execute(f"info breakpoints {bp.number}", to_string=True)
+            if not re.search(r"(?:hardware|hw)\s+watchpoint", details, re.IGNORECASE):
+                bp.delete()
+                STATE["sparse_write_probe_status"][name] = "software-rejected"
+                record_setup(name, "software-rejected", offset)
+                log(f"SPARSE WRITE PROBE REJECTED: name={name} "
+                    f"object_offset={offset:#x} gdb_did_not_create_hardware_watchpoint")
+                continue
+            STATE["sparse_write_bps"].append(bp)
+            STATE["sparse_write_probe_status"][name] = "hardware"
+            record_setup(name, "hardware", offset)
+            log(f"SPARSE WRITE PROBE ARMED: name={name} "
+                f"object_offset={offset:#x} hardware=yes")
+        except Exception as exc:
+            STATE["sparse_write_probe_status"][name] = "setup-error"
+            record_setup(name, "setup-error", offset)
+            log(f"SPARSE WRITE PROBE SETUP ERROR: name={name} "
+                f"object_offset={offset:#x} {type(exc).__name__}: {exc}")
+            try:
+                if bp is not None and bp.is_valid():
+                    bp.delete()
+            except Exception:
+                pass
+
+
 class SourceSlotStoreBP(gdb.Breakpoint):
     """Capture RCX at 0xDD511; continue through a GDB command list."""
     def __init__(self):
@@ -593,6 +702,9 @@ class SourceSlotStoreBP(gdb.Breakpoint):
         # Command lists run after stop() returns; no nested continue is posted
         # back into GDB's Python UI event loop.
         self.commands = """silent
+python
+arm_sparse_window_write_probes()
+end
 continue
 """
 

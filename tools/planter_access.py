@@ -16,6 +16,13 @@ _OPERAND = re.compile(
 _WIDTHS = {"byte": 1, "word": 2, "dword": 4, "qword": 8,
            "tbyte": 10, "xmmword": 16, "ymmword": 32, "zmmword": 64}
 
+# One-byte hardware-write probes for two sparse windows and a dense control.
+SPARSE_WRITE_PROBE_OFFSETS = (
+    ("fam2_tail", 0x1A00 + 0xFF),
+    ("fam4_tail", 0x1390 + 0xFF),
+    ("fam3_control_tail", 0x2460 + 0xFF),
+)
+
 
 def parse_intel_memory_operands(instruction: str) -> list[tuple[str, int | None]]:
     result = []
