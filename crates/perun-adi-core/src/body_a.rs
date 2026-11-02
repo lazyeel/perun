@@ -31,7 +31,8 @@
 pub struct MixerInputs {
     /// The planter-derived lane value (c for lanes A/B, c3 for C, c4 for D).
     pub lane_value: u8,
-    /// The mul operand (lanes A/B only; unused by the C/D tails).
+    /// A/B multiplication operand. In each M14 giant-tape row this slot
+    /// instead carries the already-finalized post-tail output byte.
     pub mul: u8,
     /// Legacy tape-structure field retained for input compatibility.
     /// The cross-session measurement disproved the proposed m4 first-round

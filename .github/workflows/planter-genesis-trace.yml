@@ -37,6 +37,13 @@ jobs:
           python3 -m py_compile tools/planter_trace_gdb.py tools/planter_access.py tools/analyze_planter_trace.py
           python3 -m unittest tools/test_planter_trace.py -v
 
+      - name: Compile and run perun-adi-core tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p perun-adi-core --locked --no-run
+          cargo test -p perun-adi-core --locked --lib
+
       - name: Install GDB and filesystem tools
         run: |
           sudo apt-get update
@@ -893,6 +900,11 @@ jobs:
                           + row.get("candidate_ea_matches_watch_address", "na")
                           + ", PC-after is next decoded instruction "
                           + row.get("pc_after_matches_next_instruction", "na")
+                          + "; observed store "
+                          + row.get("observed_store_rva", "na")
+                          + " " + row.get("observed_store_instruction", "na")
+                          + ", width " + row.get("observed_store_width", "na")
+                          + ", EA match " + row.get("observed_store_ea_match", "na")
                       )
               else:
                   lines.append("Sparse-window watchpoint event file was not created; no conclusion about writes is available.")

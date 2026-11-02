@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v21).
+"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v27).
 
 Canonical project copy: tools/planter_trace_gdb.py.
 
@@ -650,6 +650,10 @@ class SparseWindowWriteBP(gdb.Breakpoint):
             effective_address_match = "na"
             software_bp_enabled = "na"
             pc_after_matches_next = "na"
+            observed_store_rva = "na"
+            observed_store_instruction = "na"
+            observed_store_width = "na"
+            observed_store_ea_match = "na"
             if expected_rva is not None and base is not None:
                 try:
                     dis = gdb.execute(
@@ -658,7 +662,7 @@ class SparseWindowWriteBP(gdb.Breakpoint):
                     parsed = []
                     for line in dis:
                         match = re.match(
-                            r"\s*(0x[0-9a-fA-F]+)(?:\s+<[^>]+>)?:\s*(.*)$",
+                            r"^\s*(?:=>\s*)?(0x[0-9a-fA-F]+)(?:\s+<[^>]+>)?:\s*(.*)$",
                             line,
                         )
                         if match:
@@ -688,6 +692,57 @@ class SparseWindowWriteBP(gdb.Breakpoint):
                     effective_address_match = "yes" if candidate_ea == self.address else "no"
                 except Exception:
                     effective_address_match = "unavailable"
+
+            # Recover the instruction immediately preceding the hardware
+            # watchpoint stop. On x86, the debug exception reports post-write
+            # RIP. Sweep the preceding 15 bytes (maximum instruction length),
+            # retaining only decodes that end at RIP and whose explicit
+            # memory operand covers the watched byte.
+            try:
+                register_values = {
+                    name: rv("$" + name)
+                    for name in ("rax", "rbx", "rcx", "rdx", "rsi", "rdi",
+                                 "rbp", "rsp", "r8", "r9", "r10", "r11",
+                                 "r12", "r13", "r14", "r15")
+                }
+                actual_candidates = []
+                for back in range(1, 16):
+                    start = pc - back
+                    dis = gdb.execute(f"x/2i {start:#x}", to_string=True).strip().splitlines()
+                    decoded = []
+                    for line in dis:
+                        match = re.match(
+                            r"^\s*(?:=>\s*)?(0x[0-9a-fA-F]+)(?:\s+<[^>]+>)?:\s*(.*)$",
+                            line,
+                        )
+                        if match:
+                            decoded.append((int(match.group(1), 16), match.group(2).strip()))
+                    if len(decoded) < 2 or decoded[1][0] != pc:
+                        continue
+                    for expression, width in parse_intel_memory_operands(decoded[0][1]):
+                        resolved = analyze_intel_address(expression, register_values)
+                        if resolved is None:
+                            continue
+                        ea = resolved["effective_address"]
+                        size = width or 1
+                        if ea <= self.address < ea + size:
+                            actual_candidates.append((
+                                start, decoded[0][1], width, ea
+                            ))
+                unique = {(item[0], item[1], item[2], item[3]) for item in actual_candidates}
+                if len(unique) == 1:
+                    start, asm, width, _ea = next(iter(unique))
+                    observed_store_rva = f"{start - base:#x}" if start >= base else "outside-module"
+                    observed_store_instruction = asm
+                    observed_store_width = str(width) if width is not None else "unknown"
+                    observed_store_ea_match = "yes"
+                elif len(unique) > 1:
+                    observed_store_rva = f"ambiguous:{len(unique)}"
+                    observed_store_ea_match = "ambiguous"
+                else:
+                    observed_store_ea_match = "no-explicit-operand-match"
+            except Exception as exc:
+                observed_store_ea_match = f"scan-error:{type(exc).__name__}"
             path = os.path.join(OUT, "sparse_write_events.csv")
             with open(path, "a", newline="", encoding="utf-8") as stream:
                 csv.writer(stream).writerow([
@@ -695,7 +750,9 @@ class SparseWindowWriteBP(gdb.Breakpoint):
                     count, pc_rva,
                     f"{expected_rva:#x}" if expected_rva is not None else "na",
                     instruction, software_bp_enabled, effective_address_match,
-                    pc_after_matches_next,
+                    pc_after_matches_next, observed_store_rva,
+                    observed_store_instruction, observed_store_width,
+                    observed_store_ea_match,
                 ])
             log(f"SPARSE WRITE PROBE HIT: name={self.name} "
                 f"object_offset={self.object_offset:#x} hit={count} "
@@ -703,7 +760,11 @@ class SparseWindowWriteBP(gdb.Breakpoint):
                 f"candidate_instruction={instruction!r} "
                 f"software_bp_enabled={software_bp_enabled} "
                 f"candidate_ea_matches_watch_address={effective_address_match} "
-                f"pc_after_is_next_instruction={pc_after_matches_next}")
+                f"pc_after_is_next_instruction={pc_after_matches_next} "
+                f"observed_store_rva={observed_store_rva} "
+                f"observed_store_instruction={observed_store_instruction!r} "
+                f"observed_store_width={observed_store_width} "
+                f"observed_store_ea_match={observed_store_ea_match}")
         except Exception as exc:
             log(f"SPARSE WRITE PROBE CALLBACK ERROR: name={self.name} "
                 f"{type(exc).__name__}: {exc}")
@@ -718,13 +779,15 @@ def arm_sparse_window_write_probes():
             "event", "status", "name", "object_offset", "hit", "pc_after_rva",
             "candidate_writer_rva", "candidate_instruction", "software_bp_enabled",
             "candidate_ea_matches_watch_address", "pc_after_matches_next_instruction",
+            "observed_store_rva", "observed_store_instruction", "observed_store_width",
+            "observed_store_ea_match",
         ])
 
     def record_setup(name, status, offset):
         with open(path, "a", newline="", encoding="utf-8") as stream:
             csv.writer(stream).writerow([
                 "setup", status, name, f"{offset:#x}", 0, "na",
-                "na", "na", "na", "na", "na",
+                "na", "na", "na", "na", "na", "na", "na", "na", "na",
             ])
 
     source = STATE.get("src")
@@ -1574,7 +1637,7 @@ with open(os.path.join(OUT, "writer_callback_events.csv"), "w",
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v26", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v27", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},

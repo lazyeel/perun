@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! THE END-TO-END CPIM TEST: the full 276-byte container, assembled
-//! from the generated depot zone plus the measured session fields,
+//! from the assembled depot zone plus the measured session fields,
 //! compared byte for byte against the live oracle's own CPIM.
 //!
 //! What is reconstructed or computed from same-session measurements:
@@ -27,17 +27,17 @@
 use perun_adi_core::body_a::generate_body_from_tapes;
 
 #[test]
+#[ignore = "requires same-session live CPIM/tape artifacts; run explicitly with PERUN_CPIM_E2E_READY=1"]
 fn cpim_end_to_end() {
+    assert_eq!(
+        std::env::var("PERUN_CPIM_E2E_READY").as_deref().unwrap_or(""),
+        "1",
+        "set PERUN_CPIM_E2E_READY=1 for the live CPIM parity test"
+    );
     let dir = std::env::var("PERUN_LIVE_DIR")
         .unwrap_or_else(|_| "/opt/data/adi-re".into());
-    if std::env::var("PERUN_CPIM_E2E_READY").is_err() {
-        eprintln!("gating: PERUN_CPIM_E2E_READY not set");
-        return;
-    }
-    let Ok(cpim) = std::fs::read(format!("{dir}/live_prov_out.bin")) else {
-        eprintln!("gating: no live CPIM under {dir}");
-        return;
-    };
+    let cpim = std::fs::read(format!("{dir}/live_prov_out.bin"))
+        .expect("same-session live CPIM is required for this ignored integration test");
     assert_eq!(cpim.len(), 0x114, "the live CPIM is 276 bytes");
 
     // THE ASSEMBLED DEPOT ZONE (192): body A + digest, one session.
