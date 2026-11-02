@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v28).
+"""Dynamic planter-genesis tracer for libCoreADI.so (GDB Python, v29).
 
 Canonical project copy: tools/planter_trace_gdb.py.
 
@@ -759,7 +759,7 @@ class SparseWindowWriteBP(gdb.Breakpoint):
                 if current:
                     pc_instruction = current[0][1]
                 near = parse_disassembly(
-                    gdb.execute(f"x/12i {max(0, pc - 0x30):#x}", to_string=True)
+                    gdb.execute(f"x/32i {max(0, pc - 0x80):#x}", to_string=True)
                 )
                 near_pc_disassembly = "; ".join(
                     f"{addr - base:+#x} {asm}" if addr >= base else f"{addr:#x} {asm}"
@@ -770,7 +770,7 @@ class SparseWindowWriteBP(gdb.Breakpoint):
                 # lies before all three current watchpoint PCs in this function.
                 anchor = base + 0xE24C9
                 anchored = parse_disassembly(
-                    gdb.execute(f"x/256i {anchor:#x}", to_string=True)
+                    gdb.execute(f"x/4096i {anchor:#x}", to_string=True)
                 )
                 anchored_matches = []
                 for index, (addr, asm) in enumerate(anchored):
@@ -1724,7 +1724,7 @@ with open(os.path.join(OUT, "writer_callback_events.csv"), "w",
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v28", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v29", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},

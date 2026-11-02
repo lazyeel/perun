@@ -400,9 +400,11 @@ pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String
     Ok((depot, body_bytes))
 }
 
-/// Validate that pair37's depot snapshot belongs to the same CPIM as the
-/// word-tape resolver. This prevents stale watchpoint data from being
-/// accepted against a later session's live_prov_out.bin.
+/// Validate the captured depot slice against the reference CPIM before
+/// resolving digest words. This rejects a mismatched CPIM/depot pair, but
+/// does not cryptographically authenticate every zone/selector/word tape;
+/// those still rely on the capture script's startup truncation and the
+/// caller's explicit same-session readiness marker.
 fn read_paired_cpim(dir: &str) -> Result<Vec<u8>, String> {
     let cpim = std::fs::read(format!("{dir}/live_prov_out.bin"))
         .map_err(|e| format!("read live CPIM: {e}"))?;
@@ -645,6 +647,12 @@ mod tests {
         depot[0x7F] ^= 1;
         std::fs::write(dir.join("pair_depot.bin"), &depot).expect("write stale depot");
         assert!(read_paired_cpim(path).is_err(), "mismatched pair must be rejected");
+        let error = generate_digest_from_tapes(path)
+            .expect_err("the production resolver must reject a mismatched CPIM/depot pair");
+        assert!(
+            error.contains("does not match live_prov_out.bin"),
+            "expected the explicit pair-mismatch guard, got: {error}"
+        );
         std::fs::remove_dir_all(&dir).expect("remove temporary test directory");
     }
 
