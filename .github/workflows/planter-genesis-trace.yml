@@ -891,6 +891,8 @@ jobs:
                           + row.get("software_bp_enabled", "na")
                           + ", candidate EA equals watched byte "
                           + row.get("candidate_ea_matches_watch_address", "na")
+                          + ", PC-after is next decoded instruction "
+                          + row.get("pc_after_matches_next_instruction", "na")
                       )
               else:
                   lines.append("Sparse-window watchpoint event file was not created; no conclusion about writes is available.")

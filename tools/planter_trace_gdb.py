@@ -636,20 +636,41 @@ class SparseWindowWriteBP(gdb.Breakpoint):
             pc = rv("$pc")
             base = STATE.get("base")
             pc_rva = f"{pc - base:#x}" if base is not None and pc >= base else "na"
+            probe_writer_names = {
+                "fam2_tail": "fam2",
+                "fam4_tail": "fam4",
+                "fam3_control_tail": "fam3",
+            }
+            writer_name = probe_writer_names.get(self.name)
             expected_rva = next(
-                (rva for rva, spec in WRITERS.items() if spec[0] == self.name),
+                (rva for rva, spec in WRITERS.items() if spec[0] == writer_name),
                 None,
             )
             instruction = "na"
             effective_address_match = "na"
             software_bp_enabled = "na"
+            pc_after_matches_next = "na"
             if expected_rva is not None and base is not None:
                 try:
                     dis = gdb.execute(
-                        f"x/i {base + expected_rva:#x}", to_string=True
+                        f"x/2i {base + expected_rva:#x}", to_string=True
                     ).strip().splitlines()
-                    if dis:
-                        instruction = dis[-1].rsplit(":", 1)[-1].strip()
+                    parsed = []
+                    for line in dis:
+                        match = re.match(
+                            r"\s*(0x[0-9a-fA-F]+)(?:\s+<[^>]+>)?:\s*(.*)$",
+                            line,
+                        )
+                        if match:
+                            parsed.append((int(match.group(1), 16), match.group(2).strip()))
+                    if parsed:
+                        instruction = parsed[0][1]
+                    if len(parsed) >= 2:
+                        instruction_length = parsed[1][0] - (base + expected_rva)
+                        pc_after_matches_next = (
+                            "yes" if instruction_length > 0
+                            and pc == base + expected_rva + instruction_length else "no"
+                        )
                 except Exception as exc:
                     instruction = f"disassembly-error:{type(exc).__name__}"
                 candidate_bp = next(
@@ -674,13 +695,15 @@ class SparseWindowWriteBP(gdb.Breakpoint):
                     count, pc_rva,
                     f"{expected_rva:#x}" if expected_rva is not None else "na",
                     instruction, software_bp_enabled, effective_address_match,
+                    pc_after_matches_next,
                 ])
             log(f"SPARSE WRITE PROBE HIT: name={self.name} "
                 f"object_offset={self.object_offset:#x} hit={count} "
                 f"pc_after_rva={pc_rva} candidate_store_rva={expected_rva!r} "
                 f"candidate_instruction={instruction!r} "
                 f"software_bp_enabled={software_bp_enabled} "
-                f"candidate_ea_matches_watch_address={effective_address_match}")
+                f"candidate_ea_matches_watch_address={effective_address_match} "
+                f"pc_after_is_next_instruction={pc_after_matches_next}")
         except Exception as exc:
             log(f"SPARSE WRITE PROBE CALLBACK ERROR: name={self.name} "
                 f"{type(exc).__name__}: {exc}")
@@ -694,14 +717,14 @@ def arm_sparse_window_write_probes():
         csv.writer(stream).writerow([
             "event", "status", "name", "object_offset", "hit", "pc_after_rva",
             "candidate_writer_rva", "candidate_instruction", "software_bp_enabled",
-            "candidate_ea_matches_watch_address",
+            "candidate_ea_matches_watch_address", "pc_after_matches_next_instruction",
         ])
 
     def record_setup(name, status, offset):
         with open(path, "a", newline="", encoding="utf-8") as stream:
             csv.writer(stream).writerow([
                 "setup", status, name, f"{offset:#x}", 0, "na",
-                "na", "na", "na", "na",
+                "na", "na", "na", "na", "na",
             ])
 
     source = STATE.get("src")

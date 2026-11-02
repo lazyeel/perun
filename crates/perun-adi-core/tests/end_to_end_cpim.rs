@@ -40,7 +40,7 @@ fn cpim_end_to_end() {
     };
     assert_eq!(cpim.len(), 0x114, "the live CPIM is 276 bytes");
 
-    // THE GENERATED DEPOT ZONE (192): body A + digest, one session.
+    // THE ASSEMBLED DEPOT ZONE (192): body A + digest, one session.
     let Ok((depot, body_bytes)) = generate_body_from_tapes(&dir) else {
         panic!("the body-a tapes did not assemble under {dir}");
     };
@@ -54,7 +54,7 @@ fn cpim_end_to_end() {
     out[0..4].copy_from_slice(&5u32.to_be_bytes());          // version: written
     out[4..0x14].copy_from_slice(&cpim[4..0x14]);           // session: carried
     out[0x14..0x18].copy_from_slice(&0xa0u32.to_be_bytes()); // A len: written
-    out[0x18..0xb8].copy_from_slice(&depot[0..0xa0]);        // body A: generated
+    out[0x18..0xb8].copy_from_slice(&depot[0..0xa0]);        // body A: assembled from formulas + M14 tape results
     out[0xb8..0xd8].copy_from_slice(&depot[0xa0..0xc0]);     // digest: generated
     out[0xd8..0xdc].copy_from_slice(&0x34u32.to_be_bytes()); // B len: written
     out[0xdc..0xe0].copy_from_slice(&4u32.to_be_bytes());    // B ver: written
