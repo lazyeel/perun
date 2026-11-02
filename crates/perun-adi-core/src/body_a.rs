@@ -361,16 +361,36 @@ pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String
 
     // the depot zone: body A rows (m14's row IS the finished byte)
     let mut depot = [0u8; 0xC0];
+    let mut written = [false; 0xA0];
     let mut body_bytes = 0usize;
+    if rounds_raw.len() < 10 {
+        return Err(format!("the giant tape has only {} body-A rounds; ten are required", rounds_raw.len()));
+    }
     for (k, round) in rounds_raw.iter().take(10).enumerate() {
+        let mut mixer_seen = [false; 16];
         for (j, inp) in round {
-            let pos = ROW_POS[*j] + 0x10 * k;
-            let got = if *j == 13 { Some(inp.mul) } else { mixer_byte(*j, inp, &zones) };
-            if let Some(b) = got {
-                depot[pos] = b;
-                body_bytes += 1;
+            if *j >= 16 { return Err(format!("invalid mixer index {j} in round {}", k + 1)); }
+            if std::mem::replace(&mut mixer_seen[*j], true) {
+                return Err(format!("duplicate mixer {} in round {}", j + 1, k + 1));
             }
+            let pos = ROW_POS[*j] + 0x10 * k;
+            if std::mem::replace(&mut written[pos], true) {
+                return Err(format!("duplicate body-A destination {pos:#x} in round {}", k + 1));
+            }
+            let got = if *j == 13 { Some(inp.mul) } else { mixer_byte(*j, inp, &zones) };
+            let Some(b) = got else {
+                return Err(format!("mixer {} round {} indexed outside its 0x300-byte zone window", j + 1, k + 1));
+            };
+            depot[pos] = b;
+            body_bytes += 1;
         }
+        if !mixer_seen.iter().all(|&v| v) {
+            let missing: Vec<usize> = mixer_seen.iter().enumerate().filter_map(|(j, seen)| if *seen { None } else { Some(j + 1) }).collect();
+            return Err(format!("round {} is missing mixer rows {:?}", k + 1, missing));
+        }
+    }
+    if body_bytes != 160 || !written.iter().all(|&v| v) {
+        return Err(format!("body-A coverage is {body_bytes}/160; a complete depot is required"));
     }
     // the digest zone, resolved from the word tape (all eight blocks;
     // the 0xA0 word is the prologue cascade, taped at the stores)
@@ -719,6 +739,15 @@ mod tests {
                 }
             }
         }
+        assert!(rounds_raw.len() >= 10, "the giant tape must carry ten body-A rounds");
+        for (round_no, round) in rounds_raw.iter().take(10).enumerate() {
+            let mut seen = [false; 16];
+            for (mixer, _) in round {
+                assert!(*mixer < 16, "invalid mixer index in round {}", round_no + 1);
+                assert!(!std::mem::replace(&mut seen[*mixer], true), "duplicate mixer {} in round {}", mixer + 1, round_no + 1);
+            }
+            assert!(seen.iter().all(|&v| v), "round {} lacks one or more mixer rows", round_no + 1);
+        }
         let mut checked = 0;
         let mut ok = 0;
         let mut skipped_named = 0;
@@ -878,6 +907,15 @@ mod tests {
                     rnd.push((14, MixerInputs { lane_value: sr[14], mul: 0, m4_round1: false }));
                 }
             }
+        }
+        assert!(rounds_raw.len() >= 10, "the giant tape must carry ten body-A rounds");
+        for (round_no, round) in rounds_raw.iter().take(10).enumerate() {
+            let mut mixer_seen = [false; 16];
+            for (mixer, _) in round {
+                assert!(*mixer < 16, "invalid mixer index in round {}", round_no + 1);
+                assert!(!std::mem::replace(&mut mixer_seen[*mixer], true), "duplicate mixer {} in round {}", mixer + 1, round_no + 1);
+            }
+            assert!(mixer_seen.iter().all(|&v| v), "round {} lacks one or more mixer rows", round_no + 1);
         }
         let mut body_bytes = 0;
         for (k, round) in rounds_raw.iter().take(10).enumerate() {
