@@ -266,7 +266,7 @@ class TraceLifecycleTests(unittest.TestCase):
     def test_manifest_uses_v31_after_lifecycle_fix(self):
         trace_source = Path(__file__).with_name("planter_trace_gdb.py")
         source = trace_source.read_text(encoding="utf-8")
-        self.assertIn('"script_version": "v32"', source)
+        self.assertIn('"script_version": "v33"', source)
 
 
     def test_slot_pointer_watchpoint_is_hardware_only_and_armed_first(self):
@@ -295,3 +295,22 @@ class TraceLifecycleTests(unittest.TestCase):
         self.assertIn("bp.delete()", installer)
         self.assertIn("software-rejected", installer)
         self.assertIn("slot_pointer_events.csv", installer)
+
+
+    def test_slot_pointer_watchpoint_uses_expression_spec(self):
+        trace_source = Path(__file__).with_name("planter_trace_gdb.py")
+        source = trace_source.read_text(encoding="utf-8")
+        body = source.split("class SlotPointerWriteBP", 1)[1].split(
+            "def arm_slot_pointer_hardware_watchpoint", 1
+        )[0]
+        self.assertIn('f"*(unsigned long long *)0x{address:x}"', body)
+        self.assertNotIn('f"-location *(unsigned long long *)', body)
+
+    def test_slot_pointer_watchpoint_reports_failure_stage_without_raw_message(self):
+        trace_source = Path(__file__).with_name("planter_trace_gdb.py")
+        source = trace_source.read_text(encoding="utf-8")
+        installer = source.split("def arm_slot_pointer_hardware_watchpoint", 1)[1].split(
+            "def arm_sparse_window_write_probes", 1
+        )[0]
+        self.assertIn('stage = "create-watchpoint"', installer)
+        self.assertIn('status = f"setup-error:{stage}:{type(exc).__name__}"', installer)

@@ -872,7 +872,7 @@ class SlotPointerWriteBP(gdb.Breakpoint):
         self.previous = initial
         self.hits = 0
         super().__init__(
-            f"-location *(unsigned long long *)0x{address:x}",
+            f"*(unsigned long long *)0x{address:x}",
             gdb.BP_WATCHPOINT,
             gdb.WP_WRITE,
             internal=False,
@@ -937,9 +937,12 @@ def arm_slot_pointer_hardware_watchpoint():
         log("SLOT POINTER WATCH NOT ARMED: initial frame-slot qword unavailable")
         return
 
+    stage = "enable-hardware-watchpoints"
     try:
         gdb.execute("set can-use-hw-watchpoints 1", to_string=True)
+        stage = "create-watchpoint"
         bp = SlotPointerWriteBP(address, initial)
+        stage = "inspect-watchpoint"
         details = gdb.execute(f"info breakpoints {bp.number}", to_string=True)
         if not re.search(r"(?:hardware|hw)\s+watchpoint", details, re.IGNORECASE):
             bp.delete()
@@ -950,6 +953,7 @@ def arm_slot_pointer_hardware_watchpoint():
             log("SLOT POINTER WATCH REJECTED: GDB did not create a hardware watchpoint")
             return
 
+        stage = "record-setup"
         STATE["slot_pointer_watch_bp"] = bp
         STATE["slot_watch_armed"] = True
         source = STATE.get("src")
@@ -968,11 +972,13 @@ def arm_slot_pointer_hardware_watchpoint():
             f"initial_span_0x2700_mapped={initial_mapped}"
         )
     except Exception as exc:
+        status = f"setup-error:{stage}:{type(exc).__name__}"
         with open(path, "a", newline="", encoding="utf-8") as stream:
             csv.writer(stream).writerow([
-                "setup", "setup-error", "na", "na", "na", "no", "no", "no"
+                "setup", status, "na", "na", "na", "no", "no", "no"
             ])
-        log(f"SLOT POINTER WATCH SETUP ERROR: {type(exc).__name__}: {exc}")
+        log(f"SLOT POINTER WATCH SETUP ERROR: stage={stage} "
+            f"type={type(exc).__name__}: {exc}")
 
 def arm_sparse_window_write_probes():
     """Arm three 1-byte hardware probes after the pre-transform anchor exists."""
@@ -1858,7 +1864,7 @@ with open(os.path.join(OUT, "writer_callback_events.csv"), "w",
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v32", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v33", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},
