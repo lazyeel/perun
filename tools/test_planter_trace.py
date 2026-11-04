@@ -261,3 +261,9 @@ class TraceLifecycleTests(unittest.TestCase):
         self.assertIn('if STATE["active_op"] != TRANSFORM_OPCODE:', body)
         self.assertIn('if not STATE["final_dumped"]:', body)
         self.assertIn("return False", body)
+
+ 
+    def test_manifest_uses_v31_after_lifecycle_fix(self):
+        trace_source = Path(__file__).with_name("planter_trace_gdb.py")
+        source = trace_source.read_text(encoding="utf-8")
+        self.assertIn('"script_version": "v31"', source)

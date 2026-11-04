@@ -5,7 +5,6 @@ on:
     branches:
       - rnd/phase1-standalone-anisette
     paths:
-      - .github/workflows/planter-genesis-trace.yml
       - crates/perun-cli/examples/adi-android/run-native.sh
       - crates/perun-cli/examples/adi-android/adi_test.c
       - tools/planter_trace_gdb.py
@@ -22,7 +21,7 @@ concurrency:
 jobs:
   trace:
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    timeout-minutes: 8
     steps:
       - name: Checkout research branch
         uses: actions/checkout@v4
@@ -170,7 +169,7 @@ jobs:
           echo "Running non-GDB control first; persisted random identity is reused below."
           export ADI_GDB=0
           set +e
-          timeout --signal=TERM 15m bash "$GITHUB_WORKSPACE/crates/perun-cli/examples/adi-android/run-native.sh" \
+          timeout --signal=TERM --kill-after=5s 90s bash "$GITHUB_WORKSPACE/crates/perun-cli/examples/adi-android/run-native.sh" \
             > "$WORK/native-console.log" 2>&1
           NATIVE_RC=$?
           set -e
@@ -181,7 +180,7 @@ jobs:
           echo "Running identical harness under GDB with the same working directory/identity."
           export ADI_GDB=1
           set +e
-          timeout --signal=TERM 50m bash "$GITHUB_WORKSPACE/crates/perun-cli/examples/adi-android/run-native.sh" \
+          timeout --signal=TERM --kill-after=5s 4m bash "$GITHUB_WORKSPACE/crates/perun-cli/examples/adi-android/run-native.sh" \
             > "$WORK/gdb-console.log" 2>&1
           RC=$?
           set -e
