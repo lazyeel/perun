@@ -1808,7 +1808,7 @@ class Fam1CandidateBP(gdb.Breakpoint):
         self.hits += 1
         try:
             line = gdb.execute("x/i $pc", to_string=True).strip()
-            match = re.search(r":\\s*(.*)$", line)
+            match = re.search(r":\s*(.*)$", line)
             instruction = match.group(1).strip() if match else ""
             parts = instruction.split(None, 1)
             mnemonic = parts[0].lower() if parts else "unknown"
@@ -1899,7 +1899,7 @@ def install_transform_probes(base):
             output = gdb.execute(f"x/2i {base + 0xE243D:#x}", to_string=True)
             for raw in output.splitlines():
                 match = re.match(
-                    r"^\\s*(?:=>\\s*)?(0x[0-9a-fA-F]+)(?:\\s+<[^>]+>)?:\\s*(.*)$",
+                    r"^\s*(?:=>\s*)?(0x[0-9a-fA-F]+)(?:\s+<[^>]+>)?:\s*(.*)$",
                     raw,
                 )
                 if match:

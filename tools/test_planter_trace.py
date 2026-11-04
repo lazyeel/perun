@@ -407,6 +407,13 @@ class Fam1CandidateProbeTests(unittest.TestCase):
         self.assertIn("base + 0xE2441", installer)
         self.assertIn("boundary=verified", installer)
         self.assertIn("boundary=unverified", installer)
+        self.assertIn('r"^\s*', installer)
+        self.assertNotIn('r"^\\s*', installer)
+        candidate = source.split("class Fam1CandidateBP", 1)[1].split(
+            "def install_transform_probes", 1
+        )[0]
+        self.assertIn('re.search(r":\s*', candidate)
+        self.assertNotIn('re.search(r":\\s*', candidate)
 
     def test_candidate_callback_is_read_only_and_bounded(self):
         source = (Path(__file__).with_name("planter_trace_gdb.py")).read_text(encoding="utf-8")
