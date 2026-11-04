@@ -128,6 +128,7 @@ STATE = {
     "postmalloc_bp": None,
     "copy_entry_bp": None,
     "writer_bps": [],
+    "fam1_candidate_bp": None,
     "mixer_bps": [],
     "watchers": [],
     "sparse_write_bps": [],
@@ -1785,10 +1786,133 @@ def install_global_probes(base):
         log(f"GLOBAL INSTALL ERROR: {type(exc).__name__}: {exc}")
 
 
+
+class Fam1CandidateBP(gdb.Breakpoint):
+    """Read-only observer for the unverified 0xE2441 fam1 writer candidate."""
+    MAX_HITS = 1024
+
+    def __init__(self, address):
+        self.rva = 0xE2441
+        self.hits = 0
+        super().__init__(f"*{address:#x}", gdb.BP_BREAKPOINT, internal=False)
+        self.silent = True
+        self.path = os.path.join(OUT, "fam1_candidate_events.csv")
+        with open(self.path, "w", newline="", encoding="utf-8") as stream:
+            csv.writer(stream).writerow([
+                "active_opcode", "rva", "mnemonic", "destination_is_memory",
+                "memory_expression", "width", "object_offset", "fam1_index",
+                "anchor_register", "index_registers", "resolution",
+            ])
+
+    def stop(self):
+        self.hits += 1
+        try:
+            line = gdb.execute("x/i $pc", to_string=True).strip()
+            match = re.search(r":\\s*(.*)$", line)
+            instruction = match.group(1).strip() if match else ""
+            parts = instruction.split(None, 1)
+            mnemonic = parts[0].lower() if parts else "unknown"
+            operands_text = parts[1] if len(parts) > 1 else ""
+            destination = operands_text.split(",", 1)[0].strip()
+            destination_is_memory = "[" in destination and "]" in destination
+            memory_operands = parse_intel_memory_operands(instruction)
+
+            expression, width = memory_operands[0] if memory_operands else ("", None)
+            registers = {}
+            for name in (
+                "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
+                "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+            ):
+                try:
+                    registers[name] = rv("$" + name)
+                except Exception:
+                    pass
+
+            source = STATE.get("src")
+            object_base = source + 0x20 if source is not None else None
+            resolved = (
+                analyze_intel_address(
+                    expression, registers, object_base=object_base,
+                    object_size=PLANTER_SIZE,
+                )
+                if expression else None
+            )
+            object_offset = (
+                resolved.get("object_offset") if resolved is not None else None
+            )
+            fam1_index = (
+                object_offset - 0x0D60
+                if object_offset is not None and 0x0D60 <= object_offset < 0x0E60
+                else None
+            )
+            if not memory_operands:
+                resolution = "no-memory-operand"
+            elif not destination_is_memory:
+                resolution = "memory-not-destination"
+            elif object_base is None:
+                resolution = "source-anchor-unavailable"
+            elif resolved is None or object_offset is None:
+                resolution = "outside-or-unresolved-planter"
+            elif fam1_index is not None:
+                resolution = "source-anchored-fam1-window"
+            else:
+                resolution = "source-anchored-other-planter-offset"
+
+            with open(self.path, "a", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerow([
+                    f"{STATE.get('active_op', 0):#x}",
+                    f"{self.rva:#x}",
+                    mnemonic,
+                    "yes" if destination_is_memory else "no",
+                    expression,
+                    width if width is not None else "unknown",
+                    f"{object_offset:#x}" if object_offset is not None else "na",
+                    f"{fam1_index:#x}" if fam1_index is not None else "na",
+                    resolved.get("anchor_register") or "na" if resolved else "na",
+                    ",".join(resolved.get("index_registers", ())) if resolved else "na",
+                    resolution,
+                ])
+            log(
+                f"FAM1 CANDIDATE HIT: opcode={STATE.get('active_op')} "
+                f"rva={self.rva:#x} mnemonic={mnemonic} "
+                f"destination_is_memory={destination_is_memory} "
+                f"object_offset={object_offset!r} fam1_index={fam1_index!r} "
+                f"resolution={resolution}"
+            )
+        except Exception as exc:
+            # Keep potentially sensitive GDB exception details out of the report.
+            log(f"FAM1 CANDIDATE CALLBACK ERROR: {type(exc).__name__}")
+        if self.hits >= self.MAX_HITS:
+            self.enabled = False
+            log("FAM1 CANDIDATE BP DISABLED: hit safety limit reached")
+        return False
+
+
 def install_transform_probes(base):
     """Install the target transform's frame/base and mixer-read probes."""
     log("TRANSFORM INSTALL STAGE: command list entered")
     try:
+        # 0xE2441 is only a candidate fam1 writer. Install it only if a
+        # two-instruction decode from the known 0xE243D boundary confirms it.
+        try:
+            decoded = []
+            output = gdb.execute(f"x/2i {base + 0xE243D:#x}", to_string=True)
+            for raw in output.splitlines():
+                match = re.match(
+                    r"^\\s*(?:=>\\s*)?(0x[0-9a-fA-F]+)(?:\\s+<[^>]+>)?:\\s*(.*)$",
+                    raw,
+                )
+                if match:
+                    decoded.append(int(match.group(1), 16))
+            if (len(decoded) >= 2 and decoded[0] == base + 0xE243D
+                    and decoded[1] == base + 0xE2441):
+                STATE["fam1_candidate_bp"] = Fam1CandidateBP(base + 0xE2441)
+                log("FAM1 CANDIDATE BP: installed boundary=verified rva=0xe2441")
+            else:
+                log("FAM1 CANDIDATE BP: not installed boundary=unverified")
+        except Exception as exc:
+            log(f"FAM1 CANDIDATE BP: not installed boundary-check-error={type(exc).__name__}")
+
         for rva, reg_name in ((0xE243D, "$rdi"), (0xFAC8A, "$r12")):
             bp = PlanterBaseLoadBP(rva, reg_name)
             STATE["base_load_bps"].append(bp)

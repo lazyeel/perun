@@ -393,3 +393,37 @@ class WorkflowProbeRestorationTests(unittest.TestCase):
             tail.index('export GDB_SCRIPT="$GITHUB_WORKSPACE/tools/planter_trace_gdb.py"'),
             tail.index('timeout --signal=TERM --kill-after=5s 4m bash'),
         )
+
+
+
+class Fam1CandidateProbeTests(unittest.TestCase):
+    def test_candidate_site_requires_boundary_verified_from_known_predecessor(self):
+        source = (Path(__file__).with_name("planter_trace_gdb.py")).read_text(encoding="utf-8")
+        installer = source.split("def install_transform_probes(base):", 1)[1].split(
+            "def ", 1
+        )[0]
+        self.assertIn("x/2i", installer)
+        self.assertIn("base + 0xE243D", installer)
+        self.assertIn("base + 0xE2441", installer)
+        self.assertIn("boundary=verified", installer)
+        self.assertIn("boundary=unverified", installer)
+
+    def test_candidate_callback_is_read_only_and_bounded(self):
+        source = (Path(__file__).with_name("planter_trace_gdb.py")).read_text(encoding="utf-8")
+        body = source.split("class Fam1CandidateBP", 1)[1].split(
+            "def install_transform_probes", 1
+        )[0]
+        self.assertIn("MAX_HITS = 1024", body)
+        self.assertIn("return False", body)
+        self.assertNotIn("return True", body)
+        self.assertNotIn("dump binary memory", body)
+        self.assertNotIn('gdb.execute("set $', body)
+        self.assertNotIn('gdb.execute("continue"', body)
+
+    def test_report_aggregates_only_source_relative_candidate_offsets(self):
+        workflow = (Path(__file__).parents[1] / ".github" / "workflows" /
+                    "planter-genesis-trace.yml").read_text(encoding="utf-8")
+        self.assertIn("fam1_candidate_events.csv", workflow)
+        self.assertIn("source-anchored-fam1-window", workflow)
+        self.assertIn("Distinct fam1 indices", workflow)
+        self.assertNotIn('row.get("effective_address")', workflow)

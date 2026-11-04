@@ -963,6 +963,42 @@ jobs:
                       )
               else:
                   lines.append("The live module-relative region was not captured.")
+              lines += ["", "## fam1 candidate writer site (RVA 0xE2441)", ""]
+              if "FAM1 CANDIDATE BP: installed boundary=verified" in log:
+                  lines.append("- Instruction boundary: verified from the decode beginning at 0xE243D.")
+              elif "FAM1 CANDIDATE BP:" in log:
+                  lines.append("- Instruction boundary: not verified; candidate breakpoint was not installed.")
+              else:
+                  lines.append("- Candidate breakpoint installation was not recorded.")
+              candidate_path = run / "fam1_candidate_events.csv"
+              if candidate_path.is_file():
+                  with candidate_path.open(newline="") as stream:
+                      candidate_rows = list(csv.DictReader(stream))
+                  grouped_candidates = defaultdict(list)
+                  for row in candidate_rows:
+                      grouped_candidates[row.get("active_opcode", "unknown")].append(row)
+                  lines += [
+                      "",
+                      "| vdfut opcode | Hits | Memory destination | Source-anchored fam1 offsets | Distinct fam1 indices | Index min..max |",
+                      "|---|---:|---:|---:|---:|---:|",
+                  ]
+                  for opcode, rows in sorted(grouped_candidates.items()):
+                      memory_dest = [row for row in rows if row.get("destination_is_memory") == "yes"]
+                      fam1_rows = [row for row in memory_dest
+                                   if row.get("resolution") == "source-anchored-fam1-window"
+                                   and row.get("fam1_index", "na") != "na"]
+                      indexes = sorted({int(row["fam1_index"], 16) for row in fam1_rows})
+                      span = f"{indexes[0]:#x}..{indexes[-1]:#x}" if indexes else "n/a"
+                      lines.append(
+                          f"| {opcode} | {len(rows)} | {len(memory_dest)} | {len(fam1_rows)} | "
+                          f"{len(indexes)} | {span} |"
+                      )
+                  errors = sum("FAM1 CANDIDATE CALLBACK ERROR:" in x for x in trace_lines)
+                  lines.append(f"- Candidate callback errors: {errors}")
+              else:
+                  lines.append("- No candidate breakpoint events were captured.")
+              lines.append("")
+
               lines += ["", "## Direct writer coverage by opcode", "",
                         "| Writer | vdfut opcode | Hits | Distinct indices | Index min..max | Base−source delta |",
                         "|---|---|---:|---:|---:|---:|"]
