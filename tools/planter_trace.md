@@ -14,7 +14,7 @@ snapshots; the latest v30 snapshot has 256/256 unique bytes in all four
 canonical windows.
 
 
-## Tracer lifecycle (v31)
+## Tracer lifecycle (v32)
 
 A valid planter snapshot is a capture milestone, **not** a reason to stop the
 inferior. Earlier v30 stopped on the first mixer-read breakpoint that happened
@@ -29,6 +29,27 @@ it does not disable later probes. `reader_events.csv` / `MIXER ACCESS` records
 and the slot samples must therefore be interpreted across the full completed
 call, not just the first valid object observation. A trace is still incomplete
 when the harness times out or exits before its own `ProvisioningStart` result.
+
+## Frame-slot pointer watchpoint (v32)
+
+The source-slot breakpoint now arms a dedicated hardware write watchpoint on the
+8-byte stack qword at [RBP-0x30], before the three established sparse-window
+probes. The slot is captured at the source-slot event; every write records only
+the post-write instruction RVA and the old/new offsets relative to the captured
+source pointer. It also records whether the new value equals source+0x20 and
+whether a readable RW span of 0x2700 bytes begins there.
+
+The watchpoint is accepted only when info breakpoints explicitly identifies
+it as a hardware watchpoint. A software fallback is deleted and recorded as
+software-rejected; it is never allowed to single-step the inferior. The probe
+has a 128-hit safety cap. Its CSV contains no absolute process pointers and is
+suitable for the redacted report builder. A post-write PC is not claimed to be
+the store instruction address without independent instruction-boundary evidence.
+
+The three sparse byte probes are armed after the slot watchpoint, giving the
+frame-slot transition priority among x86 hardware debug registers. On x86-64,
+the expected configuration is one 8-byte slot watchpoint plus three 1-byte
+window probes; actual GDB allocation is still verified at runtime.
 
 ## Current measured model
 

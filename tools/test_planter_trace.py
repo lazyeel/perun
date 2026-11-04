@@ -266,4 +266,32 @@ class TraceLifecycleTests(unittest.TestCase):
     def test_manifest_uses_v31_after_lifecycle_fix(self):
         trace_source = Path(__file__).with_name("planter_trace_gdb.py")
         source = trace_source.read_text(encoding="utf-8")
-        self.assertIn('"script_version": "v31"', source)
+        self.assertIn('"script_version": "v32"', source)
+
+
+    def test_slot_pointer_watchpoint_is_hardware_only_and_armed_first(self):
+        trace_source = Path(__file__).with_name("planter_trace_gdb.py")
+        source = trace_source.read_text(encoding="utf-8")
+
+        source_slot = source.split("class SourceSlotStoreBP", 1)[1].split(
+            "class PostMallocBP", 1
+        )[0]
+        self.assertLess(
+            source_slot.index("arm_slot_pointer_hardware_watchpoint()"),
+            source_slot.index("arm_sparse_window_write_probes()"),
+        )
+
+        watchpoint = source.split("class SlotPointerWriteBP", 1)[1].split(
+            "def arm_slot_pointer_hardware_watchpoint", 1
+        )[0]
+        self.assertIn("gdb.BP_WATCHPOINT", watchpoint)
+        self.assertIn("gdb.WP_WRITE", watchpoint)
+        self.assertIn("return False", watchpoint)
+
+        installer = source.split("def arm_slot_pointer_hardware_watchpoint", 1)[1].split(
+            "def arm_sparse_window_write_probes", 1
+        )[0]
+        self.assertIn("hardware", installer.lower())
+        self.assertIn("bp.delete()", installer)
+        self.assertIn("software-rejected", installer)
+        self.assertIn("slot_pointer_events.csv", installer)

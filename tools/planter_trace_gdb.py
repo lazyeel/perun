@@ -148,6 +148,10 @@ STATE = {
     "final_dumped": False,
     "postmalloc_seen": False,
     "slot_watch_armed": False,
+    "slot_pointer_watch_bp": None,
+    "slot_pointer_watch_addr": None,
+    "slot_pointer_watch_initial": None,
+    "slot_pointer_watch_hits": 0,
     "writer_stats": {},
     "writer_callback_hits": {},
     "writer_bases": {},
@@ -860,6 +864,116 @@ class SparseWindowWriteBP(gdb.Breakpoint):
         return False
 
 
+
+class SlotPointerWriteBP(gdb.Breakpoint):
+    """Hardware-only write watchpoint for the active frame's [RBP-0x30] qword."""
+    def __init__(self, address, initial):
+        self.address = address
+        self.previous = initial
+        self.hits = 0
+        super().__init__(
+            f"-location *(unsigned long long *)0x{address:x}",
+            gdb.BP_WATCHPOINT,
+            gdb.WP_WRITE,
+            internal=False,
+        )
+        self.silent = True
+
+    def stop(self):
+        try:
+            current = int.from_bytes(read_mem(self.address, 8), "little")
+            previous = self.previous
+            self.previous = current
+            self.hits += 1
+            STATE["slot_pointer_watch_hits"] = self.hits
+
+            source = STATE.get("src")
+            old_delta = f"{previous - source:+#x}" if source is not None else "na"
+            new_delta = f"{current - source:+#x}" if source is not None else "na"
+            matches = source is not None and current == source + 0x20
+            mapped = bool(current and ptr_ok(current, PLANTER_SIZE))
+
+            pc = rv("$pc")
+            base = STATE.get("base")
+            pc_rva = f"{pc - base:#x}" if base is not None and pc >= base else "na"
+            path = os.path.join(OUT, "slot_pointer_events.csv")
+            with open(path, "a", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerow([
+                    "hit", "ok", pc_rva, old_delta, new_delta,
+                    "yes" if matches else "no", "yes" if mapped else "no",
+                    "yes" if current != previous else "no",
+                ])
+            log(
+                f"SLOT POINTER WRITE: hit={self.hits} pc_after_rva={pc_rva} "
+                f"old_source_delta={old_delta} new_source_delta={new_delta} "
+                f"matches_source_plus_0x20={matches} span_0x2700_mapped={mapped} "
+                f"value_changed={current != previous}"
+            )
+            if self.hits >= 128:
+                self.enabled = False
+                log("SLOT POINTER WATCH DISABLED: 128-hit safety limit reached")
+        except Exception as exc:
+            log(f"SLOT POINTER WATCH CALLBACK ERROR: {type(exc).__name__}: {exc}")
+        return False
+
+
+def arm_slot_pointer_hardware_watchpoint():
+    """Arm one hardware-only qword watchpoint; never accept GDB's software fallback."""
+    address = STATE.get("slot_pointer_watch_addr")
+    initial = STATE.get("slot_pointer_watch_initial")
+    path = os.path.join(OUT, "slot_pointer_events.csv")
+    with open(path, "w", newline="", encoding="utf-8") as stream:
+        csv.writer(stream).writerow([
+            "event", "status", "pc_after_rva", "old_source_delta",
+            "new_source_delta", "new_is_source_plus_20",
+            "new_span_mapped", "value_changed",
+        ])
+
+    if address is None or initial is None or not ptr_ok(address, 8):
+        with open(path, "a", newline="", encoding="utf-8") as stream:
+            csv.writer(stream).writerow([
+                "setup", "no-slot-anchor", "na", "na", "na", "no", "no", "no"
+            ])
+        log("SLOT POINTER WATCH NOT ARMED: initial frame-slot qword unavailable")
+        return
+
+    try:
+        gdb.execute("set can-use-hw-watchpoints 1", to_string=True)
+        bp = SlotPointerWriteBP(address, initial)
+        details = gdb.execute(f"info breakpoints {bp.number}", to_string=True)
+        if not re.search(r"(?:hardware|hw)\s+watchpoint", details, re.IGNORECASE):
+            bp.delete()
+            with open(path, "a", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerow([
+                    "setup", "software-rejected", "na", "na", "na", "no", "no", "no"
+                ])
+            log("SLOT POINTER WATCH REJECTED: GDB did not create a hardware watchpoint")
+            return
+
+        STATE["slot_pointer_watch_bp"] = bp
+        STATE["slot_watch_armed"] = True
+        source = STATE.get("src")
+        delta = f"{initial - source:+#x}" if source is not None else "na"
+        initial_match = source is not None and initial == source + 0x20
+        initial_mapped = bool(initial and ptr_ok(initial, PLANTER_SIZE))
+        with open(path, "a", newline="", encoding="utf-8") as stream:
+            csv.writer(stream).writerow([
+                "setup", "hardware", "na", "na", delta,
+                "yes" if initial_match else "no",
+                "yes" if initial_mapped else "no", "no",
+            ])
+        log(
+            f"SLOT POINTER WATCH ARMED: hardware=yes initial_source_delta={delta} "
+            f"initial_matches_source_plus_0x20={initial_match} "
+            f"initial_span_0x2700_mapped={initial_mapped}"
+        )
+    except Exception as exc:
+        with open(path, "a", newline="", encoding="utf-8") as stream:
+            csv.writer(stream).writerow([
+                "setup", "setup-error", "na", "na", "na", "no", "no", "no"
+            ])
+        log(f"SLOT POINTER WATCH SETUP ERROR: {type(exc).__name__}: {exc}")
+
 def arm_sparse_window_write_probes():
     """Arm three 1-byte hardware probes after the pre-transform anchor exists."""
     path = os.path.join(OUT, "sparse_write_events.csv")
@@ -947,6 +1061,7 @@ class SourceSlotStoreBP(gdb.Breakpoint):
         # back into GDB's Python UI event loop.
         self.commands = """silent
 python
+arm_slot_pointer_hardware_watchpoint()
 arm_sparse_window_write_probes()
 end
 continue
@@ -958,6 +1073,15 @@ continue
         self.done = True
         src = rv("$rcx")
         rbp = rv("$rbp")
+        slot_addr = rbp - 0x30
+        STATE["slot_pointer_watch_addr"] = slot_addr
+        try:
+            STATE["slot_pointer_watch_initial"] = int.from_bytes(
+                read_mem(slot_addr, 8), "little"
+            )
+        except Exception as exc:
+            STATE["slot_pointer_watch_initial"] = None
+            log(f"SLOT POINTER INITIAL READ ERROR: {type(exc).__name__}: {exc}")
         slot_before = ptr_from_slot(rbp, -0x11A8)
         STATE["source_init"] = src
         STATE["src"] = src
@@ -1734,7 +1858,7 @@ with open(os.path.join(OUT, "writer_callback_events.csv"), "w",
 with open(os.path.join(OUT, "run.json"), "w", encoding="utf-8") as f:
     import json
     json.dump({"run_id": RUN_ID, "pid": os.getpid(), "created_unix": time.time(),
-               "script_version": "v31", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
+               "script_version": "v32", "entry_rva": ENTRY_RVA, "transform_opcode": TRANSFORM_OPCODE,
                "planter_size": PLANTER_SIZE, "tables": TABLES,
                "unknown_ranges": UNKNOWN_RANGES,
                "staging_requested": 200, "staging_observed_copy_span": 256},

@@ -710,8 +710,23 @@ jobs:
                       lines.append(f"- Bytes inspected: {scan_counts.group(2)}")
               else:
                   lines.append("The memory signature scan did not run or did not record a result.")
+              slot_path = run / "slot_pointer_events.csv"
+              slot_setup_status = "not-armed"
+              slot_hits = []
+              slot_target_hits = 0
+              if slot_path.is_file():
+                  with slot_path.open(newline="") as stream:
+                      slot_rows = list(csv.DictReader(stream))
+                  setup = next((row for row in slot_rows if row.get("event") == "setup"), None)
+                  slot_setup_status = setup.get("status", "unknown") if setup else "unknown"
+                  slot_hits = [row for row in slot_rows if row.get("event") == "hit"]
+                  slot_target_hits = sum(
+                      row.get("new_is_source_plus_20") == "yes" for row in slot_hits
+                  )
               lines += ["", "## Capture checkpoints", "",
                         f"- Software watchpoints armed: `{'yes' if 'WATCH ARMED' in log else 'no'}`",
+                        f"- Frame-slot hardware pointer watchpoint: `{slot_setup_status}` "
+                        f"({len(slot_hits)} writes; {slot_target_hits} writes to source+0x20)",
                         f"- Planter base candidate logged: `{'yes' if 'PLANTER BASE CANDIDATE' in log or 'PLANTER BASE IDENTIFIED' in log or 'PLANTER SCAN SELECTED' in log else 'no'}`",
                         f"- Mapped 0x2700 candidate snapshots: `{len(candidate_files)}`",
                         f"- Independent writer-window snapshots: `{len(window_files)}`",
@@ -864,6 +879,17 @@ jobs:
                       lines.append(f"| {name} | {opcode} | {len(rows)} | {len(set(indexes))} | {span} | {delta_span} |")
                   except Exception:
                       lines.append(f"| {name} | {opcode} | {len(rows)} | n/a | n/a | n/a |")
+              lines += ["", "## Frame-slot pointer hardware watchpoint", ""]
+              if slot_path.is_file():
+                  lines.append(f"- Setup status: `{slot_setup_status}`")
+                  lines.append(f"- Observed writes: {len(slot_hits)}")
+                  lines.append(f"- Writes to source+0x20: {slot_target_hits}")
+                  stop_rvas = sorted({row.get("pc_after_rva", "na") for row in slot_hits})
+                  lines.append("- Distinct post-write stop RVAs: " + (", ".join(stop_rvas) if stop_rvas else "none"))
+                  mapped_hits = sum(row.get("new_span_mapped") == "yes" for row in slot_hits)
+                  lines.append(f"- New pointer values with a mapped 0x2700-byte span: {mapped_hits}")
+              else:
+                  lines.append("The frame-slot pointer event file was not created; no conclusion about writes is available.")
               lines += ["", "## Sparse-window hardware write probes", ""]
               sparse_path = run / "sparse_write_events.csv"
               if sparse_path.is_file():
