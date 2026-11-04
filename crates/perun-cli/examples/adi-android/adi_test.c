@@ -35,6 +35,7 @@
 #include <openssl/evp.h>
 #include <ctype.h>
 #include <signal.h>
+#include <errno.h>
 
 /* ── ADI function prototypes (ABI per Provision/adi.d) ─────────────────── */
 typedef int  (*ADI_LoadLibraryWithPath_t)(const char *dir);
@@ -358,6 +359,27 @@ static void dump_raw(const char *path, const void *data, size_t n) {
     close(fd);
 }
 
+/* Private experiment captures: opt-in, mode 0600, and never committed. */
+static void save_env_blob(const char *env_name, const void *data, size_t n) {
+    const char *path = getenv(env_name);
+    if (!path || !*path) return;
+    if (!data || n == 0) die("%s requested but buffer is empty", env_name);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) die("%s: cannot create private capture", env_name);
+    (void)fchmod(fd, 0600);
+    size_t off = 0;
+    while (off < n) {
+        ssize_t w = write(fd, (const uint8_t *)data + off, n - off);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) {
+            close(fd);
+            die("%s: private capture write failed", env_name);
+        }
+        off += (size_t)w;
+    }
+    if (close(fd) != 0) die("%s: private capture close failed", env_name);
+}
+
 #ifdef DUMP_ADI
 /* ── SPIM/CPIM capture (DUMP_ADI builds only) ─────────────────────────────── */
 
@@ -622,6 +644,7 @@ int main(int argc, char **argv) {
 #endif
             rc = pStart(DS_ID, spim_buf, (uint32_t)spim_n, &cpim, &cpim_n, &session);
             if (rc != 0) die("ADIProvisioningStart=%d", rc);
+            save_env_blob("ADI_CPIM_OUT", cpim, cpim_n);
             info("prov", "cpim ready (%u bytes, session=%u)", cpim_n, session);
 #ifdef DUMP_ADI
             save_prov_result(cpim, cpim_n, rc);
@@ -651,6 +674,7 @@ int main(int argc, char **argv) {
         if (!spim_b64) die("no spim in startProvisioning response");
         size_t spim_n = 0;
         uint8_t *spim = b64_decode(spim_b64, &spim_n);
+        save_env_blob("ADI_SPIM_OUT", spim, spim_n);
         info("prov", "spim received (%zu bytes decoded)", spim_n);
 
         uint8_t *cpim = NULL; uint32_t cpim_n = 0; uint32_t session = 0;
@@ -668,6 +692,8 @@ int main(int argc, char **argv) {
         extern void ww_finish(const uint8_t *, uint32_t);
 #endif
         rc = pStart(DS_ID, spim, (uint32_t)spim_n, &cpim, &cpim_n, &session);
+        if (rc == 0 && cpim && cpim_n)
+            save_env_blob("ADI_CPIM_OUT", cpim, cpim_n);
         if (force_start && trace_start_only) {
             info("prov", "TRACE-ONLY start rc=%d cpim_len=%u", rc, cpim_n);
             return 0;

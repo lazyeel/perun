@@ -5,8 +5,9 @@
 # и теми же замороженными часами дают ОДИНАКОВЫЙ CPIM — время доказано
 # как вариативный вход генезиса. Доктрина: прямые BPs, stop() -> False.
 import gdb
+import os as _os
 
-LOG = "/opt/data/adi-re/time_freeze.log"
+LOG = _os.environ.get("ADI_PROBE_LOG", "/opt/data/adi-re/time_freeze.log")
 FROZEN_SEC = 1793783000
 FROZEN_USEC = 123456
 STATE = {"gt": 0, "poked": 0}
@@ -17,6 +18,19 @@ def log(msg):
         f.write(msg + "\n")
 
 
+def return_from_gettimeofday(tv):
+    """Write a deterministic timeval and emulate a successful function return."""
+    rsp = ru("$rsp")
+    ret = ru("*(unsigned long long*)%#x" % rsp)
+    if tv:
+        gdb.execute("set {unsigned long long}%d = %d" % (tv, FROZEN_SEC))
+        gdb.execute("set {unsigned long long}%d = %d" % (tv + 8, FROZEN_USEC))
+    gdb.execute("set $rax = 0")
+    gdb.execute("set $rsp = %#x" % (rsp + 8))
+    gdb.execute("set $pc = %#x" % ret)
+    return ret
+
+
 class GtBP(gdb.Breakpoint):
     def __init__(self):
         super().__init__("gettimeofday", gdb.BP_BREAKPOINT, internal=False)
@@ -25,27 +39,25 @@ class GtBP(gdb.Breakpoint):
     def stop(self):
         STATE["gt"] += 1
         try:
-            caller = gdb.execute("bt 2", to_string=True)
+            caller = gdb.execute("bt 4", to_string=True)
         except Exception:  # noqa: BLE001
             caller = ""
-        in_vdfut = "vdfut768ig" in caller
-        if in_vdfut:
-            # struct timeval { time_t tv_sec; suseconds_t tv_usec; } (64-бит)
-            tv = int(gdb.parse_and_eval("$rdi")) & 0xFFFFFFFFFFFFFFFF
-            gdb.execute("set {unsigned long long}%d = %d" % (tv, FROZEN_SEC))
-            gdb.execute("set {unsigned long long}%d = %d" % (tv + 8, FROZEN_USEC))
-            STATE["poked"] += 1
-            log("POKE #%d tv@%#x = %d.%d" % (STATE["poked"], tv, FROZEN_SEC, FROZEN_USEC))
+        if "vdfut768ig" in caller:
+            try:
+                tv = ru("$rdi")
+                return_from_gettimeofday(tv)
+                STATE["poked"] += 1
+                log("POKE gettimeofday #%d" % STATE["poked"])
+            except Exception as e:  # noqa: BLE001
+                log("gettimeofday freeze ERR %s" % type(e).__name__)
+                return True
         else:
-            log("gt call #%d outside vdfut (left alone)" % STATE["gt"])
+            log("gt call #%d outside vdfut (left)" % STATE["gt"])
         return False
-
 
 gdb.execute("set pagination off")
 gdb.execute("set confirm off")
 gdb.execute("set breakpoint pending on")
-
-import os as _os
 
 _raw = gdb.parameter("args")
 _args = (_raw.string if hasattr(_raw, "string") else str(_raw)).split()

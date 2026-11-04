@@ -351,3 +351,32 @@ class TraceLifecycleTests(unittest.TestCase):
         self.assertIn("| Old source-relative offset | New source-relative offset |", source)
         self.assertIn("for index, event in enumerate(safe_slot_events, 1)", source)
         self.assertNotIn("row.get(\"old_pointer\")", source)
+
+
+class DeterministicInputProbeTests(unittest.TestCase):
+    def test_gettimeofday_probe_returns_without_running_libc_body(self):
+        for filename in ("time_freeze_gdb.py", "rdtsc_freeze_gdb.py"):
+            source = (Path(__file__).with_name(filename)).read_text(encoding="utf-8")
+            helper = source.split("def return_from_gettimeofday", 1)[1].split(
+                "class GtBP", 1
+            )[0]
+            self.assertIn('gdb.execute("set $rax = 0")', helper)
+            self.assertIn('gdb.execute("set $rsp = %#x" % (rsp + 8))', helper)
+            self.assertIn('gdb.execute("set $pc = %#x" % ret)', helper)
+            self.assertIn("return_from_gettimeofday(tv)", source)
+            self.assertIn('log("POKE gettimeofday #', source)
+
+    def test_rdtsc_probe_uses_architectural_eax_edx_and_skips_instruction(self):
+        source = (Path(__file__).with_name("rdtsc_freeze_gdb.py")).read_text(encoding="utf-8")
+        body = source.split("class RdtscBP", 1)[1].split("class ArmBP", 1)[0]
+        self.assertIn('gdb.execute("set $eax = %#x" % FROZEN_RAX)', body)
+        self.assertIn('gdb.execute("set $edx = %#x" % FROZEN_RDX)', body)
+        self.assertIn('gdb.execute("set $pc = %#x" % (self.addr + 2))', body)
+
+    def test_probe_captures_are_opt_in_and_private(self):
+        source = (Path(__file__).parents[1] / "crates/perun-cli/examples/adi-android/adi_test.c").read_text(encoding="utf-8")
+        helper = source.split("static void save_env_blob", 1)[1].split("#ifdef DUMP_ADI", 1)[0]
+        self.assertIn('getenv(env_name)', helper)
+        self.assertIn("O_CREAT | O_TRUNC, 0600", helper)
+        self.assertIn('save_env_blob("ADI_SPIM_OUT"', source)
+        self.assertIn('save_env_blob("ADI_CPIM_OUT"', source)

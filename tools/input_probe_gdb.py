@@ -98,7 +98,6 @@ SymBP("clock_gettime", "cp")
 SymBP("gettimeofday", "gt")
 SymBP("time", "tm")
 SymBP("getrandom", "gr")
-OpenBP("open", "rsi")        # open(path, ...) -> rsi? нет: open(path) -> rdi
 OpenBP("open", "rdi")
 OpenBP("openat", "rsi")      # openat(dirfd, path) -> rsi
 log("probes armed")

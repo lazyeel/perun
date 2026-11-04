@@ -169,6 +169,8 @@ jobs:
           export PERUN_TRACE_DIR="$WORK/traces"
           export ADI_FORCE_START=1
           export ADI_TRACE_START_ONLY=1
+          export ADI_SPIM_OUT="$WORK/fixed-input.spim"
+          export ADI_CPIM_OUT="$WORK/native-live.cpim"
           export GDB_SCRIPT="$GITHUB_WORKSPACE/tools/planter_trace_gdb.py"
 
           echo "Android NDK compiler: $CC"
@@ -182,6 +184,82 @@ jobs:
           echo "$NATIVE_RC" > "$WORK/native-exit-code.txt"
           echo "Native control exit code: $NATIVE_RC"
 
+          # Replay one fixed SPIM/identity/state seed in two ordinary and two
+          # frozen offline processes. Only aggregates leave this ephemeral runner.
+          PROBE_DIR="$WORK/fixed-input-probe"
+          mkdir -p "$PROBE_DIR/seed" /opt/data/adi-re
+          if [ -s "$WORK/fixed-input.spim" ] && [ -f "$WORK/adi_identifier" ] && [ -d "$WORK/adi-data" ]; then
+            cp -a "$WORK/adi-data" "$PROBE_DIR/seed/adi-data"
+            cp -p "$WORK/adi_identifier" "$PROBE_DIR/seed/adi_identifier"
+            restore_probe_state() {
+              rm -rf "$WORK/adi-data" "$WORK/adi_identifier"
+              cp -a "$PROBE_DIR/seed/adi-data" "$WORK/adi-data"
+              cp -p "$PROBE_DIR/seed/adi_identifier" "$WORK/adi_identifier"
+            }
+            run_probe_pass() {
+              local name="$1" mode="$2" rc=0
+              restore_probe_state
+              export ADI_OFFLINE_SPIM="$WORK/fixed-input.spim"
+              export ADI_CPIM_OUT="$PROBE_DIR/$name.cpim"
+              if [ "$mode" = frozen ]; then
+                export ADI_GDB=1
+                export GDB_SCRIPT="$GITHUB_WORKSPACE/tools/rdtsc_freeze_gdb.py"
+                export ADI_PROBE_LOG="$PROBE_DIR/$name-gdb.log"
+              else
+                export ADI_GDB=0
+                unset ADI_PROBE_LOG
+              fi
+              rm -f "$ADI_CPIM_OUT"
+              set +e
+              timeout --signal=TERM --kill-after=3s 20s bash "$GITHUB_WORKSPACE/crates/perun-cli/examples/adi-android/run-native.sh" \
+                > "$PROBE_DIR/$name-console.log" 2>&1
+              rc=$?
+              set -e
+              echo "$rc" > "$PROBE_DIR/$name.rc"
+              echo "Fixed-input probe $name exit code: $rc"
+            }
+            run_probe_pass baseline_a baseline
+            run_probe_pass baseline_b baseline
+            run_probe_pass frozen_a frozen
+            run_probe_pass frozen_b frozen
+
+            probe_hash() { [ -s "$1" ] && sha256sum "$1" | awk '{print $1}' || printf 'missing'; }
+            probe_len() { [ -s "$1" ] && stat -c '%s' "$1" || printf '0'; }
+            BASE_A_SHA="$(probe_hash "$PROBE_DIR/baseline_a.cpim")"
+            BASE_B_SHA="$(probe_hash "$PROBE_DIR/baseline_b.cpim")"
+            FROZEN_A_SHA="$(probe_hash "$PROBE_DIR/frozen_a.cpim")"
+            FROZEN_B_SHA="$(probe_hash "$PROBE_DIR/frozen_b.cpim")"
+            BASE_EQUAL=no; FROZEN_EQUAL=no
+            [ "$BASE_A_SHA" != missing ] && [ "$BASE_A_SHA" = "$BASE_B_SHA" ] && BASE_EQUAL=yes
+            [ "$FROZEN_A_SHA" != missing ] && [ "$FROZEN_A_SHA" = "$FROZEN_B_SHA" ] && FROZEN_EQUAL=yes
+            TIME_HITS="$(grep -c '^POKE gettimeofday' "$PROBE_DIR/frozen_b-gdb.log" 2>/dev/null || true)"
+            RDTSC_HITS="$(grep -c '^RDTSC freeze' "$PROBE_DIR/frozen_b-gdb.log" 2>/dev/null || true)"
+            {
+              echo "status=completed"
+              echo "baseline_a_rc=$(cat "$PROBE_DIR/baseline_a.rc")"
+              echo "baseline_b_rc=$(cat "$PROBE_DIR/baseline_b.rc")"
+              echo "frozen_a_rc=$(cat "$PROBE_DIR/frozen_a.rc")"
+              echo "frozen_b_rc=$(cat "$PROBE_DIR/frozen_b.rc")"
+              echo "baseline_a_len=$(probe_len "$PROBE_DIR/baseline_a.cpim")"
+              echo "baseline_b_len=$(probe_len "$PROBE_DIR/baseline_b.cpim")"
+              echo "frozen_a_len=$(probe_len "$PROBE_DIR/frozen_a.cpim")"
+              echo "frozen_b_len=$(probe_len "$PROBE_DIR/frozen_b.cpim")"
+              echo "baseline_equal=$BASE_EQUAL"
+              echo "frozen_equal=$FROZEN_EQUAL"
+              echo "gettimeofday_freeze_hits=$TIME_HITS"
+              echo "rdtsc_freeze_hits=$RDTSC_HITS"
+              echo "spim_len=$(stat -c '%s' "$WORK/fixed-input.spim")"
+            } > "$PROBE_DIR/summary.env"
+          else
+            echo "status=skipped" > "$PROBE_DIR/summary.env"
+          fi
+
+          # Return to the original state before the standard trace invocation.
+          if [ -d "$PROBE_DIR/seed/adi-data" ] && [ -f "$PROBE_DIR/seed/adi_identifier" ]; then
+            restore_probe_state
+          fi
+          unset ADI_OFFLINE_SPIM ADI_SPIM_OUT ADI_CPIM_OUT ADI_PROBE_LOG
+          export ADI_GDB=1
           echo "Using GDB: $(gdb --version | head -1)"
           echo "Running identical harness under GDB with the same working directory/identity."
           export ADI_GDB=1
@@ -1011,6 +1089,33 @@ jobs:
               else:
                   lines.append("The run did not produce a validated planter snapshot. Raw traces remain on the ephemeral runner and are not published.")
               lines.append("")
+          probe_env = Path(os.environ.get("RUN_WORK", "")) / "fixed-input-probe" / "summary.env"
+          if probe_env.is_file():
+              probe = dict(
+                  line.split("=", 1) for line in probe_env.read_text().splitlines()
+                  if "=" in line
+              )
+              if probe.get("status") == "completed":
+                  lines += [
+                      "", "## Fixed-input CPIM determinism probe", "",
+                      "Four offline runs reused the same saved SPIM, device identity, and restored adi-data seed. "
+                      "Two baseline runs used native execution; two frozen runs used GDB to replace the gettimeofday "
+                      "return value and the three confirmed RDTSC sites. Raw inputs, outputs, and digests remain private.",
+                      "",
+                      f"- SPIM input length: {probe.get('spim_len', 'n/a')} bytes",
+                      f"- Baseline CPIM lengths: {probe.get('baseline_a_len', '0')} / {probe.get('baseline_b_len', '0')} bytes; equal: {probe.get('baseline_equal', 'no')}",
+                      f"- Frozen CPIM lengths: {probe.get('frozen_a_len', '0')} / {probe.get('frozen_b_len', '0')} bytes; equal: {probe.get('frozen_equal', 'no')}",
+                      f"- Frozen gettimeofday interceptions: {probe.get('gettimeofday_freeze_hits', '0')}",
+                      f"- Frozen RDTSC bypasses: {probe.get('rdtsc_freeze_hits', '0')}",
+                      f"- Process exit codes (baseline A/B, frozen A/B): {probe.get('baseline_a_rc')}/{probe.get('baseline_b_rc')}/{probe.get('frozen_a_rc')}/{probe.get('frozen_b_rc')}",
+                      "",
+                      "Interpretation is conditional on all four runs producing CPIM and nonzero freeze-hit counts. "
+                      "Equal frozen outputs after differing baseline outputs support time/counter dependence; "
+                      "otherwise other entropy sources or state/input issues remain possible."
+                  ]
+              else:
+                  lines += ["", "## Fixed-input CPIM determinism probe", "",
+                            "Skipped: no valid SPIM/identity seed was captured by the initial native control."]
           report.parent.mkdir(parents=True, exist_ok=True)
           report.write_text("\n".join(lines), encoding="utf-8")
           print(report.read_text())
