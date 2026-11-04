@@ -380,3 +380,16 @@ class DeterministicInputProbeTests(unittest.TestCase):
         self.assertIn("O_CREAT | O_TRUNC, 0600", helper)
         self.assertIn('save_env_blob("ADI_SPIM_OUT"', source)
         self.assertIn('save_env_blob("ADI_CPIM_OUT"', source)
+
+
+class WorkflowProbeRestorationTests(unittest.TestCase):
+    def test_standard_trace_restores_full_planter_gdb_script(self):
+        workflow = (Path(__file__).parents[1] / ".github" / "workflows" / "planter-genesis-trace.yml").read_text(encoding="utf-8")
+        marker = "# Return to the original state before the standard trace invocation."
+        self.assertIn(marker, workflow)
+        tail = workflow.split(marker, 1)[1].split("      - name: Build a redacted trace report", 1)[0]
+        self.assertIn('export GDB_SCRIPT="$GITHUB_WORKSPACE/tools/planter_trace_gdb.py"', tail)
+        self.assertLess(
+            tail.index('export GDB_SCRIPT="$GITHUB_WORKSPACE/tools/planter_trace_gdb.py"'),
+            tail.index('timeout --signal=TERM --kill-after=5s 4m bash'),
+        )

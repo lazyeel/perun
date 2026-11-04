@@ -260,6 +260,9 @@ jobs:
           fi
           unset ADI_OFFLINE_SPIM ADI_SPIM_OUT ADI_CPIM_OUT ADI_PROBE_LOG
           export ADI_GDB=1
+          # The frozen offline probes replace this variable; explicitly restore
+          # the full planter tracer before the regular GDB capture.
+          export GDB_SCRIPT="$GITHUB_WORKSPACE/tools/planter_trace_gdb.py"
           echo "Using GDB: $(gdb --version | head -1)"
           echo "Running identical harness under GDB with the same working directory/identity."
           export ADI_GDB=1
