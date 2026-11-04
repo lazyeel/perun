@@ -4164,3 +4164,14 @@ The first trace after commit `76f6d1aa6cfedcf0552f306019b2acf50e5c8520` empirica
 **Remaining boundary.** The report establishes stable object identity and complete mixer-read coverage, but it does not derive the session-dependent initialization of the 0x2700-byte object from raw SPIM plus identity. The full-memory signature scan was not recorded. The Rust implementation still cannot be called autonomous on the strength of this run.
 
 **Metadata correction.** The run's manifest labelled the tracer `v30` even though the lifecycle change is the documented v31 behavior. The manifest version is corrected to `v31` in the follow-up source commit; historical run 41865454992 remains labelled as originally emitted.
+
+
+#### Frame-slot pointer transition evidence (2026-11-04, run 41871439693)
+
+Tracer v33 successfully installed the dedicated hardware write watchpoint on the 8-byte `[RBP-0x30]` qword. The live GDB harness recorded **six writes** to this slot. Those writes produced **five distinct post-write instruction-pointer RVAs**: `0x9159c`, `0x91c4d`, `0xa1510`, `0xa4737`, and `0xdd659` (one of the RVAs was observed more than once).
+
+Across those six events, exactly one new slot value equalled `source+0x20`; exactly one new value also passed the readable-RW-span check for `0x2700` bytes. The initial value sampled at the source-slot breakpoint did not equal `source+0x20`. At all 160 subsequent mixer-read samples, the slot equalled `source+0x20` and remained unchanged. This bridges the mutable frame-slot phase to the stable planter object with direct hardware write observation.
+
+The reported RVAs are **post-write stop PCs**, not yet asserted to be the store instructions themselves. The v33 public report retained only the event count and distinct RVAs; the per-event CSV stayed on the ephemeral runner and was not published. Consequently, the order and old/new source-relative deltas for the six writes cannot be reconstructed from the public report. The next report-builder revision adds a redacted per-event table containing only post-write RVA, old/new source-relative offsets, equality with `source+0x20`, mapped-span status, and value-change status. Absolute pointers and raw memory remain excluded.
+
+The same run completed successfully: 160 mixer-read samples, no breakpoint or callback errors, all five tracked windows were 256/256 permutations, the native control exited 0, and trace-only `ProvisioningStart` returned `rc=0, cpim_len=276`. No signal-stop location or autonomous Rust CPIM generation was demonstrated.

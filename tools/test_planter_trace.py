@@ -314,3 +314,16 @@ class TraceLifecycleTests(unittest.TestCase):
         )[0]
         self.assertIn('stage = "create-watchpoint"', installer)
         self.assertIn('status = f"setup-error:{stage}:{type(exc).__name__}"', installer)
+
+
+    def test_workflow_redacts_and_reports_each_slot_pointer_transition(self):
+        workflow_path = Path(__file__).parents[1] / ".github" / "workflows" / "planter-genesis-trace.yml"
+        source = workflow_path.read_text(encoding="utf-8")
+        self.assertIn("safe_slot_events = []", source)
+        self.assertIn('row.get("old_source_delta", "")', source)
+        self.assertIn('row.get("new_source_delta", "")', source)
+        self.assertIn('re.fullmatch(r"(?:[+-]0x[0-9a-f]+|na)", old_delta)', source)
+        self.assertIn('re.fullmatch(r"0x[0-9a-f]+", rva)', source)
+        self.assertIn("| Old source-relative offset | New source-relative offset |", source)
+        self.assertIn("for index, event in enumerate(safe_slot_events, 1)", source)
+        self.assertNotIn("row.get(\"old_pointer\")", source)
