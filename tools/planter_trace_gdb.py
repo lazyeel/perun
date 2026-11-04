@@ -865,6 +865,14 @@ class SparseWindowWriteBP(gdb.Breakpoint):
 
 
 
+def bounded_source_delta(value, source):
+    """Return only small source-relative offsets; suppress unrelated stack/scalar data."""
+    if source is None:
+        return "na"
+    delta = value - source
+    return f"{delta:+#x}" if abs(delta) <= 0x100000 else "na"
+
+
 class SlotPointerWriteBP(gdb.Breakpoint):
     """Hardware-only write watchpoint for the active frame's [RBP-0x30] qword."""
     def __init__(self, address, initial):
@@ -888,8 +896,8 @@ class SlotPointerWriteBP(gdb.Breakpoint):
             STATE["slot_pointer_watch_hits"] = self.hits
 
             source = STATE.get("src")
-            old_delta = f"{previous - source:+#x}" if source is not None else "na"
-            new_delta = f"{current - source:+#x}" if source is not None else "na"
+            old_delta = bounded_source_delta(previous, source)
+            new_delta = bounded_source_delta(current, source)
             matches = source is not None and current == source + 0x20
             mapped = bool(current and ptr_ok(current, PLANTER_SIZE))
 
@@ -909,7 +917,13 @@ class SlotPointerWriteBP(gdb.Breakpoint):
                 f"matches_source_plus_0x20={matches} span_0x2700_mapped={mapped} "
                 f"value_changed={current != previous}"
             )
-            if self.hits >= 128:
+            if matches:
+                # This watchpoint is anchored to a stack address, not a
+                # lifetime-tracked variable. Once the target pointer is seen,
+                # later writes may be reuse of the same stack slot by other frames.
+                self.enabled = False
+                log("SLOT POINTER WATCH DISABLED: source+0x20 anchor captured")
+            elif self.hits >= 128:
                 self.enabled = False
                 log("SLOT POINTER WATCH DISABLED: 128-hit safety limit reached")
         except Exception as exc:
@@ -957,7 +971,7 @@ def arm_slot_pointer_hardware_watchpoint():
         STATE["slot_pointer_watch_bp"] = bp
         STATE["slot_watch_armed"] = True
         source = STATE.get("src")
-        delta = f"{initial - source:+#x}" if source is not None else "na"
+        delta = bounded_source_delta(initial, source)
         initial_match = source is not None and initial == source + 0x20
         initial_mapped = bool(initial and ptr_ok(initial, PLANTER_SIZE))
         with open(path, "a", newline="", encoding="utf-8") as stream:

@@ -297,6 +297,27 @@ class TraceLifecycleTests(unittest.TestCase):
         self.assertIn("slot_pointer_events.csv", installer)
 
 
+    def test_slot_pointer_watchpoint_stops_after_source_anchor_match(self):
+        trace_source = Path(__file__).with_name("planter_trace_gdb.py")
+        source = trace_source.read_text(encoding="utf-8")
+        body = source.split("class SlotPointerWriteBP", 1)[1].split(
+            "def arm_slot_pointer_hardware_watchpoint", 1
+        )[0]
+        self.assertIn("bounded_source_delta(previous, source)", body)
+        self.assertIn("bounded_source_delta(current, source)", body)
+        self.assertIn("if matches:", body)
+        self.assertIn("self.enabled = False", body)
+        self.assertIn("SLOT POINTER WATCH DISABLED: source+0x20 anchor captured", body)
+
+    def test_bounded_source_delta_suppresses_unrelated_values(self):
+        trace_source = Path(__file__).with_name("planter_trace_gdb.py")
+        source = trace_source.read_text(encoding="utf-8")
+        helper = source.split("def bounded_source_delta", 1)[1].split(
+            "class SlotPointerWriteBP", 1
+        )[0]
+        self.assertIn("abs(delta) <= 0x100000", helper)
+        self.assertIn('return "na"', helper)
+
     def test_slot_pointer_watchpoint_uses_expression_spec(self):
         trace_source = Path(__file__).with_name("planter_trace_gdb.py")
         source = trace_source.read_text(encoding="utf-8")
@@ -322,7 +343,10 @@ class TraceLifecycleTests(unittest.TestCase):
         self.assertIn("safe_slot_events = []", source)
         self.assertIn('row.get("old_source_delta", "")', source)
         self.assertIn('row.get("new_source_delta", "")', source)
-        self.assertIn('re.fullmatch(r"(?:[+-]0x[0-9a-f]+|na)", old_delta)', source)
+        self.assertIn("def safe_relative_offset(value):", source)
+        self.assertIn("magnitude <= 0x100000", source)
+        self.assertIn('safe_relative_offset(row.get("old_source_delta", ""))', source)
+        self.assertIn('safe_relative_offset(row.get("new_source_delta", ""))', source)
         self.assertIn('re.fullmatch(r"0x[0-9a-f]+", rva)', source)
         self.assertIn("| Old source-relative offset | New source-relative offset |", source)
         self.assertIn("for index, event in enumerate(safe_slot_events, 1)", source)
