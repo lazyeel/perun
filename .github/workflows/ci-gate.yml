@@ -1,0 +1,33 @@
+name: ci
+
+# Lean push gate: formatting, lints, and the full workspace test suite.
+# The capture-consuming tests (autonomous/e2e/iter0 parity) are env-gated
+# and skip here by design -- measured SPIM/CPIM/tape artifacts never leave
+# the lab, so CI validates structure and the white-box math, not captures.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain components
+        run: rustup component add rustfmt clippy
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
