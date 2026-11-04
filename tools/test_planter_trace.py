@@ -244,3 +244,20 @@ class ZoneRegionComparisonTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class TraceLifecycleTests(unittest.TestCase):
+    """Keep a valid capture from accidentally terminating the live oracle."""
+
+    def test_valid_planter_snapshot_does_not_stop_the_inferior(self):
+        trace_source = Path(__file__).with_name("planter_trace_gdb.py")
+        source = trace_source.read_text(encoding="utf-8")
+        body = source.split("class FirstMixerReadBP", 1)[1].split(
+            "class PlanterBaseLoadBP", 1
+        )[0]
+        self.assertNotIn('if STATE["final_dumped"] or', body)
+        self.assertNotIn("return True", body)
+        self.assertIn('if STATE["active_op"] != TRANSFORM_OPCODE:', body)
+        self.assertIn('if not STATE["final_dumped"]:', body)
+        self.assertIn("return False", body)

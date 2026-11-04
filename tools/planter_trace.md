@@ -13,6 +13,23 @@ Window shape is capture-dependent: earlier runs had sparse fam2/fam4
 snapshots; the latest v30 snapshot has 256/256 unique bytes in all four
 canonical windows.
 
+
+## Tracer lifecycle (v31)
+
+A valid planter snapshot is a capture milestone, **not** a reason to stop the
+inferior. Earlier v30 stopped on the first mixer-read breakpoint that happened
+to satisfy the four-window signature. That could preserve the object while
+preventing the remaining mixer-read sites and the trace-only
+`ProvisioningStart` result from being observed.
+
+The current tracer writes `planter.final.bin` once, keeps all mixer-read
+breakpoints observational, and continues the harness to completion. The
+`final_dumped` flag now means only "the validated snapshot has been written";
+it does not disable later probes. `reader_events.csv` / `MIXER ACCESS` records
+and the slot samples must therefore be interpreted across the full completed
+call, not just the first valid object observation. A trace is still incomplete
+when the harness times out or exits before its own `ProvisioningStart` result.
+
 ## Current measured model
 
 The four-window permutation signature is not an invariant of every capture.

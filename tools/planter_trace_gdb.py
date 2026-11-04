@@ -1284,7 +1284,7 @@ class FirstMixerReadBP(gdb.Breakpoint):
         self.silent = True
 
     def stop(self):
-        if STATE["final_dumped"] or STATE["active_op"] != TRANSFORM_OPCODE:
+        if STATE["active_op"] != TRANSFORM_OPCODE:
             return False
         rbp = rv("$rbp")
         slot_ptr = ptr_from_slot(rbp, -0x30)
@@ -1436,45 +1436,52 @@ class FirstMixerReadBP(gdb.Breakpoint):
             if scanned is not None:
                 p = scanned
         if p and has_planter_signature(p):
-            STATE["final_dumped"] = True
-            data = read_mem(p, PLANTER_SIZE)
-            write_blob("planter.final.bin", data)
-            for name, off in TABLES:
-                w = data[off:off + WINDOW_SIZE]
-                log(f"FINAL {name}: unique={len(set(w))}/256 first32={w[:32].hex()}")
-                write_blob(f"{name}.final.bin", w)
-            for name, off, size in UNKNOWN_RANGES:
-                region = data[off:off + size]
-                log(f"FINAL {name}: offset={off:#x} size={size:#x} "
-                    f"unique={len(set(region))}/256 first64={region[:64].hex()}")
-                write_blob(f"{name}.final.bin", region)
-            with open(os.path.join(OUT, "writer_stats.txt"), "w", encoding="utf-8") as f:
-                for name, st in sorted(STATE["writer_stats"].items()):
-                    f.write(f"{name}: {st}\n")
+            # A validated snapshot is a durable capture milestone, not the
+            # end of the experiment. Earlier v30 stopped the inferior here,
+            # on the first mixer read that happened to satisfy the historical
+            # four-window signature. That prevented the remaining mixer
+            # reads and ProvisioningStart's return from being observed.
+            if not STATE["final_dumped"]:
+                STATE["final_dumped"] = True
+                data = read_mem(p, PLANTER_SIZE)
+                write_blob("planter.final.bin", data)
+                for name, off in TABLES:
+                    w = data[off:off + WINDOW_SIZE]
+                    log(f"FINAL {name}: unique={len(set(w))}/256 first32={w[:32].hex()}")
+                    write_blob(f"{name}.final.bin", w)
+                for name, off, size in UNKNOWN_RANGES:
+                    region = data[off:off + size]
+                    log(f"FINAL {name}: offset={off:#x} size={size:#x} "
+                        f"unique={len(set(region))}/256 first64={region[:64].hex()}")
+                    write_blob(f"{name}.final.bin", region)
+                with open(os.path.join(OUT, "writer_stats.txt"), "w", encoding="utf-8") as f:
+                    for name, st in sorted(STATE["writer_stats"].items()):
+                        f.write(f"{name}: {st}\n")
+                if STATE["src"] and ptr_ok(STATE["src"], 256):
+                    write_blob("source.final.bin", read_mem(STATE["src"], 256))
+                if STATE["dst"] and STATE["dst_span"]:
+                    n = STATE["dst_span"]
+                    if ptr_ok(STATE["dst"], n):
+                        staging = read_mem(STATE["dst"], n)
+                        write_blob(f"staging.final.span_{n}.bin", staging)
+                        if n >= 200:
+                            write_blob("staging.final.requested_200.bin", staging[:200])
+                        if n >= 256:
+                            write_blob("staging.final.adjacent_56.bin", staging[200:256])
+                log(f"VALIDATED PLANTER SNAPSHOT at mixer read {self.rva:#x}; "
+                    "continuing through the remaining reads and ProvisioningStart")
+            else:
+                log(f"VALIDATED PLANTER remains present at mixer read {self.rva:#x}; continuing")
         elif STATE["slot_anchor_dumped"]:
             log("MIXER SLOT OBJECT RETAINED: pointer anchor is verified; "
                 "legacy four-permutation signature is not satisfied in this session; continuing")
-            # This is an observation breakpoint, not a terminal capture point.
-            # Keep executing so the remaining mixer reads and ProvisioningStart
-            # complete; the slot-anchored dump has already been saved.
-            return False
         else:
             log("MIXER CANDIDATE REJECTED: no verified four-permutation planter; "
                 "retrying at next mixer-read site")
-            return False
-        if STATE["src"] and ptr_ok(STATE["src"], 256):
-            write_blob("source.final.bin", read_mem(STATE["src"], 256))
-        if STATE["dst"] and STATE["dst_span"]:
-            n = STATE["dst_span"]
-            if ptr_ok(STATE["dst"], n):
-                data = read_mem(STATE["dst"], n)
-                write_blob(f"staging.final.span_{n}.bin", data)
-                if n >= 200:
-                    write_blob("staging.final.requested_200.bin", data[:200])
-                if n >= 256:
-                    write_blob("staging.final.adjacent_56.bin", data[200:256])
-        log(f"TRACE COMPLETE elapsed={time.time() - STATE['started']:.1f}s; GDB left stopped")
-        return True
+
+        # Every mixer-read breakpoint is observational. Never stop the
+        # inferior merely because a candidate has been captured or validated.
+        return False
 
 
 class PlanterBaseLoadBP(gdb.Breakpoint):
