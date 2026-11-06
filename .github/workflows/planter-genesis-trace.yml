@@ -296,6 +296,7 @@ jobs:
           from pathlib import Path
           sys.path.insert(0, str(Path(os.environ['GITHUB_WORKSPACE']) / 'tools'))
           from compare_zone_regions import compare_zone_regions
+          from planter_access import infer_byte_relations
 
           root = Path(os.environ["TRACE_ROOT"])
           report = Path(os.environ["REPORT"])

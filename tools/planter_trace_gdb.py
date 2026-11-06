@@ -898,6 +898,12 @@ class SlotPointerWriteBP(gdb.Breakpoint):
             self.hits += 1
             STATE["slot_pointer_watch_hits"] = self.hits
 
+            def safe_frame_value(expression):
+                try:
+                    return f"{rv(expression):#x}"
+                except Exception:
+                    return "na"
+
             source = STATE.get("src")
             old_delta = bounded_source_delta(previous, source)
             new_delta = bounded_source_delta(current, source)
@@ -1805,7 +1811,7 @@ class Fam1CandidateBP(gdb.Breakpoint):
                 "memory_expression", "width", "object_offset", "fam1_index",
                 "anchor_register", "index_registers", "resolution",
                 "memory_write_class", "source_operand", "source_register",
-                "source_value", "fam1_index", "counter_d8", "state_38", "state_40",
+                "source_value", "counter_d8", "state_38", "state_40",
                 "reg_rax", "reg_rbx", "reg_rcx", "reg_rdx", "reg_rsi", "reg_rdi", "reg_rbp", "reg_rsp", "reg_r8", "reg_r9", "reg_r10", "reg_r11", "reg_r12", "reg_r13", "reg_r14", "reg_r15",
             ])
 
@@ -1882,10 +1888,9 @@ class Fam1CandidateBP(gdb.Breakpoint):
                     source_operand,
                     source_register or "na",
                     f"{registers[source_register]:#x}" if source_register in registers else "na",
-                    f"{fam1_index:#x}" if fam1_index is not None else "na",
-                    f"{rv('*(unsigned long long*)($rbp-0xd8)'):#x}" if source_register else "na",
-                    f"{rv('*(unsigned int*)($rbp-0x38)'):#x}" if source_register else "na",
-                    f"{rv('*(unsigned long long*)($rbp-0x40)'):#x}" if source_register else "na",
+                    f"{safe_frame_value('*(unsigned long long*)($rbp-0xd8)')}",
+                    f"{safe_frame_value('*(unsigned int*)($rbp-0x38)')}",
+                    f"{safe_frame_value('*(unsigned long long*)($rbp-0x40)')}",
                     f"{registers.get('rax', 0):#x}" if "rax" in registers else "na",
                     f"{registers.get('rbx', 0):#x}" if "rbx" in registers else "na",
                     f"{registers.get('rcx', 0):#x}" if "rcx" in registers else "na",

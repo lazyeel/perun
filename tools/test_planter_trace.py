@@ -521,4 +521,5 @@ class MemoryDestinationSemanticsTests(unittest.TestCase):
                     "planter-genesis-trace.yml").read_text(encoding="utf-8")
         self.assertIn("Fam1 byte-write hits", workflow)
         self.assertIn("Distinct byte-write indices", workflow)
+        self.assertIn("from planter_access import infer_byte_relations", workflow)
         self.assertIn('row.get("memory_write_class") == "writes-memory-destination"', workflow)
