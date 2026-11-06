@@ -4293,3 +4293,7 @@ The first source-dataflow instrumentation was added after #84 had established `m
 **Interpretation.** `r10b` is a full 256-value permutation at the write point, but the tested low-byte relation family does not expose its derivation. This does not imply that the operation has no simple formula: upper byte lanes of registers, memory-loaded operands, carry/flag dependencies, nonlinear instruction chains, or state held outside the sampled registers remain untested. The next scan expands to all captured GPR/frame-state byte lanes and excludes address-base/index registers from the candidate value predictors, so it does not mistake address calculation for value generation.
 
 Trace #87 completed successfully; the parallel CI #14 passed. The redacted report is `research-runs/planter-trace-42229838856.md`. The full native reference still produced 347-byte SPIM and a 276-byte CPIM result; fixed-input CPIM determinism remains inconclusive as previously recorded.
+
+#### Trace #88 validation-only failure (2026-11-06; run 42231522493)
+
+Trace #88 did not reach the native/GDB stage. One newly added source-text regression assertion expected the literal substring `reg_ + name`, while the actual workflow builds register field names using the Python expression `"reg_" + name for name in ...`. All other 46 tests passed. This is a test expectation mismatch, not a failure of the byte-lane relation scan or a CoreADI/runtime observation. The assertion is corrected to match the actual source expression; no result is attributed to #88.

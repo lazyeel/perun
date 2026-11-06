@@ -544,7 +544,7 @@ class Fam1ReportAggregationTests(unittest.TestCase):
         self.assertIn("row.get(\"anchor_register\", \"na\")", workflow)
         self.assertIn('row.get("index_registers", "")', workflow)
         self.assertIn("for lane in range(byte_lanes)", workflow)
-        self.assertIn("reg_" + " + name", workflow)
+        self.assertIn('"reg_" + name for name in', workflow)
         self.assertIn("address_registers", workflow)
 
     def test_trace_workflow_runs_when_its_report_logic_changes(self):
