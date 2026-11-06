@@ -8,6 +8,7 @@ on:
       - crates/perun-cli/examples/adi-android/run-native.sh
       - crates/perun-cli/examples/adi-android/adi_test.c
       - tools/planter_trace_gdb.py
+      - tools/planter_access.py
       - tools/analyze_planter_trace.py
       - tools/test_planter_trace.py
       - tools/genesis_probe_gdb.py
@@ -976,22 +977,33 @@ jobs:
                       candidate_rows = list(csv.DictReader(stream))
                   grouped_candidates = defaultdict(list)
                   for row in candidate_rows:
-                      grouped_candidates[row.get("active_opcode", "unknown")].append(row)
+                      key = (
+                          row.get("active_opcode", "unknown"),
+                          row.get("mnemonic", "unknown"),
+                          row.get("width", "unknown"),
+                          row.get("memory_write_class", "unknown"),
+                      )
+                      grouped_candidates[key].append(row)
                   lines += [
                       "",
-                      "| vdfut opcode | Hits | Memory destination | Source-anchored fam1 offsets | Distinct fam1 indices | Index min..max |",
-                      "|---|---:|---:|---:|---:|---:|",
+                      "| vdfut opcode | Mnemonic | Destination width | Memory-destination semantics | Hits | Fam1 byte-write hits | Distinct byte-write indices | Index min..max |",
+                      "|---|---|---:|---|---:|---:|---:|---:|",
                   ]
-                  for opcode, rows in sorted(grouped_candidates.items()):
-                      memory_dest = [row for row in rows if row.get("destination_is_memory") == "yes"]
-                      fam1_rows = [row for row in memory_dest
+                  for (opcode, mnemonic, width, operation_class), rows in sorted(grouped_candidates.items()):
+                      fam1_rows = [row for row in rows
                                    if row.get("resolution") == "source-anchored-fam1-window"
                                    and row.get("fam1_index", "na") != "na"]
-                      indexes = sorted({int(row["fam1_index"], 16) for row in fam1_rows})
+                      byte_write_rows = [
+                          row for row in fam1_rows
+                          if row.get("destination_is_memory") == "yes"
+                          and row.get("memory_write_class") == "writes-memory-destination"
+                          and row.get("width") == "1"
+                      ]
+                      indexes = sorted({int(row["fam1_index"], 16) for row in byte_write_rows})
                       span = f"{indexes[0]:#x}..{indexes[-1]:#x}" if indexes else "n/a"
                       lines.append(
-                          f"| {opcode} | {len(rows)} | {len(memory_dest)} | {len(fam1_rows)} | "
-                          f"{len(indexes)} | {span} |"
+                          f"| {opcode} | {mnemonic} | {width} | {operation_class} | "
+                          f"{len(rows)} | {len(byte_write_rows)} | {len(indexes)} | {span} |"
                       )
                   errors = sum("FAM1 CANDIDATE CALLBACK ERROR:" in x for x in trace_lines)
                   lines.append(f"- Candidate callback errors: {errors}")

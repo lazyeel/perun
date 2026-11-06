@@ -16,6 +16,40 @@ _OPERAND = re.compile(
 _WIDTHS = {"byte": 1, "word": 2, "dword": 4, "qword": 8,
            "tbyte": 10, "xmmword": 16, "ymmword": 32, "zmmword": 64}
 
+# Explicit-destination instruction classes for the observed x86-64 operand form.
+# "write" means the first explicit operand is architecturally modified.
+_MEMORY_DEST_WRITES = frozenset({
+    "mov", "movabs", "movbe", "xchg",
+    "add", "adc", "sub", "sbb", "and", "or", "xor",
+    "inc", "dec", "not", "neg",
+    "shl", "sal", "shr", "sar", "rol", "ror", "rcl", "rcr",
+    "bts", "btr", "btc", "cmpxchg", "cmpxchg8b", "cmpxchg16b", "xadd",
+    "pop",
+    "sete", "setz", "setne", "setnz", "seta", "setnbe", "setae", "setnb",
+    "setb", "setc", "setnae", "setbe", "setna", "setg", "setnle",
+    "setge", "setnl", "setl", "setnge", "setle", "setng",
+    "sets", "setns", "seto", "setno", "setp", "setpe", "setnp", "setpo",
+})
+# These mnemonics may display memory as their first operand, but that operand
+# is read-only/source or is used only for comparison/testing.
+_MEMORY_DEST_READS_ONLY = frozenset({
+    "cmp", "test", "bt", "push", "call", "jmp",
+    "prefetchnta", "prefetcht0", "prefetcht1", "prefetcht2",
+})
+
+
+def classify_memory_destination(mnemonic: str, destination_is_memory: bool) -> str:
+    """Conservatively classify writes to an explicit first memory operand."""
+    if not destination_is_memory:
+        return "not-memory-destination"
+    name = mnemonic.strip().lower()
+    if name in _MEMORY_DEST_WRITES:
+        return "writes-memory-destination"
+    if name in _MEMORY_DEST_READS_ONLY:
+        return "does-not-write-memory-destination"
+    return "unknown-memory-destination-semantics"
+
+
 # One-byte hardware-write probes for two sparse windows and a dense control.
 SPARSE_WRITE_PROBE_OFFSETS = (
     ("fam2_tail", 0x1A00 + 0xFF),

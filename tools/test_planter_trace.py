@@ -434,3 +434,51 @@ class Fam1CandidateProbeTests(unittest.TestCase):
         self.assertIn("source-anchored-fam1-window", workflow)
         self.assertIn("Distinct fam1 indices", workflow)
         self.assertNotIn('row.get("effective_address")', workflow)
+
+class MemoryDestinationSemanticsTests(unittest.TestCase):
+    def test_known_byte_store_classifies_as_write(self):
+        self.assertEqual(
+            ACCESS.classify_memory_destination("mov", True),
+            "writes-memory-destination",
+        )
+        self.assertEqual(
+            ACCESS.classify_memory_destination("add", True),
+            "writes-memory-destination",
+        )
+        self.assertEqual(
+            ACCESS.classify_memory_destination("setne", True),
+            "writes-memory-destination",
+        )
+
+    def test_compare_and_source_operands_do_not_count_as_writes(self):
+        for mnemonic in ("cmp", "test", "bt", "push", "call", "jmp"):
+            with self.subTest(mnemonic=mnemonic):
+                self.assertEqual(
+                    ACCESS.classify_memory_destination(mnemonic, True),
+                    "does-not-write-memory-destination",
+                )
+
+    def test_unknown_and_non_memory_destinations_are_not_overclaimed(self):
+        self.assertEqual(
+            ACCESS.classify_memory_destination("vm_opaque", True),
+            "unknown-memory-destination-semantics",
+        )
+        self.assertEqual(
+            ACCESS.classify_memory_destination("mov", False),
+            "not-memory-destination",
+        )
+
+    def test_candidate_trace_publishes_write_class_and_operand_width(self):
+        source = (Path(__file__).with_name("planter_trace_gdb.py")).read_text(encoding="utf-8")
+        observer = source.split("class Fam1CandidateBP", 1)[1].split(
+            "def install_transform_probes", 1
+        )[0]
+        self.assertIn("classify_memory_destination", observer)
+        self.assertIn('"memory_write_class"', observer)
+        self.assertIn("width if width is not None else", observer)
+
+        workflow = (Path(__file__).parents[1] / ".github" / "workflows" /
+                    "planter-genesis-trace.yml").read_text(encoding="utf-8")
+        self.assertIn("Fam1 byte-write hits", workflow)
+        self.assertIn("Distinct byte-write indices", workflow)
+        self.assertIn('row.get("memory_write_class") == "writes-memory-destination"', workflow)

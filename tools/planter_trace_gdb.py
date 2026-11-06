@@ -41,8 +41,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from planter_access import (SPARSE_WRITE_PROBE_OFFSETS, analyze_intel_address,
-                            classify_mapped_address, parse_intel_memory_operands,
-                            parse_proc_maps)
+                            classify_mapped_address, classify_memory_destination,
+                            parse_intel_memory_operands, parse_proc_maps)
 
 ENTRY_RVA = 0x87554
 SOURCE_SLOT_STORE_RVA = 0xDD511
@@ -1802,6 +1802,7 @@ class Fam1CandidateBP(gdb.Breakpoint):
                 "active_opcode", "rva", "mnemonic", "destination_is_memory",
                 "memory_expression", "width", "object_offset", "fam1_index",
                 "anchor_register", "index_registers", "resolution",
+                "memory_write_class",
             ])
 
     def stop(self):
@@ -1810,11 +1811,17 @@ class Fam1CandidateBP(gdb.Breakpoint):
             line = gdb.execute("x/i $pc", to_string=True).strip()
             match = re.search(r":\s*(.*)$", line)
             instruction = match.group(1).strip() if match else ""
-            parts = instruction.split(None, 1)
-            mnemonic = parts[0].lower() if parts else "unknown"
-            operands_text = parts[1] if len(parts) > 1 else ""
+            instruction_match = re.match(
+                r"^(?:(?:lock|rep|repe|repz|repne|repnz|bnd|xacquire|xrelease)\\s+)*"
+                r"([a-z0-9]+)\\s*(.*)$",
+                instruction,
+                re.IGNORECASE,
+            )
+            mnemonic = instruction_match.group(1).lower() if instruction_match else "unknown"
+            operands_text = instruction_match.group(2) if instruction_match else ""
             destination = operands_text.split(",", 1)[0].strip()
             destination_is_memory = "[" in destination and "]" in destination
+            memory_write_class = classify_memory_destination(mnemonic, destination_is_memory)
             memory_operands = parse_intel_memory_operands(instruction)
 
             expression, width = memory_operands[0] if memory_operands else ("", None)
@@ -1871,11 +1878,13 @@ class Fam1CandidateBP(gdb.Breakpoint):
                     resolved.get("anchor_register") or "na" if resolved else "na",
                     ",".join(resolved.get("index_registers", ())) if resolved else "na",
                     resolution,
+                    memory_write_class,
                 ])
             log(
                 f"FAM1 CANDIDATE HIT: opcode={STATE.get('active_op')} "
                 f"rva={self.rva:#x} mnemonic={mnemonic} "
                 f"destination_is_memory={destination_is_memory} "
+                f"memory_write_class={memory_write_class} "
                 f"object_offset={object_offset!r} fam1_index={fam1_index!r} "
                 f"resolution={resolution}"
             )
