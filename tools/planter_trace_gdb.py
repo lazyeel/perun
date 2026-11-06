@@ -42,7 +42,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from planter_access import (SPARSE_WRITE_PROBE_OFFSETS, analyze_intel_address,
                             classify_mapped_address, classify_memory_destination,
-                            parse_intel_memory_operands, parse_proc_maps)
+                            parse_intel_memory_operands, parse_intel_mnemonic_operands,
+                            parse_proc_maps)
 
 ENTRY_RVA = 0x87554
 SOURCE_SLOT_STORE_RVA = 0xDD511
@@ -1811,14 +1812,7 @@ class Fam1CandidateBP(gdb.Breakpoint):
             line = gdb.execute("x/i $pc", to_string=True).strip()
             match = re.search(r":\s*(.*)$", line)
             instruction = match.group(1).strip() if match else ""
-            instruction_match = re.match(
-                r"^(?:(?:lock|rep|repe|repz|repne|repnz|bnd|xacquire|xrelease)\\s+)*"
-                r"([a-z0-9]+)\\s*(.*)$",
-                instruction,
-                re.IGNORECASE,
-            )
-            mnemonic = instruction_match.group(1).lower() if instruction_match else "unknown"
-            operands_text = instruction_match.group(2) if instruction_match else ""
+            mnemonic, operands_text = parse_intel_mnemonic_operands(instruction)
             destination = operands_text.split(",", 1)[0].strip()
             destination_is_memory = "[" in destination and "]" in destination
             memory_write_class = classify_memory_destination(mnemonic, destination_is_memory)

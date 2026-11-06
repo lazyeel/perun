@@ -38,6 +38,23 @@ _MEMORY_DEST_READS_ONLY = frozenset({
 })
 
 
+_INSTRUCTION_PREFIXES = frozenset({
+    "lock", "rep", "repe", "repz", "repne", "repnz",
+    "bnd", "xacquire", "xrelease", "notrack",
+})
+
+
+def parse_intel_mnemonic_operands(instruction: str) -> tuple[str, str]:
+    """Return mnemonic and operands after stripping legacy/transaction prefixes."""
+    parts = instruction.strip().split()
+    index = 0
+    while index < len(parts) and parts[index].lower() in _INSTRUCTION_PREFIXES:
+        index += 1
+    if index >= len(parts):
+        return "unknown", ""
+    return parts[index].lower(), " ".join(parts[index + 1:])
+
+
 def classify_memory_destination(mnemonic: str, destination_is_memory: bool) -> str:
     """Conservatively classify writes to an explicit first memory operand."""
     if not destination_is_memory:

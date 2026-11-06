@@ -432,10 +432,25 @@ class Fam1CandidateProbeTests(unittest.TestCase):
                     "planter-genesis-trace.yml").read_text(encoding="utf-8")
         self.assertIn("fam1_candidate_events.csv", workflow)
         self.assertIn("source-anchored-fam1-window", workflow)
-        self.assertIn("Distinct fam1 indices", workflow)
+        self.assertIn("Distinct byte-write indices", workflow)
         self.assertNotIn('row.get("effective_address")', workflow)
 
 class MemoryDestinationSemanticsTests(unittest.TestCase):
+    def test_instruction_parser_handles_plain_and_prefixed_mnemonics(self):
+        self.assertEqual(
+            ACCESS.parse_intel_mnemonic_operands(
+                "mov BYTE PTR [rdi+rax*1+0xd60],r10b"
+            ),
+            ("mov", "BYTE PTR [rdi+rax*1+0xd60],r10b"),
+        )
+        self.assertEqual(
+            ACCESS.parse_intel_mnemonic_operands(
+                "lock cmpxchg DWORD PTR [rdi+rax],ecx"
+            ),
+            ("cmpxchg", "DWORD PTR [rdi+rax],ecx"),
+        )
+        self.assertEqual(ACCESS.parse_intel_mnemonic_operands("rep"), ("unknown", ""))
+
     def test_known_byte_store_classifies_as_write(self):
         self.assertEqual(
             ACCESS.classify_memory_destination("mov", True),
