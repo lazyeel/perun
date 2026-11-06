@@ -525,3 +525,29 @@ class MemoryDestinationSemanticsTests(unittest.TestCase):
         self.assertIn("Distinct byte-write indices", workflow)
         self.assertIn("from planter_access import infer_byte_relations", workflow)
         self.assertIn('row.get("memory_write_class") == "writes-memory-destination"', workflow)
+
+class Fam1ReportAggregationTests(unittest.TestCase):
+    def test_report_initializes_empty_byte_write_collection_before_group_loop(self):
+        workflow = (Path(__file__).parents[1] / ".github" / "workflows" /
+                    "planter-genesis-trace.yml").read_text(encoding="utf-8")
+        marker = "byte_write_rows = []"
+        loop = "for (opcode, mnemonic, width, operation_class), rows in sorted(grouped_candidates.items()):"
+        self.assertIn(marker, workflow)
+        self.assertLess(workflow.index(marker), workflow.index(loop))
+        self.assertIn("opcode_byte_write_rows", workflow)
+        self.assertIn("byte_write_rows.extend(opcode_byte_write_rows)", workflow)
+
+    def test_report_searches_full_register_byte_lanes_without_address_registers(self):
+        workflow = (Path(__file__).parents[1] / ".github" / "workflows" /
+                    "planter-genesis-trace.yml").read_text(encoding="utf-8")
+        self.assertIn("address_registers = set()", workflow)
+        self.assertIn("row.get(\"anchor_register\", \"na\")", workflow)
+        self.assertIn('row.get("index_registers", "")', workflow)
+        self.assertIn("for lane in range(byte_lanes)", workflow)
+        self.assertIn("reg_" + " + name", workflow)
+        self.assertIn("address_registers", workflow)
+
+    def test_trace_workflow_runs_when_its_report_logic_changes(self):
+        workflow = (Path(__file__).parents[1] / ".github" / "workflows" /
+                    "planter-genesis-trace.yml").read_text(encoding="utf-8")
+        self.assertIn("- .github/workflows/planter-genesis-trace.yml", workflow)

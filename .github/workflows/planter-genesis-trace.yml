@@ -16,6 +16,7 @@ on:
       - tools/time_freeze_gdb.py
       - tools/rdtsc_freeze_gdb.py
       - tools/slot_origin_gdb.py
+      - .github/workflows/planter-genesis-trace.yml
 
 permissions:
   contents: write
@@ -990,17 +991,19 @@ jobs:
                       "| vdfut opcode | Mnemonic | Destination width | Memory-destination semantics | Hits | Fam1 byte-write hits | Distinct byte-write indices | Index min..max |",
                       "|---|---|---:|---|---:|---:|---:|---:|",
                   ]
+                  byte_write_rows = []
                   for (opcode, mnemonic, width, operation_class), rows in sorted(grouped_candidates.items()):
                       fam1_rows = [row for row in rows
                                    if row.get("resolution") == "source-anchored-fam1-window"
                                    and row.get("fam1_index", "na") != "na"]
-                      byte_write_rows = [
+                      opcode_byte_write_rows = [
                           row for row in fam1_rows
                           if row.get("destination_is_memory") == "yes"
                           and row.get("memory_write_class") == "writes-memory-destination"
                           and row.get("width") == "1"
                       ]
-                      indexes = sorted({int(row["fam1_index"], 16) for row in byte_write_rows})
+                      byte_write_rows.extend(opcode_byte_write_rows)
+                      indexes = sorted({int(row["fam1_index"], 16) for row in opcode_byte_write_rows})
                       span = f"{indexes[0]:#x}..{indexes[-1]:#x}" if indexes else "n/a"
                       lines.append(
                           f"| {opcode} | {mnemonic} | {width} | {operation_class} | "
@@ -1030,26 +1033,49 @@ jobs:
                       lines.append("- Source-byte values: unavailable")
                   if source_registers and len(byte_write_rows) == 256:
                       sample_rows = []
+                      data_fields = ["counter_d8", "state_38", "state_40"] + [
+                          "reg_" + name for name in ["rax","rbx","rcx","rdx","rsi","rdi","rbp","rsp","r8","r9","r10","r11","r12","r13","r14","r15"]
+                      ]
+                      address_registers = set()
+                      for row in byte_write_rows:
+                          anchor = row.get("anchor_register", "na")
+                          if anchor not in ("", "na", None):
+                              address_registers.add(anchor.lstrip("-"))
+                          for token in row.get("index_registers", "").split(","):
+                              token = token.strip().lstrip("-")
+                              if token:
+                                  address_registers.add(token)
                       for row in byte_write_rows:
                           sample = {}
-                          for key in ("fam1_index", "counter_d8", "state_38", "state_40") + tuple(
-                                  "reg_" + name for name in ["rax","rbx","rcx","rdx","rsi","rdi","rbp","rsp","r8","r9","r10","r11","r12","r13","r14","r15"]):
+                          raw_index = row.get("fam1_index", "na")
+                          if raw_index not in ("", "na", None):
+                              sample["index"] = int(raw_index, 16)
+                          for key in data_fields:
                               raw = row.get(key, "na")
-                              if raw not in ("", "na", None):
-                                  sample[key.replace("fam1_index", "index")] = int(raw, 16)
+                              if raw in ("", "na", None):
+                                  continue
+                              value = int(raw, 16)
+                              byte_lanes = 4 if key == "state_38" else 8
+                              for lane in range(byte_lanes):
+                                  sample[f"{key}_b{lane}"] = (value >> (lane * 8)) & 0xff
                           raw_target = row.get("source_value", "na")
                           if raw_target != "na":
-                              sample["target"] = int(raw_target, 16)
+                              sample["target"] = int(raw_target, 16) & 0xff
                               sample_rows.append(sample)
-                      predictors = ["index", "counter_d8", "state_38", "state_40"] + [
-                          "reg_" + name for name in ["rax","rbx","rcx","rdx","rsi","rdi","rbp","rsp","r8","r9","r10","r11","r12","r13","r14","r15"] if name not in source_registers
+                      predictors = ["index"]
+                      predictors += [
+                          f"{key}_b{lane}"
+                          for key in data_fields
+                          if not key.startswith("reg_") or
+                             key.removeprefix("reg_") not in source_registers | address_registers
+                          for lane in range(4 if key == "state_38" else 8)
                       ]
                       relation_rows = infer_byte_relations(sample_rows, "target", predictors)
                   if relation_rows:
                       lines.append("- Exact byte relation(s), valid for every captured row:")
                       lines.extend("  - " + item for item in relation_rows)
                   else:
-                      lines.append("- No exact affine or pairwise byte relation was found among captured index/GPR/state low bytes.")
+                      lines.append("- No exact affine or pairwise byte relation was found among captured index, GPR byte lanes, or frame-state byte lanes.")
                   errors = sum("FAM1 CANDIDATE CALLBACK ERROR:" in x for x in trace_lines)
                   lines.append(f"- Candidate callback errors: {errors}")
               else:
