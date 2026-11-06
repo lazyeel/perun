@@ -435,6 +435,31 @@ class Fam1CandidateProbeTests(unittest.TestCase):
         self.assertIn("Distinct byte-write indices", workflow)
         self.assertNotIn('row.get("effective_address")', workflow)
 
+class Fam1SourceDataflowTests(unittest.TestCase):
+    def test_gpr_alias_resolution(self):
+        self.assertEqual(ACCESS.intel_gpr_name("r10b"), "r10")
+        self.assertEqual(ACCESS.intel_gpr_name("eax"), "rax")
+        self.assertEqual(ACCESS.intel_gpr_name("sil"), "rsi")
+        self.assertIsNone(ACCESS.intel_gpr_name("BYTE PTR [rax]"))
+
+    def test_infer_affine_byte_relation(self):
+        samples = [
+            {"index": index, "target": (3 * index + 7) & 0xFF}
+            for index in range(256)
+        ]
+        relations = ACCESS.infer_byte_relations(samples, "target", ["index"])
+        self.assertIn("target = (3*index + 7) mod 256", relations)
+
+    def test_infer_pairwise_xor_relation(self):
+        samples = [
+            {"reg_rax": value, "reg_rbx": (value * 5 + 9) & 0xFF,
+             "target": value ^ ((value * 5 + 9) & 0xFF)}
+            for value in range(256)
+        ]
+        relations = ACCESS.infer_byte_relations(samples, "target", ["reg_rax", "reg_rbx"])
+        self.assertIn("target = (reg_rax xor reg_rbx) mod 256", relations)
+
+
 class MemoryDestinationSemanticsTests(unittest.TestCase):
     def test_instruction_parser_handles_plain_and_prefixed_mnemonics(self):
         self.assertEqual(

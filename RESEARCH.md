@@ -4277,3 +4277,9 @@ All 256 callbacks therefore correspond to the same decoded `mov` instruction for
 **Validation.** Trace #84 passed Python tooling validation, `perun-adi-core` compile/library tests, GDB/native execution, and redacted report generation. Parallel CI #10 passed workspace Clippy and the full workspace test suite. The report is `research-runs/planter-trace-42211855394.md`.
 
 Native reference behavior again produced a 347-byte decoded SPIM; trace-only `ProvisioningStart` returned `rc=0` and `cpim_len=276`. The fixed-input CPIM probe remains inconclusive: baseline outputs differ, nominally frozen outputs also differ, the frozen run recorded one `gettimeofday` interception and zero RDTSC bypasses. This does not identify the source of CPIM variation and does not prove autonomous Rust parity. Fresh-SPIM/identity-to-CPIM derivation and finishProvisioning/OTP parity remain open.
+
+#### Fam1 source-operand/dataflow probe design (2026-11-06)
+
+Following the confirmed `mov r/m8, r8` writer at `vdfut768ig+0xE2441`, the next probe extends the private candidate CSV with the source operand/register value, the full GPR snapshot, and selected frame-state words at each fam1 byte write. The values remain only on the ephemeral Actions runner and are not committed or printed in callback logs. The redacted report may publish source-register identity, cardinality/permutation statistics, and exact byte identities only if they hold over every captured row. No raw source bytes, register values, pointers, memory dumps, or identity material are emitted.
+
+The relation scan is intentionally narrow and falsifiable: exact affine relations over a byte and exact pairwise xor/add/sub/reverse-subtract/multiply identities across all captured rows. Failure to find one does not prove the transformation is more complex; it only bounds this first candidate scan. The next run is required before any formula conclusion is recorded.

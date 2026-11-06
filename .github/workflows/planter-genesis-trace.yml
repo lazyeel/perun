@@ -1005,6 +1005,50 @@ jobs:
                           f"| {opcode} | {mnemonic} | {width} | {operation_class} | "
                           f"{len(rows)} | {len(byte_write_rows)} | {len(indexes)} | {span} |"
                       )
+                  # Private CSV contains full register values; only aggregate statistics
+                  # and exact formulas that hold for every captured index are published.
+                  relation_rows = []
+                  source_operands = sorted({
+                      row.get("source_operand", "unknown") for row in byte_write_rows
+                  })
+                  source_registers = sorted({
+                      row.get("source_register", "na") for row in byte_write_rows
+                      if row.get("source_register", "na") != "na"
+                  })
+                  source_values = []
+                  for row in byte_write_rows:
+                      raw_value = row.get("source_value", "na")
+                      if raw_value != "na":
+                          source_values.append(int(raw_value, 16) & 0xff)
+                  lines.append("- Source operand(s): " + (", ".join(source_operands) if source_operands else "not resolved"))
+                  lines.append("- Source GPR(s): " + (", ".join(source_registers) if source_registers else "not resolved"))
+                  if source_values:
+                      lines.append(f"- Source-byte unique values: {len(set(source_values))}/256")
+                      lines.append(f"- Source-byte permutation: {'yes' if len(set(source_values)) == 256 and len(source_values) == 256 else 'no'}")
+                  else:
+                      lines.append("- Source-byte values: unavailable")
+                  if source_registers and len(byte_write_rows) == 256:
+                      sample_rows = []
+                      for row in byte_write_rows:
+                          sample = {}
+                          for key in ("fam1_index", "counter_d8", "state_38", "state_40") + tuple(
+                                  "reg_" + name for name in ["rax","rbx","rcx","rdx","rsi","rdi","rbp","rsp","r8","r9","r10","r11","r12","r13","r14","r15"]):
+                              raw = row.get(key, "na")
+                              if raw not in ("", "na", None):
+                                  sample[key.replace("fam1_index", "index")] = int(raw, 16)
+                          raw_target = row.get("source_value", "na")
+                          if raw_target != "na":
+                              sample["target"] = int(raw_target, 16)
+                              sample_rows.append(sample)
+                      predictors = ["index", "counter_d8", "state_38", "state_40"] + [
+                          "reg_" + name for name in ["rax","rbx","rcx","rdx","rsi","rdi","rbp","rsp","r8","r9","r10","r11","r12","r13","r14","r15"] if name not in source_registers
+                      ]
+                      relation_rows = infer_byte_relations(sample_rows, "target", predictors)
+                  if relation_rows:
+                      lines.append("- Exact byte relation(s), valid for every captured row:")
+                      lines.extend("  - " + item for item in relation_rows)
+                  else:
+                      lines.append("- No exact affine or pairwise byte relation was found among captured index/GPR/state low bytes.")
                   errors = sum("FAM1 CANDIDATE CALLBACK ERROR:" in x for x in trace_lines)
                   lines.append(f"- Candidate callback errors: {errors}")
               else:

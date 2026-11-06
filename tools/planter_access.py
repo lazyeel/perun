@@ -55,6 +55,95 @@ def parse_intel_mnemonic_operands(instruction: str) -> tuple[str, str]:
     return parts[index].lower(), " ".join(parts[index + 1:])
 
 
+
+_GPR_ALIASES = {}
+for _base, _names in {
+    "rax": ("al", "ah", "ax", "eax", "rax"),
+    "rbx": ("bl", "bh", "bx", "ebx", "rbx"),
+    "rcx": ("cl", "ch", "cx", "ecx", "rcx"),
+    "rdx": ("dl", "dh", "dx", "edx", "rdx"),
+    "rsi": ("sil", "si", "esi", "rsi"),
+    "rdi": ("dil", "di", "edi", "rdi"),
+    "rbp": ("bpl", "bp", "ebp", "rbp"),
+    "rsp": ("spl", "sp", "esp", "rsp"),
+    "r8": ("r8b", "r8w", "r8d", "r8"),
+    "r9": ("r9b", "r9w", "r9d", "r9"),
+    "r10": ("r10b", "r10w", "r10d", "r10"),
+    "r11": ("r11b", "r11w", "r11d", "r11"),
+    "r12": ("r12b", "r12w", "r12d", "r12"),
+    "r13": ("r13b", "r13w", "r13d", "r13"),
+    "r14": ("r14b", "r14w", "r14d", "r14"),
+    "r15": ("r15b", "r15w", "r15d", "r15"),
+}.items():
+    for _alias in _names:
+        _GPR_ALIASES[_alias] = _base
+
+
+def intel_gpr_name(operand: str) -> str | None:
+    """Resolve a simple Intel GPR operand (including byte/word/dword aliases)."""
+    token = operand.strip().lower()
+    token = token.split(None, 1)[0].rstrip(",") if token else ""
+    return _GPR_ALIASES.get(token)
+
+
+def infer_byte_relations(
+    samples: list[Mapping[str, int]],
+    target_key: str,
+    predictor_keys: list[str],
+    max_results: int = 8,
+) -> list[str]:
+    """Find exact affine/binary byte identities that hold over every sample."""
+    rows = [
+        row for row in samples
+        if target_key in row and row[target_key] is not None
+    ]
+    if len(rows) < 2:
+        return []
+    targets = [int(row[target_key]) & 0xFF for row in rows]
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def add(expression: str) -> None:
+        if expression not in seen and len(found) < max_results:
+            seen.add(expression)
+            found.append(expression)
+
+    columns = {}
+    for key in predictor_keys:
+        values = [int(row[key]) & 0xFF for row in rows if key in row and row[key] is not None]
+        if len(values) == len(rows) and len(set(values)) >= 16:
+            columns[key] = values
+
+    for key, values in columns.items():
+        x0, y0 = values[0], targets[0]
+        for multiplier in range(1, 256):
+            offset = (y0 - multiplier * x0) & 0xFF
+            if all(((multiplier * x + offset) & 0xFF) == y
+                   for x, y in zip(values, targets)):
+                add(f"target = ({multiplier}*{key} + {offset}) mod 256")
+                if len(found) >= max_results:
+                    return found
+
+    operations = (
+        ("xor", lambda x, y: x ^ y),
+        ("add", lambda x, y: x + y),
+        ("sub", lambda x, y: x - y),
+        ("revsub", lambda x, y: y - x),
+        ("mul", lambda x, y: x * y),
+    )
+    keys = list(columns)
+    for left_index, left in enumerate(keys):
+        for right in keys[left_index + 1:]:
+            a, b = columns[left], columns[right]
+            for label, operation in operations:
+                if all((operation(x, y) & 0xFF) == target
+                       for x, y, target in zip(a, b, targets)):
+                    add(f"target = ({left} {label} {right}) mod 256")
+                    if len(found) >= max_results:
+                        return found
+    return found
+
+
 def classify_memory_destination(mnemonic: str, destination_is_memory: bool) -> str:
     """Conservatively classify writes to an explicit first memory operand."""
     if not destination_is_memory:

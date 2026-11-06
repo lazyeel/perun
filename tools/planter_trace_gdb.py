@@ -42,6 +42,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from planter_access import (SPARSE_WRITE_PROBE_OFFSETS, analyze_intel_address,
                             classify_mapped_address, classify_memory_destination,
+                            infer_byte_relations, intel_gpr_name,
                             parse_intel_memory_operands, parse_intel_mnemonic_operands,
                             parse_proc_maps)
 
@@ -1803,7 +1804,9 @@ class Fam1CandidateBP(gdb.Breakpoint):
                 "active_opcode", "rva", "mnemonic", "destination_is_memory",
                 "memory_expression", "width", "object_offset", "fam1_index",
                 "anchor_register", "index_registers", "resolution",
-                "memory_write_class",
+                "memory_write_class", "source_operand", "source_register",
+                "source_value", "fam1_index", "counter_d8", "state_38", "state_40",
+                "reg_rax", "reg_rbx", "reg_rcx", "reg_rdx", "reg_rsi", "reg_rdi", "reg_rbp", "reg_rsp", "reg_r8", "reg_r9", "reg_r10", "reg_r11", "reg_r12", "reg_r13", "reg_r14", "reg_r15",
             ])
 
     def stop(self):
@@ -1813,9 +1816,12 @@ class Fam1CandidateBP(gdb.Breakpoint):
             match = re.search(r":\s*(.*)$", line)
             instruction = match.group(1).strip() if match else ""
             mnemonic, operands_text = parse_intel_mnemonic_operands(instruction)
-            destination = operands_text.split(",", 1)[0].strip()
+            operand_parts = [part.strip() for part in operands_text.split(",")]
+            destination = operand_parts[0] if operand_parts else ""
+            source_operand = operand_parts[1] if len(operand_parts) > 1 else ""
             destination_is_memory = "[" in destination and "]" in destination
             memory_write_class = classify_memory_destination(mnemonic, destination_is_memory)
+            source_register = intel_gpr_name(source_operand)
             memory_operands = parse_intel_memory_operands(instruction)
 
             expression, width = memory_operands[0] if memory_operands else ("", None)
@@ -1873,6 +1879,29 @@ class Fam1CandidateBP(gdb.Breakpoint):
                     ",".join(resolved.get("index_registers", ())) if resolved else "na",
                     resolution,
                     memory_write_class,
+                    source_operand,
+                    source_register or "na",
+                    f"{registers[source_register]:#x}" if source_register in registers else "na",
+                    f"{fam1_index:#x}" if fam1_index is not None else "na",
+                    f"{rv('*(unsigned long long*)($rbp-0xd8)'):#x}" if source_register else "na",
+                    f"{rv('*(unsigned int*)($rbp-0x38)'):#x}" if source_register else "na",
+                    f"{rv('*(unsigned long long*)($rbp-0x40)'):#x}" if source_register else "na",
+                    f"{registers.get('rax', 0):#x}" if "rax" in registers else "na",
+                    f"{registers.get('rbx', 0):#x}" if "rbx" in registers else "na",
+                    f"{registers.get('rcx', 0):#x}" if "rcx" in registers else "na",
+                    f"{registers.get('rdx', 0):#x}" if "rdx" in registers else "na",
+                    f"{registers.get('rsi', 0):#x}" if "rsi" in registers else "na",
+                    f"{registers.get('rdi', 0):#x}" if "rdi" in registers else "na",
+                    f"{registers.get('rbp', 0):#x}" if "rbp" in registers else "na",
+                    f"{registers.get('rsp', 0):#x}" if "rsp" in registers else "na",
+                    f"{registers.get('r8', 0):#x}" if "r8" in registers else "na",
+                    f"{registers.get('r9', 0):#x}" if "r9" in registers else "na",
+                    f"{registers.get('r10', 0):#x}" if "r10" in registers else "na",
+                    f"{registers.get('r11', 0):#x}" if "r11" in registers else "na",
+                    f"{registers.get('r12', 0):#x}" if "r12" in registers else "na",
+                    f"{registers.get('r13', 0):#x}" if "r13" in registers else "na",
+                    f"{registers.get('r14', 0):#x}" if "r14" in registers else "na",
+                    f"{registers.get('r15', 0):#x}" if "r15" in registers else "na",
                 ])
             log(
                 f"FAM1 CANDIDATE HIT: opcode={STATE.get('active_op')} "
