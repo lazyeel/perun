@@ -4250,3 +4250,30 @@ A bounded, read-only observer was added to the normal v33 tracer. It is installe
 Native reference behavior remains unchanged: the live control produced a 347-byte SPIM and trace-only `ProvisioningStart` returned `rc=0`, `cpim_len=276`. The four-run fixed-input replay again showed unequal baseline and frozen CPIM pairs, one `gettimeofday` interception, and zero RDTSC bypasses. Thus the source of CPIM variation remains unknown and these native results are not Rust parity.
 
 The redacted run report is `research-runs/planter-trace-41899617876.md`. Autonomous fresh-SPIM/identity-to-CPIM generation and finishProvisioning/OTP parity remain unproven.
+
+#### Fam1 byte-writer semantic confirmation (2026-11-06; trace run 42211855394 / #84)
+
+Trace #83 (run 42211390701) did not reach GDB: the Python validation stage rejected a stale test assertion that still expected the former report column `Distinct fam1 indices` after the report schema had been changed to `Distinct byte-write indices`. The trace report correctly records `Harness/GDB exit code: not-started` and no trace directory. This was a test-contract failure, not a CoreADI/runtime result. The parallel CI run #9 completed successfully; the trace workflow did not execute its native harness.
+
+The follow-up patch removed regular-expression parsing of instruction prefixes and added `parse_intel_mnemonic_operands()` in `tools/planter_access.py`. It strips `lock`/`rep`-family prefixes via tokenization, with unit coverage for a plain `mov`, `lock cmpxchg`, and a prefix-only input. The stale report expectation was updated. A conservative explicit-memory-destination classifier now distinguishes known destination-writing mnemonics, known source/compare-only mnemonics, and unknown semantics. It deliberately does not turn an unknown instruction into a presumed write.
+
+**Trace #84 result.** Run 42211855394 completed successfully with the full v33 trace directory, harness/GDB exit code 0, and an automatically committed redacted report. The `0xE2441` instruction boundary was again verified by decoding from the known `0xE243D` boundary. For target opcode `0x716bd86c`, the candidate site produced:
+
+| Evidence | Result |
+|---|---:|
+| Instruction callbacks | 256 |
+| Mnemonic | `mov` |
+| Explicit destination width | 1 byte |
+| Destination semantics | writes-memory-destination |
+| Source-anchored fam1 byte-write hits | 256 |
+| Distinct fam1 indices | 256 |
+| Index range | `0x00..0xFF` |
+| Callback errors | 0 |
+
+All 256 callbacks therefore correspond to the same decoded `mov` instruction form with a one-byte memory destination, and the resolved destination offsets cover the entire fam1 window `+0x0D60..+0x0E5F`. This closes the previous ambiguity: `0xE2441` is a confirmed byte-writer site for fam1, not merely an instruction with an incidental memory operand. The old direct sites `0xFB05B`/`0xFB075` remain only four hits apiece and are not the complete path.
+
+**What is and is not solved.** The fam1 write site and full index coverage are now established. The byte-generation formula is not yet reconstructed: the redacted report does not expose source-register values, intermediate arithmetic inputs, or written bytes, and none of those values should be added to the public report. The next technical step should capture the candidate instruction's source operand and relevant register/dataflow state privately on the ephemeral runner, then publish only validated formula/coverage conclusions and non-sensitive aggregates. Do not infer the output-byte formula from the index coverage alone.
+
+**Validation.** Trace #84 passed Python tooling validation, `perun-adi-core` compile/library tests, GDB/native execution, and redacted report generation. Parallel CI #10 passed workspace Clippy and the full workspace test suite. The report is `research-runs/planter-trace-42211855394.md`.
+
+Native reference behavior again produced a 347-byte decoded SPIM; trace-only `ProvisioningStart` returned `rc=0` and `cpim_len=276`. The fixed-input CPIM probe remains inconclusive: baseline outputs differ, nominally frozen outputs also differ, the frozen run recorded one `gettimeofday` interception and zero RDTSC bypasses. This does not identify the source of CPIM variation and does not prove autonomous Rust parity. Fresh-SPIM/identity-to-CPIM derivation and finishProvisioning/OTP parity remain open.
