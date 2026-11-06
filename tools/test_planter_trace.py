@@ -516,6 +516,8 @@ class MemoryDestinationSemanticsTests(unittest.TestCase):
         self.assertIn("classify_memory_destination", observer)
         self.assertIn('"memory_write_class"', observer)
         self.assertIn("width if width is not None else", observer)
+        self.assertIn("def safe_frame_value(expression):", observer)
+        self.assertIn("safe_frame_value('*(unsigned long long*)($rbp-0xd8)')", observer)
 
         workflow = (Path(__file__).parents[1] / ".github" / "workflows" /
                     "planter-genesis-trace.yml").read_text(encoding="utf-8")

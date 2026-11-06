@@ -898,12 +898,6 @@ class SlotPointerWriteBP(gdb.Breakpoint):
             self.hits += 1
             STATE["slot_pointer_watch_hits"] = self.hits
 
-            def safe_frame_value(expression):
-                try:
-                    return f"{rv(expression):#x}"
-                except Exception:
-                    return "na"
-
             source = STATE.get("src")
             old_delta = bounded_source_delta(previous, source)
             new_delta = bounded_source_delta(current, source)
@@ -1818,6 +1812,12 @@ class Fam1CandidateBP(gdb.Breakpoint):
     def stop(self):
         self.hits += 1
         try:
+            def safe_frame_value(expression):
+                try:
+                    return f"{rv(expression):#x}"
+                except Exception:
+                    return "na"
+
             line = gdb.execute("x/i $pc", to_string=True).strip()
             match = re.search(r":\s*(.*)$", line)
             instruction = match.group(1).strip() if match else ""
