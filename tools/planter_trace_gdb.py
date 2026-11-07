@@ -1846,7 +1846,7 @@ def fam1_reverse_source_probe():
                     producer_rva = "outside-module"
                 try:
                     disassembly = gdb.execute("x/i $pc", to_string=True).strip()
-                    match = re.search(r":\\s*(.*)$", disassembly)
+                    match = re.search(r":\s*(.*)$", disassembly)
                     instruction = match.group(1).strip() if match else ""
                     mnemonic, _ = parse_intel_mnemonic_operands(instruction)
                     mnemonic = mnemonic or "unknown"
@@ -1888,7 +1888,11 @@ class Fam1CandidateBP(gdb.Breakpoint):
         self.hits = 0
         super().__init__(f"*{address:#x}", gdb.BP_BREAKPOINT, internal=False)
         self.silent = True
-        self.commands = """silent\npython\nfam1_reverse_source_probe()\nend\n"""\n        self.path = os.path.join(OUT, "fam1_candidate_events.csv")
+        self.commands = """silent
+python
+fam1_reverse_source_probe()
+end
+"""\n        self.path = os.path.join(OUT, "fam1_candidate_events.csv")
         with open(self.path, "w", newline="", encoding="utf-8") as stream:
             csv.writer(stream).writerow([
                 "active_opcode", "rva", "mnemonic", "destination_is_memory",
