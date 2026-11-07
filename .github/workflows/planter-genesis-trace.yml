@@ -28,7 +28,7 @@ concurrency:
 jobs:
   trace:
     runs-on: ubuntu-22.04
-    timeout-minutes: 8
+    timeout-minutes: 15
     steps:
       - name: Checkout research branch
         uses: actions/checkout@v4
@@ -169,6 +169,7 @@ jobs:
           export ADI_RESOLVE="gsa.apple.com:443:$GSA_IP,buy.itunes.apple.com:443:$BUY_IP"
           export ANDROID_ROOT=/system ANDROID_DATA=/data
           export PERUN_TRACE_DIR="$WORK/traces"
+          export PERUN_RECORD_FAM1=1
           export ADI_FORCE_START=1
           export ADI_TRACE_START_ONLY=1
           export ADI_SPIM_OUT="$WORK/fixed-input.spim"
@@ -269,7 +270,7 @@ jobs:
           echo "Running identical harness under GDB with the same working directory/identity."
           export ADI_GDB=1
           set +e
-          timeout --signal=TERM --kill-after=5s 4m bash "$GITHUB_WORKSPACE/crates/perun-cli/examples/adi-android/run-native.sh" \
+          timeout --signal=TERM --kill-after=5s 10m bash "$GITHUB_WORKSPACE/crates/perun-cli/examples/adi-android/run-native.sh" \
             > "$WORK/gdb-console.log" 2>&1
           RC=$?
           set -e
@@ -1077,6 +1078,29 @@ jobs:
                       lines.append("- No exact affine or pairwise byte relation was found among captured index, GPR byte lanes, or frame-state byte lanes.")
                   errors = sum("FAM1 CANDIDATE CALLBACK ERROR:" in x for x in trace_lines)
                   lines.append(f"- Candidate callback errors: {errors}")
+                  record_started = any("FAM1 RECORD START:" in item for item in trace_lines)
+                  record_failed = next((item for item in trace_lines
+                                         if "FAM1 RECORD START FAILED:" in item), None)
+                  if record_started:
+                      lines.append("- GDB reverse-recording: started (full; bounded 500,000-instruction history).")
+                  elif record_failed:
+                      lines.append("- GDB reverse-recording: unavailable (startup failed safely).")
+                  else:
+                      lines.append("- GDB reverse-recording: not started.")
+                  reverse_result = next((item for item in trace_lines
+                                         if "FAM1 PRODUCER REVERSE RESULT:" in item), None)
+                  if reverse_result:
+                      payload = reverse_result.split("FAM1 PRODUCER REVERSE RESULT:", 1)[1].strip()
+                      fields = dict(token.split("=", 1) for token in payload.split()
+                                    if "=" in token)
+                      lines.append(
+                          "- Latest r10b producer: "
+                          f"status={fields.get('status', 'unknown')}; "
+                          f"reverse steps={fields.get('steps', 'n/a')}; "
+                          f"producer RVA={fields.get('producer_rva', 'n/a')}; "
+                          f"mnemonic={fields.get('mnemonic', 'unknown')}; "
+                          f"forward check={fields.get('forward_check', 'no')}."
+                      )
               else:
                   lines.append("- No candidate breakpoint events were captured.")
               lines.append("")

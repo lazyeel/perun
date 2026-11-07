@@ -554,6 +554,35 @@ class Fam1ByteLanePredictorTests(unittest.TestCase):
         self.assertIn("source_registers=set(source_registers)", workflow)
 
 
+class Fam1ReverseProducerTests(unittest.TestCase):
+    def test_reverse_recording_is_opt_in_and_begins_at_source_slot(self):
+        source = (Path(__file__).with_name("planter_trace_gdb.py")).read_text(encoding="utf-8")
+        slot = source.split("class SourceSlotStoreBP", 1)[1].split(
+            "class ", 1
+        )[0]
+        self.assertIn("start_fam1_recording()", slot)
+        self.assertIn('os.environ.get("PERUN_RECORD_FAM1") != "1"', source)
+        self.assertIn('gdb.execute("record full"', source)
+
+    def test_reverse_probe_is_bounded_and_redacts_register_values(self):
+        source = (Path(__file__).with_name("planter_trace_gdb.py")).read_text(encoding="utf-8")
+        probe = source.split("def fam1_reverse_source_probe", 1)[1].split(
+            "class Fam1CandidateBP", 1
+        )[0]
+        self.assertIn("MAX_FAM1_REVERSE_STEPS = 8192", source)
+        self.assertIn('"reverse-stepi"', probe)
+        self.assertIn('"stepi"', probe)
+        self.assertIn("producer_rva=", probe)
+        self.assertNotIn('log(f"r10=', probe)
+        self.assertIn('gdb.execute("kill"', probe)
+
+    def test_report_publishes_only_reverse_probe_summary(self):
+        workflow = (Path(__file__).parents[1] / ".github" / "workflows" /
+                    "planter-genesis-trace.yml").read_text(encoding="utf-8")
+        self.assertIn("FAM1 PRODUCER REVERSE RESULT:", workflow)
+        self.assertIn("producer RVA=", workflow)
+        self.assertIn("export PERUN_RECORD_FAM1=1", workflow)
+
 class Fam1ReportAggregationTests(unittest.TestCase):
     def test_report_initializes_empty_byte_write_collection_before_group_loop(self):
         workflow = (Path(__file__).parents[1] / ".github" / "workflows" /

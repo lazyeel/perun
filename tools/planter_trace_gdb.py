@@ -131,6 +131,8 @@ STATE = {
     "copy_entry_bp": None,
     "writer_bps": [],
     "fam1_candidate_bp": None,
+    "fam1_record_attempted": False,
+    "fam1_record_active": False,
     "mixer_bps": [],
     "watchers": [],
     "sparse_write_bps": [],
@@ -1086,6 +1088,7 @@ class SourceSlotStoreBP(gdb.Breakpoint):
 python
 arm_slot_pointer_hardware_watchpoint()
 arm_sparse_window_write_probes()
+start_fam1_recording()
 end
 continue
 """
@@ -1789,6 +1792,93 @@ def install_global_probes(base):
 
 
 
+MAX_FAM1_REVERSE_STEPS = 8192
+
+
+def start_fam1_recording():
+    """Start bounded x86-64 process recording immediately before the transform."""
+    if os.environ.get("PERUN_RECORD_FAM1") != "1":
+        return
+    if STATE.get("fam1_record_attempted"):
+        return
+    STATE["fam1_record_attempted"] = True
+    try:
+        gdb.execute("set record full insn-number-max 500000", to_string=True)
+        gdb.execute("set record full stop-at-limit off", to_string=True)
+        gdb.execute("set record full memory-query off", to_string=True)
+        gdb.execute("record full", to_string=True)
+        STATE["fam1_record_active"] = True
+        log("FAM1 RECORD START: method=full instruction_limit=500000")
+    except Exception as exc:
+        STATE["fam1_record_active"] = False
+        log(f"FAM1 RECORD START FAILED: error_type={type(exc).__name__}")
+
+
+def fam1_reverse_source_probe():
+    """Find the most recent instruction that changed r10b, without logging values."""
+    status = "unavailable"
+    steps = 0
+    producer_rva = "na"
+    mnemonic = "unknown"
+    forward_check = "no"
+    try:
+        if not STATE.get("fam1_record_active"):
+            status = "record-not-active"
+            return
+        # Reverse-step must not stop at the other probes installed by the main
+        # tracer. This diagnostic run is intentionally terminal after one hit.
+        for breakpoint in gdb.breakpoints() or []:
+            try:
+                breakpoint.enabled = False
+            except Exception:
+                pass
+
+        target_byte = rv("$r10") & 0xff
+        base = STATE.get("base")
+        status = "step-limit"
+        for steps in range(1, MAX_FAM1_REVERSE_STEPS + 1):
+            gdb.execute("reverse-stepi", to_string=True)
+            if (rv("$r10") & 0xff) != target_byte:
+                pc = rv("$pc")
+                if base is not None and base <= pc < base + MODULE_RVA_LIMIT:
+                    producer_rva = f"{pc - base:#x}"
+                else:
+                    producer_rva = "outside-module"
+                try:
+                    disassembly = gdb.execute("x/i $pc", to_string=True).strip()
+                    match = re.search(r":\\s*(.*)$", disassembly)
+                    instruction = match.group(1).strip() if match else ""
+                    mnemonic, _ = parse_intel_mnemonic_operands(instruction)
+                    mnemonic = mnemonic or "unknown"
+                except Exception:
+                    mnemonic = "unknown"
+                # Replay exactly the candidate producer instruction once. It
+                # must restore the byte observed at the fam1 writer breakpoint.
+                gdb.execute("stepi", to_string=True)
+                forward_check = "yes" if (rv("$r10") & 0xff) == target_byte else "no"
+                status = "found" if forward_check == "yes" else "forward-check-failed"
+                break
+
+        log(
+            f"FAM1 PRODUCER REVERSE RESULT: status={status} steps={steps} "
+            f"producer_rva={producer_rva} mnemonic={mnemonic} "
+            f"forward_check={forward_check}"
+        )
+    except Exception as exc:
+        status = "reverse-error"
+        log(
+            f"FAM1 PRODUCER REVERSE RESULT: status={status} steps={steps} "
+            f"producer_rva={producer_rva} mnemonic={mnemonic} "
+            f"forward_check=no error_type={type(exc).__name__}"
+        )
+    finally:
+        # Do not detach a stopped inferior or resume a partially reversed trace.
+        try:
+            gdb.execute("kill", to_string=True)
+        except Exception:
+            pass
+
+
 class Fam1CandidateBP(gdb.Breakpoint):
     """Read-only observer for the unverified 0xE2441 fam1 writer candidate."""
     MAX_HITS = 1024
@@ -1798,7 +1888,7 @@ class Fam1CandidateBP(gdb.Breakpoint):
         self.hits = 0
         super().__init__(f"*{address:#x}", gdb.BP_BREAKPOINT, internal=False)
         self.silent = True
-        self.path = os.path.join(OUT, "fam1_candidate_events.csv")
+        self.commands = """silent\npython\nfam1_reverse_source_probe()\nend\n"""\n        self.path = os.path.join(OUT, "fam1_candidate_events.csv")
         with open(self.path, "w", newline="", encoding="utf-8") as stream:
             csv.writer(stream).writerow([
                 "active_opcode", "rva", "mnemonic", "destination_is_memory",
@@ -1919,6 +2009,11 @@ class Fam1CandidateBP(gdb.Breakpoint):
         except Exception as exc:
             # Keep potentially sensitive GDB exception details out of the report.
             log(f"FAM1 CANDIDATE CALLBACK ERROR: {type(exc).__name__}")
+        if (self.hits == 1 and STATE.get("fam1_record_active")
+                and STATE.get("active_op") == TRANSFORM_OPCODE
+                and resolution == "source-anchored-fam1-window"):
+            log("FAM1 REVERSE PROBE DISPATCH: first confirmed fam1 write")
+            return True
         if self.hits >= self.MAX_HITS:
             self.enabled = False
             log("FAM1 CANDIDATE BP DISABLED: hit safety limit reached")
