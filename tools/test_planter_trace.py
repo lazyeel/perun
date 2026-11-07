@@ -391,7 +391,7 @@ class WorkflowProbeRestorationTests(unittest.TestCase):
         self.assertIn('export GDB_SCRIPT="$GITHUB_WORKSPACE/tools/planter_trace_gdb.py"', tail)
         self.assertLess(
             tail.index('export GDB_SCRIPT="$GITHUB_WORKSPACE/tools/planter_trace_gdb.py"'),
-            tail.index('timeout --signal=TERM --kill-after=5s 4m bash'),
+            tail.index('timeout --signal=TERM --kill-after=5s 10m bash'),
         )
 
 
@@ -422,7 +422,10 @@ class Fam1CandidateProbeTests(unittest.TestCase):
         )[0]
         self.assertIn("MAX_HITS = 1024", body)
         self.assertIn("return False", body)
-        self.assertNotIn("return True", body)
+        self.assertIn("return True", body)
+        self.assertIn('STATE.get("fam1_record_active")', body)
+        self.assertIn("self.hits == 1", body)
+        self.assertIn('resolution == "source-anchored-fam1-window"', body)
         self.assertNotIn("dump binary memory", body)
         self.assertNotIn('gdb.execute("set $', body)
         self.assertNotIn('gdb.execute("continue"', body)

@@ -1906,6 +1906,7 @@ end
 
     def stop(self):
         self.hits += 1
+        resolution = None
         try:
             def safe_frame_value(expression):
                 try:
