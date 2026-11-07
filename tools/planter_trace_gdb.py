@@ -1892,7 +1892,8 @@ class Fam1CandidateBP(gdb.Breakpoint):
 python
 fam1_reverse_source_probe()
 end
-"""\n        self.path = os.path.join(OUT, "fam1_candidate_events.csv")
+"""
+        self.path = os.path.join(OUT, "fam1_candidate_events.csv")
         with open(self.path, "w", newline="", encoding="utf-8") as stream:
             csv.writer(stream).writerow([
                 "active_opcode", "rva", "mnemonic", "destination_is_memory",

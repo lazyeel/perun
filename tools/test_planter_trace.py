@@ -561,7 +561,7 @@ class Fam1ReverseProducerTests(unittest.TestCase):
             "class ", 1
         )[0]
         self.assertIn("start_fam1_recording()", slot)
-        self.assertIn('self.commands = """silent\\npython', source)
+        self.assertIn('self.commands = """silent\npython', source)
         self.assertIn('os.environ.get("PERUN_RECORD_FAM1") != "1"', source)
         self.assertIn('gdb.execute("record full"', source)
 
