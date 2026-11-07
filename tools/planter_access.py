@@ -144,6 +144,34 @@ def infer_byte_relations(
     return found
 
 
+def select_byte_lane_predictor_keys(
+    data_fields: list[str],
+    address_registers: set[str],
+    source_registers: set[str],
+    lane_counts: Mapping[str, int] | None = None,
+) -> list[str]:
+    """Select non-address byte lanes, retaining source-GPR upper lanes.
+
+    The destination byte is the low lane of the source GPR, so that one lane
+    is excluded to avoid the tautology target == source_gpr_b0. Higher lanes
+    of the same register remain eligible because they may carry useful state.
+    Address base/index registers are excluded in every lane.
+    """
+    lane_counts = lane_counts or {}
+    selected = []
+    for key in data_fields:
+        is_gpr = key.startswith("reg_")
+        register = key.removeprefix("reg_") if is_gpr else None
+        if is_gpr and register in address_registers:
+            continue
+        count = lane_counts.get(key, 8)
+        for lane in range(count):
+            if is_gpr and register in source_registers and lane == 0:
+                continue
+            selected.append(f"{key}_b{lane}")
+    return selected
+
+
 def classify_memory_destination(mnemonic: str, destination_is_memory: bool) -> str:
     """Conservatively classify writes to an explicit first memory operand."""
     if not destination_is_memory:

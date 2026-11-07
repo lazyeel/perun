@@ -297,7 +297,7 @@ jobs:
           from pathlib import Path
           sys.path.insert(0, str(Path(os.environ['GITHUB_WORKSPACE']) / 'tools'))
           from compare_zone_regions import compare_zone_regions
-          from planter_access import infer_byte_relations
+          from planter_access import infer_byte_relations, select_byte_lane_predictor_keys
 
           root = Path(os.environ["TRACE_ROOT"])
           report = Path(os.environ["REPORT"])
@@ -1063,13 +1063,12 @@ jobs:
                               sample["target"] = int(raw_target, 16) & 0xff
                               sample_rows.append(sample)
                       predictors = ["index"]
-                      predictors += [
-                          f"{key}_b{lane}"
-                          for key in data_fields
-                          if not key.startswith("reg_") or
-                             key.removeprefix("reg_") not in source_registers | address_registers
-                          for lane in range(4 if key == "state_38" else 8)
-                      ]
+                      predictors += select_byte_lane_predictor_keys(
+                          data_fields,
+                          address_registers=address_registers,
+                          source_registers=set(source_registers),
+                          lane_counts={"state_38": 4},
+                      )
                       relation_rows = infer_byte_relations(sample_rows, "target", predictors)
                   if relation_rows:
                       lines.append("- Exact byte relation(s), valid for every captured row:")

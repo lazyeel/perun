@@ -526,6 +526,34 @@ class MemoryDestinationSemanticsTests(unittest.TestCase):
         self.assertIn("from planter_access import infer_byte_relations", workflow)
         self.assertIn('row.get("memory_write_class") == "writes-memory-destination"', workflow)
 
+class Fam1ByteLanePredictorTests(unittest.TestCase):
+    def test_excludes_address_lanes_but_keeps_source_register_upper_lanes(self):
+        selected = ACCESS.select_byte_lane_predictor_keys(
+            ["reg_rax", "reg_rdi", "reg_r10", "state_38", "counter_d8"],
+            address_registers={"rdi"},
+            source_registers={"r10"},
+            lane_counts={"state_38": 4},
+        )
+        self.assertEqual(len([key for key in selected if key.startswith("reg_rax_")]), 8)
+        self.assertFalse(any(key.startswith("reg_rdi_") for key in selected))
+        self.assertNotIn("reg_r10_b0", selected)
+        self.assertEqual(
+            [key for key in selected if key.startswith("reg_r10_")],
+            [f"reg_r10_b{lane}" for lane in range(1, 8)],
+        )
+        self.assertEqual(
+            [key for key in selected if key.startswith("state_38_")],
+            [f"state_38_b{lane}" for lane in range(4)],
+        )
+
+    def test_report_uses_typed_predictor_helper_not_list_set_union(self):
+        workflow = (Path(__file__).parents[1] / ".github" / "workflows" /
+                    "planter-genesis-trace.yml").read_text(encoding="utf-8")
+        self.assertIn("select_byte_lane_predictor_keys(", workflow)
+        self.assertNotIn("source_registers | address_registers", workflow)
+        self.assertIn("source_registers=set(source_registers)", workflow)
+
+
 class Fam1ReportAggregationTests(unittest.TestCase):
     def test_report_initializes_empty_byte_write_collection_before_group_loop(self):
         workflow = (Path(__file__).parents[1] / ".github" / "workflows" /
