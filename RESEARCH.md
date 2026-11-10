@@ -4327,3 +4327,29 @@ Trace #91 (run 42371934767) and #92 (run 42372025227) did not reach the native/G
 
 
 Trace #93 (run 42372190363; source revision `aa4d2b81`) passed syntax compilation but failed two tooling regression tests before the native/GDB stage. The candidate observer test still prohibited any `return True`, although the new reverse-recording path deliberately returns `True` only for the first confirmed fam1 write when recording is active; this is a controlled breakpoint stop, not a register/memory mutation. The workflow restoration test also still expected the old 4-minute harness timeout after the trace budget had been raised to 10 minutes (job cap 15 minutes) to accommodate software recording. Tests are updated to assert the gated first-hit condition and new timeout. The callback now initializes its resolution marker before the guarded sampling block, so an observer exception cannot cause an unbound-local error during dispatch evaluation. #93 produced no native or GDB evidence.
+
+
+## 2026-11-10 — Explicit Android CPIM provenance boundary
+
+The focused source audit now records the exact inputs consumed by the
+Android CPIM assembly in
+`research-runs/anisette-input-provenance-audit-2026-11-10.md`.
+The previous `SessionInputs` name overstated the role of its fields:
+`planter`, `feeds`, and the hard-coded `identity` were not read by
+`generate_cpim`; SPIM was used only for a 347-byte length assertion.
+The session block and Body B were copied from the reference CPIM, the
+depot came from capture tapes, and digest candidate selection was
+anchored to the reference CPIM's sums.
+
+The public capture path is now named
+`OracleCaptureInputs::from_capture_dir` /
+`assemble_cpim_from_oracle_capture`. Deprecated `SessionInputs`,
+`from_tapes`, and `generate_cpim` compatibility entry points remain
+for downstream source compatibility. This is a provenance/API correction,
+not a new autonomous algorithm and not a new live-parity claim.
+
+The separate Windows `chain.rs` path is documented independently:
+its measured entry vector is not derived from SPIM, and its default CPIM
+uses a reference session constant, zero Body A/digest placeholders (unless
+an early drive is supplied), and zero Body B. It must not be counted as
+Android SPIM-to-CPIM autonomy.

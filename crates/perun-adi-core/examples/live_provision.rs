@@ -11,7 +11,7 @@
 //!   2. POST start  (empty plist request)   -> the SPIM (347 bytes, b64)
 //!   3. THE CRATE:  generate_cpim(&SessionInputs) -> the 276-byte CPIM
 //!      (the inject layer feeds the session inputs; the CPIM itself is
-//!      the crate's own container math, byte for byte the oracle's)
+//!      the container assembly around oracle-derived fields and capture-tape results)
 //!   4. POST finish (cpim in the plist)     -> ptm / tk / routing info
 //!
 //! The honest gate: the CPIM is bound to the SPIM the oracle measured.
@@ -24,7 +24,7 @@
 //! Environment: PERUN_LIVE_DIR (default /opt/data/adi-re) -- the
 //! capture directory of the reference pair.
 
-use perun_adi_core::body_a::{generate_cpim, SessionInputs};
+use perun_adi_core::body_a::{assemble_cpim_from_oracle_capture, OracleCaptureInputs};
 
 const UUID: &str = "1A7DC030-8887-C2D8-F470-E2EA813C70C1";
 const MD_LU: &str = "C0308887C2D8F470";
@@ -143,8 +143,8 @@ fn main() {
     std::fs::write(format!("{dir}/fresh_spim_live.bin"), &spim).expect("save fresh spim");
 
     // 3. THE CRATE: the CPIM over the session inputs.
-    let inputs = SessionInputs::from_tapes(&dir).expect("the measured inject layer");
-    if spim != inputs.spim {
+    let inputs = OracleCaptureInputs::from_capture_dir(&dir).expect("the measured inject layer");
+    if spim != inputs.captured_spim {
         println!("[verdict] FRESH SPIM: the oracle rotated the challenge ({} bytes).", spim.len());
         println!("[verdict] The crate's CPIM is bound to the reference session's SPIM;");
         println!("[verdict] the planter expand (the genesis frontier) is the named blocker");
@@ -152,9 +152,9 @@ fn main() {
         println!("[verdict] The fresh SPIM is saved: {dir}/fresh_spim_live.bin");
         return;
     }
-    println!("[net] spim MATCHES the reference pair -- the crate's CPIM is THE answer");
-    let cpim = generate_cpim(&inputs);
-    println!("[prov] cpim ready ({} bytes, crate-generated)", cpim.len());
+    println!("[net] SPIM matches the saved capture; assembling its oracle-backed CPIM");
+    let cpim = assemble_cpim_from_oracle_capture(&inputs);
+    println!("[prov] oracle-capture CPIM assembled ({} bytes)", cpim.len());
 
     // 4. finishMachineProvisioning with the crate's CPIM.
     let cpim_b64 = b64_encode(&cpim);
@@ -180,7 +180,7 @@ fn main() {
     println!("[verdict] tk:  {}", tk.as_deref().map(|s| if s.len() > 48 { format!("{}... ({} bytes)", &s[..48], s.len()) } else { s.to_string() }).unwrap_or_else(|| "NONE".into()));
     println!("[verdict] routing info: {}", rinfo.as_deref().unwrap_or("(none)"));
     if ptm.is_some() && tk.is_some() {
-        println!("[verdict] *** THE CRATE'S CPIM WAS ACCEPTED BY THE LIVE BACKEND ***");
+        println!("[verdict] *** THE ORACLE-CAPTURE CPIM WAS ACCEPTED BY THE LIVE BACKEND ***");
     } else {
         println!("[verdict] no ptm/tk -- dumping the response head:");
         println!("{}", &r2_xml[..r2_xml.len().min(600)]);

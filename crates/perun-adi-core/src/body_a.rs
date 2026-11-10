@@ -568,56 +568,94 @@ impl RoundOneFeeds {
     }
 }
 
-/// Everything the generator consumes, each field with its origin
-/// named. The depot zone rides in ASSEMBLED (the inject layer's
-/// engine, generate_body_from_tapes, fills it today); the genesis
-/// frontier -- the planter expand, the feed evolution across the ten
-/// rounds, the session fold -- will replace the assembly with pure
-/// computation, and SessionInputs shrinks to (spim, identity).
-pub struct SessionInputs {
-    pub spim: Vec<u8>,
-    pub identity: String,
-    pub planter: Vec<u8>,
-    pub feeds: RoundOneFeeds,
-    pub session16: [u8; 16],
-    pub body_b: Vec<u8>,
-    /// The assembled 192-byte depot zone (body A + digest).
-    pub depot: [u8; 0xC0],
+/// Explicit inputs for the legacy, oracle-backed CPIM assembly path.
+///
+/// This is deliberately NOT named an autonomous session: it carries
+/// fields copied from a reference CPIM and a depot assembled from capture
+/// tapes. The SPIM is retained only for capture/session comparison and a
+/// length sanity check; its bytes do not feed the current derivation.
+#[derive(Debug, Clone)]
+pub struct OracleCaptureInputs {
+    /// SPIM saved by the same capture workflow. The generator currently
+    /// checks only its length; it does not derive CPIM fields from its bytes.
+    pub captured_spim: Vec<u8>,
+    /// Bytes [0x04..0x14] copied from live_prov_out.bin.
+    pub reference_session16: [u8; 16],
+    /// Bytes [0xe0..0x114] copied from live_prov_out.bin.
+    pub reference_body_b: [u8; 52],
+    /// Body A + digest assembled from capture tapes and measured inputs.
+    pub assembled_depot: [u8; 0xC0],
 }
 
-impl SessionInputs {
-    /// The measured-inputs assembly from the capture directory -- the
-    /// legacy inject layer. Dies when the genesis lands.
+impl OracleCaptureInputs {
+    /// Assemble the explicitly oracle-backed input set from one capture
+    /// directory. The capture's CPIM must be exactly 276 bytes.
+    pub fn from_capture_dir(dir: &str) -> Result<Self, String> {
+        let captured_spim = std::fs::read(format!("{dir}/live_prov_in.bin"))
+            .map_err(|e| format!("read captured SPIM: {e}"))?;
+        if captured_spim.len() != 347 {
+            return Err(format!("captured SPIM must be 347 bytes, got {}", captured_spim.len()));
+        }
+
+        let cpim = std::fs::read(format!("{dir}/live_prov_out.bin"))
+            .map_err(|e| format!("read reference CPIM: {e}"))?;
+        if cpim.len() != 0x114 {
+            return Err(format!("reference CPIM must be 0x114 bytes, got {:#x}", cpim.len()));
+        }
+
+        let (assembled_depot, body_bytes) = generate_body_from_tapes(dir)?;
+        if body_bytes != 160 {
+            return Err(format!("capture tape body-A coverage is {body_bytes}/160"));
+        }
+
+        let mut reference_session16 = [0u8; 16];
+        reference_session16.copy_from_slice(&cpim[0x04..0x14]);
+        let mut reference_body_b = [0u8; 52];
+        reference_body_b.copy_from_slice(&cpim[0xe0..0x114]);
+
+        Ok(Self {
+            captured_spim,
+            reference_session16,
+            reference_body_b,
+            assembled_depot,
+        })
+    }
+
+    /// Compatibility shim for the pre-audit name. This remains an
+    /// oracle-backed capture loader, not an autonomous constructor.
+    #[deprecated(note = "use from_capture_dir; this loader consumes oracle artifacts")]
     pub fn from_tapes(dir: &str) -> Result<Self, String> {
-        let spim = std::fs::read(format!("{dir}/live_prov_in.bin")).map_err(|e| e.to_string())?;
-        let cpim = std::fs::read(format!("{dir}/live_prov_out.bin")).map_err(|e| e.to_string())?;
-        let planter = std::fs::read(format!("{dir}/planter34.bin")).map_err(|e| e.to_string())?;
-        let feeds = RoundOneFeeds::from_sel_tape(dir)?;
-        let (depot, _n) = generate_body_from_tapes(dir)?;
-        let mut session16 = [0u8; 16];
-        session16.copy_from_slice(&cpim[4..0x14]);
-        let body_b = cpim[0xe0..0x114].to_vec();
-        let identity = "1A7DC030-8887-C2D8-F470-E2EA813C70C1".to_string();
-        Ok(Self { spim, identity, planter, feeds, session16, body_b, depot })
+        Self::from_capture_dir(dir)
     }
 }
 
-/// THE CONTAINER GENERATOR: the full 276-byte CPIM from the session
-/// inputs -- a PURE function (no I/O), every structural field written
-/// by the crate, the depot zone carried assembled until the genesis.
-pub fn generate_cpim(inputs: &SessionInputs) -> [u8; 0x114] {
-    assert_eq!(inputs.spim.len(), 347, "the SPIM is 347 bytes");
-    assert_eq!(inputs.body_b.len(), 52, "body B is 52 bytes");
+/// Assemble the CPIM container around explicitly oracle-backed fields.
+///
+/// The operation itself is pure, but its inputs are not autonomous:
+/// session16 and Body B came from the reference CPIM; the 192-byte depot
+/// came from a tape assembler whose digest word selection is CPIM-anchored.
+pub fn assemble_cpim_from_oracle_capture(inputs: &OracleCaptureInputs) -> [u8; 0x114] {
+    assert_eq!(inputs.captured_spim.len(), 347, "the captured SPIM is 347 bytes");
     let mut out = [0u8; 0x114];
-    out[0..4].copy_from_slice(&5u32.to_be_bytes());            // version: written
-    out[4..0x14].copy_from_slice(&inputs.session16);           // session: named boundary
-    out[0x14..0x18].copy_from_slice(&0xa0u32.to_be_bytes());   // body A length: written
-    out[0x18..0xb8].copy_from_slice(&inputs.depot[0..0xa0]);   // body A: generated
-    out[0xb8..0xd8].copy_from_slice(&inputs.depot[0xa0..0xc0]);// digest: generated
-    out[0xd8..0xdc].copy_from_slice(&0x34u32.to_be_bytes());   // body B length: written
-    out[0xdc..0xe0].copy_from_slice(&4u32.to_be_bytes());      // body B version: written
-    out[0xe0..0x114].copy_from_slice(&inputs.body_b);         // body B: named boundary
+    out[0..4].copy_from_slice(&5u32.to_be_bytes());              // version: observed constant
+    out[4..0x14].copy_from_slice(&inputs.reference_session16);  // copied from reference CPIM
+    out[0x14..0x18].copy_from_slice(&0xa0u32.to_be_bytes());    // body A length: observed constant
+    out[0x18..0xb8].copy_from_slice(&inputs.assembled_depot[0..0xa0]);
+    out[0xb8..0xd8].copy_from_slice(&inputs.assembled_depot[0xa0..0xc0]);
+    out[0xd8..0xdc].copy_from_slice(&0x34u32.to_be_bytes());    // body B length: observed constant
+    out[0xdc..0xe0].copy_from_slice(&4u32.to_be_bytes());       // body B version: observed constant
+    out[0xe0..0x114].copy_from_slice(&inputs.reference_body_b); // copied from reference CPIM
     out
+}
+
+/// Compatibility shim for existing callers. This function only assembles
+/// an oracle-backed capture; it does not generate CPIM from SPIM + identity.
+#[deprecated(note = "use assemble_cpim_from_oracle_capture; this is not SPIM-only")]
+pub type SessionInputs = OracleCaptureInputs;
+
+#[deprecated(note = "use assemble_cpim_from_oracle_capture; this is not SPIM-only")]
+pub fn generate_cpim(inputs: &OracleCaptureInputs) -> [u8; 0x114] {
+    assemble_cpim_from_oracle_capture(inputs)
 }
 
 #[cfg(test)]
