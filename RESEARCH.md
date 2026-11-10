@@ -4353,3 +4353,35 @@ its measured entry vector is not derived from SPIM, and its default CPIM
 uses a reference session constant, zero Body A/digest placeholders (unless
 an early drive is supplied), and zero Body B. It must not be counted as
 Android SPIM-to-CPIM autonomy.
+
+
+#### Per-run capture manifest and process-boundary enforcement (2026-11-10)
+
+Added `tools/capture_manifest.py` and its standard-library unit tests. The
+planter trace workflow now generates a per-run JSON manifest alongside the
+redacted Markdown report. The manifest records SHA-256 fingerprints and
+sizes, not raw SPIM/CPIM, device identity, state contents, absolute paths,
+or state filenames. Directory fingerprints are deterministic aggregates
+over sorted relative paths, file sizes and per-file hashes; symlinks are
+counted but not followed.
+
+The manifest keeps three execution groups separate:
+
+1. **Native control:** `fixed-input.spim` and `native-live.cpim` are outputs
+   of the same initial non-GDB harness process. The persistent identity and
+   post-control state are fingerprinted separately.
+2. **Offline fixed-input replays:** four distinct processes consume the
+   saved native-control SPIM and restore the captured identity/state seed
+   before each run. Their CPIM outputs are fingerprinted individually.
+3. **GDB trace:** after the replay stage the workflow unsets
+   `ADI_OFFLINE_SPIM`, `ADI_SPIM_OUT` and `ADI_CPIM_OUT`; the GDB harness
+   therefore performs a separate live provisioning request. Its source and
+   planter snapshots are fingerprinted as GDB-run artifacts and are
+   explicitly not paired to the native-control SPIM/CPIM.
+
+This is a provenance ledger, not cryptographic authentication. Matching
+hashes prove byte equality only; they do not prove that every tape, state
+file and snapshot belongs to a single provisioning session. The manifest
+is intended to prevent accidental cross-process pairing and make missing
+artifacts explicit. The workflow validates the generator with unit tests
+before execution and commits only the redacted manifest, never raw captures.
