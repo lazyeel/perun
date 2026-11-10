@@ -489,31 +489,17 @@ fn expect_sum(cpim: &[u8], block: usize) -> u32 {
 
 
 // ---------------------------------------------------------------------------
-// THE AUTONOMOUS API: the crate's single-entry CPIM generator.
+// CAPTURE-BACKED BODY-A REPLAY / DIAGNOSTIC INPUTS
 //
-// generate_cpim(&SessionInputs) is a PURE COMPUTATION -- no tapes, no
-// files, no dumps read inside. Every measured artifact the math needs
-// rides in through SessionInputs, whose fields carry the honest origin
-// of each input:
+// This module contains measured mixer arithmetic and tape assemblers. Its
+// CPIM packing API is OracleCaptureInputs / assemble_cpim_from_oracle_capture
+// below; that API is deliberately not an autonomous SPIM + identity
+// generator. The live runner currently submits the assembled CPIM only when
+// Apple's fresh SPIM byte-matches the saved capture.
 //
-//   spim / identity       -- the raw session inputs (the oracle's own
-//                             start-provisioning pair);
-//   planter               -- the session's 0x2700 planter table. THE
-//                             GENESIS FRONTIER: its expand from the
-//                             SPIM is the init cascade (the kin of the
-//                             transcribed early-series machine), not yet
-//                             lifted; until then it rides in measured.
-//   feeds                 -- the ten cascade feeds of the first mixer
-//                             round (the same frontier: they derive
-//                             from the init envelope's words);
-//   session16 / body_b     -- the container's session fields (the
-//                             session fold's output, named boundary);
-//   zone tables           -- LOAD-STABLE, baked into the crate (the
-//                             from_files fallback reads fresh dumps
-//                             only as a capture convenience).
-//
-// The day the genesis lands, SessionInputs::from_tapes dies and the
-// struct shrinks to (spim, identity) -- the computation does not change.
+// Remaining provenance gaps include the planter/feed producer chain,
+// session16, Body B, and digest-word selection. RoundOneFeeds is a diagnostic
+// tape parser; it is not a required field of the CPIM packer.
 // ---------------------------------------------------------------------------
 
 /// The per-round cascade feeds, straight off the tape of round one.
