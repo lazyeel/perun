@@ -4385,3 +4385,18 @@ file and snapshot belongs to a single provisioning session. The manifest
 is intended to prevent accidental cross-process pairing and make missing
 artifacts explicit. The workflow validates the generator with unit tests
 before execution and commits only the redacted manifest, never raw captures.
+
+
+#### Trace #95: separate-process provenance manifest and first fam1 producer hit (2026-11-10; run 42871602839)
+
+The new per-run manifest and the existing GDB trace workflow both completed successfully. The manifest is committed as
+`research-runs/capture-manifest-42871602839.json`; the redacted trace report is
+`research-runs/planter-trace-42871602839.md`.
+
+The initial non-GDB control exited 0 and captured a 347-byte SPIM and a 276-byte CPIM in the same process. The four offline replays each exited 0 and emitted a 276-byte CPIM. Baseline outputs were unequal; frozen outputs were also unequal. The frozen run recorded one `gettimeofday` interception and zero RDTSC bypasses, so the replay does not identify the source of CPIM variation.
+
+The later GDB run is explicitly a separate provisioning process: the workflow unsets `ADI_OFFLINE_SPIM`, `ADI_SPIM_OUT` and `ADI_CPIM_OUT` before launching it, so it obtains a new network SPIM. Its report records HTTP 200 for lookup and start, SPIM length 347, and no fatal provisioning classification. It does not record the trace-process `ProvisioningStart` return and does not reach the first mixer-read breakpoint. Its only planter image is the early `planter.at_base_load.bin` candidate; it is not a validated final planter.
+
+**Fam1 producer result.** The reverse-recording probe reached the first confirmed fam1 byte-write event. It located the immediately preceding instruction that changed `r10b` at RVA `0xE2432`, mnemonic `add`, after five reverse steps; executing that instruction once restored the byte observed at the writer (`forward_check=yes`). This is a single-hit producer confirmation only. The report does not contain the instruction operands or the upstream input lineage, and it does not establish the formula for all 256 fam1 bytes. The next probe must capture the static operand form and then trace the operand's producer/dataflow; do not promote this to a completed fam1 algorithm.
+
+The run's Python tooling validation, the perun-adi-core compile/library tests, the native control, GDB harness, manifest generation, redacted report generation and report/manifest commit all completed successfully. This does not establish autonomous SPIM-to-CPIM generation or fresh-session acceptance.
