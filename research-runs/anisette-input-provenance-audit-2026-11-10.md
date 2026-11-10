@@ -129,3 +129,21 @@ Use these states consistently:
 
 A byte-parity result from one captured session must not be promoted to
 "autonomous" without satisfying the later states.
+
+## 2026-11-10 follow-up — trace #95
+
+Trace run `42871602839` completed successfully. The initial native-control
+process saved a 347-byte SPIM and 276-byte CPIM; the offline replay stage
+ran four distinct processes, each producing a 276-byte CPIM. Baseline and
+frozen output pairs were both unequal; the frozen run observed one
+`gettimeofday` interception and zero RDTSC bypasses. This does not locate
+the source of variation.
+
+The separate GDB live process completed lookup/start HTTP requests with
+200 responses and decoded a 347-byte SPIM, but did not reach the first
+mixer read, did not report the trace-process `ProvisioningStart` return,
+and captured only an early planter candidate rather than a validated
+final planter. The fam1 reverse probe found an immediate `add` producer
+at RVA `0xE2432` for its first confirmed byte-write event after five
+reverse steps, with a successful one-instruction forward check. This is
+one-event evidence; operands and upstream provenance remain unknown.
