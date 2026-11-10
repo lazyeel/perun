@@ -9,12 +9,9 @@
 //! runs the PURE container computation over it. The result must
 //! equal the oracle's own 276-byte CPIM byte for byte.
 //!
-//! The honest boundary, stated in the code: the depot zone rides
-//! in assembled by the tape engine; the zones are baked (load-
-//! stable, proven cross-session); the session block and body B are
-//! the named session-fold boundary. When the genesis lands, the
-//! from_tapes call dies and this test becomes the fully
-//! autonomous test -- the assertion never changes.
+//! This test is intentionally capture-dependent and is not an autonomy
+//! test: it compares an assembly using oracle-derived fields and tapes
+//! against the reference CPIM from that capture.
 
 use perun_adi_core::body_a::{assemble_cpim_from_oracle_capture, OracleCaptureInputs};
 

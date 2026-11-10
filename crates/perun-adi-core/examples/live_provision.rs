@@ -9,9 +9,8 @@
 //!   1. GET  https://gsa.apple.com/grandslam/GsService2/lookup
 //!      -> the URL bag (midStartProvisioning / midFinishProvisioning)
 //!   2. POST start  (empty plist request)   -> the SPIM (347 bytes, b64)
-//!   3. THE CRATE:  generate_cpim(&SessionInputs) -> the 276-byte CPIM
-//!      (the inject layer feeds the session inputs; the CPIM itself is
-//!      the container assembly around oracle-derived fields and capture-tape results)
+//!   3. THE CRATE: assemble_cpim_from_oracle_capture(&OracleCaptureInputs)
+//!      assembles 276 bytes around oracle-derived fields and capture tapes
 //!   4. POST finish (cpim in the plist)     -> ptm / tk / routing info
 //!
 //! The honest gate: the CPIM is bound to the SPIM the oracle measured.
@@ -142,7 +141,7 @@ fn main() {
     println!("[net] spim received ({} bytes decoded)", spim.len());
     std::fs::write(format!("{dir}/fresh_spim_live.bin"), &spim).expect("save fresh spim");
 
-    // 3. THE CRATE: the CPIM over the session inputs.
+    // 3. Assemble only the saved capture's oracle-backed CPIM fields.
     let inputs = OracleCaptureInputs::from_capture_dir(&dir).expect("the measured inject layer");
     if spim != inputs.captured_spim {
         println!("[verdict] FRESH SPIM: the oracle rotated the challenge ({} bytes).", spim.len());

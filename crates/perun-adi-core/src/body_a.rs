@@ -1233,4 +1233,31 @@ mod tests {
         assert_eq!(written, 160);
         assert!(seen.iter().all(|&s| s), "no gaps in the ladder");
     }
+    #[test]
+    fn oracle_capture_assembler_has_explicit_field_provenance() {
+        let inputs = OracleCaptureInputs {
+            captured_spim: vec![0xAA; 347],
+            reference_session16: [0x11; 16],
+            reference_body_b: [0x22; 52],
+            assembled_depot: [0x33; 0xC0],
+        };
+        let out = assemble_cpim_from_oracle_capture(&inputs);
+        assert_eq!(&out[0x00..0x04], &5u32.to_be_bytes());
+        assert_eq!(&out[0x04..0x14], &[0x11; 16]);
+        assert_eq!(&out[0x14..0x18], &0xA0u32.to_be_bytes());
+        assert_eq!(&out[0x18..0xB8], &[0x33; 160]);
+        assert_eq!(&out[0xB8..0xD8], &[0x33; 32]);
+        assert_eq!(&out[0xD8..0xDC], &0x34u32.to_be_bytes());
+        assert_eq!(&out[0xDC..0xE0], &4u32.to_be_bytes());
+        assert_eq!(&out[0xE0..0x114], &[0x22; 52]);
+
+        // SPIM is not a derivation input in this assembler. It is retained
+        // for capture/session comparison and length validation only.
+        let mut other = inputs.clone();
+        other.captured_spim.fill(0x55);
+        assert_eq!(assemble_cpim_from_oracle_capture(&other), out);
+    }
+
+
+
 }
