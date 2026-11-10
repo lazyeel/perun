@@ -16,6 +16,8 @@ on:
       - tools/time_freeze_gdb.py
       - tools/rdtsc_freeze_gdb.py
       - tools/slot_origin_gdb.py
+      - tools/test_capture_manifest.py
+      - tools/capture_manifest.py
       - .github/workflows/planter-genesis-trace.yml
 
 permissions:
@@ -41,6 +43,8 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m py_compile tools/planter_trace_gdb.py tools/planter_access.py tools/analyze_planter_trace.py
+          python3 -m py_compile tools/capture_manifest.py
+          python3 -m unittest tools.test_capture_manifest -v
           python3 -m py_compile tools/genesis_probe_gdb.py tools/input_probe_gdb.py tools/time_freeze_gdb.py tools/rdtsc_freeze_gdb.py tools/slot_origin_gdb.py
           python3 -m unittest tools/test_planter_trace.py -v
 
@@ -280,6 +284,18 @@ jobs:
           echo "NATIVE_CONTROL_RC=$NATIVE_RC" >> "$GITHUB_ENV"
           echo "Harness/GDB exit code: $RC"
           exit 0
+
+      - name: Build a privacy-preserving capture manifest
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="${RUN_WORK:-$RUNNER_TEMP/perun-adi-gdb}"
+          python3 tools/capture_manifest.py \
+            --work "$WORK" \
+            --source-sha "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --output "research-runs/capture-manifest-$GITHUB_RUN_ID.json"
 
       - name: Build a redacted trace report
         if: always()
@@ -1262,6 +1278,18 @@ jobs:
                   lines += ["", "## Fixed-input CPIM determinism probe", "",
                             "Skipped: no valid SPIM/identity seed was captured by the initial native control."]
           report.parent.mkdir(parents=True, exist_ok=True)
+          manifest_path = report.with_name(
+              f"capture-manifest-{os.environ.get('GITHUB_RUN_ID', 'unknown')}.json"
+          )
+          if manifest_path.is_file():
+              lines += [
+                  "",
+                  "## Capture provenance manifest",
+                  "",
+                  f"- Fingerprint manifest: `{manifest_path.name}`",
+                  "- Contains SHA-256 fingerprints and sizes only; raw captures, absolute paths, identity values and state filenames are excluded.",
+                  "- Native-control SPIM/CPIM, offline replay outputs, and the separate GDB live run are recorded as distinct process groups.",
+              ]
           report.write_text("\n".join(lines), encoding="utf-8")
           print(report.read_text())
           PY
@@ -1274,7 +1302,9 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add research-runs/planter-trace-${GITHUB_RUN_ID}.md
+          git add "research-runs/planter-trace-${GITHUB_RUN_ID}.md"
+          MANIFEST="research-runs/capture-manifest-${GITHUB_RUN_ID}.json"
+          if [ -f "$MANIFEST" ]; then git add "$MANIFEST"; fi
           if git diff --cached --quiet; then
             echo "No report to commit."
             exit 0
