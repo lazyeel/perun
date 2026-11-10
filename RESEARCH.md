@@ -4400,3 +4400,19 @@ The later GDB run is explicitly a separate provisioning process: the workflow un
 **Fam1 producer result.** The reverse-recording probe reached the first confirmed fam1 byte-write event. It located the immediately preceding instruction that changed `r10b` at RVA `0xE2432`, mnemonic `add`, after five reverse steps; executing that instruction once restored the byte observed at the writer (`forward_check=yes`). This is a single-hit producer confirmation only. The report does not contain the instruction operands or the upstream input lineage, and it does not establish the formula for all 256 fam1 bytes. The next probe must capture the static operand form and then trace the operand's producer/dataflow; do not promote this to a completed fam1 algorithm.
 
 The run's Python tooling validation, the perun-adi-core compile/library tests, the native control, GDB harness, manifest generation, redacted report generation and report/manifest commit all completed successfully. This does not establish autonomous SPIM-to-CPIM generation or fresh-session acceptance.
+
+#### Fam1 producer probe extension (2026-11-11; instrumentation)
+
+Trace #95 identified the immediate instruction that changed r10b, but
+reported only RVA and mnemonic. The next trace now records the static Intel
+disassembly token and its destination/source operand spellings, plus canonical
+GPR names when either operand is a simple register. These are instruction
+metadata, not runtime register contents or effective addresses. The workflow
+report carries only those static fields forward.
+
+This is a narrow follow-up: it distinguishes an immediate add from a
+register-fed or memory-fed add. It does not yet trace the source operand's
+previous writer, prove the complete arithmetic chain, or establish the
+256-byte fam1 table. The reverse probe remains one-hit, bounded to 8,192
+reverse steps, terminal, and forward-checked. A new trace must complete before
+any operand/dataflow conclusion is recorded.

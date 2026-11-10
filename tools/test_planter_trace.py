@@ -577,6 +577,11 @@ class Fam1ReverseProducerTests(unittest.TestCase):
         self.assertIn('"reverse-stepi"', probe)
         self.assertIn('"stepi"', probe)
         self.assertIn("producer_rva=", probe)
+        self.assertIn("instruction={instruction_token}", probe)
+        self.assertIn("dst_operand={destination_operand}", probe)
+        self.assertIn("src_operand={source_operand}", probe)
+        self.assertIn("src_gpr={source_gpr}", probe)
+        self.assertNotIn("source_value=", probe)
         self.assertNotIn('log(f"r10=', probe)
         self.assertIn('gdb.execute("kill"', probe)
 

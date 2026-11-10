@@ -1117,6 +1117,14 @@ jobs:
                           f"mnemonic={fields.get('mnemonic', 'unknown')}; "
                           f"forward check={fields.get('forward_check', 'no')}."
                       )
+                      lines.append(
+                          "- Producer instruction (static disassembly): "
+                          f"\`{fields.get('instruction', 'unknown')}\`; "
+                          f"dst={fields.get('dst_operand', 'unknown')}; "
+                          f"src={fields.get('src_operand', 'unknown')}; "
+                          f"destination GPR={fields.get('dst_gpr', 'na')}; "
+                          f"source GPR={fields.get('src_gpr', 'na')}."
+                      )
               else:
                   lines.append("- No candidate breakpoint events were captured.")
               lines.append("")

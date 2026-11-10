@@ -1815,11 +1815,16 @@ def start_fam1_recording():
 
 
 def fam1_reverse_source_probe():
-    """Find the most recent instruction that changed r10b, without logging values."""
+    """Find the latest r10b producer and record its static operands only."""
     status = "unavailable"
     steps = 0
     producer_rva = "na"
     mnemonic = "unknown"
+    instruction_token = "unknown"
+    destination_operand = "unknown"
+    source_operand = "unknown"
+    destination_gpr = "na"
+    source_gpr = "na"
     forward_check = "no"
     try:
         if not STATE.get("fam1_record_active"):
@@ -1832,7 +1837,6 @@ def fam1_reverse_source_probe():
                 breakpoint.enabled = False
             except Exception:
                 pass
-
         target_byte = rv("$r10") & 0xff
         base = STATE.get("base")
         status = "step-limit"
@@ -1848,28 +1852,49 @@ def fam1_reverse_source_probe():
                     disassembly = gdb.execute("x/i $pc", to_string=True).strip()
                     match = re.search(r":\s*(.*)$", disassembly)
                     instruction = match.group(1).strip() if match else ""
-                    mnemonic, _ = parse_intel_mnemonic_operands(instruction)
+                    mnemonic, operands_text = parse_intel_mnemonic_operands(instruction)
                     mnemonic = mnemonic or "unknown"
+                    instruction_token = re.sub(
+                        r"[^A-Za-z0-9_.,+\-\[\]*:]",
+                        "",
+                        re.sub(r"\s+", "_", instruction.strip()),
+                    ) or "unknown"
+                    operand_parts = [part.strip() for part in operands_text.split(",")]
+                    destination_operand = re.sub(
+                        r"[^A-Za-z0-9_.,+\-\[\]*:]",
+                        "",
+                        operand_parts[0] if operand_parts else "",
+                    ) or "none"
+                    source_operand = re.sub(
+                        r"[^A-Za-z0-9_.,+\-\[\]*:]",
+                        "",
+                        operand_parts[1] if len(operand_parts) > 1 else "",
+                    ) or "none"
+                    destination_gpr = intel_gpr_name(destination_operand) or "na"
+                    source_gpr = intel_gpr_name(source_operand) or "na"
                 except Exception:
                     mnemonic = "unknown"
-                # Replay exactly the candidate producer instruction once. It
-                # must restore the byte observed at the fam1 writer breakpoint.
+                    instruction_token = "unknown"
+                # Replay exactly the candidate producer instruction once.
                 gdb.execute("stepi", to_string=True)
                 forward_check = "yes" if (rv("$r10") & 0xff) == target_byte else "no"
                 status = "found" if forward_check == "yes" else "forward-check-failed"
                 break
-
         log(
             f"FAM1 PRODUCER REVERSE RESULT: status={status} steps={steps} "
             f"producer_rva={producer_rva} mnemonic={mnemonic} "
-            f"forward_check={forward_check}"
+            f"instruction={instruction_token} dst_operand={destination_operand} "
+            f"src_operand={source_operand} dst_gpr={destination_gpr} "
+            f"src_gpr={source_gpr} forward_check={forward_check}"
         )
     except Exception as exc:
         status = "reverse-error"
         log(
             f"FAM1 PRODUCER REVERSE RESULT: status={status} steps={steps} "
             f"producer_rva={producer_rva} mnemonic={mnemonic} "
-            f"forward_check=no error_type={type(exc).__name__}"
+            f"instruction={instruction_token} dst_operand={destination_operand} "
+            f"src_operand={source_operand} dst_gpr={destination_gpr} "
+            f"src_gpr={source_gpr} forward_check=no error_type={type(exc).__name__}"
         )
     finally:
         # Do not detach a stopped inferior or resume a partially reversed trace.
