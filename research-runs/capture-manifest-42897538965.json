@@ -1,0 +1,201 @@
+{
+  "capture_groups": {
+    "fixed_input_replays": {
+      "outputs": [
+        {
+          "bytes": 276,
+          "label": "baseline_a_cpim",
+          "present": true,
+          "sha256": "4944a16eddccf983a7dae81a31ee56dbc4e2edfacc43e355307cd87db3bc70e5"
+        },
+        {
+          "bytes": 276,
+          "label": "baseline_b_cpim",
+          "present": true,
+          "sha256": "92c36cd972a643b46e19fa5567effb0209b7db66b568004c53e5ee952b33bd02"
+        },
+        {
+          "bytes": 276,
+          "label": "frozen_a_cpim",
+          "present": true,
+          "sha256": "58b751b41b25fa7a3e799651cebf7b2a948d9033db39777692345fabd2cbd923"
+        },
+        {
+          "bytes": 276,
+          "label": "frozen_b_cpim",
+          "present": true,
+          "sha256": "9d822e4c3432d557d6407bea6a135b02bda4638a3dff713142b9b1bb90c8bdd5"
+        },
+        {
+          "bytes": 2,
+          "label": "baseline_a_exit_code",
+          "present": true,
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+        },
+        {
+          "bytes": 2,
+          "label": "baseline_b_exit_code",
+          "present": true,
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+        },
+        {
+          "bytes": 2,
+          "label": "frozen_a_exit_code",
+          "present": true,
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+        },
+        {
+          "bytes": 2,
+          "label": "frozen_b_exit_code",
+          "present": true,
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+        }
+      ],
+      "pairing_rule": "Each replay is a separate process using the saved native-control SPIM. The workflow restores the captured identity/state seed before each replay. Replay CPIM outputs are not the GDB trace's CPIM.",
+      "process_role": "four separate offline replay processes",
+      "spim_source": "native_control.spim",
+      "state_seed": [
+        {
+          "bytes": 16,
+          "label": "persistent_device_identity_seed",
+          "present": true,
+          "sha256": "4d4425dafa5a57c0784f678545a5ef26067432e25fcd81bdd313301d7c939fd6"
+        },
+        {
+          "bytes": 0,
+          "file_count": 0,
+          "label": "adi_state_seed",
+          "present": true,
+          "symlinks_skipped": 0,
+          "tree_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "summary_present": true
+    },
+    "gdb_trace": {
+      "artifacts": [
+        {
+          "bytes": 256,
+          "label": "source.at_dd511.bin",
+          "present": true,
+          "sha256": "34a53b16e36887510c94ef936ab037a733e79a0a0823e4f80dd2f23b9e92f0b8"
+        },
+        {
+          "bytes": 256,
+          "label": "source.at_postmalloc.bin",
+          "present": true,
+          "sha256": "34a53b16e36887510c94ef936ab037a733e79a0a0823e4f80dd2f23b9e92f0b8"
+        },
+        {
+          "label": "source.final.bin",
+          "present": false
+        },
+        {
+          "label": "planter.at_writer_candidate.bin",
+          "present": false
+        },
+        {
+          "bytes": 9984,
+          "label": "planter.at_base_load.bin",
+          "present": true,
+          "sha256": "5fd721d2a66b1ad836c37159a039a3d45a81e4f8d92913bf6152ca0dbdd9f7c8"
+        },
+        {
+          "label": "planter.slot_anchored.bin",
+          "present": false
+        },
+        {
+          "label": "planter.final.bin",
+          "present": false
+        }
+      ],
+      "metadata": {
+        "entry_rva": 554324,
+        "trace_run_id": "run-1794343338379161-11384",
+        "tracer_version": "v33",
+        "transform_opcode": 1902893164
+      },
+      "pairing_rule": "The workflow unsets ADI_OFFLINE_SPIM, ADI_SPIM_OUT and ADI_CPIM_OUT before this run. It performs a fresh network provisioning request. Its source/planter snapshots must not be paired with the initial native-control SPIM/CPIM or with offline replay outputs.",
+      "process_role": "separate GDB live provisioning process",
+      "trace_directory_present": true
+    },
+    "native_control": {
+      "artifacts": [
+        {
+          "bytes": 347,
+          "label": "spim",
+          "present": true,
+          "sha256": "b9f8f987c3b9bcd6a4980f2cc26d828a3c45b477bc83e64a534550f059c21c10"
+        },
+        {
+          "bytes": 276,
+          "label": "cpim",
+          "present": true,
+          "sha256": "0e3897bebf140253f80a201101a972cc33556987018f0564aa099b2743d56cbd"
+        },
+        {
+          "bytes": 16,
+          "label": "persistent_device_identity",
+          "present": true,
+          "sha256": "4d4425dafa5a57c0784f678545a5ef26067432e25fcd81bdd313301d7c939fd6"
+        },
+        {
+          "bytes": 0,
+          "file_count": 0,
+          "label": "adi_state_after_native_control",
+          "present": true,
+          "symlinks_skipped": 0,
+          "tree_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "exit_code": "0",
+      "pairing_rule": "SPIM and CPIM are saved by the same native-control process. The identity and state fingerprints describe persistent local context, not a cryptographic binding to every later tape.",
+      "process_role": "initial non-GDB live provisioning control"
+    }
+  },
+  "manifest_version": 1,
+  "privacy": {
+    "absolute_paths_included": false,
+    "device_identity_included": false,
+    "hashes_are_integrity_fingerprints_not_authenticators": true,
+    "raw_artifacts_included": false,
+    "state_filenames_included": false
+  },
+  "runtime_fingerprints": [
+    {
+      "bytes": 65816248,
+      "file_count": 18,
+      "label": "apple_library_directory",
+      "present": true,
+      "symlinks_skipped": 1,
+      "tree_sha256": "1cb2110943daca158f447ed3c16ff8121e28d036c8d40f42d722c245b8841b83"
+    },
+    {
+      "bytes": 132888007,
+      "file_count": 196,
+      "label": "bionic_sysroot",
+      "present": true,
+      "symlinks_skipped": 0,
+      "tree_sha256": "20335c2ac3ca673488a1cb4963cdc3f48b94f452c7b170468c67f684c283b56c"
+    },
+    {
+      "bytes": 1178599424,
+      "label": "android_system_image",
+      "present": true,
+      "sha256": "5ffb473249982a792074b5e27a974ed4c1229640f4857f260357f9cdb55414d9"
+    }
+  ],
+  "session_separation": [
+    "A matching byte hash identifies identical bytes, not a common provisioning session.",
+    "Only native_control.spim and native_control.cpim are asserted to be outputs of one process.",
+    "fixed_input_replays are separate offline processes seeded from native_control.spim.",
+    "gdb_trace is a separate live provisioning process; its planter/source observations are not paired to native_control.spim/cpim.",
+    "The manifest does not prove every tape or auxiliary snapshot belongs to one session."
+  ],
+  "workflow": {
+    "gdb_trace_exit_code": "0",
+    "native_control_exit_code": "0",
+    "run_id": "42897538965",
+    "source_revision": "f5ee38e3ba23136dce4fdab3c0340cea0bc9a372"
+  }
+}
