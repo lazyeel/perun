@@ -13,12 +13,13 @@
 //!      assembles 276 bytes around oracle-derived fields and capture tapes
 //!   4. POST finish (cpim in the plist)     -> ptm / tk / routing info
 //!
-//! The honest gate: the CPIM is bound to the SPIM the oracle measured.
-//! If the fresh start returns the SAME SPIM, the crate's answer is
-//! THE answer and the server must take it (ec, ptm, tk). If the SPIM
-//! is fresh, the genesis frontier (the planter expand) is the named
-//! blocker -- the runner reports the fact and saves the new SPIM for
-//! the capture workflow instead of lying.
+//! The safety gate: this runner submits a saved capture only when the
+//! newly issued SPIM byte-matches the SPIM saved with that capture. This
+//! prevents reusing a response after Apple's challenge rotates; it does
+//! NOT prove that every tape has a cryptographic same-session binding and
+//! does NOT make the assembler SPIM-only. Planter/feed genesis, session16,
+//! Body B and digest-word provenance remain independent open boundaries.
+//! When the SPIM differs, the runner saves it and does not submit stale data.
 //!
 //! Environment: PERUN_LIVE_DIR (default /opt/data/adi-re) -- the
 //! capture directory of the reference pair.
@@ -146,8 +147,8 @@ fn main() {
     if spim != inputs.captured_spim {
         println!("[verdict] FRESH SPIM: the oracle rotated the challenge ({} bytes).", spim.len());
         println!("[verdict] The crate's CPIM is bound to the reference session's SPIM;");
-        println!("[verdict] the planter expand (the genesis frontier) is the named blocker");
-        println!("[verdict] for answering a fresh challenge autonomously.");
+        println!("[verdict] saved tapes and reference CPIM cannot answer this fresh challenge.");
+        println!("[verdict] planter/feed genesis, session16, Body B and digest provenance remain open.");
         println!("[verdict] The fresh SPIM is saved: {dir}/fresh_spim_live.bin");
         return;
     }
