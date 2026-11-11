@@ -4597,3 +4597,45 @@ from the prefix sil_producer_ and a static tuple of field names. The other
 observation is attributed to #104. The test is corrected to verify the
 dynamic prefix plus the tuple containing instruction, and to leave the
 implementation's field-generation approach intact.
+
+
+#### Trace #105: SIL producer confirmed (2026-11-11; run 42989210112)
+
+Trace #105 ran against source revision
+cfea74b66c161f4a1dc78bb20f82c6615ec41789. The specialized trace and
+matching CI run completed successfully. Tooling validation,
+perun-adi-core tests, cargo clippy and cargo test all passed. The redacted
+report and manifest are
+research-runs/planter-trace-42989210112.md and
+research-runs/capture-manifest-42989210112.json.
+
+For the same single observed fam1[0] store, the tracer found the producer
+of the SIL source byte used by sub r10b,sil: add sil,0x1e at RVA 0xE1BD3.
+The reverse probe rewound across the SUB, verified the r10b rewind, found
+the instruction that changes RSI's low byte, and forward-checked it.
+The SIL lineage status is producer-found; the complete diagnostic used
+467 reverse steps.
+
+The six-instruction execution chain into the observed fam1[0] write is:
+
+1. add sil,0x1e at RVA 0xE1BD3;
+2. sub r10b,sil at RVA 0xE1BDB;
+3. add r10b,0x63 at RVA 0xE1C87;
+4. add r10d,0x6d at RVA 0xE2366;
+5. xor r10b,0x6d at RVA 0xE23C4;
+6. add r10b,0x3b at RVA 0xE2432.
+
+Let u be SIL before add sil,0x1e and x be r10b before sub r10b,sil.
+For this observed instruction path, the resulting byte can be written as
+((((x - u + 0xB2) mod 256) XOR 0x6D) + 0x3B) mod 256. This algebra
+combines the immediate additions/subtraction only for the low-byte value.
+The values x and u were not published, and the relation remains local to one
+captured event at index 0. It is not a verified 256-entry fam1 formula.
+
+The next useful reverse target is the instruction that produced SIL before
+add sil,0x1e. The existing trace still captures one fam1 write at index 0,
+one early base-load candidate, no slot-anchored/final planter and no first
+mixer read. The native control succeeded with 347-byte SPIM and 276-byte
+CPIM; fixed-input CPIM replay pairs remained unequal, and the GDB trace is a
+separate live provisioning process. Autonomous SPIM-to-CPIM generation and
+fresh-session parity remain unproven.
