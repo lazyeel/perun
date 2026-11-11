@@ -4416,3 +4416,18 @@ previous writer, prove the complete arithmetic chain, or establish the
 256-byte fam1 table. The reverse probe remains one-hit, bounded to 8,192
 reverse steps, terminal, and forward-checked. A new trace must complete before
 any operand/dataflow conclusion is recorded.
+
+#### Fam1 two-hop reverse lineage probe (2026-11-11; instrumentation)
+
+Trace #96 captured one concrete producer: `add r10b, 0x3b` at RVA
+`0xE2432`, confirmed by reverse execution and a successful forward check.
+The next tracer revision now verifies the reverse transition back to the
+pre-add byte, then continues backwards to find the preceding instruction
+that changed `r10b`. It records static instruction/operand metadata for both
+stages and separately forward-checks the upstream producer.
+
+The combined reverse budget is capped at 8,192 instructions, including the
+rewind. The process still terminates after the first confirmed fam1 store;
+the probe does not log runtime register values, pointers or memory contents.
+A successful two-hop result would establish only one observed byte's local
+dataflow, not the generation formula for all fam1 indices.

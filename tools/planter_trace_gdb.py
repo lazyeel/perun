@@ -1815,7 +1815,7 @@ def start_fam1_recording():
 
 
 def fam1_reverse_source_probe():
-    """Find the latest r10b producer and record its static operands only."""
+    """Trace two successive producers of the byte consumed by the fam1 store."""
     status = "unavailable"
     steps = 0
     producer_rva = "na"
@@ -1826,75 +1826,168 @@ def fam1_reverse_source_probe():
     destination_gpr = "na"
     source_gpr = "na"
     forward_check = "no"
+    rewind_check = "no"
+    upstream_status = "not-attempted"
+    upstream_steps = 0
+    upstream_rva = "na"
+    upstream_mnemonic = "unknown"
+    upstream_instruction = "unknown"
+    upstream_dst_operand = "unknown"
+    upstream_src_operand = "unknown"
+    upstream_dst_gpr = "na"
+    upstream_src_gpr = "na"
+    upstream_forward_check = "no"
+
+    def static_instruction():
+        """Return static disassembly fields only; never capture dynamic values."""
+        line = gdb.execute("x/i $pc", to_string=True).strip()
+        match = re.search(r":\s*(.*)$", line)
+        instruction = match.group(1).strip() if match else ""
+        op, operands_text = parse_intel_mnemonic_operands(instruction)
+        token = re.sub(
+            r"[^A-Za-z0-9_.,+\-\[\]*:]",
+            "",
+            re.sub(r"\s+", "_", instruction.strip()),
+        ) or "unknown"
+        parts = [part.strip() for part in operands_text.split(",")]
+        dst = re.sub(
+            r"[^A-Za-z0-9_.,+\-\[\]*:]",
+            "",
+            parts[0] if parts else "",
+        ) or "none"
+        src = re.sub(
+            r"[^A-Za-z0-9_.,+\-\[\]*:]",
+            "",
+            parts[1] if len(parts) > 1 else "",
+        ) or "none"
+        return {
+            "mnemonic": op or "unknown",
+            "instruction": token,
+            "dst_operand": dst,
+            "src_operand": src,
+            "dst_gpr": intel_gpr_name(dst) or "na",
+            "src_gpr": intel_gpr_name(src) or "na",
+        }
+
     try:
         if not STATE.get("fam1_record_active"):
             status = "record-not-active"
             return
-        # Reverse-step must not stop at the other probes installed by the main
-        # tracer. This diagnostic run is intentionally terminal after one hit.
+        # Disable every ordinary breakpoint before reverse execution. This
+        # diagnostic run is terminal and intentionally limited to two writers.
         for breakpoint in gdb.breakpoints() or []:
             try:
                 breakpoint.enabled = False
             except Exception:
                 pass
-        target_byte = rv("$r10") & 0xff
+
         base = STATE.get("base")
+        target_byte = rv("$r10") & 0xff
         status = "step-limit"
-        for steps in range(1, MAX_FAM1_REVERSE_STEPS + 1):
+        while steps < MAX_FAM1_REVERSE_STEPS:
             gdb.execute("reverse-stepi", to_string=True)
-            if (rv("$r10") & 0xff) != target_byte:
+            steps += 1
+            before_byte = rv("$r10") & 0xff
+            if before_byte != target_byte:
                 pc = rv("$pc")
-                if base is not None and base <= pc < base + MODULE_RVA_LIMIT:
-                    producer_rva = f"{pc - base:#x}"
-                else:
-                    producer_rva = "outside-module"
-                try:
-                    disassembly = gdb.execute("x/i $pc", to_string=True).strip()
-                    match = re.search(r":\s*(.*)$", disassembly)
-                    instruction = match.group(1).strip() if match else ""
-                    mnemonic, operands_text = parse_intel_mnemonic_operands(instruction)
-                    mnemonic = mnemonic or "unknown"
-                    instruction_token = re.sub(
-                        r"[^A-Za-z0-9_.,+\-\[\]*:]",
-                        "",
-                        re.sub(r"\s+", "_", instruction.strip()),
-                    ) or "unknown"
-                    operand_parts = [part.strip() for part in operands_text.split(",")]
-                    destination_operand = re.sub(
-                        r"[^A-Za-z0-9_.,+\-\[\]*:]",
-                        "",
-                        operand_parts[0] if operand_parts else "",
-                    ) or "none"
-                    source_operand = re.sub(
-                        r"[^A-Za-z0-9_.,+\-\[\]*:]",
-                        "",
-                        operand_parts[1] if len(operand_parts) > 1 else "",
-                    ) or "none"
-                    destination_gpr = intel_gpr_name(destination_operand) or "na"
-                    source_gpr = intel_gpr_name(source_operand) or "na"
-                except Exception:
-                    mnemonic = "unknown"
-                    instruction_token = "unknown"
-                # Replay exactly the candidate producer instruction once.
+                producer_rva = (
+                    f"{pc - base:#x}"
+                    if base is not None and base <= pc < base + MODULE_RVA_LIMIT
+                    else "outside-module"
+                )
+                meta = static_instruction()
+                mnemonic = meta["mnemonic"]
+                instruction_token = meta["instruction"]
+                destination_operand = meta["dst_operand"]
+                source_operand = meta["src_operand"]
+                destination_gpr = meta["dst_gpr"]
+                source_gpr = meta["src_gpr"]
+                # Verify the immediate producer before following the prior
+                # value. The reverse position is before this instruction.
                 gdb.execute("stepi", to_string=True)
                 forward_check = "yes" if (rv("$r10") & 0xff) == target_byte else "no"
                 status = "found" if forward_check == "yes" else "forward-check-failed"
+                if forward_check != "yes":
+                    break
+
+                # Return to the state immediately before the first producer.
+                gdb.execute("reverse-stepi", to_string=True)
+                steps += 1
+                rewind_check = (
+                    "yes" if (rv("$r10") & 0xff) == before_byte else "no"
+                )
+                if rewind_check != "yes":
+                    upstream_status = "rewind-check-failed"
+                    break
+
+                # Search further backwards for the previous instruction that
+                # changed r10b. It may be outside libCoreADI, e.g. in a helper.
+                upstream_target = before_byte
+                remaining = MAX_FAM1_REVERSE_STEPS - steps
+                upstream_status = "step-limit"
+                for upstream_steps in range(1, remaining + 1):
+                    gdb.execute("reverse-stepi", to_string=True)
+                    steps += 1
+                    current_byte = rv("$r10") & 0xff
+                    if current_byte != upstream_target:
+                        upstream_pc = rv("$pc")
+                        upstream_rva = (
+                            f"{upstream_pc - base:#x}"
+                            if base is not None
+                            and base <= upstream_pc < base + MODULE_RVA_LIMIT
+                            else "outside-module"
+                        )
+                        upstream_meta = static_instruction()
+                        upstream_mnemonic = upstream_meta["mnemonic"]
+                        upstream_instruction = upstream_meta["instruction"]
+                        upstream_dst_operand = upstream_meta["dst_operand"]
+                        upstream_src_operand = upstream_meta["src_operand"]
+                        upstream_dst_gpr = upstream_meta["dst_gpr"]
+                        upstream_src_gpr = upstream_meta["src_gpr"]
+                        # Forward execution must restore the value consumed by
+                        # the first producer; dynamic values remain unlogged.
+                        gdb.execute("stepi", to_string=True)
+                        upstream_forward_check = (
+                            "yes"
+                            if (rv("$r10") & 0xff) == upstream_target
+                            else "no"
+                        )
+                        upstream_status = (
+                            "found"
+                            if upstream_forward_check == "yes"
+                            else "forward-check-failed"
+                        )
+                        break
+                else:
+                    upstream_steps = remaining
                 break
+
         log(
             f"FAM1 PRODUCER REVERSE RESULT: status={status} steps={steps} "
             f"producer_rva={producer_rva} mnemonic={mnemonic} "
             f"instruction={instruction_token} dst_operand={destination_operand} "
             f"src_operand={source_operand} dst_gpr={destination_gpr} "
-            f"src_gpr={source_gpr} forward_check={forward_check}"
+            f"src_gpr={source_gpr} forward_check={forward_check} "
+            f"rewind_check={rewind_check} upstream_status={upstream_status} "
+            f"upstream_steps={upstream_steps} upstream_rva={upstream_rva} "
+            f"upstream_mnemonic={upstream_mnemonic} "
+            f"upstream_instruction={upstream_instruction} "
+            f"upstream_dst_operand={upstream_dst_operand} "
+            f"upstream_src_operand={upstream_src_operand} "
+            f"upstream_dst_gpr={upstream_dst_gpr} "
+            f"upstream_src_gpr={upstream_src_gpr} "
+            f"upstream_forward_check={upstream_forward_check}"
         )
     except Exception as exc:
         status = "reverse-error"
         log(
             f"FAM1 PRODUCER REVERSE RESULT: status={status} steps={steps} "
             f"producer_rva={producer_rva} mnemonic={mnemonic} "
-            f"instruction={instruction_token} dst_operand={destination_operand} "
-            f"src_operand={source_operand} dst_gpr={destination_gpr} "
-            f"src_gpr={source_gpr} forward_check=no error_type={type(exc).__name__}"
+            f"instruction={instruction_token} forward_check=no "
+            f"upstream_status={upstream_status} "
+            f"upstream_rva={upstream_rva} "
+            f"upstream_instruction={upstream_instruction} "
+            f"upstream_forward_check=no error_type={type(exc).__name__}"
         )
     finally:
         # Do not detach a stopped inferior or resume a partially reversed trace.

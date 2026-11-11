@@ -1125,6 +1125,15 @@ jobs:
                           f"destination GPR={fields.get('dst_gpr', 'na')}; "
                           f"source GPR={fields.get('src_gpr', 'na')}."
                       )
+                      lines.append(
+                          "- Previous r10b producer: "
+                          f"status={fields.get('upstream_status', 'unknown')}; "
+                          f"RVA={fields.get('upstream_rva', 'n/a')}; "
+                          f"instruction=\`{fields.get('upstream_instruction', 'unknown')}\`; "
+                          f"dst={fields.get('upstream_dst_operand', 'unknown')}; "
+                          f"src={fields.get('upstream_src_operand', 'unknown')}; "
+                          f"forward check={fields.get('upstream_forward_check', 'no')}."
+                      )
               else:
                   lines.append("- No candidate breakpoint events were captured.")
               lines.append("")
