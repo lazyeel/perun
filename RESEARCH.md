@@ -4458,3 +4458,14 @@ value and searches for the previous r10b-changing instruction. The chain is
 capped at three producer instructions and one shared 8,192 reverse-step
 budget. Only static instruction/operand metadata and per-hop checks are
 reported; runtime register values and addresses remain excluded.
+#### Trace #98: preflight regression failure (2026-11-11; run 42968477574)
+
+Trace #98 did not enter the native-control or GDB stage. The Python tooling
+validation stopped on a stale unit-test assertion that expected the old
+literal `producer_rva=` log field after the trace output had been generalized
+to prefixed per-hop fields (`producer_rva`, `upstream_rva`, `upstream2_rva`).
+No reverse-execution, CoreADI or provisioning evidence was generated.
+
+The test is being updated to assert the structured per-hop output and the
+fail-closed rewind invariant. A failed rewind must terminate lineage tracing
+rather than continuing from an unverified register state.

@@ -574,22 +574,20 @@ class Fam1ReverseProducerTests(unittest.TestCase):
             "class Fam1CandidateBP", 1
         )[0]
         self.assertIn("MAX_FAM1_REVERSE_STEPS = 8192", source)
-        self.assertIn('"reverse-stepi"', probe)
-        self.assertIn('"stepi"', probe)
-        self.assertIn("producer_rva=", probe)
-        self.assertIn("instruction={instruction_token}", probe)
-        self.assertIn("dst_operand={destination_operand}", probe)
-        self.assertIn("src_operand={source_operand}", probe)
-        self.assertIn("src_gpr={source_gpr}", probe)
+        self.assertIn('gdb.execute("reverse-stepi"', probe)
+        self.assertIn('gdb.execute("stepi"', probe)
+        self.assertIn('"rva": rva', probe)
+        self.assertIn('"forward_check": forward_check', probe)
+        self.assertIn('"rewind_check": "not-attempted"', probe)
         self.assertIn('for hop in range(1, 4)', probe)
         self.assertIn('prefix = "producer" if idx == 1', probe)
         self.assertIn("upstream2", probe)
         self.assertIn("lineage_status={final_status}", probe)
+        self.assertIn('if records[-1]["rewind_check"] != "yes":', probe)
         self.assertIn("MAX_FAM1_REVERSE_STEPS", probe)
         self.assertIn('gdb.execute("kill"', probe)
         self.assertNotIn("source_value=", probe)
-        self.assertNotIn('log(f"r10=', probe)
-        self.assertIn('gdb.execute("kill"', probe)
+        self.assertNotIn("registers[", probe)
 
     def test_report_publishes_only_reverse_probe_summary(self):
         workflow = (Path(__file__).parents[1] / ".github" / "workflows" /

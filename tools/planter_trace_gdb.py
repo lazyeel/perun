@@ -1931,7 +1931,7 @@ def fam1_reverse_source_probe():
                 break
             if records[-1]["status"] != "found":
                 break
-            if records[-1]["rewind_check"] == "not-attempted":
+            if records[-1]["rewind_check"] != "yes":
                 break
 
         fields = [f"lineage_status={final_status}", f"reverse_steps={steps}"]
