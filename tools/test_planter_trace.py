@@ -585,6 +585,12 @@ class Fam1ReverseProducerTests(unittest.TestCase):
         self.assertIn('"upstream4"', probe)
         self.assertIn("record_prefixes[idx - 1]", probe)
         self.assertNotIn('prefix = ("producer" if idx == 1', probe)
+        self.assertIn('meta.get("src_operand") == "sil"', probe)
+        self.assertIn('meta.get("src_gpr") == "rsi"', probe)
+        self.assertIn('target_sil = rv("$rsi") & 0xff', probe)
+        self.assertIn('before_sil = rv("$rsi") & 0xff', probe)
+        self.assertIn("sil_producer_instruction", probe)
+        self.assertNotIn("sil_value=", probe)
         self.assertIn("upstream2", probe)
         self.assertIn("lineage_status={final_status}", probe)
         self.assertIn('if records[-1]["rewind_check"] != "yes":', probe)
@@ -602,6 +608,8 @@ class Fam1ReverseProducerTests(unittest.TestCase):
         self.assertIn("fields.get('producer_mnemonic', 'unknown')", workflow)
         self.assertIn("fields.get('upstream3_instruction', 'unknown')", workflow)
         self.assertIn("fields.get('upstream4_instruction', 'unknown')", workflow)
+        self.assertIn("fields.get('sil_producer_instruction', 'unknown')", workflow)
+        self.assertIn("SIL source-register producer", workflow)
         self.assertIn("export PERUN_RECORD_FAM1=1", workflow)
 
 class Fam1ReportAggregationTests(unittest.TestCase):

@@ -1162,6 +1162,16 @@ jobs:
                           f"forward check={fields.get('upstream4_forward_check', 'no')}."
                       )
                       lines.append(
+                          "- SIL source-register producer: "
+                          f"lineage={fields.get('sil_lineage_status', 'not-probed')}; "
+                          f"status={fields.get('sil_producer_status', 'unknown')}; "
+                          f"RVA={fields.get('sil_producer_rva', 'n/a')}; "
+                          f"instruction={fields.get('sil_producer_instruction', 'unknown')}; "
+                          f"dst={fields.get('sil_producer_dst_operand', 'unknown')}; "
+                          f"src={fields.get('sil_producer_src_operand', 'unknown')}; "
+                          f"forward check={fields.get('sil_producer_forward_check', 'no')}."
+                      )
+                      lines.append(
                           f"- Reverse lineage status: {fields.get('lineage_status', 'unknown')}; "
                           f"reverse steps={fields.get('reverse_steps', 'n/a')}."
                       )

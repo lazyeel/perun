@@ -1819,6 +1819,9 @@ def fam1_reverse_source_probe():
     steps = 0
     records = []
     record_prefixes = ("producer", "upstream", "upstream2", "upstream3", "upstream4")
+    sil_record = None
+    sil_lineage_status = "not-probed"
+    sil_probe_start_steps = 0
     final_status = "hop-limit"
 
     def static_instruction():
@@ -1902,7 +1905,71 @@ def fam1_reverse_source_probe():
                     break
 
                 if hop == 5:
-                    final_status = "hop-limit"
+                    if meta.get("src_operand") == "sil" and meta.get("src_gpr") == "rsi":
+                        sil_probe_start_steps = steps
+                        if steps >= MAX_FAM1_REVERSE_STEPS:
+                            sil_lineage_status = "budget-exhausted-before-sub-rewind"
+                            final_status = "sil-" + sil_lineage_status
+                            break
+
+                        # Rewind the r10b SUB so the machine state is before
+                        # the consumer; SIL itself is not modified by SUB.
+                        gdb.execute("reverse-stepi", to_string=True)
+                        steps += 1
+                        record["rewind_check"] = (
+                            "yes"
+                            if (rv("$r10") & 0xff) == before_byte
+                            else "no"
+                        )
+                        if record["rewind_check"] != "yes":
+                            sil_lineage_status = "sub-rewind-check-failed"
+                            final_status = "sil-" + sil_lineage_status
+                            break
+
+                        target_sil = rv("$rsi") & 0xff
+                        sil_search_start_steps = steps
+                        sil_found = False
+                        while steps < MAX_FAM1_REVERSE_STEPS:
+                            gdb.execute("reverse-stepi", to_string=True)
+                            steps += 1
+                            before_sil = rv("$rsi") & 0xff
+                            if before_sil == target_sil:
+                                continue
+
+                            sil_pc = rv("$pc")
+                            sil_rva = (
+                                f"{sil_pc - base:#x}"
+                                if base is not None and base <= sil_pc < base + MODULE_RVA_LIMIT
+                                else "outside-module"
+                            )
+                            sil_meta = static_instruction()
+                            gdb.execute("stepi", to_string=True)
+                            sil_forward_check = (
+                                "yes" if (rv("$rsi") & 0xff) == target_sil else "no"
+                            )
+                            sil_record = {
+                                "status": "found" if sil_forward_check == "yes" else "forward-check-failed",
+                                "steps": steps - sil_search_start_steps,
+                                "rva": sil_rva,
+                                **sil_meta,
+                                "forward_check": sil_forward_check,
+                            }
+                            sil_found = True
+                            sil_lineage_status = (
+                                "producer-found" if sil_forward_check == "yes"
+                                else "producer-forward-check-failed"
+                            )
+                            break
+
+                        if not sil_found:
+                            sil_lineage_status = (
+                                "reverse-budget-exhausted"
+                                if steps >= MAX_FAM1_REVERSE_STEPS
+                                else "no-earlier-sil-writer"
+                            )
+                        final_status = "sil-" + sil_lineage_status
+                    else:
+                        final_status = "hop-limit"
                     break
                 if steps >= MAX_FAM1_REVERSE_STEPS:
                     final_status = "reverse-budget-exhausted-before-rewind"
@@ -1942,6 +2009,13 @@ def fam1_reverse_source_probe():
                         "dst_operand", "src_operand", "dst_gpr", "src_gpr",
                         "forward_check", "rewind_check"):
                 fields.append(f"{prefix}_{key}={record.get(key, 'na')}")
+        fields.append(f"sil_lineage_status={sil_lineage_status}")
+        fields.append(f"sil_reverse_steps={steps - sil_probe_start_steps}")
+        if sil_record is not None:
+            for key in ("status", "steps", "rva", "mnemonic", "instruction",
+                        "dst_operand", "src_operand", "dst_gpr", "src_gpr",
+                        "forward_check"):
+                fields.append(f"sil_producer_{key}={sil_record.get(key, 'na')}")
         log("FAM1 PRODUCER REVERSE RESULT: " + " ".join(fields))
     except Exception as exc:
         final_status = "reverse-error"
@@ -1954,6 +2028,13 @@ def fam1_reverse_source_probe():
                 f"{prefix}_instruction={record.get('instruction', 'unknown')}",
                 f"{prefix}_forward_check={record.get('forward_check', 'no')}",
             ])
+        fields.append(f"sil_lineage_status={sil_lineage_status}")
+        fields.append(f"sil_reverse_steps={steps - sil_probe_start_steps}")
+        if sil_record is not None:
+            for key in ("status", "steps", "rva", "mnemonic", "instruction",
+                        "dst_operand", "src_operand", "dst_gpr", "src_gpr",
+                        "forward_check"):
+                fields.append(f"sil_producer_{key}={sil_record.get(key, 'na')}")
         log("FAM1 PRODUCER REVERSE RESULT: " + " ".join(fields))
     finally:
         # Do not detach a stopped inferior or resume a partially reversed trace.

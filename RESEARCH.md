@@ -4544,3 +4544,44 @@ reverse-execution result, or provisioning observation is attributed to #102.
 The assertion is corrected to require the shared prefix tuple and reject the
 obsolete expression. The generated report and manifest explicitly record
 that no trace directory was created and GDB was unavailable.
+
+
+#### Trace #103: fifth fam1 producer exposes an RSI-byte dependency (2026-11-11; run 42987702439)
+
+Trace #103 ran against source revision
+001be17d1e78565a26faaf69b4a8c110bbc60f22. Both the research CI and the
+specialized trace workflow completed successfully. The redacted report and
+manifest are
+research-runs/planter-trace-42987702439.md and
+research-runs/capture-manifest-42987702439.json.
+
+The single observed fam1[0] store now has five successive confirmed r10b
+producers, all with successful forward checks:
+
+1. add r10b, 0x63 at RVA 0xE1C87;
+2. add r10d, 0x6d at RVA 0xE2366;
+3. xor r10b, 0x6d at RVA 0xE23C4;
+4. add r10b, 0x3b at RVA 0xE2432;
+5. sub r10b, sil at RVA 0xE1BDB.
+
+In execution order, the newly extended byte relation is
+((((((x - s + 0xD0) mod 256) XOR 0x6D) + 0x3B) mod 256), where x is
+r10b before the SUB and s is SIL at that instruction. The SUB's source
+operand is the low byte of RSI. This is a concrete register dependency,
+not yet an explanation of how RSI/SIL is produced and not a complete fam1
+table formula.
+
+The fifth producer was found after the tracer ceiling was extended to five;
+lineage_status remained hop-limit because that run did not yet follow SIL's
+own dataflow. The next probe rewinds across the confirmed SUB, verifies the
+r10b rewind, then searches backward for the last instruction changing RSI's
+low byte and forward-checks that instruction. It reports only static
+instruction metadata and aggregate step counts.
+
+All other main-trace limits remain: one fam1 write at index 0, one early
+base-load planter candidate, no slot-anchored/final planter, no first mixer
+read, and no dynamic mixer memory operands. The native control reached
+ProvisioningStart with rc=0 and cpim_len=276 from a 347-byte SPIM. Baseline
+and frozen fixed-input CPIM pairs remained unequal; the GDB live trace is a
+separate provisioning process. No autonomous SPIM-to-CPIM or fresh-session
+parity is established.
