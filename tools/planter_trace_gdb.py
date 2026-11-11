@@ -1815,28 +1815,10 @@ def start_fam1_recording():
 
 
 def fam1_reverse_source_probe():
-    """Trace two successive producers of the byte consumed by the fam1 store."""
-    status = "unavailable"
+    """Trace up to three successive producers of the byte consumed by fam1."""
     steps = 0
-    producer_rva = "na"
-    mnemonic = "unknown"
-    instruction_token = "unknown"
-    destination_operand = "unknown"
-    source_operand = "unknown"
-    destination_gpr = "na"
-    source_gpr = "na"
-    forward_check = "no"
-    rewind_check = "no"
-    upstream_status = "not-attempted"
-    upstream_steps = 0
-    upstream_rva = "na"
-    upstream_mnemonic = "unknown"
-    upstream_instruction = "unknown"
-    upstream_dst_operand = "unknown"
-    upstream_src_operand = "unknown"
-    upstream_dst_gpr = "na"
-    upstream_src_gpr = "na"
-    upstream_forward_check = "no"
+    records = []
+    final_status = "hop-limit"
 
     def static_instruction():
         """Return static disassembly fields only; never capture dynamic values."""
@@ -1871,10 +1853,10 @@ def fam1_reverse_source_probe():
 
     try:
         if not STATE.get("fam1_record_active"):
-            status = "record-not-active"
+            final_status = "record-not-active"
             return
         # Disable every ordinary breakpoint before reverse execution. This
-        # diagnostic run is terminal and intentionally limited to two writers.
+        # diagnostic run is terminal and intentionally limited to three hops.
         for breakpoint in gdb.breakpoints() or []:
             try:
                 breakpoint.enabled = False
@@ -1883,112 +1865,95 @@ def fam1_reverse_source_probe():
 
         base = STATE.get("base")
         target_byte = rv("$r10") & 0xff
-        status = "step-limit"
-        while steps < MAX_FAM1_REVERSE_STEPS:
-            gdb.execute("reverse-stepi", to_string=True)
-            steps += 1
-            before_byte = rv("$r10") & 0xff
-            if before_byte != target_byte:
+        for hop in range(1, 4):
+            hop_start_steps = steps
+            found = False
+            while steps < MAX_FAM1_REVERSE_STEPS:
+                gdb.execute("reverse-stepi", to_string=True)
+                steps += 1
+                before_byte = rv("$r10") & 0xff
+                if before_byte == target_byte:
+                    continue
+
                 pc = rv("$pc")
-                producer_rva = (
+                rva = (
                     f"{pc - base:#x}"
                     if base is not None and base <= pc < base + MODULE_RVA_LIMIT
                     else "outside-module"
                 )
                 meta = static_instruction()
-                mnemonic = meta["mnemonic"]
-                instruction_token = meta["instruction"]
-                destination_operand = meta["dst_operand"]
-                source_operand = meta["src_operand"]
-                destination_gpr = meta["dst_gpr"]
-                source_gpr = meta["src_gpr"]
-                # Verify the immediate producer before following the prior
-                # value. The reverse position is before this instruction.
                 gdb.execute("stepi", to_string=True)
-                forward_check = "yes" if (rv("$r10") & 0xff) == target_byte else "no"
-                status = "found" if forward_check == "yes" else "forward-check-failed"
+                forward_check = (
+                    "yes" if (rv("$r10") & 0xff) == target_byte else "no"
+                )
+                record = {
+                    "status": "found" if forward_check == "yes" else "forward-check-failed",
+                    "steps": steps - hop_start_steps,
+                    "rva": rva,
+                    **meta,
+                    "forward_check": forward_check,
+                    "rewind_check": "not-attempted",
+                }
+                records.append(record)
+                found = True
                 if forward_check != "yes":
+                    final_status = "forward-check-failed"
                     break
 
-                # Return to the state immediately before the first producer.
+                if hop == 3:
+                    final_status = "hop-limit"
+                    break
+                if steps >= MAX_FAM1_REVERSE_STEPS:
+                    final_status = "reverse-budget-exhausted-before-rewind"
+                    break
+
+                # Rewind across this producer so the next hop starts at the
+                # byte that existed before it. Count this in the shared budget.
                 gdb.execute("reverse-stepi", to_string=True)
                 steps += 1
-                rewind_check = (
-                    "yes" if (rv("$r10") & 0xff) == before_byte else "no"
+                record["rewind_check"] = (
+                    "yes"
+                    if (rv("$r10") & 0xff) == before_byte
+                    else "no"
                 )
-                if rewind_check != "yes":
-                    upstream_status = "rewind-check-failed"
+                if record["rewind_check"] != "yes":
+                    final_status = "rewind-check-failed"
                     break
-
-                # Search further backwards for the previous instruction that
-                # changed r10b. It may be outside libCoreADI, e.g. in a helper.
-                upstream_target = before_byte
-                remaining = MAX_FAM1_REVERSE_STEPS - steps
-                upstream_status = "step-limit"
-                for upstream_steps in range(1, remaining + 1):
-                    gdb.execute("reverse-stepi", to_string=True)
-                    steps += 1
-                    current_byte = rv("$r10") & 0xff
-                    if current_byte != upstream_target:
-                        upstream_pc = rv("$pc")
-                        upstream_rva = (
-                            f"{upstream_pc - base:#x}"
-                            if base is not None
-                            and base <= upstream_pc < base + MODULE_RVA_LIMIT
-                            else "outside-module"
-                        )
-                        upstream_meta = static_instruction()
-                        upstream_mnemonic = upstream_meta["mnemonic"]
-                        upstream_instruction = upstream_meta["instruction"]
-                        upstream_dst_operand = upstream_meta["dst_operand"]
-                        upstream_src_operand = upstream_meta["src_operand"]
-                        upstream_dst_gpr = upstream_meta["dst_gpr"]
-                        upstream_src_gpr = upstream_meta["src_gpr"]
-                        # Forward execution must restore the value consumed by
-                        # the first producer; dynamic values remain unlogged.
-                        gdb.execute("stepi", to_string=True)
-                        upstream_forward_check = (
-                            "yes"
-                            if (rv("$r10") & 0xff) == upstream_target
-                            else "no"
-                        )
-                        upstream_status = (
-                            "found"
-                            if upstream_forward_check == "yes"
-                            else "forward-check-failed"
-                        )
-                        break
-                else:
-                    upstream_steps = remaining
+                target_byte = before_byte
                 break
 
-        log(
-            f"FAM1 PRODUCER REVERSE RESULT: status={status} steps={steps} "
-            f"producer_rva={producer_rva} mnemonic={mnemonic} "
-            f"instruction={instruction_token} dst_operand={destination_operand} "
-            f"src_operand={source_operand} dst_gpr={destination_gpr} "
-            f"src_gpr={source_gpr} forward_check={forward_check} "
-            f"rewind_check={rewind_check} upstream_status={upstream_status} "
-            f"upstream_steps={upstream_steps} upstream_rva={upstream_rva} "
-            f"upstream_mnemonic={upstream_mnemonic} "
-            f"upstream_instruction={upstream_instruction} "
-            f"upstream_dst_operand={upstream_dst_operand} "
-            f"upstream_src_operand={upstream_src_operand} "
-            f"upstream_dst_gpr={upstream_dst_gpr} "
-            f"upstream_src_gpr={upstream_src_gpr} "
-            f"upstream_forward_check={upstream_forward_check}"
-        )
+            if not found:
+                final_status = (
+                    "reverse-budget-exhausted"
+                    if steps >= MAX_FAM1_REVERSE_STEPS
+                    else "no-earlier-r10b-writer"
+                )
+                break
+            if records[-1]["status"] != "found":
+                break
+            if records[-1]["rewind_check"] == "not-attempted":
+                break
+
+        fields = [f"lineage_status={final_status}", f"reverse_steps={steps}"]
+        for idx, record in enumerate(records, 1):
+            prefix = "producer" if idx == 1 else ("upstream" if idx == 2 else "upstream2")
+            for key in ("status", "steps", "rva", "mnemonic", "instruction",
+                        "dst_operand", "src_operand", "dst_gpr", "src_gpr",
+                        "forward_check", "rewind_check"):
+                fields.append(f"{prefix}_{key}={record.get(key, 'na')}")
+        log("FAM1 PRODUCER REVERSE RESULT: " + " ".join(fields))
     except Exception as exc:
-        status = "reverse-error"
-        log(
-            f"FAM1 PRODUCER REVERSE RESULT: status={status} steps={steps} "
-            f"producer_rva={producer_rva} mnemonic={mnemonic} "
-            f"instruction={instruction_token} forward_check=no "
-            f"upstream_status={upstream_status} "
-            f"upstream_rva={upstream_rva} "
-            f"upstream_instruction={upstream_instruction} "
-            f"upstream_forward_check=no error_type={type(exc).__name__}"
-        )
+        final_status = "reverse-error"
+        fields = [f"lineage_status={final_status}", f"reverse_steps={steps}",
+                  f"error_type={type(exc).__name__}"]
+        for idx, record in enumerate(records, 1):
+            prefix = "producer" if idx == 1 else ("upstream" if idx == 2 else "upstream2")
+            fields.extend([
+                f"{prefix}_rva={record.get('rva', 'na')}",
+                f"{prefix}_instruction={record.get('instruction', 'unknown')}",
+                f"{prefix}_forward_check={record.get('forward_check', 'no')}",
+            ])
+        log("FAM1 PRODUCER REVERSE RESULT: " + " ".join(fields))
     finally:
         # Do not detach a stopped inferior or resume a partially reversed trace.
         try:

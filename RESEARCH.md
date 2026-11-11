@@ -4431,3 +4431,30 @@ rewind. The process still terminates after the first confirmed fam1 store;
 the probe does not log runtime register values, pointers or memory contents.
 A successful two-hop result would establish only one observed byte's local
 dataflow, not the generation formula for all fam1 indices.
+#### Trace #97: confirmed two-step fam1 byte transform (2026-11-11; run 42967942135)
+
+The new static-operand probe confirmed two successive instructions for the
+single fam1 byte store captured at index 0:
+
+- `xor r10b, 0x6d` at RVA `0xE23C4` (previous producer);
+- `add r10b, 0x3b` at RVA `0xE2432` (immediate producer before the store).
+
+Both transitions were reverse-stepped and forward-checked successfully.
+For this observed path, the byte passed to the fam1 store is therefore
+`((x ^ 0x6d) + 0x3b) mod 256`, where `x` is the byte in r10b before the XOR.
+This is a local instruction-chain identity for one captured store, not a
+claim that all 256 fam1 entries use the same construction. The trace still
+did not reach the first mixer read or produce a final four-window planter.
+
+Trace #97 completed its tooling tests, perun-adi-core tests, native control,
+GDB trace, manifest generation, and report commit. The matching CI run also
+passed both `cargo clippy` and `cargo test`.
+
+#### Fam1 third-hop producer probe (2026-11-11; instrumentation)
+
+The next probe follows the byte one instruction producer further upstream:
+after each producer is forward-checked, it rewinds to the pre-instruction
+value and searches for the previous r10b-changing instruction. The chain is
+capped at three producer instructions and one shared 8,192 reverse-step
+budget. Only static instruction/operand metadata and per-hop checks are
+reported; runtime register values and addresses remain excluded.

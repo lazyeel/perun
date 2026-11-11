@@ -1134,6 +1134,19 @@ jobs:
                           f"src={fields.get('upstream_src_operand', 'unknown')}; "
                           f"forward check={fields.get('upstream_forward_check', 'no')}."
                       )
+                      lines.append(
+                          "- Producer before that: "
+                          f"status={fields.get('upstream2_status', 'unknown')}; "
+                          f"RVA={fields.get('upstream2_rva', 'n/a')}; "
+                          f"instruction=\`{fields.get('upstream2_instruction', 'unknown')}\`; "
+                          f"dst={fields.get('upstream2_dst_operand', 'unknown')}; "
+                          f"src={fields.get('upstream2_src_operand', 'unknown')}; "
+                          f"forward check={fields.get('upstream2_forward_check', 'no')}."
+                      )
+                      lines.append(
+                          f"- Reverse lineage status: {fields.get('lineage_status', 'unknown')}; "
+                          f"reverse steps={fields.get('reverse_steps', 'n/a')}."
+                      )
               else:
                   lines.append("- No candidate breakpoint events were captured.")
               lines.append("")
