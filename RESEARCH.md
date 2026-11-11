@@ -4488,3 +4488,45 @@ the formatter looked up unprefixed keys while the tracer emits `producer_*`.
 The RVA was present, and the upstream records were rendered correctly. The
 report parser is corrected in the next revision, together with an extension
 to four producer hops to continue tracing the pre-`add r10d` value.
+
+#### Trace #101: fourth fam1 producer confirmed (2026-11-11; run 42984986715)
+
+Trace #101 ran against source revision
+"bae2d08d087921a814a3c10c89b375d4191ce57d". The corrected report formatter
+and four-hop reverse probe completed successfully; the matching CI #39 run
+also passed. The report and process-separation manifest are
+"research-runs/planter-trace-42984986715.md" and
+"research-runs/capture-manifest-42984986715.json".
+
+For the single observed fam1[0] byte-write event, reverse execution
+confirmed four successive low-byte producers, each with forward_check=yes:
+
+1. add r10b, 0x63 at RVA 0xE1C87;
+2. add r10d, 0x6d at RVA 0xE2366;
+3. xor r10b, 0x6d at RVA 0xE23C4;
+4. add r10b, 0x3b at RVA 0xE2432.
+
+For the low-byte value only, the first two additions combine modulo 256:
+((((x + 0xD0) mod 256) XOR 0x6D) + 0x3B) mod 256. The r10d
+instruction remains a 32-bit operation; treating its effect as byte-width
+would be incorrect even though its low-byte arithmetic is equivalent modulo
+256. This is a local chain for one captured store, not a formula for all
+256 fam1 entries.
+
+The tracer ended with lineage_status=hop-limit after 431 reverse steps.
+That status means the configured four-producer ceiling was reached; it does
+not mean the 8,192-instruction reverse budget was exhausted. All four
+producers were statically decoded and forward-checked. The next diagnostic
+extends the ceiling by one producer to inspect the value entering
+add r10b, 0x63.
+
+The wider trace still did not reach the first mixer read, capture a
+slot-anchored object, or validate the final four-permutation planter. The
+only mapped 0x2700-byte candidate was the early base-load snapshot; its
+fam1 region had 1/256 unique bytes, and the fam1 writer probe still saw one
+write at index 0. The native control exited 0 with 347-byte SPIM and
+276-byte CPIM, but fixed-input baseline and frozen replay pairs were both
+unequal; the frozen replay recorded one gettimeofday interception and zero
+RDTSC bypasses. The GDB observations belong to a separate live provisioning
+process, not the native-control SPIM/CPIM session. None of this establishes
+autonomous SPIM-to-CPIM generation or fresh-session acceptance.

@@ -1153,6 +1153,15 @@ jobs:
                           f"forward check={fields.get('upstream3_forward_check', 'no')}."
                       )
                       lines.append(
+                          "- Producer before that (fourth upstream): "
+                          f"status={fields.get('upstream4_status', 'unknown')}; "
+                          f"RVA={fields.get('upstream4_rva', 'n/a')}; "
+                          f"instruction={fields.get('upstream4_instruction', 'unknown')}; "
+                          f"dst={fields.get('upstream4_dst_operand', 'unknown')}; "
+                          f"src={fields.get('upstream4_src_operand', 'unknown')}; "
+                          f"forward check={fields.get('upstream4_forward_check', 'no')}."
+                      )
+                      lines.append(
                           f"- Reverse lineage status: {fields.get('lineage_status', 'unknown')}; "
                           f"reverse steps={fields.get('reverse_steps', 'n/a')}."
                       )

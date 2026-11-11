@@ -1815,9 +1815,10 @@ def start_fam1_recording():
 
 
 def fam1_reverse_source_probe():
-    """Trace up to three successive producers of the byte consumed by fam1."""
+    """Trace up to five successive producers of the byte consumed by fam1."""
     steps = 0
     records = []
+    record_prefixes = ("producer", "upstream", "upstream2", "upstream3", "upstream4")
     final_status = "hop-limit"
 
     def static_instruction():
@@ -1856,7 +1857,7 @@ def fam1_reverse_source_probe():
             final_status = "record-not-active"
             return
         # Disable every ordinary breakpoint before reverse execution. This
-        # diagnostic run is terminal and intentionally limited to three hops.
+        # diagnostic run is terminal and intentionally limited to five hops.
         for breakpoint in gdb.breakpoints() or []:
             try:
                 breakpoint.enabled = False
@@ -1865,7 +1866,7 @@ def fam1_reverse_source_probe():
 
         base = STATE.get("base")
         target_byte = rv("$r10") & 0xff
-        for hop in range(1, 5):
+        for hop in range(1, 6):
             hop_start_steps = steps
             found = False
             while steps < MAX_FAM1_REVERSE_STEPS:
@@ -1900,7 +1901,7 @@ def fam1_reverse_source_probe():
                     final_status = "forward-check-failed"
                     break
 
-                if hop == 4:
+                if hop == 5:
                     final_status = "hop-limit"
                     break
                 if steps >= MAX_FAM1_REVERSE_STEPS:
@@ -1936,7 +1937,7 @@ def fam1_reverse_source_probe():
 
         fields = [f"lineage_status={final_status}", f"reverse_steps={steps}"]
         for idx, record in enumerate(records, 1):
-            prefix = ("producer" if idx == 1 else "upstream" if idx == 2 else "upstream2" if idx == 3 else "upstream3")
+            prefix = record_prefixes[idx - 1]
             for key in ("status", "steps", "rva", "mnemonic", "instruction",
                         "dst_operand", "src_operand", "dst_gpr", "src_gpr",
                         "forward_check", "rewind_check"):
@@ -1947,7 +1948,7 @@ def fam1_reverse_source_probe():
         fields = [f"lineage_status={final_status}", f"reverse_steps={steps}",
                   f"error_type={type(exc).__name__}"]
         for idx, record in enumerate(records, 1):
-            prefix = "producer" if idx == 1 else ("upstream" if idx == 2 else "upstream2")
+            prefix = record_prefixes[idx - 1]
             fields.extend([
                 f"{prefix}_rva={record.get('rva', 'na')}",
                 f"{prefix}_instruction={record.get('instruction', 'unknown')}",
