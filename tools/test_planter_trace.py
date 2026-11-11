@@ -584,7 +584,7 @@ class Fam1ReverseProducerTests(unittest.TestCase):
         self.assertIn('"upstream3"', probe)
         self.assertIn('"upstream4"', probe)
         self.assertIn("record_prefixes[idx - 1]", probe)
-        self.assertIn('prefix = ("producer" if idx == 1', probe)
+        self.assertNotIn('prefix = ("producer" if idx == 1', probe)
         self.assertIn("upstream2", probe)
         self.assertIn("lineage_status={final_status}", probe)
         self.assertIn('if records[-1]["rewind_check"] != "yes":', probe)

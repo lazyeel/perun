@@ -4530,3 +4530,17 @@ unequal; the frozen replay recorded one gettimeofday interception and zero
 RDTSC bypasses. The GDB observations belong to a separate live provisioning
 process, not the native-control SPIM/CPIM session. None of this establishes
 autonomous SPIM-to-CPIM generation or fresh-session acceptance.
+
+
+#### Trace #102: stale regression assertion stopped preflight (2026-11-11; run 42987389934)
+
+Trace #102 did not reach native control, Android runtime setup, or GDB.
+Python tooling validation passed syntax compilation and the capture-manifest
+tests, then failed one Fam1 reverse-probe unit test. The test still asserted
+the former inline conditional prefix expression after the implementation
+was changed to the indexed five-entry `record_prefixes` tuple. The other
+51 tests in `tools.test_planter_trace` passed. No CoreADI execution,
+reverse-execution result, or provisioning observation is attributed to #102.
+The assertion is corrected to require the shared prefix tuple and reject the
+obsolete expression. The generated report and manifest explicitly record
+that no trace directory was created and GDB was unavailable.
