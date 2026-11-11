@@ -170,6 +170,88 @@ def build_manifest(
         for name in TRACE_ARTIFACTS:
             trace_files.append(file_fingerprint(name, trace_run / name))
 
+    # Separate terminal replay: same saved SPIM/state seed, distinct inferior.
+    index1_run = latest_trace_run(work / "traces-index1")
+    index1_probe: dict[str, Any] = {
+        "process_role": "separate offline-SPIM GDB replay; terminal reverse probe",
+        "trace_directory_present": index1_run is not None,
+        "target_hit": read_text(work / "index1-target-hit.txt") or "2",
+        "exit_code": read_text(work / "index1-exit-code.txt"),
+        "artifacts": [],
+    }
+    if index1_run is not None:
+        try:
+            raw = json.loads((index1_run / "run.json").read_text(encoding="utf-8"))
+            index1_probe["metadata"] = {
+                "trace_run_id": raw.get("run_id"),
+                "tracer_version": raw.get("script_version"),
+            }
+        except (OSError, ValueError, TypeError):
+            index1_probe["metadata"] = {"run_manifest_present": False}
+        candidate_path = index1_run / "fam1_candidate_events.csv"
+        index1_probe["artifacts"].append(
+            file_fingerprint("fam1_candidate_events", candidate_path)
+        )
+        candidate_events: list[dict[str, str]] = []
+        try:
+            import csv
+            with candidate_path.open(newline="", encoding="utf-8") as stream:
+                candidate_events = list(csv.DictReader(stream))
+        except (OSError, UnicodeError, ValueError):
+            candidate_events = []
+        target_rows = [
+            row for row in candidate_events
+            if row.get("active_opcode", "").lower() == "0x716bd86c"
+            and row.get("resolution") == "source-anchored-fam1-window"
+            and row.get("fam1_index", "na") != "na"
+        ]
+        observed_indices: list[int] = []
+        for row in target_rows:
+            try:
+                observed_indices.append(int(row["fam1_index"], 16))
+            except (KeyError, ValueError):
+                continue
+        index1_probe["candidate_writer"] = {
+            "matching_store_events": len(target_rows),
+            "observed_indices": observed_indices[:8],
+            "distinct_indices": len(set(observed_indices)),
+        }
+
+        # Only static instruction metadata and aggregate execution counts escape.
+        reverse_fields: dict[str, str] = {}
+        try:
+            for line in (index1_run / "trace.log").read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines():
+                if "FAM1 PRODUCER REVERSE RESULT:" in line:
+                    reverse_fields = dict(
+                        token.split("=", 1) for token in line.split() if "=" in token
+                    )
+        except OSError:
+            pass
+        producer_rows = []
+        for prefix in ("producer", "upstream", "upstream2", "upstream3", "upstream4"):
+            if reverse_fields.get(f"{prefix}_status") == "found":
+                producer_rows.append({
+                    "label": prefix,
+                    "rva": reverse_fields.get(f"{prefix}_rva", "n/a"),
+                    "mnemonic": reverse_fields.get(f"{prefix}_mnemonic", "unknown"),
+                    "forward_check": reverse_fields.get(f"{prefix}_forward_check", "no"),
+                })
+        sil_producer = None
+        if reverse_fields.get("sil_producer_status") == "found":
+            sil_producer = {
+                "rva": reverse_fields.get("sil_producer_rva", "n/a"),
+                "mnemonic": reverse_fields.get("sil_producer_mnemonic", "unknown"),
+                "forward_check": reverse_fields.get("sil_producer_forward_check", "no"),
+            }
+        index1_probe["reverse_lineage"] = {
+            "status": reverse_fields.get("lineage_status", "not-observed"),
+            "reverse_steps": reverse_fields.get("reverse_steps", "n/a"),
+            "producers": producer_rows,
+            "sil_producer": sil_producer,
+        }
+
     gdb_trace = {
         "process_role": "separate GDB live provisioning process",
         "metadata": trace_metadata,
@@ -197,12 +279,14 @@ def build_manifest(
             "source_revision": source_sha,
             "native_control_exit_code": native["exit_code"],
             "gdb_trace_exit_code": read_text(work / "run-exit-code.txt"),
+            "fam1_index1_trace_exit_code": read_text(work / "index1-exit-code.txt"),
         },
         "runtime_fingerprints": runtime,
         "capture_groups": {
             "native_control": native,
             "fixed_input_replays": replay,
             "gdb_trace": gdb_trace,
+            "fam1_index1_probe": index1_probe,
         },
         "session_separation": [
             "A matching byte hash identifies identical bytes, not a common provisioning session.",

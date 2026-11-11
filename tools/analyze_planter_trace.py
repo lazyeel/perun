@@ -123,13 +123,13 @@ def validate_partition(tables: dict[str, int] | None = None,
 
 
 def load_planter_snapshot(root: Path) -> tuple[bytes | None, str | None]:
-    """Prefer a four-window-validated dump; otherwise use the active-slot capture."""
-    final_path = root / "planter.final.bin"
-    if final_path.is_file():
-        return final_path.read_bytes(), "final"
+    """Prefer object identity (active-slot anchor) over a shape-only signature."""
     anchored_path = root / "planter.slot_anchored.bin"
     if anchored_path.is_file():
         return anchored_path.read_bytes(), "slot-anchored"
+    final_path = root / "planter.final.bin"
+    if final_path.is_file():
+        return final_path.read_bytes(), "final"
     return None, None
 
 

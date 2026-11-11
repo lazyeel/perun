@@ -2051,11 +2051,22 @@ class Fam1CandidateBP(gdb.Breakpoint):
     def __init__(self, address):
         self.rva = 0xE2441
         self.hits = 0
+        try:
+            self.record_target_hit = int(os.environ.get("PERUN_RECORD_FAM1_HIT", "1"))
+        except ValueError as exc:
+            raise ValueError("PERUN_RECORD_FAM1_HIT must be an integer") from exc
+        if not 1 <= self.record_target_hit <= self.MAX_HITS:
+            raise ValueError(
+                f"PERUN_RECORD_FAM1_HIT must be in 1..{self.MAX_HITS}"
+            )
         super().__init__(f"*{address:#x}", gdb.BP_BREAKPOINT, internal=False)
         self.silent = True
         self.commands = """silent
 python
-fam1_reverse_source_probe()
+candidate = STATE.get("fam1_candidate_bp")
+if (STATE.get("fam1_record_active") and candidate is not None
+        and candidate.hits == candidate.record_target_hit):
+    fam1_reverse_source_probe()
 end
 """
         self.path = os.path.join(OUT, "fam1_candidate_events.csv")
@@ -2180,10 +2191,13 @@ end
         except Exception as exc:
             # Keep potentially sensitive GDB exception details out of the report.
             log(f"FAM1 CANDIDATE CALLBACK ERROR: {type(exc).__name__}")
-        if (self.hits == 1 and STATE.get("fam1_record_active")
+        if (self.hits == self.record_target_hit and STATE.get("fam1_record_active")
                 and STATE.get("active_op") == TRANSFORM_OPCODE
                 and resolution == "source-anchored-fam1-window"):
-            log("FAM1 REVERSE PROBE DISPATCH: first confirmed fam1 write")
+            log(
+                "FAM1 REVERSE PROBE DISPATCH: confirmed fam1 write "
+                f"hit={self.record_target_hit}"
+            )
             return True
         if self.hits >= self.MAX_HITS:
             self.enabled = False

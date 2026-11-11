@@ -69,6 +69,29 @@ class CaptureManifestTests(unittest.TestCase):
             (trace / "source.at_dd511.bin").write_bytes(b"source")
             (work / "run-exit-code.txt").write_text("0")
 
+            second = work / "traces-index1" / "run-2-3"
+            second.mkdir(parents=True)
+            (second / "run.json").write_text(json.dumps({
+                "run_id": "run-2-3", "script_version": "v34",
+            }))
+            (second / "fam1_candidate_events.csv").write_text(
+                "active_opcode,resolution,fam1_index\n"
+                "0x716bd86c,source-anchored-fam1-window,0x0\n"
+                "0x716bd86c,source-anchored-fam1-window,0x1\n"
+                "0x716bd86c,source-anchored-fam1-window,0x2\n"
+            )
+            (second / "trace.log").write_text(
+                "[12:00:00] FAM1 PRODUCER REVERSE RESULT: lineage_status=sil-producer-found "
+                "reverse_steps=466 producer_status=found producer_rva=0xe2432 "
+                "producer_mnemonic=add producer_forward_check=yes "
+                "upstream_status=found upstream_rva=0xe23c4 "
+                "upstream_mnemonic=xor upstream_forward_check=yes "
+                "sil_producer_status=found sil_producer_rva=0xe1bd7 "
+                "sil_producer_mnemonic=and sil_producer_forward_check=yes\n"
+            )
+            (work / "index1-target-hit.txt").write_text("2")
+            (work / "index1-exit-code.txt").write_text("0")
+
             manifest = build_manifest(work, "abc123", "42")
             groups = manifest["capture_groups"]
             self.assertTrue(groups["native_control"]["artifacts"][0]["present"])
@@ -77,6 +100,11 @@ class CaptureManifestTests(unittest.TestCase):
             self.assertEqual(groups["gdb_trace"]["metadata"]["tracer_version"], "v33")
             self.assertIn("separate GDB live provisioning process", groups["gdb_trace"]["process_role"])
             self.assertIn("must not be paired", groups["gdb_trace"]["pairing_rule"])
+            index_probe = groups["fam1_index1_probe"]
+            self.assertTrue(index_probe["trace_directory_present"])
+            self.assertEqual(index_probe["target_hit"], "2")
+            self.assertEqual(index_probe["candidate_writer"]["observed_indices"], [0, 1, 2])
+            self.assertEqual(index_probe["reverse_lineage"]["producers"][0]["rva"], "0xe2432")
             serialized = json.dumps(manifest)
             self.assertNotIn("state secret", serialized)
             self.assertNotIn(str(work), serialized)

@@ -177,7 +177,9 @@ jobs:
           export ADI_RESOLVE="gsa.apple.com:443:$GSA_IP,buy.itunes.apple.com:443:$BUY_IP"
           export ANDROID_ROOT=/system ANDROID_DATA=/data
           export PERUN_TRACE_DIR="$WORK/traces"
-          export PERUN_RECORD_FAM1=1
+          # Primary capture must remain non-terminal through mixer reads and return.
+          export PERUN_RECORD_FAM1=0
+          export PERUN_RECORD_FAM1_HIT=1
           export ADI_FORCE_START=1
           export ADI_TRACE_START_ONLY=1
           export ADI_SPIM_OUT="$WORK/fixed-input.spim"
@@ -294,6 +296,36 @@ jobs:
           echo "TRACE_RUN_RC=$RC" >> "$GITHUB_ENV"
           echo "NATIVE_CONTROL_RC=$NATIVE_RC" >> "$GITHUB_ENV"
           echo "Harness/GDB exit code: $RC"
+
+          # Separate terminal replay: same saved SPIM and restored seed, but
+          # reverse execution starts only at the second confirmed fam1 store.
+          INDEX1_RC=125
+          if [ -s "$WORK/fixed-input.spim" ] \
+              && [ -d "$PROBE_DIR/seed/adi-data" ] \
+              && [ -f "$PROBE_DIR/seed/adi_identifier" ]; then
+            rm -rf "$WORK/adi-data" "$WORK/adi_identifier"
+            cp -a "$PROBE_DIR/seed/adi-data" "$WORK/adi-data"
+            cp -p "$PROBE_DIR/seed/adi_identifier" "$WORK/adi_identifier"
+            mkdir -p "$WORK/traces-index1"
+            export ADI_OFFLINE_SPIM="$WORK/fixed-input.spim"
+            export ADI_CPIM_OUT="$WORK/index1-replay.cpim"
+            export PERUN_TRACE_DIR="$WORK/traces-index1"
+            export PERUN_RECORD_FAM1=1
+            export PERUN_RECORD_FAM1_HIT=2
+            export GDB_SCRIPT="$GITHUB_WORKSPACE/tools/planter_trace_gdb.py"
+            export ADI_GDB=1
+            echo "Running terminal fam1 reverse trace at target hit #2 (expected index 1)."
+            set +e
+            timeout --signal=TERM --kill-after=5s 4m bash "$GITHUB_WORKSPACE/crates/perun-cli/examples/adi-android/run-native.sh" \
+              > "$WORK/index1-console.log" 2>&1
+            INDEX1_RC=$?
+            set -e
+            echo "Second-store reverse trace exit code: $INDEX1_RC"
+          else
+            echo "Second-store reverse trace skipped: no saved SPIM/identity/state seed."
+          fi
+          echo "$INDEX1_RC" > "$WORK/index1-exit-code.txt"
+          echo "INDEX1_TRACE_RC=$INDEX1_RC" >> "$GITHUB_ENV"
           exit 0
 
       - name: Build a privacy-preserving capture manifest
@@ -795,15 +827,21 @@ jobs:
                   lines.append("No allow-listed GDB console diagnostic matched.")
               lines.append("")
               planter_path = run / "planter.final.bin"
+              slot_anchored_path = run / "planter.slot_anchored.bin"
               candidate_files = sorted(
                   list(run.glob("mixer_*_candidate_*.bin")) + list(run.glob("planter.at_*.bin")),
                   key=lambda p: p.stat().st_mtime)
               window_files = sorted(run.glob("window_*.final_candidate.bin"))
-              snapshot_path = (planter_path if planter_path.exists() else
-                               (candidate_files[-1] if candidate_files else None))
+              # Object identity outranks a historical four-window shape signature.
+              snapshot_path = (slot_anchored_path if slot_anchored_path.exists() else
+                               (planter_path if planter_path.exists() else
+                                (candidate_files[-1] if candidate_files else None)))
               planter = snapshot_path.read_bytes() if snapshot_path else b""
-              snapshot_kind = ("final" if snapshot_path == planter_path else
-                               (f"candidate:{snapshot_path.name}" if snapshot_path else "none"))
+              snapshot_kind = (
+                  "slot-anchored" if snapshot_path == slot_anchored_path else
+                  ("final" if snapshot_path == planter_path else
+                   (f"candidate:{snapshot_path.name}" if snapshot_path else "none"))
+              )
               tables = {"fam1":0x0D60,"fam2":0x1A00,"fam3":0x2460,"fam4":0x1390}
               scan_selected = next((x for x in trace_lines if "PLANTER SCAN SELECTED:" in x), None)
               scan_miss = next((x for x in trace_lines if "PLANTER SCAN: no four-permutation candidate" in x), None)
@@ -1312,8 +1350,10 @@ jobs:
               lines += ["", "## Status", ""]
               if planter_path.exists() and len(planter) >= 0x2700:
                   lines.append("A final 0x2700-byte planter snapshot passed the four-permutation signature check.")
+              elif slot_anchored_path.exists() and len(planter) >= 0x2700:
+                  lines.append("A 0x2700-byte object snapshot was captured from the active slot after source+0x20 and writer-base agreement; the four-permutation signature was not required.")
               elif candidate_files:
-                  lines.append(f"Captured {len(candidate_files)} mapped 0x2700-byte candidate snapshots, but no final four-permutation planter signature was validated.")
+                  lines.append(f"Captured {len(candidate_files)} mapped 0x2700-byte candidate snapshots, but no slot-anchored or final-signature object was validated.")
               elif run_rc == "0":
                   lines.append("The harness exited successfully, but no mapped planter candidate or final snapshot was recorded.")
               else:
@@ -1364,13 +1404,40 @@ jobs:
               f"capture-manifest-{os.environ.get('GITHUB_RUN_ID', 'unknown')}.json"
           )
           if manifest_path.is_file():
+              lines += ["", "## Second fam1 store reverse probe", ""]
+              try:
+                  manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+                  second = manifest_data.get("capture_groups", {}).get("fam1_index1_probe", {})
+              except (OSError, ValueError, TypeError):
+                  second = {}
+              if second.get("trace_directory_present"):
+                  observed = second.get("candidate_writer", {})
+                  indexes = observed.get("observed_indices", [])
+                  lines.append(f"- Reverse target hit: {second.get('target_hit', 'unknown')}")
+                  lines.append(f"- Target-transform fam1 store events: {observed.get('matching_store_events', 0)}")
+                  lines.append("- Observed fam1 indices in order: " + (", ".join(str(x) for x in indexes) if indexes else "not resolved"))
+                  lineage = second.get("reverse_lineage", {})
+                  lines.append(f"- Reverse lineage status: {lineage.get('status', 'not observed')}; reverse steps: {lineage.get('reverse_steps', 'n/a')}")
+                  for producer in lineage.get("producers", []):
+                      lines.append(
+                          f"- {producer.get('label')}: RVA {producer.get('rva', 'n/a')}, "
+                          f"{producer.get('mnemonic', 'unknown')}, forward check {producer.get('forward_check', 'no')}"
+                      )
+                  sil = lineage.get("sil_producer")
+                  if sil:
+                      lines.append(
+                          f"- SIL producer: RVA {sil.get('rva', 'n/a')}, "
+                          f"{sil.get('mnemonic', 'unknown')}, forward check {sil.get('forward_check', 'no')}"
+                      )
+              else:
+                  lines.append("Second-store reverse trace was not captured.")
               lines += [
                   "",
                   "## Capture provenance manifest",
                   "",
                   f"- Fingerprint manifest: `{manifest_path.name}`",
                   "- Contains SHA-256 fingerprints and sizes only; raw captures, absolute paths, identity values and state filenames are excluded.",
-                  "- Native-control SPIM/CPIM, offline replay outputs, and the separate GDB live run are recorded as distinct process groups.",
+                  "- Native-control SPIM/CPIM, offline replay outputs, full non-record GDB trace, and separate terminal second-store trace are distinct process groups.",
               ]
           report.write_text("\n".join(lines), encoding="utf-8")
           print(report.read_text())

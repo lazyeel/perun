@@ -61,7 +61,7 @@ class PlanterTraceTests(unittest.TestCase):
         hits = ANALYZER.scan_bijections(data)
         self.assertTrue(any(offset == 6 for offset, _ in hits))
 
-    def test_slot_anchored_snapshot_fallback_and_final_precedence(self):
+    def test_slot_anchored_snapshot_takes_precedence_over_shape_signature(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.assertEqual(ANALYZER.load_planter_snapshot(root), (None, None))
@@ -73,7 +73,7 @@ class PlanterTraceTests(unittest.TestCase):
             (root / "planter.final.bin").write_bytes(b"validated")
             self.assertEqual(
                 ANALYZER.load_planter_snapshot(root),
-                (b"validated", "final"),
+                (b"anchored", "slot-anchored"),
             )
 
     def test_manifest_round_trip(self):
@@ -240,10 +240,6 @@ class ZoneRegionComparisonTests(unittest.TestCase):
             self.assertEqual(row["best_offset"], 0)
             self.assertNotIn("data", row)
 
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 
@@ -424,7 +420,9 @@ class Fam1CandidateProbeTests(unittest.TestCase):
         self.assertIn("return False", body)
         self.assertIn("return True", body)
         self.assertIn('STATE.get("fam1_record_active")', body)
-        self.assertIn("self.hits == 1", body)
+        self.assertIn('os.environ.get("PERUN_RECORD_FAM1_HIT", "1")', body)
+        self.assertIn("self.hits == self.record_target_hit", body)
+        self.assertIn("candidate.hits == candidate.record_target_hit", body)
         self.assertIn('resolution == "source-anchored-fam1-window"', body)
         self.assertNotIn("dump binary memory", body)
         self.assertNotIn('gdb.execute("set $', body)
@@ -638,3 +636,7 @@ class Fam1ReportAggregationTests(unittest.TestCase):
         workflow = (Path(__file__).parents[1] / ".github" / "workflows" /
                     "planter-genesis-trace.yml").read_text(encoding="utf-8")
         self.assertIn("- .github/workflows/planter-genesis-trace.yml", workflow)
+
+
+if __name__ == "__main__":
+    unittest.main()
