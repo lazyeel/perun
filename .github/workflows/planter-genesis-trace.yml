@@ -18,6 +18,8 @@ on:
       - tools/slot_origin_gdb.py
       - tools/test_capture_manifest.py
       - tools/capture_manifest.py
+      - tools/cpim_diff_probe.py
+      - tools/test_cpim_diff_probe.py
       - .github/workflows/planter-genesis-trace.yml
 
 permissions:
@@ -45,6 +47,8 @@ jobs:
           python3 -m py_compile tools/planter_trace_gdb.py tools/planter_access.py tools/analyze_planter_trace.py
           python3 -m py_compile tools/capture_manifest.py
           python3 -m unittest tools.test_capture_manifest -v
+          python3 -m py_compile tools/cpim_diff_probe.py
+          python3 -m unittest tools.test_cpim_diff_probe -v
           python3 -m py_compile tools/genesis_probe_gdb.py tools/input_probe_gdb.py tools/time_freeze_gdb.py tools/rdtsc_freeze_gdb.py tools/slot_origin_gdb.py
           python3 -m unittest tools/test_planter_trace.py -v
 
@@ -229,6 +233,13 @@ jobs:
             run_probe_pass baseline_b baseline
             run_probe_pass frozen_a frozen
             run_probe_pass frozen_b frozen
+
+            python3 "$GITHUB_WORKSPACE/tools/cpim_diff_probe.py" \
+              --baseline-a "$PROBE_DIR/baseline_a.cpim" \
+              --baseline-b "$PROBE_DIR/baseline_b.cpim" \
+              --frozen-a "$PROBE_DIR/frozen_a.cpim" \
+              --frozen-b "$PROBE_DIR/frozen_b.cpim" \
+              --output "$PROBE_DIR/cpim-diff.json"
 
             probe_hash() { [ -s "$1" ] && sha256sum "$1" | awk '{print $1}' || printf 'missing'; }
             probe_len() { [ -s "$1" ] && stat -c '%s' "$1" || printf '0'; }
@@ -1317,9 +1328,9 @@ jobs:
               if probe.get("status") == "completed":
                   lines += [
                       "", "## Fixed-input CPIM determinism probe", "",
-                      "Four offline runs reused the same saved SPIM, device identity, and restored adi-data seed. "
-                      "Two baseline runs used native execution; two frozen runs used GDB to replace the gettimeofday "
-                      "return value and the three confirmed RDTSC sites. Raw inputs, outputs, and digests remain private.",
+                      "Four offline runs reused the saved native-control SPIM and restored identity/adi-data seed. "
+                      "Two baseline replays used native execution; two frozen-mode replays ran through GDB. "
+                      "The counters below distinguish configured probes from substitutions that actually executed. Raw bytes remain private.",
                       "",
                       f"- SPIM input length: {probe.get('spim_len', 'n/a')} bytes",
                       f"- Baseline CPIM lengths: {probe.get('baseline_a_len', '0')} / {probe.get('baseline_b_len', '0')} bytes; equal: {probe.get('baseline_equal', 'no')}",
@@ -1327,10 +1338,23 @@ jobs:
                       f"- Frozen gettimeofday interceptions: {probe.get('gettimeofday_freeze_hits', '0')}",
                       f"- Frozen RDTSC bypasses: {probe.get('rdtsc_freeze_hits', '0')}",
                       f"- Process exit codes (baseline A/B, frozen A/B): {probe.get('baseline_a_rc')}/{probe.get('baseline_b_rc')}/{probe.get('frozen_a_rc')}/{probe.get('frozen_b_rc')}",
-                      "",
-                      "Interpretation is conditional on all four runs producing CPIM and nonzero freeze-hit counts. "
-                      "Equal frozen outputs after differing baseline outputs support time/counter dependence; "
-                      "otherwise other entropy sources or state/input issues remain possible."
+                      ""
+                  ]
+                  diff_path = Path(os.environ.get("RUN_WORK", "")) / "fixed-input-probe" / "cpim-diff.json"
+                  if diff_path.is_file():
+                      diff = json.loads(diff_path.read_text())
+                      lines += ["### Segment-level CPIM differences", "",
+                                "Offsets are absolute within CPIM; ranges are half-open. No byte values are published.", ""]
+                      for pair_name, pair in diff.get("pairs", {}).items():
+                          lines.append(f"- **{pair_name}**: status={pair.get('status')}, equal={pair.get('equal')}, changed_bytes={pair.get('changed_bytes', 'n/a')}")
+                          for segment in pair.get("segments", []):
+                              if segment.get("changed_bytes", 0):
+                                  offsets = ", ".join(f"0x{x:03x}" for x in segment.get("first_changed_offsets", []))
+                                  lines.append(f"  - {segment['name']} [{segment['range'][0]:#05x}..{segment['range'][1]:#05x}): {segment['changed_bytes']} changed; first offsets: {offsets or 'n/a'}")
+                      lines.append("")
+                  lines += [
+                      "Interpretation: segment diffs localize varying CPIM fields but do not identify their cause. "
+                      "A configured clock/RDTSC probe with zero hits is not evidence that the source was frozen."
                   ]
               else:
                   lines += ["", "## Fixed-input CPIM determinism probe", "",

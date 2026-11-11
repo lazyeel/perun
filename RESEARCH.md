@@ -4639,3 +4639,35 @@ mixer read. The native control succeeded with 347-byte SPIM and 276-byte
 CPIM; fixed-input CPIM replay pairs remained unequal, and the GDB trace is a
 separate live provisioning process. Autonomous SPIM-to-CPIM generation and
 fresh-session parity remain unproven.
+
+
+#### CPIM difference localization — next trace diagnostic (2026-11-11)
+
+The repeated fixed-input probe establishes that baseline CPIM outputs and
+frozen-mode CPIM outputs are unequal despite reusing the saved 347-byte
+SPIM and restoring the persisted identity/adi-data seed. This does **not**
+identify the varying input: process state, untracked environment inputs,
+wall time, timestamp instructions, random bytes, address layout, and
+instrumentation effects remain competing hypotheses.
+
+The next trace adds \`tools/cpim_diff_probe.py\`. It compares the four
+276-byte outputs using the measured CPIM boundaries: version, session16,
+Body-A length, Body A, digest, Body-B length, Body-B version, and Body B.
+The public report contains only whole-capture SHA-256 fingerprints,
+changed-byte counts, contiguous offset runs, and the first differing
+offsets; it never publishes CPIM byte values or raw captures. The capture
+manifest carries the same aggregate summary.
+
+The frozen-mode run is an intervention, not proof of determinism: it uses
+GDB software breakpoints, and each configured gettimeofday/RDTSC probe
+must have a nonzero hit count before its target source can be considered
+intercepted. In the observed run #105 the gettimeofday probe hit once but
+the three configured RDTSC sites hit zero times. A zero-hit RDTSC set is
+an untested intervention, not a successful freeze.
+
+Interpretation follows the first differing CPIM segment. A change in
+session16 or Body B points first to their independent producers; a Body-A
+change with fixed session fields directs the next slice toward the
+planter/mixer input; digest-only change directs attention to digest-word
+selection and its CPIM-anchored resolver. Segment localization is
+diagnostic, not proof of a nonce or entropy source.

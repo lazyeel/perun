@@ -80,6 +80,14 @@ def tree_fingerprint(label: str, root: Path) -> dict[str, Any]:
     }
 
 
+def read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def read_text(path: Path) -> str | None:
     try:
         return path.read_text(encoding="utf-8").strip()
@@ -138,6 +146,7 @@ def build_manifest(
         ],
         "outputs": replay_artifacts,
         "summary_present": (probe / "summary.env").is_file(),
+        "cpim_segment_diff": read_json(probe / "cpim-diff.json"),
         "pairing_rule": (
             "Each replay is a separate process using the saved native-control "
             "SPIM. The workflow restores the captured identity/state seed "

@@ -55,8 +55,9 @@ class CaptureManifestTests(unittest.TestCase):
             (seed / "adi_identifier").write_bytes(b"I" * 16)
             probe = work / "fixed-input-probe"
             for name in ("baseline_a", "baseline_b", "frozen_a", "frozen_b"):
-                (probe / f"{name}.cpim").write_bytes(name.encode())
+                (probe / f"{name}.cpim").write_bytes(bytes(276))
                 (probe / f"{name}.rc").write_text("0")
+            (probe / "cpim-diff.json").write_text(json.dumps({"schema_version": 1, "pairs": {"baseline_repeat": {"equal": True}}}))
 
             trace = work / "traces" / "run-1-2"
             trace.mkdir(parents=True)
@@ -72,6 +73,7 @@ class CaptureManifestTests(unittest.TestCase):
             groups = manifest["capture_groups"]
             self.assertTrue(groups["native_control"]["artifacts"][0]["present"])
             self.assertEqual(groups["fixed_input_replays"]["spim_source"], "native_control.spim")
+            self.assertTrue(groups["fixed_input_replays"]["cpim_segment_diff"]["pairs"]["baseline_repeat"]["equal"])
             self.assertEqual(groups["gdb_trace"]["metadata"]["tracer_version"], "v33")
             self.assertIn("separate GDB live provisioning process", groups["gdb_trace"]["process_role"])
             self.assertIn("must not be paired", groups["gdb_trace"]["pairing_rule"])
