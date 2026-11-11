@@ -4585,3 +4585,15 @@ ProvisioningStart with rc=0 and cpim_len=276 from a 347-byte SPIM. Baseline
 and frozen fixed-input CPIM pairs remained unequal; the GDB live trace is a
 separate provisioning process. No autonomous SPIM-to-CPIM or fresh-session
 parity is established.
+
+
+#### Trace #104: SIL report-field test used a non-literal generated key (2026-11-11; run 42988990813)
+
+Trace #104 did not enter native control or GDB. Tooling validation failed
+one new assertion in the reverse-probe test: it searched for the literal
+string sil_producer_instruction, while the implementation emits that key
+from the prefix sil_producer_ and a static tuple of field names. The other
+51 tests in tools.test_planter_trace passed. No RSI/SIL or CoreADI runtime
+observation is attributed to #104. The test is corrected to verify the
+dynamic prefix plus the tuple containing instruction, and to leave the
+implementation's field-generation approach intact.
