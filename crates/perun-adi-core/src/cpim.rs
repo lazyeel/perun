@@ -11,7 +11,7 @@
 //!
 //! ```text
 //! [0x000..0x004)  version          = 5            (BE)
-//! [0x004..0x014)  session block    = 16 bytes     (three BE words + marker 0x15098a76)
+//! [0x004..0x014)  session block    = 16 bytes     (sample-specific layout; not a fixed marker)
 //! [0x014..0x018)  body A length    = 0xa0 (160)   (BE)
 //! [0x018..0x0b8)  body A           = 160 bytes    (the crypto body)
 //! [0x0b8..0x0d8)  body A digest    = 32 bytes     (SHA-256-shaped)

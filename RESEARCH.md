@@ -4641,33 +4641,68 @@ separate live provisioning process. Autonomous SPIM-to-CPIM generation and
 fresh-session parity remain unproven.
 
 
-#### CPIM difference localization — next trace diagnostic (2026-11-11)
+#### CPIM difference localization — trace #106 (2026-11-11; run 43022313324)
 
-The repeated fixed-input probe establishes that baseline CPIM outputs and
-frozen-mode CPIM outputs are unequal despite reusing the saved 347-byte
-SPIM and restoring the persisted identity/adi-data seed. This does **not**
-identify the varying input: process state, untracked environment inputs,
-wall time, timestamp instructions, random bytes, address layout, and
-instrumentation effects remain competing hypotheses.
+The segment-diff tool was added in commit
+`653f9cec73a4dff86ad8157ff737de6a67ed3896`. Trace #106 and its paired CI
+completed successfully; the report and manifest are
+`research-runs/planter-trace-43022313324.md` and
+`research-runs/capture-manifest-43022313324.json`. The generic CI
+`43022313588` also passed.
 
-The next trace adds \`tools/cpim_diff_probe.py\`. It compares the four
-276-byte outputs using the measured CPIM boundaries: version, session16,
-Body-A length, Body A, digest, Body-B length, Body-B version, and Body B.
-The public report contains only whole-capture SHA-256 fingerprints,
-changed-byte counts, contiguous offset runs, and the first differing
-offsets; it never publishes CPIM byte values or raw captures. The capture
-manifest carries the same aggregate summary.
+Four offline processes consumed the same saved 347-byte SPIM and restored
+the same captured identity/state seed. Each returned a 276-byte CPIM.
+Baseline A/B differed in 206 bytes; frozen-mode A/B differed in 207 bytes.
+Across both repeat pairs:
+- all 16 bytes of `session16` changed;
+- 158/160 or 159/160 bytes of Body A changed;
+- all 32 digest bytes changed;
+- all 52 Body-B bytes and all structural length/version fields were unchanged.
 
-The frozen-mode run is an intervention, not proof of determinism: it uses
-GDB software breakpoints, and each configured gettimeofday/RDTSC probe
-must have a nonzero hit count before its target source can be considered
-intercepted. In the observed run #105 the gettimeofday probe hit once but
-the three configured RDTSC sites hit zero times. A zero-hit RDTSC set is
-an untested intervention, not a successful freeze.
+Baseline-vs-frozen comparisons also differed in session16, Body A and the
+digest. The frozen run intercepted `gettimeofday` once but hit none of the
+three configured RDTSC sites. Therefore the run does not establish that
+RDTSC was frozen, and the pairwise differences do not identify the source
+of variation. In particular, session16 being variable is an observation;
+calling it a client nonce is not yet supported.
 
-Interpretation follows the first differing CPIM segment. A change in
-session16 or Body B points first to their independent producers; a Body-A
-change with fixed session fields directs the next slice toward the
-planter/mixer input; digest-only change directs attention to digest-word
-selection and its CPIM-anchored resolver. Segment localization is
-diagnostic, not proof of a nonce or entropy source.
+**State-seed limitation.** The manifest records an empty `adi-data`
+directory (`file_count=0`, zero bytes). This seed was captured after the
+workflow's initial live control, but that control sets
+`ADI_TRACE_START_ONLY=1`. In `adi_test.c`, this branch returns
+immediately after `ProvisioningStart`; it does not call the network
+`finishProvisioning` endpoint or `ADI_ProvisioningEnd`. Thus the
+experiment restored an empty, start-only/unprovisioned state, not a
+previously completed provisioning state. The empty directory cannot be
+used as evidence that a real provisioned state was restored or that
+state-dependence explains the observed session16 variation. The older
+three-live-pair byte-identity observation remains relevant, but its state
+conditions must be matched before it can resolve this discrepancy.
+
+**Trace lifecycle.** The same workflow sets `PERUN_RECORD_FAM1=1`.
+On the first confirmed fam1 store, `Fam1CandidateBP.stop()` deliberately
+stops the inferior, runs the reverse producer probe, and that probe kills
+the inferior in its `finally` block. Therefore no first mixer-read or
+trace-process `ProvisioningStart` return is expected in this record-mode
+run. Their absence here is a consequence of the terminal experiment, not
+evidence of an anti-tamper decoy or a broken mixer breakpoint. A separate
+non-record trace is required to observe the full mixer/return path.
+
+**SIL producer correction.** Trace #105 reported `add sil, 0x1e` at
+RVA `0xE1BD3`; trace #106 reported `and sil, 0xa8` at RVA `0xE1BD7`.
+These observations are compatible with the current reverse probe: it
+searches backward for an instruction that changes the observed low byte
+of RSI, and skips instructions whose execution leaves that byte
+unchanged. An `and sil, 0xa8` can therefore be invisible in a run where
+its input already contains only masked bits, while it is reported in a
+run where it clears bits. The older #105 formula is local to that
+observed path and must not be generalized across runs. At minimum, #106
+establishes that the mask can be an effective producer; the source feeding
+the mask and its behavior across the 256 fam1 indices remain unresolved.
+
+The segment diff localizes variability; it does not establish
+`session16 = RNG`, `session16 = h(state)`, or `Body B = g(identity,state)`.
+The next state experiment must explicitly compare a real completed
+provisioning state against the empty start-only state, while independently
+verifying the exact path passed to `ADI_SetProvisioningPath`. A
+non-record trace should separately establish the full mixer/return path.
