@@ -579,8 +579,9 @@ class Fam1ReverseProducerTests(unittest.TestCase):
         self.assertIn('"rva": rva', probe)
         self.assertIn('"forward_check": forward_check', probe)
         self.assertIn('"rewind_check": "not-attempted"', probe)
-        self.assertIn('for hop in range(1, 4)', probe)
-        self.assertIn('prefix = "producer" if idx == 1', probe)
+        self.assertIn('for hop in range(1, 5)', probe)
+        self.assertIn('"upstream3"', probe)
+        self.assertIn('prefix = ("producer" if idx == 1', probe)
         self.assertIn("upstream2", probe)
         self.assertIn("lineage_status={final_status}", probe)
         self.assertIn('if records[-1]["rewind_check"] != "yes":', probe)
@@ -594,6 +595,9 @@ class Fam1ReverseProducerTests(unittest.TestCase):
                     "planter-genesis-trace.yml").read_text(encoding="utf-8")
         self.assertIn("FAM1 PRODUCER REVERSE RESULT:", workflow)
         self.assertIn("producer RVA=", workflow)
+        self.assertIn("fields.get('producer_status', 'unknown')", workflow)
+        self.assertIn("fields.get('producer_mnemonic', 'unknown')", workflow)
+        self.assertIn("fields.get('upstream3_instruction', 'unknown')", workflow)
         self.assertIn("export PERUN_RECORD_FAM1=1", workflow)
 
 class Fam1ReportAggregationTests(unittest.TestCase):

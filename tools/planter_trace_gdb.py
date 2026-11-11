@@ -1865,7 +1865,7 @@ def fam1_reverse_source_probe():
 
         base = STATE.get("base")
         target_byte = rv("$r10") & 0xff
-        for hop in range(1, 4):
+        for hop in range(1, 5):
             hop_start_steps = steps
             found = False
             while steps < MAX_FAM1_REVERSE_STEPS:
@@ -1936,7 +1936,7 @@ def fam1_reverse_source_probe():
 
         fields = [f"lineage_status={final_status}", f"reverse_steps={steps}"]
         for idx, record in enumerate(records, 1):
-            prefix = "producer" if idx == 1 else ("upstream" if idx == 2 else "upstream2")
+            prefix = ("producer" if idx == 1 else "upstream" if idx == 2 else "upstream2" if idx == 3 else "upstream3")
             for key in ("status", "steps", "rva", "mnemonic", "instruction",
                         "dst_operand", "src_operand", "dst_gpr", "src_gpr",
                         "forward_check", "rewind_check"):

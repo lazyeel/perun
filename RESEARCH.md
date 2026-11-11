@@ -4469,3 +4469,22 @@ No reverse-execution, CoreADI or provisioning evidence was generated.
 The test is being updated to assert the structured per-hop output and the
 fail-closed rewind invariant. A failed rewind must terminate lineage tracing
 rather than continuing from an unverified register state.
+#### Trace #99: third fam1 producer and report-parser correction (2026-11-11; run 42968754198)
+
+The three-hop reverse probe recorded the following producer chain for the
+single observed fam1[0] store:
+
+- `add r10d, 0x6d` at RVA `0xE2366`;
+- `xor r10b, 0x6d` at RVA `0xE23C4`;
+- `add r10b, 0x3b` at RVA `0xE2432`.
+
+The upstream transitions were forward-checked. The 32-bit `add r10d` also
+changes the low byte; for the low-byte lineage its arithmetic is modulo 256,
+although it is not a byte-width instruction. This remains one dynamic store
+at index 0; no full fam1 table formula or final planter is established.
+
+The generated report initially rendered the first producer as unknown because
+the formatter looked up unprefixed keys while the tracer emits `producer_*`.
+The RVA was present, and the upstream records were rendered correctly. The
+report parser is corrected in the next revision, together with an extension
+to four producer hops to continue tracing the pre-`add r10d` value.

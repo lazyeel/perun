@@ -1111,19 +1111,19 @@ jobs:
                                     if "=" in token)
                       lines.append(
                           "- Latest r10b producer: "
-                          f"status={fields.get('status', 'unknown')}; "
-                          f"reverse steps={fields.get('steps', 'n/a')}; "
+                          f"status={fields.get('producer_status', 'unknown')}; "
+                          f"reverse steps={fields.get('producer_steps', 'n/a')}; "
                           f"producer RVA={fields.get('producer_rva', 'n/a')}; "
-                          f"mnemonic={fields.get('mnemonic', 'unknown')}; "
-                          f"forward check={fields.get('forward_check', 'no')}."
+                          f"mnemonic={fields.get('producer_mnemonic', 'unknown')}; "
+                          f"forward check={fields.get('producer_forward_check', 'no')}."
                       )
                       lines.append(
                           "- Producer instruction (static disassembly): "
-                          f"\`{fields.get('instruction', 'unknown')}\`; "
-                          f"dst={fields.get('dst_operand', 'unknown')}; "
-                          f"src={fields.get('src_operand', 'unknown')}; "
-                          f"destination GPR={fields.get('dst_gpr', 'na')}; "
-                          f"source GPR={fields.get('src_gpr', 'na')}."
+                          f"\`{fields.get('producer_instruction', 'unknown')}\`; "
+                          f"dst={fields.get('producer_dst_operand', 'unknown')}; "
+                          f"src={fields.get('producer_src_operand', 'unknown')}; "
+                          f"destination GPR={fields.get('producer_dst_gpr', 'na')}; "
+                          f"source GPR={fields.get('producer_src_gpr', 'na')}."
                       )
                       lines.append(
                           "- Previous r10b producer: "
@@ -1142,6 +1142,15 @@ jobs:
                           f"dst={fields.get('upstream2_dst_operand', 'unknown')}; "
                           f"src={fields.get('upstream2_src_operand', 'unknown')}; "
                           f"forward check={fields.get('upstream2_forward_check', 'no')}."
+                      )
+                      lines.append(
+                          "- Producer before that (third upstream): "
+                          f"status={fields.get('upstream3_status', 'unknown')}; "
+                          f"RVA={fields.get('upstream3_rva', 'n/a')}; "
+                          f"instruction=\`{fields.get('upstream3_instruction', 'unknown')}\`; "
+                          f"dst={fields.get('upstream3_dst_operand', 'unknown')}; "
+                          f"src={fields.get('upstream3_src_operand', 'unknown')}; "
+                          f"forward check={fields.get('upstream3_forward_check', 'no')}."
                       )
                       lines.append(
                           f"- Reverse lineage status: {fields.get('lineage_status', 'unknown')}; "
