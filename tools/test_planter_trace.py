@@ -580,6 +580,7 @@ class Fam1ReverseProducerTests(unittest.TestCase):
         self.assertIn('"forward_check": forward_check', probe)
         self.assertIn('"rewind_check": "not-attempted"', probe)
         self.assertIn('for hop in range(1, 5)', probe)
+        self.assertIn("if hop == 4:", probe)
         self.assertIn('"upstream3"', probe)
         self.assertIn('prefix = ("producer" if idx == 1', probe)
         self.assertIn("upstream2", probe)

@@ -1900,7 +1900,7 @@ def fam1_reverse_source_probe():
                     final_status = "forward-check-failed"
                     break
 
-                if hop == 3:
+                if hop == 4:
                     final_status = "hop-limit"
                     break
                 if steps >= MAX_FAM1_REVERSE_STEPS:
