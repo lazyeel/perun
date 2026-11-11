@@ -1,0 +1,115 @@
+{
+  "capture_groups": {
+    "fixed_input_replays": {
+      "outputs": [
+        {
+          "label": "baseline_a_cpim",
+          "present": false
+        },
+        {
+          "label": "baseline_b_cpim",
+          "present": false
+        },
+        {
+          "label": "frozen_a_cpim",
+          "present": false
+        },
+        {
+          "label": "frozen_b_cpim",
+          "present": false
+        },
+        {
+          "label": "baseline_a_exit_code",
+          "present": false
+        },
+        {
+          "label": "baseline_b_exit_code",
+          "present": false
+        },
+        {
+          "label": "frozen_a_exit_code",
+          "present": false
+        },
+        {
+          "label": "frozen_b_exit_code",
+          "present": false
+        }
+      ],
+      "pairing_rule": "Each replay is a separate process using the saved native-control SPIM. The workflow restores the captured identity/state seed before each replay. Replay CPIM outputs are not the GDB trace's CPIM.",
+      "process_role": "four separate offline replay processes",
+      "spim_source": "native_control.spim",
+      "state_seed": [
+        {
+          "label": "persistent_device_identity_seed",
+          "present": false
+        },
+        {
+          "label": "adi_state_seed",
+          "present": false
+        }
+      ],
+      "summary_present": false
+    },
+    "gdb_trace": {
+      "artifacts": [],
+      "metadata": {},
+      "pairing_rule": "The workflow unsets ADI_OFFLINE_SPIM, ADI_SPIM_OUT and ADI_CPIM_OUT before this run. It performs a fresh network provisioning request. Its source/planter snapshots must not be paired with the initial native-control SPIM/CPIM or with offline replay outputs.",
+      "process_role": "separate GDB live provisioning process",
+      "trace_directory_present": false
+    },
+    "native_control": {
+      "artifacts": [
+        {
+          "label": "spim",
+          "present": false
+        },
+        {
+          "label": "cpim",
+          "present": false
+        },
+        {
+          "label": "persistent_device_identity",
+          "present": false
+        },
+        {
+          "label": "adi_state_after_native_control",
+          "present": false
+        }
+      ],
+      "exit_code": null,
+      "pairing_rule": "SPIM and CPIM are saved by the same native-control process. The identity and state fingerprints describe persistent local context, not a cryptographic binding to every later tape.",
+      "process_role": "initial non-GDB live provisioning control"
+    }
+  },
+  "manifest_version": 1,
+  "privacy": {
+    "absolute_paths_included": false,
+    "device_identity_included": false,
+    "hashes_are_integrity_fingerprints_not_authenticators": true,
+    "raw_artifacts_included": false,
+    "state_filenames_included": false
+  },
+  "runtime_fingerprints": [
+    {
+      "label": "apple_library_directory",
+      "present": false
+    },
+    {
+      "label": "bionic_sysroot",
+      "present": false
+    }
+  ],
+  "session_separation": [
+    "A matching byte hash identifies identical bytes, not a common provisioning session.",
+    "Only native_control.spim and native_control.cpim are asserted to be outputs of one process.",
+    "fixed_input_replays are separate offline processes seeded from native_control.spim.",
+    "gdb_trace is a separate live provisioning process; its planter/source observations are not paired to native_control.spim/cpim.",
+    "The manifest does not prove every tape or auxiliary snapshot belongs to one session."
+  ],
+  "workflow": {
+    "gdb_trace_exit_code": null,
+    "native_control_exit_code": null,
+    "run_id": "42988990813",
+    "source_revision": "0315b6cb0a338cf78070dc877b37e8e4019c6ca8"
+  }
+}
