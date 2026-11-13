@@ -38,7 +38,13 @@ PHASES = {
     3: "login_code_after_end",
     4: "otp_request",
 }
-STATE = {"vdfut": 0, "cvu": 0, "api": 0}
+API_PHASES = {
+    "rsegvyrt87": 1,  # ProvisioningStart
+    "uv5t6nhkui": 2,  # ProvisioningEnd
+    "aslgmuibau": 3,  # GetLoginCode
+    "qi864985u0": 4,  # OTPRequest
+}
+STATE = {"vdfut": 0, "cvu": 0, "api": 0, "last_api_phase": 0}
 
 
 def emit(kind: str, phase: int, detail: str) -> None:
@@ -61,6 +67,8 @@ class VdfutBreakpoint(gdb.Breakpoint):
 
     def stop(self) -> bool:
         phase = read_int("g_adi_phase")
+        if phase < 0:
+            phase = STATE["last_api_phase"]
         opcode = read_int("$rdi", 0) & 0xFFFFFFFF
         STATE["vdfut"] += 1
         emit("opcode", phase, f"0x{opcode:08x}")
@@ -87,6 +95,9 @@ class ExportBreakpoint(gdb.Breakpoint):
 
     def stop(self) -> bool:
         phase = read_int("g_adi_phase")
+        if phase < 0:
+            phase = API_PHASES.get(self.symbol, -1)
+        STATE["last_api_phase"] = phase
         STATE["api"] += 1
         emit("api", phase, self.symbol)
         return False
