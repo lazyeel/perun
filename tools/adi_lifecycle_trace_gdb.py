@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 """Low-distortion GDB trace of the complete Android ADI lifecycle.
 
-The trace deliberately records only the harness phase, public export name and
+The default trace records only the harness phase, public export name and
 vdfut opcode. It does not record pointers, register contents, memory, SPIM,
 CPIM, ptm/tk, device identity, MID or OTP bytes.
+
+An opt-in private argument capture is available through
+`ADI_LIFECYCLE_ARGS_LOG`. It records candidate argument registers and bounded
+memory snapshots only for ProvisioningEnd and the OTP dispatch opcodes. This
+data can contain protocol secrets and must remain in a mode-0700 directory,
+be age-encrypted before upload, and never appear in a public log or manifest.
 
 Run through run-native.sh with:
   ADI_GDB=1
   GDB_SCRIPT=tools/adi_lifecycle_trace_gdb.py
   ADI_LIFECYCLE_TRACE_LOG=<private path>
+  ADI_LIFECYCLE_ARGS_LOG=<private path>
 
 Harness phase markers are defined by g_adi_phase:
   0 setup, 1 ProvisioningStart, 2 ProvisioningEnd,
