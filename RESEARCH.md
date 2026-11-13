@@ -4903,3 +4903,47 @@ then widen only where the trace shows dependencies. One dynamic trace
 covers only the route taken for its inputs; collect additional SPIM/state
 variants for input-dependent paths. Do not build a runtime dependency on
 QEMU: it is an analysis instrument, not part of the desired Rust product.
+
+
+### Phase-aware lifecycle trace — trace #117 (2026-11-13; run 43443339235)
+
+The follow-up trace produced a 1,076-byte private lifecycle log and a
+redacted manifest. The manifest classified these ADI export entries, in
+execution order:
+
+`aslgmuibau` → `aslgmuibau` → `rsegvyrt87` →
+`uv5t6nhkui` → `aslgmuibau` → `qi864985u0`.
+
+The first two GetLoginCode calls are the pre-configuration and
+post-SetAndroidID checks at the beginning of `adi_test.c`; the third
+is the post-End provisioning check. The first version of the fallback
+phase labels marked all three as phase 3 because it used the export name
+alone. That label is incorrect for the first two calls; a follow-up
+change now distinguishes the first two preflight calls (phase 0) from
+the third post-End call (phase 3) by call order. The API identity/order
+itself is observed.
+
+The `vdfut768ig` opcode sequence includes:
+
+- ProvisioningStart: `0x716bd86c`;
+- ProvisioningEnd: `0x0b2b3196`;
+- OTPRequest: `0xcfe0b46a` followed by `0x3e58e7f9` twice.
+
+This is the first phase-correlated observation in this campaign that
+places the OTP opcode `0x3e58e7f9` inside the `qi864985u0` OTPRequest
+call, rather than inferring it from a symbol name or a separate trace.
+The duplicate opcode hits are two real dispatch entries in the captured
+call; their roles within the OTP transform are not yet known. The trace
+does not yet expose the algorithm's read/write lineage or the state/time
+dependencies, and therefore is not an OTP lift.
+
+The same process completed Start, End and OTPRequest with return code 0.
+Its persistent state was 612 bytes after End and had the same fingerprint
+before and after OTP. The returned MID and OTP sizes were 60 and 28 bytes.
+Raw values remain private; only sizes, event names, opcodes and hashes
+were published.
+
+The follow-up phase-counter correction was pushed separately after this
+run. Its next GDB trace must confirm that the two preflight GetLoginCode
+calls are grouped as setup and that the third is grouped as post-End.
+Do not use #117's phase labels for those three calls as ground truth.
