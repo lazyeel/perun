@@ -1,0 +1,1137 @@
+{
+  "capture_groups": {
+    "fam1_index1_probe": {
+      "artifacts": [
+        {
+          "bytes": 925,
+          "label": "fam1_candidate_events",
+          "present": true,
+          "sha256": "cd3fd3c0e0b7766c513dcda1a1d106d5fc1cb36bf538ca524a4114e22263fe3f"
+        }
+      ],
+      "candidate_writer": {
+        "distinct_indices": 2,
+        "matching_store_events": 2,
+        "observed_indices": [
+          0,
+          207
+        ]
+      },
+      "exit_code": "0",
+      "metadata": {
+        "trace_run_id": "run-1794579933200572-6426",
+        "tracer_version": "v33"
+      },
+      "process_role": "separate offline-SPIM GDB replay; terminal reverse probe",
+      "reverse_lineage": {
+        "producers": [
+          {
+            "forward_check": "yes",
+            "label": "producer",
+            "mnemonic": "add",
+            "rva": "0xe2432"
+          },
+          {
+            "forward_check": "yes",
+            "label": "upstream",
+            "mnemonic": "sub",
+            "rva": "0xe23e9"
+          },
+          {
+            "forward_check": "yes",
+            "label": "upstream2",
+            "mnemonic": "xor",
+            "rva": "0xe23c4"
+          },
+          {
+            "forward_check": "yes",
+            "label": "upstream3",
+            "mnemonic": "xor",
+            "rva": "0xe236a"
+          },
+          {
+            "forward_check": "yes",
+            "label": "upstream4",
+            "mnemonic": "add",
+            "rva": "0xe2366"
+          }
+        ],
+        "reverse_steps": "59",
+        "sil_producer": null,
+        "status": "hop-limit"
+      },
+      "target_hit": "2",
+      "trace_directory_present": true
+    },
+    "fixed_input_replays": {
+      "cpim_segment_diff": {
+        "captures": {
+          "baseline_a": {
+            "length": 276,
+            "present": true,
+            "sha256": "493c115da84b2c1ba4a211aa39f7971212985e7c1271748e29053d0e9ddaa096",
+            "valid_cpim_length": true
+          },
+          "baseline_b": {
+            "length": 276,
+            "present": true,
+            "sha256": "75aaf9a665638936620214693434d1806534ce09f614ba6ae9d0e63be326fd6e",
+            "valid_cpim_length": true
+          },
+          "frozen_a": {
+            "length": 276,
+            "present": true,
+            "sha256": "ea8b27de3d91d45a92d05aa71074153f56a90f8975e8df42293153eaa844e3e7",
+            "valid_cpim_length": true
+          },
+          "frozen_b": {
+            "length": 276,
+            "present": true,
+            "sha256": "d64a31f5c11fe1ab0871924a6d22d1c43a1a567539efcf523ebfd56d0e459c7b",
+            "valid_cpim_length": true
+          }
+        },
+        "expected_cpim_length": 276,
+        "pairs": {
+          "baseline_a_vs_frozen_a": {
+            "changed_bytes": 208,
+            "equal": false,
+            "left": "baseline_a",
+            "right": "frozen_a",
+            "segments": [
+              {
+                "changed_bytes": 0,
+                "changed_runs": [],
+                "first_changed_offsets": [],
+                "length": 4,
+                "name": "version",
+                "range": [
+                  0,
+                  4
+                ]
+              },
+              {
+                "changed_bytes": 16,
+                "changed_runs": [
+                  [
+                    4,
+                    20
+                  ]
+                ],
+                "first_changed_offsets": [
+                  4,
+                  5,
+                  6,
+                  7,
+                  8,
+                  9,
+                  10,
+                  11,
+                  12,
+                  13,
+                  14,
+                  15,
+                  16,
+                  17,
+                  18,
+                  19
+                ],
+                "length": 16,
+                "name": "session16",
+                "range": [
+                  4,
+                  20
+                ]
+              },
+              {
+                "changed_bytes": 0,
+                "changed_runs": [],
+                "first_changed_offsets": [],
+                "length": 4,
+                "name": "body_a_length",
+                "range": [
+                  20,
+                  24
+                ]
+              },
+              {
+                "changed_bytes": 160,
+                "changed_runs": [
+                  [
+                    24,
+                    184
+                  ]
+                ],
+                "first_changed_offsets": [
+                  24,
+                  25,
+                  26,
+                  27,
+                  28,
+                  29,
+                  30,
+                  31,
+                  32,
+                  33,
+                  34,
+                  35,
+                  36,
+                  37,
+                  38,
+                  39
+                ],
+                "length": 160,
+                "name": "body_a",
+                "range": [
+                  24,
+                  184
+                ]
+              },
+              {
+                "changed_bytes": 32,
+                "changed_runs": [
+                  [
+                    184,
+                    216
+                  ]
+                ],
+                "first_changed_offsets": [
+                  184,
+                  185,
+                  186,
+                  187,
+                  188,
+                  189,
+                  190,
+                  191,
+                  192,
+                  193,
+                  194,
+                  195,
+                  196,
+                  197,
+                  198,
+                  199
+                ],
+                "length": 32,
+                "name": "digest",
+                "range": [
+                  184,
+                  216
+                ]
+              },
+              {
+                "changed_bytes": 0,
+                "changed_runs": [],
+                "first_changed_offsets": [],
+                "length": 4,
+                "name": "body_b_length",
+                "range": [
+                  216,
+                  220
+                ]
+              },
+              {
+                "changed_bytes": 0,
+                "changed_runs": [],
+                "first_changed_offsets": [],
+                "length": 4,
+                "name": "body_b_version",
+                "range": [
+                  220,
+                  224
+                ]
+              },
+              {
+                "changed_bytes": 0,
+                "changed_runs": [],
+                "first_changed_offsets": [],
+                "length": 52,
+                "name": "body_b",
+                "range": [
+                  224,
+                  276
+                ]
+              }
+            ],
+            "status": "compared"
+          },
+          "baseline_b_vs_frozen_b": {
+            "changed_bytes": 206,
+            "equal": false,
+            "left": "baseline_b",
+            "right": "frozen_b",
+            "segments": [
+              {
+                "changed_bytes": 0,
+                "changed_runs": [],
+                "first_changed_offsets": [],
+                "length": 4,
+                "name": "version",
+                "range": [
+                  0,
+                  4
+                ]
+              },
+              {
+                "changed_bytes": 16,
+                "changed_runs": [
+                  [
+                    4,
+                    20
+                  ]
+                ],
+                "first_changed_offsets": [
+                  4,
+                  5,
+                  6,
+                  7,
+                  8,
+                  9,
+                  10,
+                  11,
+                  12,
+                  13,
+                  14,
+                  15,
+                  16,
+                  17,
+                  18,
+                  19
+                ],
+                "length": 16,
+                "name": "session16",
+                "range": [
+                  4,
+                  20
+                ]
+              },
+              {
+                "changed_bytes": 0,
+                "changed_runs": [],
+                "first_changed_offsets": [],
+                "length": 4,
+                "name": "body_a_length",
+                "range": [
+                  20,
+                  24
+                ]
+              },
+              {
+                "changed_bytes": 158,
+                "changed_runs": [
+                  [
+                    24,
+                    65
+                  ],
+                  [
+                    66,
+                    81
+                  ],
+                  [
+                    82,
+                    184
+                  ]
+                ],
+                "first_changed_offsets": [
+                  24,
+                  25,
+                  26,
+                  27,
+                  28,
+                  29,
+                  30,
+                  31,
+                  32,
+                  33,
+                  34,
+                  35,
+                  36,
+                  37,
+                  38,
+                  39
+                ],
+                "length": 160,
+                "name": "body_a",
+                "range": [
+                  24,
+                  184
+                ]
+              },
+              {
+                "changed_bytes": 32,
+                "changed_runs": [
+                  [
+                    184,
+                    216
+                  ]
+                ],
+                "first_changed_offsets": [
+                  184,
+                  185,
+                  186,
+                  187,
+                  188,
+                  189,
+                  190,
+                  191,
+                  192,
+                  193,
+                  194,
+                  195,
+                  196,
+                  197,
+                  198,
+                  199
+                ],
+                "length": 32,
+                "name": "digest",
+                "range": [
+                  184,
+                  216
+                ]
+              },
+              {
+                "changed_bytes": 0,
+                "changed_runs": [],
+                "first_changed_offsets": [],
+                "length": 4,
+                "name": "body_b_length",
+                "range": [
+                  216,
+                  220
+                ]
+              },
+              {
+                "changed_bytes": 0,
+                "changed_runs": [],
+                "first_changed_offsets": [],
+                "length": 4,
+                "name": "body_b_version",
+                "range": [
+                  220,
+                  224
+                ]
+              },
+              {
+                "changed_bytes": 0,
+                "changed_runs": [],
+                "first_changed_offsets": [],
+                "length": 52,
+                "name": "body_b",
+                "range": [
+                  224,
+                  276
+                ]
+              }
+            ],
+            "status": "compared"
+          },
+          "baseline_repeat": {
+            "changed_bytes": 207,
+            "equal": false,
+            "left": "baseline_a",
+            "right": "baseline_b",
+            "segments": [
+              {
+                "changed_bytes": 0,
+                "changed_runs": [],
+                "first_changed_offsets": [],
+                "length": 4,
+                "name": "version",
+                "range": [
+                  0,
+                  4
+                ]
+              },
+              {
+                "changed_bytes": 16,
+                "changed_runs": [
+                  [
+                    4,
+                    20
+                  ]
+                ],
+                "first_changed_offsets": [
+                  4,
+                  5,
+                  6,
+                  7,
+                  8,
+                  9,
+                  10,
+                  11,
+                  12,
+                  13,
+                  14,
+                  15,
+                  16,
+                  17,
+                  18,
+                  19
+                ],
+                "length": 16,
+                "name": "session16",
+                "range": [
+                  4,
+                  20
+                ]
+              },
+              {
+                "changed_bytes": 0,
+                "changed_runs": [],
+                "first_changed_offsets": [],
+                "length": 4,
+                "name": "body_a_length",
+                "range": [
+                  20,
+                  24
+                ]
+              },
+              {
+                "changed_bytes": 159,
+                "changed_runs": [
+                  [
+                    24,
+                    173
+                  ],
+                  [
+                    174,
+                    184
+                  ]
+                ],
+                "first_changed_offsets": [
+                  24,
+                  25,
+                  26,
+                  27,
+                  28,
+                  29,
+                  30,
+                  31,
+                  32,
+                  33,
+                  34,
+                  35,
+                  36,
+                  37,
+                  38,
+                  39
+                ],
+                "length": 160,
+                "name": "body_a",
+                "range": [
+                  24,
+                  184
+                ]
+              },
+              {
+                "changed_bytes": 32,
+                "changed_runs": [
+                  [
+                    184,
+                    216
+                  ]
+                ],
+                "first_changed_offsets": [
+                  184,
+                  185,
+                  186,
+                  187,
+                  188,
+                  189,
+                  190,
+                  191,
+                  192,
+                  193,
+                  194,
+                  195,
+                  196,
+                  197,
+                  198,
+                  199
+                ],
+                "length": 32,
+                "name": "digest",
+                "range": [
+                  184,
+                  216
+                ]
+              },
+              {
+                "changed_bytes": 0,
+                "changed_runs": [],
+                "first_changed_offsets": [],
+                "length": 4,
+                "name": "body_b_length",
+                "range": [
+                  216,
+                  220
+                ]
+              },
+              {
+                "changed_bytes": 0,
+                "changed_runs": [],
+                "first_changed_offsets": [],
+                "length": 4,
+                "name": "body_b_version",
+                "range": [
+                  220,
+                  224
+                ]
+              },
+              {
+                "changed_bytes": 0,
+                "changed_runs": [],
+                "first_changed_offsets": [],
+                "length": 52,
+                "name": "body_b",
+                "range": [
+                  224,
+                  276
+                ]
+              }
+            ],
+            "status": "compared"
+          },
+          "frozen_repeat": {
+            "changed_bytes": 208,
+            "equal": false,
+            "left": "frozen_a",
+            "right": "frozen_b",
+            "segments": [
+              {
+                "changed_bytes": 0,
+                "changed_runs": [],
+                "first_changed_offsets": [],
+                "length": 4,
+                "name": "version",
+                "range": [
+                  0,
+                  4
+                ]
+              },
+              {
+                "changed_bytes": 16,
+                "changed_runs": [
+                  [
+                    4,
+                    20
+                  ]
+                ],
+                "first_changed_offsets": [
+                  4,
+                  5,
+                  6,
+                  7,
+                  8,
+                  9,
+                  10,
+                  11,
+                  12,
+                  13,
+                  14,
+                  15,
+                  16,
+                  17,
+                  18,
+                  19
+                ],
+                "length": 16,
+                "name": "session16",
+                "range": [
+                  4,
+                  20
+                ]
+              },
+              {
+                "changed_bytes": 0,
+                "changed_runs": [],
+                "first_changed_offsets": [],
+                "length": 4,
+                "name": "body_a_length",
+                "range": [
+                  20,
+                  24
+                ]
+              },
+              {
+                "changed_bytes": 160,
+                "changed_runs": [
+                  [
+                    24,
+                    184
+                  ]
+                ],
+                "first_changed_offsets": [
+                  24,
+                  25,
+                  26,
+                  27,
+                  28,
+                  29,
+                  30,
+                  31,
+                  32,
+                  33,
+                  34,
+                  35,
+                  36,
+                  37,
+                  38,
+                  39
+                ],
+                "length": 160,
+                "name": "body_a",
+                "range": [
+                  24,
+                  184
+                ]
+              },
+              {
+                "changed_bytes": 32,
+                "changed_runs": [
+                  [
+                    184,
+                    216
+                  ]
+                ],
+                "first_changed_offsets": [
+                  184,
+                  185,
+                  186,
+                  187,
+                  188,
+                  189,
+                  190,
+                  191,
+                  192,
+                  193,
+                  194,
+                  195,
+                  196,
+                  197,
+                  198,
+                  199
+                ],
+                "length": 32,
+                "name": "digest",
+                "range": [
+                  184,
+                  216
+                ]
+              },
+              {
+                "changed_bytes": 0,
+                "changed_runs": [],
+                "first_changed_offsets": [],
+                "length": 4,
+                "name": "body_b_length",
+                "range": [
+                  216,
+                  220
+                ]
+              },
+              {
+                "changed_bytes": 0,
+                "changed_runs": [],
+                "first_changed_offsets": [],
+                "length": 4,
+                "name": "body_b_version",
+                "range": [
+                  220,
+                  224
+                ]
+              },
+              {
+                "changed_bytes": 0,
+                "changed_runs": [],
+                "first_changed_offsets": [],
+                "length": 52,
+                "name": "body_b",
+                "range": [
+                  224,
+                  276
+                ]
+              }
+            ],
+            "status": "compared"
+          }
+        },
+        "privacy": {
+          "absolute_paths_included": false,
+          "byte_values_included": false,
+          "raw_cpim_bytes_included": false
+        },
+        "schema_version": 1
+      },
+      "outputs": [
+        {
+          "bytes": 276,
+          "label": "baseline_a_cpim",
+          "present": true,
+          "sha256": "493c115da84b2c1ba4a211aa39f7971212985e7c1271748e29053d0e9ddaa096"
+        },
+        {
+          "bytes": 276,
+          "label": "baseline_b_cpim",
+          "present": true,
+          "sha256": "75aaf9a665638936620214693434d1806534ce09f614ba6ae9d0e63be326fd6e"
+        },
+        {
+          "bytes": 276,
+          "label": "frozen_a_cpim",
+          "present": true,
+          "sha256": "ea8b27de3d91d45a92d05aa71074153f56a90f8975e8df42293153eaa844e3e7"
+        },
+        {
+          "bytes": 276,
+          "label": "frozen_b_cpim",
+          "present": true,
+          "sha256": "d64a31f5c11fe1ab0871924a6d22d1c43a1a567539efcf523ebfd56d0e459c7b"
+        },
+        {
+          "bytes": 2,
+          "label": "baseline_a_exit_code",
+          "present": true,
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+        },
+        {
+          "bytes": 2,
+          "label": "baseline_b_exit_code",
+          "present": true,
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+        },
+        {
+          "bytes": 2,
+          "label": "frozen_a_exit_code",
+          "present": true,
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+        },
+        {
+          "bytes": 2,
+          "label": "frozen_b_exit_code",
+          "present": true,
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+        }
+      ],
+      "pairing_rule": "Each replay is a separate process using the saved native-control SPIM. The workflow restores the captured identity/state seed before each replay. Replay CPIM outputs are not the GDB trace's CPIM.",
+      "process_role": "four separate offline replay processes",
+      "spim_source": "native_control.spim",
+      "state_seed": [
+        {
+          "bytes": 16,
+          "label": "persistent_device_identity_seed",
+          "present": true,
+          "sha256": "6badd517fa44b80c0359b5189b21103e640d1618faedf9edd4991167f806f137"
+        },
+        {
+          "bytes": 0,
+          "file_count": 0,
+          "label": "adi_state_seed",
+          "present": true,
+          "symlinks_skipped": 0,
+          "tree_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "summary_present": true
+    },
+    "full_lifecycle": {
+      "artifacts": [
+        {
+          "bytes": 16,
+          "label": "device_identity.bin",
+          "present": true,
+          "sha256": "6badd517fa44b80c0359b5189b21103e640d1618faedf9edd4991167f806f137"
+        },
+        {
+          "bytes": 347,
+          "label": "spim.bin",
+          "present": true,
+          "sha256": "b1009d34ed15710179358f4288900550705252703510dca98856aa3c7b438f4a"
+        },
+        {
+          "bytes": 276,
+          "label": "cpim.bin",
+          "present": true,
+          "sha256": "e821da25699fc0465107d66ebd92251427bfa8aa5f0f906a237e1753d82a4180"
+        },
+        {
+          "bytes": 4,
+          "label": "provisioning-start-rc.bin",
+          "present": true,
+          "sha256": "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119"
+        },
+        {
+          "bytes": 4,
+          "label": "session.bin",
+          "present": true,
+          "sha256": "a8cf75f223124a65a76cd4e790f88d6d738049e67b463dfc2f6ae60e05d86946"
+        },
+        {
+          "bytes": 487,
+          "label": "ptm.bin",
+          "present": true,
+          "sha256": "f4fd4d81aabbc34d0f4bdb903814de0efbf3c05bd0e60556ebe94e206e92f123"
+        },
+        {
+          "bytes": 16,
+          "label": "tk.bin",
+          "present": true,
+          "sha256": "7f8b65249fd912508f2274395bdabb97420c554cb2f4ae8b749e36b8b082d18b"
+        },
+        {
+          "bytes": 4,
+          "label": "provisioning-end-rc.bin",
+          "present": true,
+          "sha256": "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119"
+        },
+        {
+          "label": "adi-state-before-end.bin",
+          "present": false
+        },
+        {
+          "bytes": 6,
+          "label": "adi-state-before-end.bin.status",
+          "present": true,
+          "sha256": "5ad38304b535c2987dbd24657c1a11b884984ff600d9f389deb0d4e634fee792"
+        },
+        {
+          "bytes": 626,
+          "label": "adi-state-after-end.bin",
+          "present": true,
+          "sha256": "617e5e6a29bdba69c285924e056eab7ae6fd0e861e3664d850d49796bce2ec0d"
+        },
+        {
+          "bytes": 7,
+          "label": "adi-state-after-end.bin.status",
+          "present": true,
+          "sha256": "4d4c7eee2e28d03cb2dbf3df639c3290ade66e18755e83caade2d8f37bd8c044"
+        },
+        {
+          "bytes": 4,
+          "label": "login-code-after-end.bin",
+          "present": true,
+          "sha256": "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119"
+        },
+        {
+          "bytes": 626,
+          "label": "adi-state-before-otp.bin",
+          "present": true,
+          "sha256": "617e5e6a29bdba69c285924e056eab7ae6fd0e861e3664d850d49796bce2ec0d"
+        },
+        {
+          "bytes": 7,
+          "label": "adi-state-before-otp.bin.status",
+          "present": true,
+          "sha256": "4d4c7eee2e28d03cb2dbf3df639c3290ade66e18755e83caade2d8f37bd8c044"
+        },
+        {
+          "bytes": 16,
+          "label": "otp-time-before.bin",
+          "present": true,
+          "sha256": "d167658609517d0646301a7fe8518f0906ac9c9977f0b25a4d21454dbfd58fb2"
+        },
+        {
+          "bytes": 4,
+          "label": "otp-request-rc.bin",
+          "present": true,
+          "sha256": "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119"
+        },
+        {
+          "bytes": 60,
+          "label": "mid.bin",
+          "present": true,
+          "sha256": "c5146e61a74f50e73442100906242121bda457a8a14b244ab3c1702f8e3a3b5c"
+        },
+        {
+          "bytes": 28,
+          "label": "otp.bin",
+          "present": true,
+          "sha256": "318c2021c7cf29740cc63c7d3a6793f0abd06bd827b54483df90dccf33f90082"
+        },
+        {
+          "bytes": 16,
+          "label": "otp-time-after.bin",
+          "present": true,
+          "sha256": "05363d091001e240fd47f6278c3c730b3079a9e4469e52dc867c528c85e91d4a"
+        },
+        {
+          "bytes": 626,
+          "label": "adi-state-after-otp.bin",
+          "present": true,
+          "sha256": "617e5e6a29bdba69c285924e056eab7ae6fd0e861e3664d850d49796bce2ec0d"
+        },
+        {
+          "bytes": 923,
+          "label": "adi-lifecycle.trace",
+          "present": true,
+          "sha256": "5e2bb0ba0a37ab585a7fd27952ef1b148a7907d936680ddb72f7dcd9d28d32be"
+        },
+        {
+          "bytes": 7,
+          "label": "adi-state-after-otp.bin.status",
+          "present": true,
+          "sha256": "4d4c7eee2e28d03cb2dbf3df639c3290ade66e18755e83caade2d8f37bd8c044"
+        }
+      ],
+      "exit_code": "0",
+      "pairing_rule": "All listed lifecycle inputs and outputs are captured by one native Bionic process. The state snapshots bracket ProvisioningEnd and OTPRequest. Raw bytes remain on the ephemeral runner; only sizes and SHA-256 fingerprints are published. A missing state file is reported by its adjacent .status capture.",
+      "process_role": "separate native Bionic full provisioning and OTP control",
+      "state_directory_after_cycle": {
+        "bytes": 626,
+        "file_count": 1,
+        "label": "adi_state_after_full_lifecycle",
+        "present": true,
+        "symlinks_skipped": 0,
+        "tree_sha256": "ece8c3650a6cb6fe3023b82316bf45b7b608fb493818aa8296f5610fc614e632"
+      },
+      "trace": {
+        "api_calls": [],
+        "artifact": {
+          "bytes": 923,
+          "label": "adi_lifecycle_trace",
+          "present": true,
+          "sha256": "5e2bb0ba0a37ab585a7fd27952ef1b148a7907d936680ddb72f7dcd9d28d32be"
+        },
+        "coreadi_init_calls": [],
+        "opcode_sequence": [],
+        "present": true,
+        "unclassified_lines": 21
+      }
+    },
+    "gdb_trace": {
+      "artifacts": [
+        {
+          "bytes": 256,
+          "label": "source.at_dd511.bin",
+          "present": true,
+          "sha256": "1cb63e85fc6fdc4e181b208434dc4e38766ee954fdc81f0b73eff7761b82645d"
+        },
+        {
+          "bytes": 256,
+          "label": "source.at_postmalloc.bin",
+          "present": true,
+          "sha256": "1cb63e85fc6fdc4e181b208434dc4e38766ee954fdc81f0b73eff7761b82645d"
+        },
+        {
+          "bytes": 256,
+          "label": "source.final.bin",
+          "present": true,
+          "sha256": "c2069a475ed4a5cf278bf376ab2dea7ab0f54a6aee0f2013b7976814f640ec6f"
+        },
+        {
+          "label": "planter.at_writer_candidate.bin",
+          "present": false
+        },
+        {
+          "bytes": 9984,
+          "label": "planter.at_base_load.bin",
+          "present": true,
+          "sha256": "ae01b363079bb66874529b6a6eaeedbf485a0d42e90fc52deeead5f50de10aed"
+        },
+        {
+          "bytes": 9984,
+          "label": "planter.slot_anchored.bin",
+          "present": true,
+          "sha256": "36c43c231294656be2473f647e3d4c669ade1a788db19da05f057d36b585b9d3"
+        },
+        {
+          "bytes": 9984,
+          "label": "planter.final.bin",
+          "present": true,
+          "sha256": "36c43c231294656be2473f647e3d4c669ade1a788db19da05f057d36b585b9d3"
+        }
+      ],
+      "metadata": {
+        "entry_rva": 554324,
+        "trace_run_id": "run-1794579929903879-6395",
+        "tracer_version": "v33",
+        "transform_opcode": 1902893164
+      },
+      "pairing_rule": "The workflow unsets ADI_OFFLINE_SPIM, ADI_SPIM_OUT and ADI_CPIM_OUT before this run. It performs a fresh network provisioning request. Its source/planter snapshots must not be paired with the initial native-control SPIM/CPIM or with offline replay outputs.",
+      "process_role": "separate GDB live provisioning process",
+      "trace_directory_present": true
+    },
+    "native_control": {
+      "artifacts": [
+        {
+          "bytes": 347,
+          "label": "spim",
+          "present": true,
+          "sha256": "8d8280ab4aa239d53a54dac47c40659639b373d833f796810a55b0eda7314d0e"
+        },
+        {
+          "bytes": 276,
+          "label": "cpim",
+          "present": true,
+          "sha256": "88cb896babf05b219de9eb438402d118dcbc4dcd592776255cb5c7ffd4a3997c"
+        },
+        {
+          "bytes": 16,
+          "label": "persistent_device_identity",
+          "present": true,
+          "sha256": "6badd517fa44b80c0359b5189b21103e640d1618faedf9edd4991167f806f137"
+        },
+        {
+          "bytes": 626,
+          "file_count": 1,
+          "label": "adi_state_after_native_control",
+          "present": true,
+          "symlinks_skipped": 0,
+          "tree_sha256": "ece8c3650a6cb6fe3023b82316bf45b7b608fb493818aa8296f5610fc614e632"
+        }
+      ],
+      "exit_code": "0",
+      "pairing_rule": "SPIM and CPIM are saved by the same native-control process. The identity and state fingerprints describe persistent local context, not a cryptographic binding to every later tape.",
+      "process_role": "initial non-GDB live provisioning control"
+    }
+  },
+  "manifest_version": 1,
+  "privacy": {
+    "absolute_paths_included": false,
+    "device_identity_included": false,
+    "hashes_are_integrity_fingerprints_not_authenticators": true,
+    "raw_artifacts_included": false,
+    "state_filenames_included": false
+  },
+  "runtime_fingerprints": [
+    {
+      "bytes": 65816248,
+      "file_count": 18,
+      "label": "apple_library_directory",
+      "present": true,
+      "symlinks_skipped": 1,
+      "tree_sha256": "1cb2110943daca158f447ed3c16ff8121e28d036c8d40f42d722c245b8841b83"
+    },
+    {
+      "bytes": 132888007,
+      "file_count": 196,
+      "label": "bionic_sysroot",
+      "present": true,
+      "symlinks_skipped": 0,
+      "tree_sha256": "20335c2ac3ca673488a1cb4963cdc3f48b94f452c7b170468c67f684c283b56c"
+    },
+    {
+      "bytes": 1178599424,
+      "label": "android_system_image",
+      "present": true,
+      "sha256": "5ffb473249982a792074b5e27a974ed4c1229640f4857f260357f9cdb55414d9"
+    }
+  ],
+  "session_separation": [
+    "A matching byte hash identifies identical bytes, not a common provisioning session.",
+    "Only native_control.spim and native_control.cpim are asserted to be outputs of one process.",
+    "fixed_input_replays are separate offline processes seeded from native_control.spim.",
+    "gdb_trace is a separate live provisioning process; its planter/source observations are not paired to native_control.spim/cpim.",
+    "The manifest does not prove every tape or auxiliary snapshot belongs to one session."
+  ],
+  "workflow": {
+    "fam1_index1_trace_exit_code": "0",
+    "full_lifecycle_exit_code": "0",
+    "gdb_trace_exit_code": "0",
+    "native_control_exit_code": "0",
+    "run_id": "43442242038",
+    "source_revision": "98b64596fe5f8985b2af4154847b2f76c85f53cc"
+  }
+}
