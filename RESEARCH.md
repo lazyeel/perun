@@ -5151,3 +5151,43 @@ offset and ELF virtual address. This is necessary to distinguish a meaningful
 read-only data hit from an incidental occurrence in symbols, relocations or
 other metadata. The next scan will establish the location class; file offsets
 alone are not a semantic match.
+
+
+### Android fold signature scan result — run 5 (2026-11-13)
+
+The independent scan workflow completed successfully as run
+`43502924405` (source revision `d7525491f1296d240bb37ade5f4fdab5d956815b`).
+It fetched 18 x86_64 libraries from the Apple Music 4.9.6 APK and scanned
+the 1,596,128-byte `libCoreADI.so` image
+(SHA-256 `ece4ffa6bbe4239e8f0d4714da57e62ce5e3c581d19553a83d78ac897783b905`).
+
+Result: **1/21** constants had an exact 16-byte repeated-lane match;
+**5/21** had at least one scalar byte-sequence match. The only full-vector
+hit was `K_7C942730 = 0x04000000`, at file offsets `0x12b0` and
+`0x212e`.
+
+The follow-up ELF map places both occurrences in `.rodata`, whose section
+starts at file offset `0x2e0`; their section-relative offsets are
+`0xfd0` and `0x1e4e`. The section flags are `0x12` (ALLOC + MERGE).
+Both are covered by a `PT_LOAD` segment with flags `0x4` (read-only);
+they are not in an executable segment. The second occurrence is not
+16-byte aligned. This is weak evidence for an incidental generic constant,
+not evidence that the same fold constant table is present as a usable
+Android SIMD machine.
+
+**Conclusion:** the straightforward exact-broadcast signature hypothesis
+is not supported by this Android build. It does not exclude an equivalent
+implementation using scalar immediates, altered constants, a different
+layout, or another reachable code path. It also does not prove that
+`0xcfe0b46a` is unrelated to the Windows Configuration fold logic.
+Do not transplant the Windows implementation into Android OTP on this
+result. The next cross-platform check, if needed, must be code/data-flow
+based: locate references to these two read-only addresses and inspect
+the relevant Android function bodies, rather than broadening the scalar
+signature search.
+
+The machine-readable report is the 30-day Actions artifact
+`android-fold-signature-scan-43502924405`; it contains only constants,
+offsets, ELF section/segment metadata, and the input-library hash.
+The regular CI gate also passed on source revision
+`d7525491f1296d240bb37ade5f4fdab5d956815b` (CI run #82).
