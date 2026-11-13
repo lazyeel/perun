@@ -5009,3 +5009,13 @@ the age private key must remain outside GitHub. Plaintext is removed
 only after successful upload. If the variable is absent, the expensive
 capture job is skipped. These new collection paths have not yet been
 validated by a new workflow run.
+
+
+### Follow-up source review
+
+A source-only review caught and corrected two escaping errors before the new
+instrumentation was accepted as measured: the private JSONL writer now emits
+actual newline-delimited records, and the syscall-name parser uses word-boundary
+and opening-parenthesis regex tokens rather than literal backslashes. The
+manifest regression fixtures were aligned with the actual trace-file format.
+These are corrective source edits; no new capture result is claimed here.

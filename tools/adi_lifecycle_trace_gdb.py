@@ -114,7 +114,7 @@ def capture_opcode_arguments(phase: int, opcode: int) -> None:
         },
         "memory": memory,
     }
-    payload = (json.dumps(record, separators=(",", ":")) + "\\n").encode("ascii")
+    payload = (json.dumps(record, separators=(",", ":")) + "\n").encode("ascii")
     os.write(ARGS_FD, payload)
 
 

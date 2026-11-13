@@ -172,26 +172,26 @@ class CaptureManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "adi-lifecycle.trace"
             path.write_text(
-                "adi lifecycle trace v1\\n"
-                "phase=0 phase_name=setup trace=armed\\n"
-                "phase=0 phase_name=setup api=aslgmuibau\\n"
-                "phase=0 phase_name=setup api=aslgmuibau\\n"
-                "phase=0 phase_name=setup opcode=0x12db31c5\\n"
-                "phase=0 phase_name=setup opcode=0xb0eda7af\\n"
-                "phase=0 phase_name=setup opcode=0xb23c691e\\n"
-                "phase=0 phase_name=setup opcode=0xc774d292\\n"
-                "phase=0 phase_name=setup opcode=0xc774d292\\n"
-                "phase=0 phase_name=setup opcode=0xb0eda7af\\n"
-                "phase=1 phase_name=provisioning_start api=rsegvyrt87\\n"
-                "phase=1 phase_name=provisioning_start opcode=0x716bd86c\\n"
-                "phase=2 phase_name=provisioning_end api=uv5t6nhkui\\n"
-                "phase=2 phase_name=provisioning_end opcode=0x0b2b3196\\n"
-                "phase=3 phase_name=login_code_after_end api=aslgmuibau\\n"
-                "phase=3 phase_name=login_code_after_end opcode=0xb0eda7af\\n"
-                "phase=4 phase_name=otp_request api=qi864985u0\\n"
-                "phase=4 phase_name=otp_request opcode=0xcfe0b46a\\n"
-                "phase=4 phase_name=otp_request opcode=0x3e58e7f9\\n"
-                "phase=4 phase_name=otp_request opcode=0x3e58e7f9\\n",
+                "adi lifecycle trace v1\n"
+                "phase=0 phase_name=setup trace=armed\n"
+                "phase=0 phase_name=setup api=aslgmuibau\n"
+                "phase=0 phase_name=setup api=aslgmuibau\n"
+                "phase=0 phase_name=setup opcode=0x12db31c5\n"
+                "phase=0 phase_name=setup opcode=0xb0eda7af\n"
+                "phase=0 phase_name=setup opcode=0xb23c691e\n"
+                "phase=0 phase_name=setup opcode=0xc774d292\n"
+                "phase=0 phase_name=setup opcode=0xc774d292\n"
+                "phase=0 phase_name=setup opcode=0xb0eda7af\n"
+                "phase=1 phase_name=provisioning_start api=rsegvyrt87\n"
+                "phase=1 phase_name=provisioning_start opcode=0x716bd86c\n"
+                "phase=2 phase_name=provisioning_end api=uv5t6nhkui\n"
+                "phase=2 phase_name=provisioning_end opcode=0x0b2b3196\n"
+                "phase=3 phase_name=login_code_after_end api=aslgmuibau\n"
+                "phase=3 phase_name=login_code_after_end opcode=0xb0eda7af\n"
+                "phase=4 phase_name=otp_request api=qi864985u0\n"
+                "phase=4 phase_name=otp_request opcode=0xcfe0b46a\n"
+                "phase=4 phase_name=otp_request opcode=0x3e58e7f9\n"
+                "phase=4 phase_name=otp_request opcode=0x3e58e7f9\n",
                 encoding="ascii",
             )
             result = summarize_lifecycle_trace(path)
@@ -213,9 +213,9 @@ class CaptureManifestTests(unittest.TestCase):
             syscall_dir = root / "syscalls"
             syscall_dir.mkdir()
             (syscall_dir / "trace.123").write_text(
-                '1712345678.0 getrandom(0x1234, 0x20, 0) = 32\\n'
-                '1712345678.1 openat(AT_FDCWD, "/dev/urandom", O_RDONLY) = 3\\n'
-                '1712345678.2 read(0x7fff, 0x1234, 0x20) = 32\\n',
+                '1712345678.0 getrandom(0x1234, 0x20, 0) = 32\n'
+                '1712345678.1 openat(AT_FDCWD, "/dev/urandom", O_RDONLY) = 3\n'
+                '1712345678.2 read(0x7fff, 0x1234, 0x20) = 32\n',
                 encoding="ascii",
             )
             summary = summarize_syscall_trace(syscall_dir)

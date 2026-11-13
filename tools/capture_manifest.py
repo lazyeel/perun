@@ -106,7 +106,7 @@ def summarize_syscall_trace(root: Path) -> dict[str, Any]:
     }
     counts: dict[str, int] = {}
     files = 0
-    pattern = re.compile(r"\\b([A-Za-z_][A-Za-z0-9_]*)\\(")
+    pattern = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\(")
     for path in sorted(root.rglob("*")):
         if path.is_symlink() or not path.is_file():
             continue
