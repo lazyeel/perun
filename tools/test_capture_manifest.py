@@ -64,6 +64,15 @@ class CaptureManifestTests(unittest.TestCase):
             ):
                 (lifecycle / name).write_bytes(payload)
             (work / "adi-data" / "adi.pb").write_bytes(b"private adi.pb")
+            (lifecycle / "adi-lifecycle.trace").write_text(
+                "adi lifecycle trace v1\\n"
+                "phase=1 phase_name=provisioning_start api=rsegvyrt87\\n"
+                "phase=1 phase_name=provisioning_start opcode=0x716bd86c\\n"
+                "phase=2 phase_name=provisioning_end api=uv5t6nhkui\\n"
+                "phase=4 phase_name=otp_request api=qi864985u0\\n"
+                "phase=4 phase_name=otp_request opcode=0x12345678\\n",
+                encoding="ascii",
+            )
 
             seed = work / "fixed-input-probe" / "seed"
             (seed / "adi-data").mkdir(parents=True)
@@ -118,6 +127,19 @@ class CaptureManifestTests(unittest.TestCase):
             lifecycle_artifacts = {item["label"]: item for item in lifecycle_group["artifacts"]}
             self.assertTrue(lifecycle_artifacts["otp.bin"]["present"])
             self.assertTrue(lifecycle_artifacts["adi-state-after-end.bin"]["present"])
+            trace = lifecycle_group["trace"]
+            self.assertTrue(trace["artifact"]["present"])
+            self.assertEqual(
+                trace["opcode_sequence"],
+                [
+                    {"phase_id": 1, "phase": "provisioning_start", "opcode": "0x716bd86c"},
+                    {"phase_id": 4, "phase": "otp_request", "opcode": "0x12345678"},
+                ],
+            )
+            self.assertEqual(
+                [row["name"] for row in trace["api_calls"]],
+                ["rsegvyrt87", "uv5t6nhkui", "qi864985u0"],
+            )
             self.assertIn("ephemeral runner", lifecycle_group["pairing_rule"])
             self.assertTrue(lifecycle_group["state_directory_after_cycle"]["present"])
             self.assertEqual(groups["gdb_trace"]["metadata"]["tracer_version"], "v33")
