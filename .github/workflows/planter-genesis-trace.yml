@@ -393,6 +393,9 @@ jobs:
 
           for name in a b; do
             restore_warm_seed
+            # The completed state makes GetLoginCode return 0. Force Start
+            # explicitly so this replay actually exercises the transform.
+            export ADI_FORCE_START=1
             export ADI_TRACE_START_ONLY=1
             export ADI_OFFLINE_SPIM="$CAPTURE/spim.bin"
             export ADI_CPIM_OUT="$WARM/$name.cpim"
@@ -408,10 +411,14 @@ jobs:
             set -e
             unset ADI_STRACE_LOG_PREFIX
             echo "$rc" > "$WARM/$name.rc"
-            echo "Warm-state offline replay $name exit code: $rc"
+            if [ "$rc" -ne 0 ] || [ ! -s "$ADI_CPIM_OUT" ]; then
+              echo "Warm-state replay $name did not produce a successful CPIM (rc=$rc)." >&2
+            else
+              echo "Warm-state replay $name produced $(stat -c '%s' "$ADI_CPIM_OUT") CPIM bytes."
+            fi
           done
           restore_warm_seed
-          unset ADI_OFFLINE_SPIM ADI_CPIM_OUT ADI_STATE_FILE ADI_TRACE_START_ONLY
+          unset ADI_FORCE_START ADI_OFFLINE_SPIM ADI_CPIM_OUT ADI_STATE_FILE ADI_TRACE_START_ONLY
           echo "Warm-state outputs and syscall traces remain private until age encryption."
 
       - name: Build a privacy-preserving capture manifest

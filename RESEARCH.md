@@ -5033,3 +5033,21 @@ The manifest test fixture now covers the six verified API phases, all
 twelve vdfut opcodes, metadata-line filtering, private argument artifact
 fingerprinting, warm-state CPIM byte-diff summaries and syscall-name-only
 census. Raw fixture values must not appear in the serialized manifest.
+
+
+### Warm-state replay control-flow correction
+
+A static review of `adi_test.c` found that the initial warm-state replay
+step did not actually force `ProvisioningStart`: on a completed state,
+`ADI_GetLoginCode` returns 0, and the harness enters Start only when the
+code is `-45061` or `ADI_FORCE_START=1`. The replay already set
+`ADI_TRACE_START_ONLY=1`, but that flag only controls the post-Start
+network/trace branch; it does not force entry into Start.
+
+The workflow now sets `ADI_FORCE_START=1` for each offline warm-state
+replay and unsets it afterwards. This preserves the completed state while
+making the intended Start transform execute. Each replay logs whether it
+produced a non-empty CPIM; the manifest still records both return codes,
+output lengths/hashes and byte-difference summary. This is a source-level
+correction only: the warm-state experiment has not yet run because the
+age-recipient Actions variable is not configured.
