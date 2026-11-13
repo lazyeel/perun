@@ -189,6 +189,12 @@ static size_t wr_cb(void *p, size_t sz, size_t nm, void *ud) {
     return sz * nm;
 }
 
+/* GDB-visible phase marker for the separate lifecycle trace. Values:
+ * 0 setup, 1 ProvisioningStart, 2 ProvisioningEnd,
+ * 3 post-End login-code check, 4 OTPRequest.
+ */
+volatile int g_adi_phase = 0;
+
 static char g_uuid[64], g_lu[80], g_srl[24];
 static char g_adi_ident[8];
 
@@ -737,6 +743,7 @@ int main(int argc, char **argv) {
             save_prov_pair(spim_buf, spim_n);
             extern void ww_finish(const uint8_t *, uint32_t);
 #endif
+            g_adi_phase = 1;
             rc = pStart(DS_ID, spim_buf, (uint32_t)spim_n, &cpim, &cpim_n, &session);
             capture_blob("provisioning-start-rc.bin", &rc, sizeof rc);
             capture_blob("spim.bin", spim_buf, spim_n);
@@ -791,6 +798,7 @@ int main(int argc, char **argv) {
          * envelope's OUT slot, swapped in wrap_vdfut when it is still NULL. */
         extern void ww_finish(const uint8_t *, uint32_t);
 #endif
+        g_adi_phase = 1;
         rc = pStart(DS_ID, spim, (uint32_t)spim_n, &cpim, &cpim_n, &session);
         capture_blob("provisioning-start-rc.bin", &rc, sizeof rc);
         capture_blob("session.bin", &session, sizeof session);
@@ -828,12 +836,14 @@ int main(int argc, char **argv) {
         capture_blob("ptm.bin", ptm, ptm_n);
         capture_blob("tk.bin", tk, tk_n);
         capture_state("adi-state-before-end.bin");
+        g_adi_phase = 2;
         rc = pEnd(session, ptm, (uint32_t)ptm_n, tk, (uint32_t)tk_n);
         capture_blob("provisioning-end-rc.bin", &rc, sizeof rc);
         capture_state("adi-state-after-end.bin");
         if (rc != 0) die("ADIProvisioningEnd=%d", rc);
         info("prov", "PROVISIONING COMPLETE");
 
+        g_adi_phase = 3;
         code = pCode(DS_ID);
         capture_blob("login-code-after-end.bin", &code, sizeof code);
         info("adi", "re-check ADIGetLoginCode=%d", code);
@@ -847,6 +857,7 @@ int main(int argc, char **argv) {
     struct timespec otp_time_before = {0}, otp_time_after = {0};
     (void)clock_gettime(CLOCK_REALTIME, &otp_time_before);
     capture_blob("otp-time-before.bin", &otp_time_before, sizeof otp_time_before);
+    g_adi_phase = 4;
     rc = pOTP(DS_ID, &mid, &mid_n, &otp, &otp_n);
     capture_blob("otp-request-rc.bin", &rc, sizeof rc);
     if (rc != 0) die("ADIOTPRequest=%d", rc);
