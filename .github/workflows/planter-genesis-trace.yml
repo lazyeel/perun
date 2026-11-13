@@ -23,6 +23,11 @@ on:
       - tools/adi_lifecycle_trace_gdb.py
       - .github/workflows/planter-genesis-trace.yml
   workflow_dispatch:
+    inputs:
+      age_recipient:
+        description: "age public recipient (age1...); keep its private key offline"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -34,11 +39,11 @@ concurrency:
 jobs:
   trace:
     # The raw capture job is disabled until the public age recipient is configured.
-    if: ${{ vars.ADI_CAPTURE_AGE_RECIPIENT != '' }}
+    if: ${{ vars.ADI_CAPTURE_AGE_RECIPIENT != '' || inputs.age_recipient != '' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     env:
-      ADI_CAPTURE_AGE_RECIPIENT: ${{ vars.ADI_CAPTURE_AGE_RECIPIENT }}
+      ADI_CAPTURE_AGE_RECIPIENT: ${{ inputs.age_recipient || vars.ADI_CAPTURE_AGE_RECIPIENT }}
     steps:
       - name: Checkout research branch
         uses: actions/checkout@v4
@@ -351,11 +356,12 @@ jobs:
           export GDB_SCRIPT="$GITHUB_WORKSPACE/tools/adi_lifecycle_trace_gdb.py"
           export ADI_LIFECYCLE_TRACE_LOG="$WORK/full-adi-capture/adi-lifecycle.trace"
           export ADI_LIFECYCLE_ARGS_LOG="$WORK/full-adi-capture/adi-lifecycle-args.jsonl"
+          export ADI_OTP_REPEAT_PROBE=1
           export ADI_CAPTURE_DIR="$WORK/full-adi-capture"
           export ADI_STATE_FILE="$WORK/adi-data/adi.pb"
           echo "Running a separate full Bionic provisioning + OTP control under the lightweight lifecycle tracer."
           set +e
-          timeout --signal=TERM --kill-after=5s 90s bash "$GITHUB_WORKSPACE/crates/perun-cli/examples/adi-android/run-native.sh" \
+          timeout --signal=TERM --kill-after=5s 180s bash "$GITHUB_WORKSPACE/crates/perun-cli/examples/adi-android/run-native.sh" \
             > "$WORK/full-cycle-console.log" 2>&1
           FULL_CYCLE_RC=$?
           set -e

@@ -5051,3 +5051,23 @@ produced a non-empty CPIM; the manifest still records both return codes,
 output lengths/hashes and byte-difference summary. This is a source-level
 correction only: the warm-state experiment has not yet run because the
 age-recipient Actions variable is not configured.
+
+
+### Repeated OTP differential capture and manual encrypted dispatch
+
+The full-lifecycle harness now supports an opt-in repeated OTP probe via
+`ADI_OTP_REPEAT_PROBE=1`. After the primary OTP output it performs four
+additional OTPRequest calls against the same persisted state and identity:
+an immediate repeat, then samples after approximately +1 s, +31 s and +62 s
+relative to the primary call. Each sample privately captures return code,
+MID, OTP, realtime timestamps immediately before/after, and state snapshots
+before/after. The four samples are fingerprinted in the public manifest;
+raw outputs remain inside the age-encrypted capture. The 180-second lifecycle
+timeout covers the additional wait. This is a probe design, not a measured
+result until the encrypted workflow succeeds.
+
+The workflow_dispatch form accepts an `age_recipient` input as an alternative
+to the repository Actions variable. The owner can supply only the public
+recipient at manual dispatch; its private key remains local/offline.
+Automatic push-triggered runs still skip unless the repository variable
+is set.

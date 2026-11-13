@@ -71,6 +71,15 @@ class CaptureManifestTests(unittest.TestCase):
             ):
                 (lifecycle / name).write_bytes(payload)
             (work / "adi-data" / "adi.pb").write_bytes(b"private adi.pb")
+            for sample in range(1, 5):
+                for suffix in (
+                    "rc", "time-before", "mid", "otp", "time-after",
+                    "state-before", "state-after",
+                ):
+                    (lifecycle / f"otp-repeat-{sample:02d}-{suffix}.bin").write_bytes(
+                        b"private " + suffix.encode("ascii")
+                    )
+            (lifecycle / "adi-state-after-otp-probes.bin").write_bytes(b"private final state")
             (lifecycle / "adi-lifecycle-args.jsonl").write_text(
                 '{"opcode":"0x3e58e7f9","registers":{"rsi":"0x1234"},"memory":{"rsi":"private MID"}}\n',
                 encoding="ascii",
@@ -154,6 +163,10 @@ class CaptureManifestTests(unittest.TestCase):
             lifecycle_artifacts = {item["label"]: item for item in lifecycle_group["artifacts"]}
             self.assertTrue(lifecycle_artifacts["otp.bin"]["present"])
             self.assertTrue(lifecycle_artifacts["adi-state-after-end.bin"]["present"])
+            for sample in range(1, 5):
+                self.assertTrue(lifecycle_artifacts[f"otp-repeat-{sample:02d}-mid.bin"]["present"])
+                self.assertTrue(lifecycle_artifacts[f"otp-repeat-{sample:02d}-otp.bin"]["present"])
+            self.assertTrue(lifecycle_artifacts["adi-state-after-otp-probes.bin"]["present"])
             trace = lifecycle_group["trace"]
             self.assertTrue(trace["artifact"]["present"])
             self.assertTrue(trace["argument_capture"]["present"])

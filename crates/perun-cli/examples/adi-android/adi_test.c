@@ -477,6 +477,65 @@ static void capture_state(const char *name) {
     capture_file(name, (path && *path) ? path : "adi-data/adi.pb");
 }
 
+static void otp_probe_capture(unsigned sample, const char *field,
+                              const void *data, size_t size) {
+    char name[96];
+    int n = snprintf(name, sizeof name, "otp-repeat-%02u-%s.bin", sample, field);
+    if (n <= 0 || n >= (int)sizeof name) die("OTP probe filename overflow");
+    capture_blob(name, data, size);
+}
+
+static void sleep_milliseconds(unsigned milliseconds) {
+    struct timespec remaining = {
+        .tv_sec = (time_t)(milliseconds / 1000U),
+        .tv_nsec = (long)(milliseconds % 1000U) * 1000000L,
+    };
+    while (nanosleep(&remaining, &remaining) != 0) {
+        if (errno == EINTR) continue;
+        die("OTP probe nanosleep failed: %s", strerror(errno));
+    }
+}
+
+static void run_otp_probe_sample(ADI_OTPRequest_t pOTP, ADI_Dispose_t pDisp,
+                                 unsigned sample, unsigned delay_ms) {
+    if (delay_ms) sleep_milliseconds(delay_ms);
+
+    char state_name[96];
+    int n = snprintf(state_name, sizeof state_name,
+                     "otp-repeat-%02u-state-before.bin", sample);
+    if (n <= 0 || n >= (int)sizeof state_name) die("OTP probe state filename overflow");
+    capture_state(state_name);
+
+    struct timespec before = {0}, after = {0};
+    if (clock_gettime(CLOCK_REALTIME, &before) != 0)
+        die("OTP probe clock_gettime(before) failed: %s", strerror(errno));
+    otp_probe_capture(sample, "time-before", &before, sizeof before);
+
+    uint8_t *mid = NULL, *otp = NULL;
+    uint32_t mid_n = 0, otp_n = 0;
+    g_adi_phase = 4;
+    int rc = pOTP(DS_ID, &mid, &mid_n, &otp, &otp_n);
+    otp_probe_capture(sample, "rc", &rc, sizeof rc);
+    if (rc != 0) die("ADIOTPRequest probe sample %u failed: %d", sample, rc);
+    if (!mid || !otp || mid_n == 0 || otp_n == 0)
+        die("ADIOTPRequest probe sample %u returned an empty buffer", sample);
+    otp_probe_capture(sample, "mid", mid, mid_n);
+    otp_probe_capture(sample, "otp", otp, otp_n);
+
+    if (clock_gettime(CLOCK_REALTIME, &after) != 0)
+        die("OTP probe clock_gettime(after) failed: %s", strerror(errno));
+    otp_probe_capture(sample, "time-after", &after, sizeof after);
+    n = snprintf(state_name, sizeof state_name,
+                 "otp-repeat-%02u-state-after.bin", sample);
+    if (n <= 0 || n >= (int)sizeof state_name) die("OTP probe state filename overflow");
+    capture_state(state_name);
+
+    info("otp-probe", "sample %u complete (MID=%u, OTP=%u, delay=%u ms)",
+         sample, mid_n, otp_n, delay_ms);
+    pDisp(mid);
+    pDisp(otp);
+}
+
 
 #ifdef DUMP_ADI
 /* ── SPIM/CPIM capture (DUMP_ADI builds only) ─────────────────────────────── */
@@ -866,6 +925,16 @@ int main(int argc, char **argv) {
     (void)clock_gettime(CLOCK_REALTIME, &otp_time_after);
     capture_blob("otp-time-after.bin", &otp_time_after, sizeof otp_time_after);
     capture_state("adi-state-after-otp.bin");
+
+    /* Optional same-state OTP differential: immediate, +1 s, +31 s, +62 s.
+     * This is opt-in because it deliberately waits just over one minute. */
+    const char *otp_probe_env = getenv("ADI_OTP_REPEAT_PROBE");
+    if (otp_probe_env && strcmp(otp_probe_env, "1") == 0) {
+        static const unsigned delays_ms[] = {0, 1000, 30000, 31000};
+        for (unsigned i = 0; i < sizeof delays_ms / sizeof delays_ms[0]; i++)
+            run_otp_probe_sample(pOTP, pDisp, i + 1, delays_ms[i]);
+        capture_state("adi-state-after-otp-probes.bin");
+    }
 
     char *mid_b64 = b64_encode(mid, mid_n);
     char *otp_b64 = b64_encode(otp, otp_n);

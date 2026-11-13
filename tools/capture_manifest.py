@@ -384,6 +384,15 @@ def build_manifest(
         "adi-lifecycle-args.jsonl",
         "adi-state-after-otp.bin.status",
     )
+    lifecycle_names += tuple(
+        f"otp-repeat-{sample:02d}-{suffix}.bin"
+        for sample in range(1, 5)
+        for suffix in (
+            "rc", "time-before", "mid", "otp", "time-after",
+            "state-before", "state-after",
+        )
+    )
+    lifecycle_names += ("adi-state-after-otp-probes.bin",)
     full_lifecycle = {
         "process_role": "separate native Bionic full provisioning and OTP control",
         "exit_code": read_text(work / "full-cycle-exit-code.txt"),
