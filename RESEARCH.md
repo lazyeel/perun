@@ -5140,3 +5140,14 @@ The scan records file offsets, not ELF RVAs or runtime addresses. A complete
 broadcast constants, but still would not prove call reachability from
 OTPRequest. The independent workflow has been added to source; its first
 run is the actual measurement gate.
+
+
+### ELF location metadata added to fold signature scan
+
+The first independent scan found one repeated 16-byte constant vector at two
+low file offsets. The scanner now maps every full-vector hit through the
+ELF section table and PT_LOAD program headers, recording its section-relative
+offset and ELF virtual address. This is necessary to distinguish a meaningful
+read-only data hit from an incidental occurrence in symbols, relocations or
+other metadata. The next scan will establish the location class; file offsets
+alone are not a semantic match.

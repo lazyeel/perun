@@ -43,6 +43,33 @@ class FoldConstantScanTests(unittest.TestCase):
         self.assertEqual(result["constants"][1]["scalar_offsets"], ["0x1c"])
         self.assertIn("do not prove", result["interpretation"])
 
+    def test_elf_offset_mapping_identifies_section_and_load_address(self):
+        image = bytearray(320)
+        image[:4] = b"\\x7fELF"
+        image[4:6] = b"\\x02\\x01"
+        struct.pack_into("<Q", image, 32, 64)    # e_phoff
+        struct.pack_into("<Q", image, 40, 120)   # e_shoff
+        struct.pack_into("<HH", image, 54, 56, 1)
+        struct.pack_into("<HHH", image, 58, 64, 3, 2)
+
+        # One PT_LOAD maps file offset 0 -> ELF virtual address 0x1000.
+        struct.pack_into("<IIQQQQQQ", image, 64, 1, 5, 0, 0x1000, 0, 320, 320, 0x1000)
+
+        # Section 1 is .rodata at file offset 256 / ELF VA 0x1100.
+        struct.pack_into("<IIQQQQIIQQ", image, 120 + 64,
+                         1, 1, 2, 0x1100, 256, 16, 0, 0, 8, 0)
+        # Section 2 is the section-name string table at 272.
+        struct.pack_into("<IIQQQQIIQQ", image, 120 + 128,
+                         9, 3, 0, 0, 272, 17, 0, 0, 1, 0)
+        image[272:289] = b"\\x00.rodata\\x00.shstrtab\\x00"
+
+        mapped = elf_locations(bytes(image), 260)
+        self.assertEqual(mapped["section"]["name"], ".rodata")
+        self.assertEqual(mapped["section"]["section_offset"], "0x4")
+        self.assertEqual(mapped["section"]["elf_vaddr"], "0x1104")
+        self.assertEqual(mapped["segments"][0]["type"], "PT_LOAD")
+        self.assertEqual(mapped["segments"][0]["elf_vaddr"], "0x1104")
+
 
 if __name__ == "__main__":
     unittest.main()

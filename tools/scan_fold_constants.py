@@ -41,6 +41,92 @@ def find_all(data: bytes, needle: bytes, limit: int = 16) -> list[int]:
     return offsets
 
 
+
+
+def elf_locations(image: bytes, file_offset: int) -> dict[str, Any]:
+    """Map a file offset to its ELF section and PT_LOAD virtual address."""
+    if len(image) < 64 or image[:4] != b"\\x7fELF" or image[4:6] != b"\\x02\\x01":
+        return {"section": None, "section_offset": None, "segments": []}
+
+    try:
+        phoff = struct.unpack_from("<Q", image, 32)[0]
+        shoff = struct.unpack_from("<Q", image, 40)[0]
+        phentsize, phnum = struct.unpack_from("<HH", image, 54)
+        shentsize, shnum, shstrndx = struct.unpack_from("<HHH", image, 58)
+    except struct.error:
+        return {"section": None, "section_offset": None, "segments": []}
+
+    def section(index: int) -> tuple[int, int, int, int, int] | None:
+        if index < 0 or index >= shnum or shentsize < 64:
+            return None
+        off = shoff + index * shentsize
+        if off + 64 > len(image):
+            return None
+        try:
+            name, stype, flags, addr, offset, size, *_ = struct.unpack_from(
+                "<IIQQQQIIQQ", image, off
+            )
+        except struct.error:
+            return None
+        return name, stype, flags, addr, offset, size
+
+    string_section = section(shstrndx)
+    string_table = b""
+    if string_section is not None:
+        _, stype, _, _, offset, size = string_section
+        if stype != 8 and offset + size <= len(image):
+            string_table = image[offset:offset + size]
+
+    def section_name(name_offset: int) -> str | None:
+        if name_offset >= len(string_table):
+            return None
+        end = string_table.find(b"\\x00", name_offset)
+        if end < 0:
+            return None
+        return string_table[name_offset:end].decode("ascii", "replace")
+
+    section_match = None
+    for index in range(shnum):
+        row = section(index)
+        if row is None:
+            continue
+        name, stype, flags, addr, offset, size = row
+        if stype != 8 and size > 0 and offset <= file_offset < offset + size:
+            section_match = {
+                "name": section_name(name),
+                "file_offset": f"0x{offset:x}",
+                "section_offset": f"0x{file_offset - offset:x}",
+                "elf_vaddr": f"0x{addr + file_offset - offset:x}",
+                "flags": f"0x{flags:x}",
+            }
+            break
+
+    segments = []
+    if phentsize >= 56:
+        for index in range(phnum):
+            off = phoff + index * phentsize
+            if off + 56 > len(image):
+                break
+            try:
+                ptype, pflags, poff, vaddr, _paddr, filesz, _memsz, _align = (
+                    struct.unpack_from("<IIQQQQQQ", image, off)
+                )
+            except struct.error:
+                break
+            if poff <= file_offset < poff + filesz:
+                segments.append({
+                    "type": "PT_LOAD" if ptype == 1 else f"PT_{ptype}",
+                    "flags": f"0x{pflags:x}",
+                    "elf_vaddr": f"0x{vaddr + file_offset - poff:x}",
+                    "file_offset": f"0x{poff:x}",
+                })
+
+    return {
+        "section": section_match,
+        "section_offset": section_match["section_offset"] if section_match else None,
+        "segments": segments,
+    }
+
 def scan_image(image: bytes, constants: list[tuple[str, int]]) -> dict[str, Any]:
     rows = []
     broadcast_found = 0
@@ -56,6 +142,10 @@ def scan_image(image: bytes, constants: list[tuple[str, int]]) -> dict[str, Any]
             "name": name,
             "value": f"0x{value:08x}",
             "broadcast_offsets": [f"0x{x:x}" for x in broadcast_offsets],
+            "broadcast_locations": [
+                {"file_offset": f"0x{x:x}", **elf_locations(image, x)}
+                for x in broadcast_offsets
+            ],
             "broadcast_match_count_capped": len(broadcast_offsets),
             "scalar_offsets": [f"0x{x:x}" for x in scalar_offsets],
             "scalar_match_count_capped": len(scalar_offsets),
