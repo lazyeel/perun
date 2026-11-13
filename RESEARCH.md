@@ -4980,13 +4980,16 @@ from the event count rather than presenting them as missing calls.
 
 ### New private acquisition path (source change; not yet measured)
 
-The lifecycle GDB tracer supports opt-in argument capture for phases
-Start, End and OTP. For each vdfut dispatch it records the opcode, PC,
-candidate SysV argument registers (`rsi`, `rdx`, `rcx`, `r8`, `r9`),
+The lifecycle GDB tracer supports opt-in argument capture only for
+ProvisioningEnd (`0x0b2b3196`) and the OTP dispatches
+(`0xcfe0b46a`, `0x3e58e7f9`). It records the opcode, PC, candidate
+SysV argument registers (`rsi`, `rdx`, `rcx`, `r8`, `r9`),
 stack head and bounded reads (up to 256 B per candidate pointer, 128 B
-for the stack). These are not ABI assertions; the capture is a working
-set for subsequent def-use analysis. The JSONL capture is private and
-must be age-encrypted before upload.
+for the stack). It deliberately does not dump every vdfut dispatch in
+Start/End/OTP: that would create large, mostly irrelevant captures and
+obscure the repeated OTP operation. These are not ABI assertions; the
+capture is a working set for subsequent def-use analysis. The JSONL
+capture is private and must be age-encrypted before upload.
 
 The runner supports `ADI_STRACE_LOG_PREFIX`, wrapping only the native
 ADI inferior when GDB is disabled. The trace filters syscall names to
