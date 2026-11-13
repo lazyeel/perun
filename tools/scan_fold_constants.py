@@ -45,7 +45,7 @@ def find_all(data: bytes, needle: bytes, limit: int = 16) -> list[int]:
 
 def elf_locations(image: bytes, file_offset: int) -> dict[str, Any]:
     """Map a file offset to its ELF section and PT_LOAD virtual address."""
-    if len(image) < 64 or image[:4] != b"\\x7fELF" or image[4:6] != b"\\x02\\x01":
+    if len(image) < 64 or image[:4] != b"\x7fELF" or image[4:6] != b"\x02\x01":
         return {"section": None, "section_offset": None, "segments": []}
 
     try:
@@ -56,7 +56,7 @@ def elf_locations(image: bytes, file_offset: int) -> dict[str, Any]:
     except struct.error:
         return {"section": None, "section_offset": None, "segments": []}
 
-    def section(index: int) -> tuple[int, int, int, int, int] | None:
+    def section(index: int) -> tuple[int, int, int, int, int, int] | None:
         if index < 0 or index >= shnum or shentsize < 64:
             return None
         off = shoff + index * shentsize
@@ -80,7 +80,7 @@ def elf_locations(image: bytes, file_offset: int) -> dict[str, Any]:
     def section_name(name_offset: int) -> str | None:
         if name_offset >= len(string_table):
             return None
-        end = string_table.find(b"\\x00", name_offset)
+        end = string_table.find(b"\x00", name_offset)
         if end < 0:
             return None
         return string_table[name_offset:end].decode("ascii", "replace")
