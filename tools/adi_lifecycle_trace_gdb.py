@@ -44,7 +44,13 @@ API_PHASES = {
     "aslgmuibau": 3,  # GetLoginCode
     "qi864985u0": 4,  # OTPRequest
 }
-STATE = {"vdfut": 0, "cvu": 0, "api": 0, "last_api_phase": 0}
+STATE = {
+    "vdfut": 0,
+    "cvu": 0,
+    "api": 0,
+    "last_api_phase": 0,
+    "login_code_calls": 0,
+}
 
 
 def emit(kind: str, phase: int, detail: str) -> None:
@@ -96,7 +102,13 @@ class ExportBreakpoint(gdb.Breakpoint):
     def stop(self) -> bool:
         phase = read_int("g_adi_phase")
         if phase < 0:
-            phase = API_PHASES.get(self.symbol, -1)
+            if self.symbol == "aslgmuibau":
+                # adi_test.c checks login status once before configuration
+                # and once after SetAndroidID; the third call follows End.
+                STATE["login_code_calls"] += 1
+                phase = 3 if STATE["login_code_calls"] >= 3 else 0
+            else:
+                phase = API_PHASES.get(self.symbol, -1)
         STATE["last_api_phase"] = phase
         STATE["api"] += 1
         emit("api", phase, self.symbol)
