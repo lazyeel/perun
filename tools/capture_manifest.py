@@ -115,7 +115,7 @@ def summarize_lifecycle_trace(path: Path) -> dict[str, Any]:
     if not result["present"]:
         return result
 
-    phase_pattern = re.compile(r"phase=(\d+)\s+phase_name=([a-z0-9_]+)\s+")
+    phase_pattern = re.compile(r"phase=(-?\d+)\s+phase_name=([a-z0-9_]+)\s+")
     opcode_pattern = re.compile(r"opcode=(0x[0-9a-fA-F]{1,8})")
     api_pattern = re.compile(r"api=([A-Za-z0-9_]+)")
     cvu_pattern = re.compile(r"coreadi_init=([A-Za-z0-9_]+)")
