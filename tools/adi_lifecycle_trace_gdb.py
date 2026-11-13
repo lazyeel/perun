@@ -79,9 +79,20 @@ def read_int(expression: str, default: int = -1) -> int:
         return default
 
 
+# Argument snapshots are limited to the End opcode and the three OTP
+# dispatches. Capturing every vdfut entry in these phases would produce large,
+# mostly irrelevant traces and obscure the two repeated OTP operations.
+CAPTURE_ARGUMENT_OPCODES = {
+    0x0B2B3196,  # ProvisioningEnd
+    0xCFE0B46A,  # OTPRequest stage 0
+    0x3E58E7F9,  # OTPRequest repeated stage
+}
+
+
 def capture_opcode_arguments(phase: int, opcode: int) -> None:
-    """Capture bounded candidate ABI state to a private JSONL file."""
-    if ARGS_FD is None or phase not in (1, 2, 4):
+    """Capture bounded candidate ABI state for selected private opcodes."""
+    if (ARGS_FD is None or phase not in (2, 4)
+            or opcode not in CAPTURE_ARGUMENT_OPCODES):
         return
 
     names = ("rsi", "rdx", "rcx", "r8", "r9", "rsp")
