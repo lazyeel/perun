@@ -4706,3 +4706,200 @@ The next state experiment must explicitly compare a real completed
 provisioning state against the empty start-only state, while independently
 verifying the exact path passed to `ADI_SetProvisioningPath`. A
 non-record trace should separately establish the full mixer/return path.
+
+
+## 2026-11-13 — Full Anisette lifecycle capture and strategy correction
+
+### Full provisioning lifecycle is now captured in one Bionic process
+
+The Android harness gained an opt-in private capture path via
+`ADI_CAPTURE_DIR`. It records, in one process and one session:
+
+- device identity, SPIM, CPIM, ProvisioningStart return code and session;
+- decoded `ptm` and `tk` from Apple's finish response;
+- state-file presence/content before and after `ADI_ProvisioningEnd`;
+- `ADI_GetLoginCode` after End;
+- state-file snapshots and wall-clock samples around `ADI_OTPRequest`;
+- the returned MID and OTP buffers.
+
+The private capture directory is created with mode 0700 and individual
+capture files with mode 0600; file creation uses `openat(O_NOFOLLOW)`.
+The workflow does not upload or commit these raw captures. The public
+manifest contains only file sizes, SHA-256 fingerprints and presence
+statuses. This is a provenance/fingerprinting control, not a claim that
+hashes authenticate the Apple protocol.
+
+The distinction between the ADI exports is now explicit in the harness:
+
+- `rsegvyrt87` — `ADI_ProvisioningStart`, consumes SPIM and returns CPIM/session;
+- `uv5t6nhkui` — `ADI_ProvisioningEnd`, consumes session + ptm + tk and persists provisioning state;
+- `aslgmuibau` — `ADI_GetLoginCode`, reports provisioning status; it does not generate the Anisette headers;
+- `qi864985u0` — `ADI_OTPRequest`, returns the MID and OTP buffers used as
+  `X-Apple-I-MD-M` and `X-Apple-I-MD`, respectively.
+
+The earlier shorthand that attributed header generation to GetLoginCode
+was incorrect. `ADI_GetLoginCode == 0` is a provisioning-state check, not
+an Anisette token.
+
+### Native full-cycle controls
+
+The specialized workflow run `43440435932` (trace run #111) completed
+the entire live sequence with exit code 0. In that single Bionic process:
+
+| Capture | Measured size |
+|---|---:|
+| SPIM | 347 bytes |
+| CPIM | 276 bytes |
+| ptm | 487 bytes |
+| tk | 16 bytes |
+| adi.pb after End | 620 bytes |
+| MID / `X-Apple-I-MD-M` | 60 bytes |
+| OTP / `X-Apple-I-MD` | 28 bytes |
+
+ProvisioningStart, ProvisioningEnd and OTPRequest returned 0; the
+post-End GetLoginCode check returned 0. The state file was absent before
+End, present after End, and its fingerprint was identical immediately
+before and after OTPRequest. Thus this run shows that End creates the
+persistent state and OTPRequest did not modify that state file. It does
+not show that OTP is a pure function of only the state: time and identity
+remain candidate inputs and have not yet been controlled.
+
+A second full lifecycle ran under the lightweight GDB setup in workflow
+run `43442242038` (#116), also with exit code 0. It captured a 347-byte
+SPIM, 276-byte CPIM, 487-byte ptm, 16-byte tk, a 626-byte state file,
+60-byte MID and 28-byte OTP. The before/after OTP state fingerprints
+again matched. The different state-file size across runs is not treated
+as a contradiction: they are distinct provisioning sessions/identities.
+
+The #116 lifecycle trace file was created, but its first public summary
+contained no classified API/opcode events. The initial parser accepted
+only nonnegative phase IDs while the tracer emitted `-1` when a GDB
+symbol lookup failed. This was a tooling defect, not a failed ADI call.
+The parser now accepts negative/unknown phase IDs, and the lifecycle
+tracer falls back to the phase implied by the ADI export being entered.
+A follow-up workflow run is required before claiming that the internal
+Start/End/OTP opcode sequence has been observed. The existence of the
+923-byte #116 trace file alone is not such evidence.
+
+### Planter/mixer observations from the same campaign
+
+The non-record GDB trace in #111 reached all 16 mixer-read sites and
+sampled the live `[rbp-0x30]` object 160 times (16 sites × 10 rounds).
+At every mixer-read sample the slot was the same mapped 0x2700-byte
+object and equalled both `source+0x20` and the writer-base candidate.
+This is a runtime anchor for the object, not proof that every byte in
+the object has already been generated at the earlier source-slot store.
+
+The effective read bases are more specific than the older four-window
+description:
+
+- family reads use planter offsets +0xD60, +0x1A00 and +0x2460;
+- the fourth family's measured reads at the relevant mixer sites resolve
+  to `libCoreADI.so+0x24070`, not to a dynamic read from
+  `planter+0x1390`.
+
+The planter also contains additional byte-aligned 256-byte permutation
+windows at +0x0C50 and +0x1280, in addition to the familiar +0xD60,
++0x1390, +0x1A00, +0x1F30 and +0x2460 windows. Their purpose is not yet
+established; they must not be assigned cryptographic roles from their
+permutation property alone. Run #116 independently re-observed all five
+mixer-facing windows as 256/256 permutations.
+
+The #111 terminal fam1 probe observed store indices 0 and 207 in order.
+It therefore disproves any unqualified assumption that the second store
+must have index 1. The reverse lineage stopped at its hop limit after 59
+steps; no complete fam1 genesis formula follows from this probe.
+
+### CPIM implementation audit — remaining oracle boundaries
+
+The current Android Rust code is not an autonomous SPIM-to-CPIM
+generator. The source audit confirms the following boundaries:
+
+1. `generate_body_from_tapes()` builds Body A from `zone26_tape.txt`,
+   `sel34_tape.txt`, captured zone files and the giant mixer tape.
+   The implemented `selectors()` / `WeaveFeeds` path is exercised by a
+   separate ignored parity test, but it is not called by that production
+   tape assembler.
+2. The state transition that produces the eleven `WeaveFeeds` words
+   between rounds is not implemented. Knowing the per-round selector
+   equations is not enough to compute the next round from SPIM.
+3. Mixer 14 still uses the already-finalized output byte carried in the
+   tape (`if mixer == 13 { Some(inp.mul) }`). Its own pre-tail input and
+   formula remain unverified. Move the capture point before the tail and
+   prove parity before removing this branch.
+4. Digest candidate selection in `generate_digest_from_tapes()` uses
+   the already captured CPIM's four-byte sums to identify candidate
+   register words. The digest arithmetic is implemented, but its word
+   producers are not autonomous; the equality test is oracle-anchored.
+5. `OracleCaptureInputs` copies `session16` and Body B from the reference
+   CPIM. The SPIM is only length-checked by the current packer.
+6. The session/Body-B producer paths and the planter genesis are still
+   open. The capture-backed 276-byte assembly must not be described as
+   autonomous or as a live Apple acceptance test for crate-generated CPIM.
+
+The four fixed-input replay pairs in #111 remain non-deterministic:
+baseline A/B differed in 208 CPIM bytes and frozen A/B in 207; each
+comparison was performed on 276-byte CPIM outputs. The frozen probe
+intercepted gettimeofday once and hit none of its three configured RDTSC
+sites. This cannot identify the source of variation. The associated
+seed came from a start-only workflow and did not represent a completed
+provisioning state. Do not infer `session16 = RNG`, `session16 = h(state)`
+or any other cause until a full-state experiment controls the actual
+syscall/vDSO/time inputs and verifies the path passed to
+`ADI_SetProvisioningPath`.
+
+The helper used by `tools/time_freeze_gdb.py` was also missing:
+`return_from_gettimeofday()` called `ru()` without defining it.
+A scalar GDB-expression reader was added. This repairs the immediate
+NameError, but it does not expand the freeze coverage to getrandom,
+`/dev/urandom`, clock_gettime, time, pid/tid, vDSO calls or ASLR.
+Consequently, the old frozen experiment remains insufficient as a
+causal entropy test.
+
+### Tooling and next verification gates
+
+The repository now has:
+
+- a private full-lifecycle capture path in `adi_test.c`;
+- a fingerprint-only manifest extension and privacy regression tests;
+- an optional low-distortion lifecycle GDB tracer
+  (`tools/adi_lifecycle_trace_gdb.py`);
+- harness phase markers around Start, End, GetLoginCode and OTPRequest;
+- a phase parser that accepts the unknown phase marker;
+- the immediate `ru()` NameError fix in `time_freeze_gdb.py`.
+
+The full lifecycle path and the Rust unit/clippy gate passed in runs
+#111 and #116 / CI #57. The first lifecycle-trace parser result from #116
+was incomplete as described above; the follow-up phase-parser/tracer run
+must be read before treating API/opcode tracing as closed.
+
+The next engineering order is:
+
+1. **OTP lift first.** Use the new full-cycle capture and a verified
+   phase-aware trace to isolate `qi864985u0` on a warm, completed
+   `adi.pb`. Capture multiple timestamps, same-state repeated calls,
+   and state/identity variations. Lift the exact operation to Rust and
+   require byte-for-byte parity for both 60-byte MID and 28-byte OTP.
+   A single output pair is only a fixture, not a derivation.
+2. **ProvisioningEnd next.** Trace `uv5t6nhkui` with the same session,
+   ptm and tk; derive the state transition and writer format. Test Rust
+   state serialization by feeding the Rust-produced state to the oracle
+   OTP path, then compare outputs.
+3. **Start/CPIM in parallel, not as a prerequisite for OTP research.**
+   Replace the per-byte reverse workflow with a whole-function dynamic
+   trace/lift or an equivalent batch def-use approach. Preserve the
+   dispatcher/control-flow route, record more than one SPIM, and
+   differential-test every lifted unit against the binary oracle.
+4. **Close the live verdict gap.** Submit a crate-generated CPIM for a
+   fresh SPIM through the real finish endpoint and record Apple's result.
+   Oracle byte-parity and a successful native Bionic provisioning are
+   not substitutes for an Apple acceptance result for Rust-generated CPIM.
+
+A QEMU TCG plugin is a plausible acquisition tool, not yet a proven
+solution in this repository. Compare it with a native x86_64 ptrace
+recorder against the already working Bionic harness. Start with selective
+instruction/control-flow and memory provenance around the transform,
+then widen only where the trace shows dependencies. One dynamic trace
+covers only the route taken for its inputs; collect additional SPIM/state
+variants for input-dependent paths. Do not build a runtime dependency on
+QEMU: it is an analysis instrument, not part of the desired Rust product.
