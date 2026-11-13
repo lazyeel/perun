@@ -48,6 +48,22 @@ class CaptureManifestTests(unittest.TestCase):
             (work / "adi-data").mkdir()
             (work / "adi-data" / "state.bin").write_bytes(b"state secret")
             (work / "native-exit-code.txt").write_text("0")
+            (work / "full-cycle-exit-code.txt").write_text("0")
+            lifecycle = work / "full-adi-capture"
+            lifecycle.mkdir()
+            for name, payload in (
+                ("device_identity.bin", b"private identity"),
+                ("spim.bin", b"private SPIM"),
+                ("cpim.bin", b"private CPIM"),
+                ("ptm.bin", b"private PTM"),
+                ("tk.bin", b"private TK"),
+                ("mid.bin", b"private MID"),
+                ("otp.bin", b"private OTP"),
+                ("adi-state-after-end.bin", b"private adi.pb"),
+                ("adi-state-after-end.bin.status", b"present"),
+            ):
+                (lifecycle / name).write_bytes(payload)
+            (work / "adi-data" / "adi.pb").write_bytes(b"private adi.pb")
 
             seed = work / "fixed-input-probe" / "seed"
             (seed / "adi-data").mkdir(parents=True)
@@ -97,6 +113,13 @@ class CaptureManifestTests(unittest.TestCase):
             self.assertTrue(groups["native_control"]["artifacts"][0]["present"])
             self.assertEqual(groups["fixed_input_replays"]["spim_source"], "native_control.spim")
             self.assertTrue(groups["fixed_input_replays"]["cpim_segment_diff"]["pairs"]["baseline_repeat"]["equal"])
+            lifecycle_group = groups["full_lifecycle"]
+            self.assertEqual(lifecycle_group["exit_code"], "0")
+            lifecycle_artifacts = {item["label"]: item for item in lifecycle_group["artifacts"]}
+            self.assertTrue(lifecycle_artifacts["otp.bin"]["present"])
+            self.assertTrue(lifecycle_artifacts["adi-state-after-end.bin"]["present"])
+            self.assertIn("ephemeral runner", lifecycle_group["pairing_rule"])
+            self.assertTrue(lifecycle_group["state_directory_after_cycle"]["present"])
             self.assertEqual(groups["gdb_trace"]["metadata"]["tracer_version"], "v33")
             self.assertIn("separate GDB live provisioning process", groups["gdb_trace"]["process_role"])
             self.assertIn("must not be paired", groups["gdb_trace"]["pairing_rule"])
@@ -107,6 +130,9 @@ class CaptureManifestTests(unittest.TestCase):
             self.assertEqual(index_probe["reverse_lineage"]["producers"][0]["rva"], "0xe2432")
             serialized = json.dumps(manifest)
             self.assertNotIn("state secret", serialized)
+            self.assertNotIn("private identity", serialized)
+            self.assertNotIn("private OTP", serialized)
+            self.assertNotIn("private adi.pb", serialized)
             self.assertNotIn(str(work), serialized)
             self.assertFalse(manifest["privacy"]["raw_artifacts_included"])
 
@@ -114,6 +140,8 @@ class CaptureManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             manifest = build_manifest(Path(tmp), "sha", "run")
             self.assertFalse(manifest["capture_groups"]["native_control"]["artifacts"][0]["present"])
+            self.assertIsNone(manifest["capture_groups"]["full_lifecycle"]["exit_code"])
+            self.assertFalse(manifest["capture_groups"]["full_lifecycle"]["artifacts"][0]["present"])
             self.assertFalse(manifest["capture_groups"]["gdb_trace"]["trace_directory_present"])
 
 
