@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -68,17 +69,37 @@ class CaptureManifestTests(unittest.TestCase):
                 ("otp.bin", b"private OTP"),
                 ("adi-state-after-end.bin", b"private adi.pb"),
                 ("adi-state-after-end.bin.status", b"present"),
+                ("adi-state-after-otp.bin", b"private adi.pb"),
             ):
                 (lifecycle / name).write_bytes(payload)
             (work / "adi-data" / "adi.pb").write_bytes(b"private adi.pb")
+            (lifecycle / "otp-time-before.bin").write_bytes(
+                struct.pack("<qq", 1_700_000_000, 100_000_000)
+            )
+            (lifecycle / "otp-time-after.bin").write_bytes(
+                struct.pack("<qq", 1_700_000_000, 120_000_000)
+            )
             for sample in range(1, 5):
+                offset_ns = {1: 150_000_000, 2: 1_150_000_000,
+                             3: 31_150_000_000, 4: 62_150_000_000}[sample]
+                start_ns = 1_700_000_000 * 1_000_000_000 + offset_ns
                 for suffix in (
                     "rc", "time-before", "mid", "otp", "time-after",
                     "state-before", "state-after",
                 ):
-                    (lifecycle / f"otp-repeat-{sample:02d}-{suffix}.bin").write_bytes(
-                        b"private " + suffix.encode("ascii")
-                    )
+                    path = lifecycle / f"otp-repeat-{sample:02d}-{suffix}.bin"
+                    if suffix in ("time-before", "time-after"):
+                        stamp = start_ns + (20_000_000 if suffix == "time-after" else 0)
+                        sec, ns = divmod(stamp, 1_000_000_000)
+                        path.write_bytes(struct.pack("<qq", sec, ns))
+                    elif suffix == "mid":
+                        path.write_bytes(b"private MID" if sample == 1 else f"private MID {sample}".encode())
+                    elif suffix == "otp":
+                        path.write_bytes(b"private OTP" if sample == 1 else f"private OTP {sample}".encode())
+                    elif suffix.startswith("state"):
+                        path.write_bytes(b"private adi.pb")
+                    else:
+                        path.write_bytes(b"\\0\\0\\0\\0")
             (lifecycle / "adi-state-after-otp-probes.bin").write_bytes(b"private final state")
             (lifecycle / "adi-lifecycle-args.jsonl").write_text(
                 '{"opcode":"0x3e58e7f9","registers":{"rsi":"0x1234"},"memory":{"rsi":"private MID"}}\n',
@@ -167,6 +188,14 @@ class CaptureManifestTests(unittest.TestCase):
                 self.assertTrue(lifecycle_artifacts[f"otp-repeat-{sample:02d}-mid.bin"]["present"])
                 self.assertTrue(lifecycle_artifacts[f"otp-repeat-{sample:02d}-otp.bin"]["present"])
             self.assertTrue(lifecycle_artifacts["adi-state-after-otp-probes.bin"]["present"])
+            repeats = lifecycle_group["otp_repeats"]
+            self.assertEqual(repeats["sample_count"], 4)
+            self.assertTrue(repeats["samples"][0]["mid_vs_primary"]["equal"])
+            self.assertTrue(repeats["samples"][0]["otp_vs_primary"]["equal"])
+            self.assertTrue(repeats["samples"][0]["state_before_vs_after"]["equal"])
+            self.assertFalse(repeats["samples"][1]["otp_vs_primary"]["equal"])
+            self.assertEqual(repeats["samples"][0]["offset_from_primary_ms"], 50.0)
+            self.assertEqual(repeats["samples"][2]["offset_from_primary_ms"], 31050.0)
             trace = lifecycle_group["trace"]
             self.assertTrue(trace["artifact"]["present"])
             self.assertTrue(trace["argument_capture"]["present"])

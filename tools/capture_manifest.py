@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import struct
 from pathlib import Path
 from typing import Any
 
@@ -141,6 +142,76 @@ def byte_diff_summary(left: Path, right: Path) -> dict[str, Any]:
         "right_bytes": len(b),
         "changed_bytes": changed + length_delta,
         "length_delta": length_delta,
+    }
+
+
+def timespec_ns(path: Path) -> int | None:
+    """Decode Linux/Android x86_64 timespec; do not publish absolute values."""
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    if len(raw) != 16:
+        return None
+    seconds, nanoseconds = struct.unpack("<qq", raw)
+    if seconds < 0 or not 0 <= nanoseconds < 1_000_000_000:
+        return None
+    return seconds * 1_000_000_000 + nanoseconds
+
+
+def summarize_otp_repeats(root: Path) -> dict[str, Any]:
+    """Compare repeat outputs/state and publish only equality and relative timing."""
+    primary_mid = root / "mid.bin"
+    primary_otp = root / "otp.bin"
+    primary_state = root / "adi-state-after-otp.bin"
+    primary_time = timespec_ns(root / "otp-time-before.bin")
+    samples: list[dict[str, Any]] = []
+
+    for sample in range(1, 5):
+        prefix = root / f"otp-repeat-{sample:02d}"
+        def sample_path(suffix: str) -> Path:
+            return Path(str(prefix) + f"-{suffix}.bin")
+
+        mid_path = sample_path("mid")
+        otp_path = sample_path("otp")
+        state_before = sample_path("state-before")
+        state_after = sample_path("state-after")
+        time_before = timespec_ns(sample_path("time-before"))
+        time_after = timespec_ns(sample_path("time-after"))
+        rc_path = sample_path("rc")
+        required = (
+            mid_path, otp_path, state_before, state_after, rc_path,
+            sample_path("time-before"), sample_path("time-after"),
+        )
+        present = all(p.is_file() and not p.is_symlink() for p in required)
+        any_present = any(p.exists() for p in required)
+        if not present and not any_present:
+            continue
+
+        row: dict[str, Any] = {
+            "sample": sample,
+            "present": present,
+            "mid_vs_primary": byte_diff_summary(primary_mid, mid_path),
+            "otp_vs_primary": byte_diff_summary(primary_otp, otp_path),
+            "state_before_vs_after": byte_diff_summary(state_before, state_after),
+            "state_before_vs_primary_after": byte_diff_summary(primary_state, state_before),
+            "state_after_vs_primary_after": byte_diff_summary(primary_state, state_after),
+            "offset_from_primary_ms": (
+                round((time_before - primary_time) / 1_000_000, 3)
+                if time_before is not None and primary_time is not None else None
+            ),
+            "call_duration_ms": (
+                round((time_after - time_before) / 1_000_000, 3)
+                if time_before is not None and time_after is not None else None
+            ),
+        }
+        samples.append(row)
+
+    return {
+        "enabled": bool(samples),
+        "sample_count": len(samples),
+        "samples": samples,
+        "timing_note": "relative offsets/durations only; absolute clock values are not published",
     }
 
 
@@ -413,6 +484,7 @@ def build_manifest(
             **summarize_lifecycle_trace(lifecycle_root / "adi-lifecycle.trace"),
         },
         "syscall_trace": summarize_syscall_trace(lifecycle_root / "syscalls"),
+        "otp_repeats": summarize_otp_repeats(lifecycle_root),
         "pairing_rule": (
             "All listed lifecycle inputs and outputs are captured by one native "
             "Bionic process. The state snapshots bracket ProvisioningEnd and "

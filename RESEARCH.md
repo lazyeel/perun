@@ -5071,3 +5071,15 @@ to the repository Actions variable. The owner can supply only the public
 recipient at manual dispatch; its private key remains local/offline.
 Automatic push-triggered runs still skip unless the repository variable
 is set.
+
+
+### OTP repeat summaries in the public manifest
+
+The fingerprint-only manifest now derives a redacted summary for each repeated
+OTP call. It reports whether MID and OTP equal the primary output, whether
+the persisted state changed during each call, whether it still matches the
+primary post-OTP state, and relative offset/duration in milliseconds. It does
+not publish raw tokens, identity, state bytes or absolute timestamps. A
+successful run can therefore answer equality/time-window questions from
+the public manifest while the age-encrypted artifact remains available for
+the actual bit-level lift.
