@@ -20,6 +20,7 @@ on:
       - tools/capture_manifest.py
       - tools/cpim_diff_probe.py
       - tools/test_cpim_diff_probe.py
+      - tools/adi_lifecycle_trace_gdb.py
       - .github/workflows/planter-genesis-trace.yml
 
 permissions:
@@ -51,6 +52,7 @@ jobs:
           python3 -m unittest tools.test_cpim_diff_probe -v
           python3 -m py_compile tools/genesis_probe_gdb.py tools/input_probe_gdb.py tools/time_freeze_gdb.py tools/rdtsc_freeze_gdb.py tools/slot_origin_gdb.py
           python3 -m unittest tools/test_planter_trace.py -v
+          python3 -m py_compile tools/adi_lifecycle_trace_gdb.py
 
       - name: Compile and run perun-adi-core tests
         shell: bash
@@ -340,10 +342,12 @@ jobs:
           mkdir -p "$WORK/full-adi-capture"
           chmod 700 "$WORK/full-adi-capture"
           unset ADI_TRACE_START_ONLY ADI_OFFLINE_SPIM ADI_SPIM_OUT ADI_CPIM_OUT ADI_PROBE_LOG
-          export ADI_GDB=0
+          export ADI_GDB=1
+          export GDB_SCRIPT="$GITHUB_WORKSPACE/tools/adi_lifecycle_trace_gdb.py"
+          export ADI_LIFECYCLE_TRACE_LOG="$WORK/full-adi-capture/adi-lifecycle.trace"
           export ADI_CAPTURE_DIR="$WORK/full-adi-capture"
           export ADI_STATE_FILE="$WORK/adi-data/adi.pb"
-          echo "Running a separate full native provisioning + OTP control."
+          echo "Running a separate full Bionic provisioning + OTP control under the lightweight lifecycle tracer."
           set +e
           timeout --signal=TERM --kill-after=5s 90s bash "$GITHUB_WORKSPACE/crates/perun-cli/examples/adi-android/run-native.sh" \
             > "$WORK/full-cycle-console.log" 2>&1
