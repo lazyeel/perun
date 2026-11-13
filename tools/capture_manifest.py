@@ -252,6 +252,53 @@ def build_manifest(
             "sil_producer": sil_producer,
         }
 
+    # Full lifecycle control is intentionally a different process from the
+    # start-only planter trace. Raw token/state bytes remain on the ephemeral
+    # runner; this manifest publishes fingerprints and lengths only.
+    lifecycle_root = work / "full-adi-capture"
+    lifecycle_names = (
+        "device_identity.bin",
+        "spim.bin",
+        "cpim.bin",
+        "provisioning-start-rc.bin",
+        "session.bin",
+        "ptm.bin",
+        "tk.bin",
+        "provisioning-end-rc.bin",
+        "adi-state-before-end.bin",
+        "adi-state-before-end.bin.status",
+        "adi-state-after-end.bin",
+        "adi-state-after-end.bin.status",
+        "login-code-after-end.bin",
+        "adi-state-before-otp.bin",
+        "adi-state-before-otp.bin.status",
+        "otp-time-before.bin",
+        "otp-request-rc.bin",
+        "mid.bin",
+        "otp.bin",
+        "otp-time-after.bin",
+        "adi-state-after-otp.bin",
+        "adi-state-after-otp.bin.status",
+    )
+    full_lifecycle = {
+        "process_role": "separate native Bionic full provisioning and OTP control",
+        "exit_code": read_text(work / "full-cycle-exit-code.txt"),
+        "artifacts": [
+            file_fingerprint(name, lifecycle_root / name)
+            for name in lifecycle_names
+        ],
+        "state_directory_after_cycle": tree_fingerprint(
+            "adi_state_after_full_lifecycle", work / "adi-data"
+        ),
+        "pairing_rule": (
+            "All listed lifecycle inputs and outputs are captured by one native "
+            "Bionic process. The state snapshots bracket ProvisioningEnd and "
+            "OTPRequest. Raw bytes remain on the ephemeral runner; only sizes "
+            "and SHA-256 fingerprints are published. A missing state file is "
+            "reported by its adjacent .status capture."
+        ),
+    }
+
     gdb_trace = {
         "process_role": "separate GDB live provisioning process",
         "metadata": trace_metadata,
@@ -280,10 +327,12 @@ def build_manifest(
             "native_control_exit_code": native["exit_code"],
             "gdb_trace_exit_code": read_text(work / "run-exit-code.txt"),
             "fam1_index1_trace_exit_code": read_text(work / "index1-exit-code.txt"),
+            "full_lifecycle_exit_code": read_text(work / "full-cycle-exit-code.txt"),
         },
         "runtime_fingerprints": runtime,
         "capture_groups": {
             "native_control": native,
+            "full_lifecycle": full_lifecycle,
             "fixed_input_replays": replay,
             "gdb_trace": gdb_trace,
             "fam1_index1_probe": index1_probe,
