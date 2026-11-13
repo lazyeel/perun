@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +101,56 @@ def latest_trace_run(trace_root: Path) -> Path | None:
         return None
     candidates = [item for item in trace_root.glob("run-*") if item.is_dir() and not item.is_symlink()]
     return max(candidates, key=lambda item: item.stat().st_mtime_ns) if candidates else None
+
+
+def summarize_lifecycle_trace(path: Path) -> dict[str, Any]:
+    """Expose only phase labels, API names and vdfut opcodes from the private trace."""
+    result: dict[str, Any] = {
+        "present": path.is_file() and not path.is_symlink(),
+        "opcode_sequence": [],
+        "api_calls": [],
+        "coreadi_init_calls": [],
+        "unclassified_lines": 0,
+    }
+    if not result["present"]:
+        return result
+
+    phase_pattern = re.compile(r"phase=(\d+)\s+phase_name=([a-z0-9_]+)\s+")
+    opcode_pattern = re.compile(r"opcode=(0x[0-9a-fA-F]{1,8})")
+    api_pattern = re.compile(r"api=([A-Za-z0-9_]+)")
+    cvu_pattern = re.compile(r"coreadi_init=([A-Za-z0-9_]+)")
+    for line in path.read_text(encoding="ascii", errors="replace").splitlines():
+        phase_match = phase_pattern.search(line)
+        if not phase_match:
+            if line and not line.startswith("trace="):
+                result["unclassified_lines"] += 1
+            continue
+        phase_id = int(phase_match.group(1))
+        phase_name = phase_match.group(2)
+        opcode_match = opcode_pattern.search(line)
+        api_match = api_pattern.search(line)
+        cvu_match = cvu_pattern.search(line)
+        if opcode_match:
+            result["opcode_sequence"].append({
+                "phase_id": phase_id,
+                "phase": phase_name,
+                "opcode": opcode_match.group(1).lower(),
+            })
+        elif api_match:
+            result["api_calls"].append({
+                "phase_id": phase_id,
+                "phase": phase_name,
+                "name": api_match.group(1),
+            })
+        elif cvu_match:
+            result["coreadi_init_calls"].append({
+                "phase_id": phase_id,
+                "phase": phase_name,
+                "name": cvu_match.group(1),
+            })
+        else:
+            result["unclassified_lines"] += 1
+    return result
 
 
 def build_manifest(
@@ -278,6 +329,7 @@ def build_manifest(
         "otp.bin",
         "otp-time-after.bin",
         "adi-state-after-otp.bin",
+        "adi-lifecycle.trace",
         "adi-state-after-otp.bin.status",
     )
     full_lifecycle = {
@@ -290,6 +342,12 @@ def build_manifest(
         "state_directory_after_cycle": tree_fingerprint(
             "adi_state_after_full_lifecycle", work / "adi-data"
         ),
+        "trace": {
+            "artifact": file_fingerprint(
+                "adi_lifecycle_trace", lifecycle_root / "adi-lifecycle.trace"
+            ),
+            **summarize_lifecycle_trace(lifecycle_root / "adi-lifecycle.trace"),
+        },
         "pairing_rule": (
             "All listed lifecycle inputs and outputs are captured by one native "
             "Bionic process. The state snapshots bracket ProvisioningEnd and "
