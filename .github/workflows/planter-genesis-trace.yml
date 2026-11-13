@@ -326,6 +326,33 @@ jobs:
           fi
           echo "$INDEX1_RC" > "$WORK/index1-exit-code.txt"
           echo "INDEX1_TRACE_RC=$INDEX1_RC" >> "$GITHUB_ENV"
+
+          # Separate complete lifecycle control: unlike every trace above,
+          # this process must run ProvisioningEnd and OTPRequest. The raw
+          # captures are private (0700 directory / 0600 files) and are never
+          # uploaded or committed; capture_manifest publishes hashes/sizes only.
+          FULL_CYCLE_RC=125
+          if [ -d "$PROBE_DIR/seed/adi-data" ] && [ -f "$PROBE_DIR/seed/adi_identifier" ]; then
+            rm -rf "$WORK/adi-data" "$WORK/adi_identifier"
+            cp -a "$PROBE_DIR/seed/adi-data" "$WORK/adi-data"
+            cp -p "$PROBE_DIR/seed/adi_identifier" "$WORK/adi_identifier"
+          fi
+          mkdir -p "$WORK/full-adi-capture"
+          chmod 700 "$WORK/full-adi-capture"
+          unset ADI_TRACE_START_ONLY ADI_OFFLINE_SPIM ADI_SPIM_OUT ADI_CPIM_OUT ADI_PROBE_LOG
+          export ADI_GDB=0
+          export ADI_CAPTURE_DIR="$WORK/full-adi-capture"
+          export ADI_STATE_FILE="$WORK/adi-data/adi.pb"
+          echo "Running a separate full native provisioning + OTP control."
+          set +e
+          timeout --signal=TERM --kill-after=5s 90s bash "$GITHUB_WORKSPACE/crates/perun-cli/examples/adi-android/run-native.sh" \
+            > "$WORK/full-cycle-console.log" 2>&1
+          FULL_CYCLE_RC=$?
+          set -e
+          echo "$FULL_CYCLE_RC" > "$WORK/full-cycle-exit-code.txt"
+          echo "Full provisioning/OTP control exit code: $FULL_CYCLE_RC"
+          echo "FULL_CYCLE_RC=$FULL_CYCLE_RC" >> "$GITHUB_ENV"
+          unset ADI_CAPTURE_DIR ADI_STATE_FILE
           exit 0
 
       - name: Build a privacy-preserving capture manifest
