@@ -380,6 +380,98 @@ static void save_env_blob(const char *env_name, const void *data, size_t n) {
     if (close(fd) != 0) die("%s: private capture close failed", env_name);
 }
 
+/* Optional full-lifecycle capture. Raw outputs stay in a mode-0700 directory;
+ * each file is mode 0600, created with openat(O_NOFOLLOW). Nothing is
+ * uploaded by the workflow: only sizes and SHA-256 fingerprints leave runner.
+ */
+static int g_capture_dirfd = -1;
+
+static void capture_init(void) {
+    const char *dir = getenv("ADI_CAPTURE_DIR");
+    if (!dir || !*dir) return;
+    if (mkdir(dir, 0700) != 0 && errno != EEXIST)
+        die("ADI_CAPTURE_DIR: mkdir failed: %s", strerror(errno));
+    struct stat st;
+    if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid())
+        die("ADI_CAPTURE_DIR must be a directory owned by this process");
+    if (chmod(dir, 0700) != 0)
+        die("ADI_CAPTURE_DIR: chmod failed: %s", strerror(errno));
+    g_capture_dirfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (g_capture_dirfd < 0)
+        die("ADI_CAPTURE_DIR: open failed: %s", strerror(errno));
+}
+
+static void capture_blob(const char *name, const void *data, size_t n) {
+    if (g_capture_dirfd < 0) return;
+    if (!name || !*name || strchr(name, '/') || !strcmp(name, ".") || !strcmp(name, ".."))
+        die("invalid private capture filename");
+    if (!data && n) die("private capture %s has a null buffer", name);
+    int fd = openat(g_capture_dirfd, name,
+                    O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) die("private capture %s: open failed: %s", name, strerror(errno));
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || fchmod(fd, 0600) != 0) {
+        close(fd);
+        die("private capture %s: unsafe output file", name);
+    }
+    size_t off = 0;
+    while (off < n) {
+        ssize_t w = write(fd, (const uint8_t *)data + off, n - off);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) {
+            close(fd);
+            die("private capture %s: write failed: %s", name, strerror(errno));
+        }
+        off += (size_t)w;
+    }
+    if (fsync(fd) != 0 || close(fd) != 0)
+        die("private capture %s: flush/close failed", name);
+}
+
+static void capture_file(const char *name, const char *source_path) {
+    if (g_capture_dirfd < 0) return;
+    int fd = open(source_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    char status_name[160];
+    if (fd < 0) {
+        int n = snprintf(status_name, sizeof status_name, "%s.status", name);
+        if (n <= 0 || n >= (int)sizeof status_name) die("capture status name too long");
+        const char *status = (errno == ENOENT) ? "absent" : strerror(errno);
+        capture_blob(status_name, status, strlen(status));
+        return;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_size < 0 || st.st_size > (16 * 1024 * 1024)) {
+        close(fd);
+        die("private capture source %s is not a bounded regular file", source_path);
+    }
+    size_t size = (size_t)st.st_size;
+    uint8_t *buf = malloc(size ? size : 1);
+    if (!buf) { close(fd); die("out of memory capturing %s", source_path); }
+    size_t off = 0;
+    while (off < size) {
+        ssize_t n = read(fd, buf + off, size - off);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) {
+            free(buf); close(fd);
+            die("private capture source %s: read failed", source_path);
+        }
+        off += (size_t)n;
+    }
+    close(fd);
+    capture_blob(name, buf, size);
+    free(buf);
+    int n = snprintf(status_name, sizeof status_name, "%s.status", name);
+    if (n <= 0 || n >= (int)sizeof status_name) die("capture status name too long");
+    capture_blob(status_name, "present", 7);
+}
+
+static void capture_state(const char *name) {
+    const char *path = getenv("ADI_STATE_FILE");
+    capture_file(name, (path && *path) ? path : "adi-data/adi.pb");
+}
+
+
 #ifdef DUMP_ADI
 /* ── SPIM/CPIM capture (DUMP_ADI builds only) ─────────────────────────────── */
 
@@ -433,6 +525,7 @@ static void load_or_create_identity(void) {
         close(fd);
         info("id", "generated new device identifier");
     } else info("id", "loaded existing device identifier");
+    capture_blob("device_identity.bin", id, sizeof id);
 
     /* Identity per Provision's WORKING retrieve_headers/app.d:
      *   uniqueDeviceIdentifier = randomUUID().toString().toUpper()  -> 36 dashed, X-Mme-Device-Id
@@ -499,8 +592,10 @@ int main(int argc, char **argv) {
         if (!libdir) die("no library kit found (need ./libs or ./libs-classic)");
     }
     curl_global_init(CURL_GLOBAL_DEFAULT);
+    capture_init();
     load_or_create_identity();
     mkdir("adi-data", 0755);
+    capture_state("adi-state-before-start.bin");
 
     /* 1. load the CLASSIC stack (Apple Music <=5.x): libstoreservicescore.so
      * carries the original stable obfuscated exports that Provision maps.
@@ -643,6 +738,10 @@ int main(int argc, char **argv) {
             extern void ww_finish(const uint8_t *, uint32_t);
 #endif
             rc = pStart(DS_ID, spim_buf, (uint32_t)spim_n, &cpim, &cpim_n, &session);
+            capture_blob("provisioning-start-rc.bin", &rc, sizeof rc);
+            capture_blob("spim.bin", spim_buf, spim_n);
+            capture_blob("cpim.bin", cpim, cpim_n);
+            capture_blob("session.bin", &session, sizeof session);
             if (rc != 0) die("ADIProvisioningStart=%d", rc);
             save_env_blob("ADI_CPIM_OUT", cpim, cpim_n);
             info("prov", "cpim ready (%u bytes, session=%u)", cpim_n, session);
@@ -675,6 +774,7 @@ int main(int argc, char **argv) {
         size_t spim_n = 0;
         uint8_t *spim = b64_decode(spim_b64, &spim_n);
         save_env_blob("ADI_SPIM_OUT", spim, spim_n);
+        capture_blob("spim.bin", spim, spim_n);
         info("prov", "spim received (%zu bytes decoded)", spim_n);
 
         uint8_t *cpim = NULL; uint32_t cpim_n = 0; uint32_t session = 0;
@@ -692,8 +792,12 @@ int main(int argc, char **argv) {
         extern void ww_finish(const uint8_t *, uint32_t);
 #endif
         rc = pStart(DS_ID, spim, (uint32_t)spim_n, &cpim, &cpim_n, &session);
-        if (rc == 0 && cpim && cpim_n)
+        capture_blob("provisioning-start-rc.bin", &rc, sizeof rc);
+        capture_blob("session.bin", &session, sizeof session);
+        if (rc == 0 && cpim && cpim_n) {
             save_env_blob("ADI_CPIM_OUT", cpim, cpim_n);
+            capture_blob("cpim.bin", cpim, cpim_n);
+        }
         if (force_start && trace_start_only) {
             info("prov", "TRACE-ONLY start rc=%d cpim_len=%u", rc, cpim_n);
             return 0;
@@ -721,11 +825,17 @@ int main(int argc, char **argv) {
         size_t ptm_n = 0, tk_n = 0;
         uint8_t *ptm = b64_decode(ptm_b64, &ptm_n);
         uint8_t *tk  = b64_decode(tk_b64,  &tk_n);
+        capture_blob("ptm.bin", ptm, ptm_n);
+        capture_blob("tk.bin", tk, tk_n);
+        capture_state("adi-state-before-end.bin");
         rc = pEnd(session, ptm, (uint32_t)ptm_n, tk, (uint32_t)tk_n);
+        capture_blob("provisioning-end-rc.bin", &rc, sizeof rc);
+        capture_state("adi-state-after-end.bin");
         if (rc != 0) die("ADIProvisioningEnd=%d", rc);
         info("prov", "PROVISIONING COMPLETE");
 
         code = pCode(DS_ID);
+        capture_blob("login-code-after-end.bin", &code, sizeof code);
         info("adi", "re-check ADIGetLoginCode=%d", code);
         if (code != 0) die("still not provisioned after successful end()");
     }
@@ -733,8 +843,18 @@ int main(int argc, char **argv) {
     /* 4b. mint one OTP */
     uint8_t *mid = NULL, *otp = NULL;
     uint32_t mid_n = 0, otp_n = 0;
+    capture_state("adi-state-before-otp.bin");
+    struct timespec otp_time_before = {0}, otp_time_after = {0};
+    (void)clock_gettime(CLOCK_REALTIME, &otp_time_before);
+    capture_blob("otp-time-before.bin", &otp_time_before, sizeof otp_time_before);
     rc = pOTP(DS_ID, &mid, &mid_n, &otp, &otp_n);
+    capture_blob("otp-request-rc.bin", &rc, sizeof rc);
     if (rc != 0) die("ADIOTPRequest=%d", rc);
+    capture_blob("mid.bin", mid, mid_n);
+    capture_blob("otp.bin", otp, otp_n);
+    (void)clock_gettime(CLOCK_REALTIME, &otp_time_after);
+    capture_blob("otp-time-after.bin", &otp_time_after, sizeof otp_time_after);
+    capture_state("adi-state-after-otp.bin");
 
     char *mid_b64 = b64_encode(mid, mid_n);
     char *otp_b64 = b64_encode(otp, otp_n);
