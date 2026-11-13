@@ -13,6 +13,11 @@ FROZEN_USEC = 123456
 STATE = {"gt": 0, "poked": 0}
 
 
+def ru(expression):
+    """Read a GDB scalar expression as an unsigned Python integer."""
+    return int(gdb.parse_and_eval(expression))
+
+
 def log(msg):
     with open(LOG, "a") as f:
         f.write(msg + "\n")
