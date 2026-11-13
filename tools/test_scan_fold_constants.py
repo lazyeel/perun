@@ -3,7 +3,7 @@ from __future__ import annotations
 import struct
 import unittest
 
-from tools.scan_fold_constants import extract_constants, scan_image
+from tools.scan_fold_constants import elf_locations, extract_constants, scan_image
 
 
 SOURCE = """
