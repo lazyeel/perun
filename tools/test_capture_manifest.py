@@ -65,12 +65,12 @@ class CaptureManifestTests(unittest.TestCase):
                 (lifecycle / name).write_bytes(payload)
             (work / "adi-data" / "adi.pb").write_bytes(b"private adi.pb")
             (lifecycle / "adi-lifecycle.trace").write_text(
-                "adi lifecycle trace v1\\n"
-                "phase=1 phase_name=provisioning_start api=rsegvyrt87\\n"
-                "phase=1 phase_name=provisioning_start opcode=0x716bd86c\\n"
-                "phase=2 phase_name=provisioning_end api=uv5t6nhkui\\n"
-                "phase=4 phase_name=otp_request api=qi864985u0\\n"
-                "phase=4 phase_name=otp_request opcode=0x12345678\\n",
+                "adi lifecycle trace v1\n"
+                "phase=1 phase_name=provisioning_start api=rsegvyrt87\n"
+                "phase=1 phase_name=provisioning_start opcode=0x716bd86c\n"
+                "phase=2 phase_name=provisioning_end api=uv5t6nhkui\n"
+                "phase=4 phase_name=otp_request api=qi864985u0\n"
+                "phase=4 phase_name=otp_request opcode=0x12345678\n",
                 encoding="ascii",
             )
 
