@@ -497,7 +497,9 @@ static void sleep_milliseconds(unsigned milliseconds) {
 }
 
 static void run_otp_probe_sample(ADI_OTPRequest_t pOTP, ADI_Dispose_t pDisp,
-                                 unsigned sample, unsigned delay_ms) {
+                                 unsigned sample, unsigned delay_ms,
+                                 const uint8_t *primary_mid,
+                                 const uint8_t *primary_otp) {
     if (delay_ms) sleep_milliseconds(delay_ms);
 
     char state_name[96];
@@ -532,8 +534,13 @@ static void run_otp_probe_sample(ADI_OTPRequest_t pOTP, ADI_Dispose_t pDisp,
 
     info("otp-probe", "sample %u complete (MID=%u, OTP=%u, delay=%u ms)",
          sample, mid_n, otp_n, delay_ms);
-    pDisp(mid);
-    pDisp(otp);
+    /* Some engine builds may reuse returned storage across calls.
+     * Keep the primary pair alive for the final banner and dispose each
+     * distinct probe allocation at most once. */
+    if (mid != primary_mid && mid != primary_otp && mid != otp)
+        pDisp(mid);
+    if (otp != primary_mid && otp != primary_otp && otp != mid)
+        pDisp(otp);
 }
 
 
@@ -926,18 +933,20 @@ int main(int argc, char **argv) {
     capture_blob("otp-time-after.bin", &otp_time_after, sizeof otp_time_after);
     capture_state("adi-state-after-otp.bin");
 
+    /* Snapshot the primary output as text before any repeated call can
+     * reuse or mutate the engine-owned MID/OTP buffers. */
+    char *mid_b64 = b64_encode(mid, mid_n);
+    char *otp_b64 = b64_encode(otp, otp_n);
+
     /* Optional same-state OTP differential: immediate, +1 s, +31 s, +62 s.
      * This is opt-in because it deliberately waits just over one minute. */
     const char *otp_probe_env = getenv("ADI_OTP_REPEAT_PROBE");
     if (otp_probe_env && strcmp(otp_probe_env, "1") == 0) {
         static const unsigned delays_ms[] = {0, 1000, 30000, 31000};
         for (unsigned i = 0; i < sizeof delays_ms / sizeof delays_ms[0]; i++)
-            run_otp_probe_sample(pOTP, pDisp, i + 1, delays_ms[i]);
+            run_otp_probe_sample(pOTP, pDisp, i + 1, delays_ms[i], mid, otp);
         capture_state("adi-state-after-otp-probes.bin");
     }
-
-    char *mid_b64 = b64_encode(mid, mid_n);
-    char *otp_b64 = b64_encode(otp, otp_n);
     /* The banner is the whole point of the stand, so it goes out the same way
      * as info(): one formatting pass, then write(2). Four printf() calls look
      * harmless but each takes the stream lock this runtime never releases. */

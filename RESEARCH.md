@@ -5105,3 +5105,19 @@ cross-platform code-path comparison. It would **not** prove that this code is
 called by `0xcfe0b46a` or participates in OTPRequest. Missing exact vectors
 do not rule out equivalent immediates or a different engine build. This is a
 static triage probe, not a portability conclusion.
+
+
+### OTP probe buffer lifetime hardening
+
+A source review identified that repeated OTP calls could theoretically reuse
+the same engine-owned output addresses. The probe previously disposed every
+sample's MID/OTP immediately, while the original pair remained scheduled
+for disposal after the probe and for base64 encoding after the repeated calls.
+That would risk freeing a primary buffer twice or reading it after reuse.
+
+The harness now base64-snapshots the primary 60/28-byte outputs before any
+repeat call. The repeated-sample helper receives the primary pointers and
+does not dispose a pointer that aliases either primary allocation; it also
+avoids double-disposing a sample whose MID and OTP pointers alias. Distinct
+probe allocations are still released after capture. This is defensive
+ownership handling, not evidence that Apple actually reuses the pointers.
