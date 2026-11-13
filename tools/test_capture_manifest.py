@@ -72,7 +72,7 @@ class CaptureManifestTests(unittest.TestCase):
                 (lifecycle / name).write_bytes(payload)
             (work / "adi-data" / "adi.pb").write_bytes(b"private adi.pb")
             (lifecycle / "adi-lifecycle-args.jsonl").write_text(
-                '{"opcode":"0x3e58e7f9","registers":{"rsi":"0x1234"},"memory":{"rsi":"private MID"}}\\n',
+                '{"opcode":"0x3e58e7f9","registers":{"rsi":"0x1234"},"memory":{"rsi":"private MID"}}\n',
                 encoding="ascii",
             )
             (lifecycle / "adi-lifecycle.trace").write_text(
@@ -139,8 +139,8 @@ class CaptureManifestTests(unittest.TestCase):
             (warm / "b.rc").write_text("0")
             (lifecycle / "syscalls").mkdir()
             (lifecycle / "syscalls" / "warm.123").write_text(
-                '1712345678.0 getrandom(0x1234, 0x20, 0) = 32\\n'
-                '1712345678.1 openat(AT_FDCWD, "/dev/urandom", O_RDONLY) = 3\\n',
+                '1712345678.0 getrandom(0x1234, 0x20, 0) = 32\n'
+                '1712345678.1 openat(AT_FDCWD, "/dev/urandom", O_RDONLY) = 3\n',
                 encoding="ascii",
             )
 
@@ -156,6 +156,11 @@ class CaptureManifestTests(unittest.TestCase):
             self.assertTrue(lifecycle_artifacts["adi-state-after-end.bin"]["present"])
             trace = lifecycle_group["trace"]
             self.assertTrue(trace["artifact"]["present"])
+            self.assertTrue(trace["argument_capture"]["present"])
+            warm_group = groups["warm_state_replays"]
+            self.assertTrue(warm_group["state_seed"]["present"])
+            self.assertEqual(warm_group["cpim_diff"]["changed_bytes"], 1)
+            self.assertEqual(warm_group["syscalls"]["calls"], {"getrandom": 1, "openat": 1})
             self.assertTrue(trace["argument_capture"]["present"])
             warm_group = groups["warm_state_replays"]
             self.assertTrue(warm_group["state_seed"]["present"])
@@ -187,6 +192,7 @@ class CaptureManifestTests(unittest.TestCase):
             self.assertNotIn("state secret", serialized)
             self.assertNotIn("private identity", serialized)
             self.assertNotIn("private OTP", serialized)
+            self.assertNotIn("private MID", serialized)
             self.assertNotIn("private adi.pb", serialized)
             self.assertNotIn(str(work), serialized)
             self.assertFalse(manifest["privacy"]["raw_artifacts_included"])
