@@ -5191,3 +5191,20 @@ The machine-readable report is the 30-day Actions artifact
 offsets, ELF section/segment metadata, and the input-library hash.
 The regular CI gate also passed on source revision
 `d7525491f1296d240bb37ade5f4fdab5d956815b` (CI run #82).
+
+
+### Warm-state seed pairing tightened to the exact post-End snapshot
+
+The warm-state replay now seeds its offline Start attempts from the captured
+`adi-state-after-end.bin` and `device_identity.bin` produced by the full
+lifecycle process. It no longer copies the mutable `WORK/adi-data` directory
+after all OTP probes. This preserves the intended experiment boundary:
+the replay state is exactly the persistent state created by End, before the
+primary OTP and four repeated OTP calls. If OTPRequest changes `adi.pb`,
+that mutation will be visible in the per-sample state diffs, but it will not
+silently contaminate the warm Start seed.
+
+This assumes the current captured state directory is represented by the
+single `adi.pb` file; the earlier full-lifecycle manifests report one file.
+If later versions add ancillary state files, the capture helper and replay
+seed must be widened together.

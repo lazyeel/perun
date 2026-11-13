@@ -399,9 +399,13 @@ jobs:
           # Reuse SPIM, completed adi.pb and identity from this exact lifecycle.
           test -s "$CAPTURE/spim.bin"
           test -s "$CAPTURE/adi-state-after-end.bin"
-          test -f "$WORK/adi_identifier"
-          cp -a "$WORK/adi-data" "$SEED/adi-data"
-          cp -p "$WORK/adi_identifier" "$SEED/adi_identifier"
+          test -s "$CAPTURE/device_identity.bin"
+          mkdir -p "$SEED/adi-data"
+          # Seed the exact post-End/pre-OTP state from this lifecycle.
+          # Do not copy WORK/adi-data here: it has already passed through all
+          # repeated OTP probes and could differ if OTP writes persistent state.
+          cp -p "$CAPTURE/adi-state-after-end.bin" "$SEED/adi-data/adi.pb"
+          cp -p "$CAPTURE/device_identity.bin" "$SEED/adi_identifier"
 
           restore_warm_seed() {
             rm -rf "$WORK/adi-data" "$WORK/adi_identifier"
