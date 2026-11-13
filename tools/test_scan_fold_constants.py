@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import struct
 import unittest
 
 from tools.scan_fold_constants import extract_constants, scan_image
@@ -60,8 +61,8 @@ class FoldConstantScanTests(unittest.TestCase):
                          1, 1, 2, 0x1100, 256, 16, 0, 0, 8, 0)
         # Section 2 is the section-name string table at 320.
         struct.pack_into("<IIQQQQIIQQ", image, 120 + 128,
-                         9, 3, 0, 0, 272, 17, 0, 0, 1, 0)
-        image[320:339] = b"\\x00.rodata\\x00.shstrtab\\x00"
+                         9, 3, 0, 0, 320, 19, 0, 0, 1, 0)
+        image[320:339] = b"\x00.rodata\x00.shstrtab\x00"
 
         mapped = elf_locations(bytes(image), 260)
         self.assertEqual(mapped["section"]["name"], ".rodata")
