@@ -5066,11 +5066,15 @@ raw outputs remain inside the age-encrypted capture. The 180-second lifecycle
 timeout covers the additional wait. This is a probe design, not a measured
 result until the encrypted workflow succeeds.
 
-The workflow_dispatch form accepts an `age_recipient` input as an alternative
-to the repository Actions variable. The owner can supply only the public
-recipient at manual dispatch; its private key remains local/offline.
-Automatic push-triggered runs still skip unless the repository variable
-is set.
+The workflow_dispatch form is prepared to accept an `age_recipient` input
+as an alternative to the repository Actions variable. **Operational caveat:**
+the repository default branch is `main`, while this research workflow currently
+exists only on `rnd/phase1-standalone-anisette`. GitHub only exposes manual
+dispatch after the workflow file exists on the default branch; therefore the
+input is not currently available in the Actions UI. For this branch, configure
+the public recipient as the repository Actions variable
+`ADI_CAPTURE_AGE_RECIPIENT`, then make a push that matches this workflow's
+path filter. The corresponding age private key remains local/offline.
 
 
 ### OTP repeat summaries in the public manifest
