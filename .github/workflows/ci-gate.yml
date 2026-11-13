@@ -23,6 +23,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Python trace-tool regression tests
+        run: |
+          python3 -m py_compile tools/capture_manifest.py tools/adi_lifecycle_trace_gdb.py
+          python3 -m unittest tools/test_capture_manifest.py tools/test_planter_trace.py -v
+
       - name: Rust toolchain components
         run: rustup component add rustfmt clippy
 

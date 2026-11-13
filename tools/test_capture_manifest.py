@@ -71,6 +71,10 @@ class CaptureManifestTests(unittest.TestCase):
             ):
                 (lifecycle / name).write_bytes(payload)
             (work / "adi-data" / "adi.pb").write_bytes(b"private adi.pb")
+            (lifecycle / "adi-lifecycle-args.jsonl").write_text(
+                '{"opcode":"0x3e58e7f9","registers":{"rsi":"0x1234"},"memory":{"rsi":"private MID"}}\\n',
+                encoding="ascii",
+            )
             (lifecycle / "adi-lifecycle.trace").write_text(
                 "adi lifecycle trace v1\n"
                 "phase=1 phase_name=provisioning_start api=rsegvyrt87\n"
@@ -125,6 +129,21 @@ class CaptureManifestTests(unittest.TestCase):
             (work / "index1-target-hit.txt").write_text("2")
             (work / "index1-exit-code.txt").write_text("0")
 
+            warm = lifecycle / "warm-offline"
+            (warm / "seed" / "adi-data").mkdir(parents=True)
+            (warm / "seed" / "adi-data" / "adi.pb").write_bytes(b"private completed state")
+            (warm / "seed" / "adi_identifier").write_bytes(b"private identity")
+            (warm / "a.cpim").write_bytes(b"A" * 276)
+            (warm / "b.cpim").write_bytes(b"A" * 275 + b"B")
+            (warm / "a.rc").write_text("0")
+            (warm / "b.rc").write_text("0")
+            (lifecycle / "syscalls").mkdir()
+            (lifecycle / "syscalls" / "warm.123").write_text(
+                '1712345678.0 getrandom(0x1234, 0x20, 0) = 32\\n'
+                '1712345678.1 openat(AT_FDCWD, "/dev/urandom", O_RDONLY) = 3\\n',
+                encoding="ascii",
+            )
+
             manifest = build_manifest(work, "abc123", "42")
             groups = manifest["capture_groups"]
             self.assertTrue(groups["native_control"]["artifacts"][0]["present"])
@@ -137,6 +156,11 @@ class CaptureManifestTests(unittest.TestCase):
             self.assertTrue(lifecycle_artifacts["adi-state-after-end.bin"]["present"])
             trace = lifecycle_group["trace"]
             self.assertTrue(trace["artifact"]["present"])
+            self.assertTrue(trace["argument_capture"]["present"])
+            warm_group = groups["warm_state_replays"]
+            self.assertTrue(warm_group["state_seed"]["present"])
+            self.assertEqual(warm_group["cpim_diff"]["changed_bytes"], 1)
+            self.assertEqual(warm_group["syscalls"]["calls"], {"getrandom": 1, "openat": 1})
             self.assertEqual(
                 trace["opcode_sequence"],
                 [
@@ -149,7 +173,7 @@ class CaptureManifestTests(unittest.TestCase):
                 ["rsegvyrt87", "uv5t6nhkui", "qi864985u0", "unclassified_export"],
             )
             self.assertEqual(trace["api_calls"][-1]["phase_id"], -1)
-            self.assertIn("ephemeral runner", lifecycle_group["pairing_rule"])
+            self.assertIn("age ciphertext", lifecycle_group["pairing_rule"])
             self.assertTrue(lifecycle_group["state_directory_after_cycle"]["present"])
             self.assertEqual(groups["gdb_trace"]["metadata"]["tracer_version"], "v33")
             self.assertIn("separate GDB live provisioning process", groups["gdb_trace"]["process_role"])

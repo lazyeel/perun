@@ -5019,3 +5019,14 @@ actual newline-delimited records, and the syscall-name parser uses word-boundary
 and opening-parenthesis regex tokens rather than literal backslashes. The
 manifest regression fixtures were aligned with the actual trace-file format.
 These are corrective source edits; no new capture result is claimed here.
+
+
+### CI coverage for the capture tooling
+
+The standard CI gate now compiles the GDB tracer and manifest builder and
+runs both Python regression suites. This gate is independent of the age
+recipient; only the raw-capture workflow is gated on encrypted retention.
+The manifest test fixture now covers the six verified API phases, all
+twelve vdfut opcodes, metadata-line filtering, private argument artifact
+fingerprinting, warm-state CPIM byte-diff summaries and syscall-name-only
+census. Raw fixture values must not appear in the serialized manifest.
