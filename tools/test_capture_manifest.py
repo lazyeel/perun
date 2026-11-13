@@ -70,7 +70,8 @@ class CaptureManifestTests(unittest.TestCase):
                 "phase=1 phase_name=provisioning_start opcode=0x716bd86c\n"
                 "phase=2 phase_name=provisioning_end api=uv5t6nhkui\n"
                 "phase=4 phase_name=otp_request api=qi864985u0\n"
-                "phase=4 phase_name=otp_request opcode=0x12345678\n",
+                "phase=4 phase_name=otp_request opcode=0x12345678\n"
+                "phase=-1 phase_name=unknown api=unclassified_export\n",
                 encoding="ascii",
             )
 
@@ -138,8 +139,9 @@ class CaptureManifestTests(unittest.TestCase):
             )
             self.assertEqual(
                 [row["name"] for row in trace["api_calls"]],
-                ["rsegvyrt87", "uv5t6nhkui", "qi864985u0"],
+                ["rsegvyrt87", "uv5t6nhkui", "qi864985u0", "unclassified_export"],
             )
+            self.assertEqual(trace["api_calls"][-1]["phase_id"], -1)
             self.assertIn("ephemeral runner", lifecycle_group["pairing_rule"])
             self.assertTrue(lifecycle_group["state_directory_after_cycle"]["present"])
             self.assertEqual(groups["gdb_trace"]["metadata"]["tracer_version"], "v33")
