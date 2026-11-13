@@ -5083,3 +5083,21 @@ not publish raw tokens, identity, state bytes or absolute timestamps. A
 successful run can therefore answer equality/time-window questions from
 the public manifest while the age-encrypted artifact remains available for
 the actual bit-level lift.
+
+
+### Static cross-platform fold signature probe
+
+Added `tools/scan_fold_constants.py` to parse the 21 four-lane broadcast
+constants in `fold_zone.rs` and search for exact 16-byte little-endian
+repeated-lane patterns in the fetched Android `libCoreADI.so`. The scan
+also records scalar-only occurrences. The workflow runs it immediately
+after the first native control has fetched the Apple library. The public
+manifest includes constant names, their already-public values and image
+offsets only; it never emits binary bytes.
+
+A complete broadcast-vector match would be strong evidence that the Android
+image contains the same fold constant table and would justify a targeted
+cross-platform code-path comparison. It would **not** prove that this code is
+called by `0xcfe0b46a` or participates in OTPRequest. Missing exact vectors
+do not rule out equivalent immediates or a different engine build. This is a
+static triage probe, not a portability conclusion.

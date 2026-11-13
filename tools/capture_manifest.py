@@ -529,6 +529,17 @@ def build_manifest(
         "trace_directory_present": trace_run is not None,
     }
 
+    fold_scan = read_json(work / "fold-constants.json")
+    fold_scan_summary = {
+        "present": fold_scan is not None,
+        "constant_count": fold_scan.get("constant_count") if fold_scan else None,
+        "broadcast_key_count": fold_scan.get("broadcast_key_count") if fold_scan else None,
+        "scalar_key_count": fold_scan.get("scalar_key_count") if fold_scan else None,
+        "complete_broadcast_set": fold_scan.get("complete_broadcast_set") if fold_scan else None,
+        "constants": fold_scan.get("constants", []) if fold_scan else [],
+        "interpretation": fold_scan.get("interpretation") if fold_scan else None,
+    }
+
     runtime = [
         tree_fingerprint("apple_library_directory", work / "libs"),
         tree_fingerprint("bionic_sysroot", work / "sysroot"),
@@ -537,7 +548,7 @@ def build_manifest(
         runtime.append(file_fingerprint("android_system_image", system_image))
 
     return {
-        "manifest_version": 2,
+        "manifest_version": 3,
         "workflow": {
             "run_id": workflow_run_id,
             "source_revision": source_sha,
@@ -549,6 +560,7 @@ def build_manifest(
         "runtime_fingerprints": runtime,
         "capture_groups": {
             "native_control": native,
+            "fold_constant_scan": fold_scan_summary,
             "full_lifecycle": full_lifecycle,
             "warm_state_replays": warm_replays,
             "fixed_input_replays": replay,

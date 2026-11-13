@@ -21,6 +21,7 @@ on:
       - tools/cpim_diff_probe.py
       - tools/test_cpim_diff_probe.py
       - tools/adi_lifecycle_trace_gdb.py
+      - tools/scan_fold_constants.py
       - .github/workflows/planter-genesis-trace.yml
   workflow_dispatch:
     inputs:
@@ -62,7 +63,8 @@ jobs:
           python3 -m unittest tools.test_cpim_diff_probe -v
           python3 -m py_compile tools/genesis_probe_gdb.py tools/input_probe_gdb.py tools/time_freeze_gdb.py tools/rdtsc_freeze_gdb.py tools/slot_origin_gdb.py
           python3 -m unittest tools/test_planter_trace.py -v
-          python3 -m py_compile tools/adi_lifecycle_trace_gdb.py
+          python3 -m py_compile tools/adi_lifecycle_trace_gdb.py tools/scan_fold_constants.py
+          python3 -m unittest tools.test_scan_fold_constants -v
 
       - name: Compile and run perun-adi-core tests
         shell: bash
@@ -208,6 +210,16 @@ jobs:
           set -e
           echo "$NATIVE_RC" > "$WORK/native-exit-code.txt"
           echo "Native control exit code: $NATIVE_RC"
+
+          # Static signature test for the Windows Configuration fold machine.
+          if [ -s "$WORK/libs/libCoreADI.so" ]; then
+            python3 "$GITHUB_WORKSPACE/tools/scan_fold_constants.py" \
+              "$WORK/libs/libCoreADI.so" \
+              --source "$GITHUB_WORKSPACE/crates/perun-adi-core/src/fold_zone.rs" \
+              --output "$WORK/fold-constants.json"
+          else
+            echo "Fold constant scan skipped: libCoreADI.so was not fetched." >&2
+          fi
 
           # Replay one fixed SPIM/identity/state seed in two ordinary and two
           # frozen offline processes. Only aggregates leave this ephemeral runner.
