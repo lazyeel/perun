@@ -103,4 +103,17 @@ if [ "${ADI_GDB:-0}" = "1" ]; then
     -ex "run" \
     --args "$PWD/adi_native" "$LIBS"
 fi
+if [ -n "${ADI_STRACE_LOG_PREFIX:-}" ]; then
+  STRACE_BIN="${STRACE_BIN:-strace}"
+  command -v "$STRACE_BIN" >/dev/null || {
+    echo "strace not found (install strace or unset ADI_STRACE_LOG_PREFIX)" >&2
+    exit 1
+  }
+  mkdir -p "$(dirname "$ADI_STRACE_LOG_PREFIX")"
+  exec "$STRACE_BIN" -ff -ttt -T -yy \
+    -e trace=getrandom,open,openat,read,clock_gettime,gettimeofday,time,getpid,gettid \
+    -e raw=read,getrandom \
+    -o "$ADI_STRACE_LOG_PREFIX" \
+    "$PWD/adi_native" "$LIBS"
+fi
 exec "$PWD/adi_native" "$LIBS"

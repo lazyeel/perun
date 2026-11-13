@@ -22,6 +22,7 @@ on:
       - tools/test_cpim_diff_probe.py
       - tools/adi_lifecycle_trace_gdb.py
       - .github/workflows/planter-genesis-trace.yml
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -32,8 +33,12 @@ concurrency:
 
 jobs:
   trace:
+    # The raw capture job is disabled until the public age recipient is configured.
+    if: ${{ vars.ADI_CAPTURE_AGE_RECIPIENT != '' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 15
+    env:
+      ADI_CAPTURE_AGE_RECIPIENT: ${{ vars.ADI_CAPTURE_AGE_RECIPIENT }}
     steps:
       - name: Checkout research branch
         uses: actions/checkout@v4
@@ -65,7 +70,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            gdb e2fsprogs ca-certificates curl unzip python3 file
+            gdb e2fsprogs ca-certificates curl unzip python3 file age strace
 
       - name: Set up JDK 17 for Android SDK tools
         uses: actions/setup-java@v4
@@ -345,6 +350,7 @@ jobs:
           export ADI_GDB=1
           export GDB_SCRIPT="$GITHUB_WORKSPACE/tools/adi_lifecycle_trace_gdb.py"
           export ADI_LIFECYCLE_TRACE_LOG="$WORK/full-adi-capture/adi-lifecycle.trace"
+          export ADI_LIFECYCLE_ARGS_LOG="$WORK/full-adi-capture/adi-lifecycle-args.jsonl"
           export ADI_CAPTURE_DIR="$WORK/full-adi-capture"
           export ADI_STATE_FILE="$WORK/adi-data/adi.pb"
           echo "Running a separate full Bionic provisioning + OTP control under the lightweight lifecycle tracer."
@@ -359,6 +365,55 @@ jobs:
           unset ADI_CAPTURE_DIR ADI_STATE_FILE
           exit 0
 
+
+      - name: Trace warm-state offline replays and syscalls
+        if: env.FULL_CYCLE_RC == '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="${RUN_WORK:-$RUNNER_TEMP/perun-adi-gdb}"
+          CAPTURE="$WORK/full-adi-capture"
+          WARM="$CAPTURE/warm-offline"
+          SEED="$WARM/seed"
+          SYSCALLS="$CAPTURE/syscalls"
+          mkdir -p "$SEED" "$SYSCALLS"
+
+          # Reuse SPIM, completed adi.pb and identity from this exact lifecycle.
+          test -s "$CAPTURE/spim.bin"
+          test -s "$CAPTURE/adi-state-after-end.bin"
+          test -f "$WORK/adi_identifier"
+          cp -a "$WORK/adi-data" "$SEED/adi-data"
+          cp -p "$WORK/adi_identifier" "$SEED/adi_identifier"
+
+          restore_warm_seed() {
+            rm -rf "$WORK/adi-data" "$WORK/adi_identifier"
+            cp -a "$SEED/adi-data" "$WORK/adi-data"
+            cp -p "$SEED/adi_identifier" "$WORK/adi_identifier"
+          }
+
+          for name in a b; do
+            restore_warm_seed
+            export ADI_TRACE_START_ONLY=1
+            export ADI_OFFLINE_SPIM="$CAPTURE/spim.bin"
+            export ADI_CPIM_OUT="$WARM/$name.cpim"
+            export ADI_STATE_FILE="$WORK/adi-data/adi.pb"
+            export ADI_GDB=0
+            export ADI_STRACE_LOG_PREFIX="$SYSCALLS/$name"
+            unset ADI_CAPTURE_DIR ADI_LIFECYCLE_TRACE_LOG ADI_LIFECYCLE_ARGS_LOG
+            rm -f "$ADI_CPIM_OUT"
+            set +e
+            timeout --signal=TERM --kill-after=3s 30s bash "$GITHUB_WORKSPACE/crates/perun-cli/examples/adi-android/run-native.sh" \
+              > "$WARM/$name-console.log" 2>&1
+            rc=$?
+            set -e
+            unset ADI_STRACE_LOG_PREFIX
+            echo "$rc" > "$WARM/$name.rc"
+            echo "Warm-state offline replay $name exit code: $rc"
+          done
+          restore_warm_seed
+          unset ADI_OFFLINE_SPIM ADI_CPIM_OUT ADI_STATE_FILE ADI_TRACE_START_ONLY
+          echo "Warm-state outputs and syscall traces remain private until age encryption."
+
       - name: Build a privacy-preserving capture manifest
         if: always()
         shell: bash
@@ -370,6 +425,46 @@ jobs:
             --source-sha "$GITHUB_SHA" \
             --run-id "$GITHUB_RUN_ID" \
             --output "research-runs/capture-manifest-$GITHUB_RUN_ID.json"
+
+
+      - name: Encrypt private lifecycle and syscall captures
+        id: seal_private_capture
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="${RUN_WORK:-$RUNNER_TEMP/perun-adi-gdb}"
+          CAPTURE="$WORK/full-adi-capture"
+          ARCHIVE="$RUNNER_TEMP/adi-private-capture-${GITHUB_RUN_ID}.tar.gz.age"
+          if [ ! -d "$CAPTURE" ]; then
+            echo "archive_created=false" >> "$GITHUB_OUTPUT"
+            echo "No lifecycle capture directory exists; nothing to seal."
+            exit 0
+          fi
+          test -n "$ADI_CAPTURE_AGE_RECIPIENT"
+          tar -C "$WORK" -czf - full-adi-capture | age -r "$ADI_CAPTURE_AGE_RECIPIENT" -o "$ARCHIVE"
+          chmod 600 "$ARCHIVE"
+          echo "archive_created=true" >> "$GITHUB_OUTPUT"
+          echo "Encrypted private capture size: $(stat -c '%s' "$ARCHIVE") bytes"
+          echo "Ciphertext SHA-256: $(sha256sum "$ARCHIVE" | awk '{print $1}')"
+
+      - name: Upload encrypted private capture
+        id: upload_private_capture
+        if: always() && steps.seal_private_capture.outputs.archive_created == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-adi-capture-${{ github.run_id }}
+          path: ${{ runner.temp }}/adi-private-capture-${{ github.run_id }}.tar.gz.age
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Remove local plaintext and ciphertext after upload
+        if: steps.upload_private_capture.outcome == 'success'
+        shell: bash
+        run: |
+          WORK="${RUN_WORK:-$RUNNER_TEMP/perun-adi-gdb}"
+          rm -rf "$WORK/full-adi-capture"
+          rm -f "$RUNNER_TEMP/adi-private-capture-${GITHUB_RUN_ID}.tar.gz.age"
 
       - name: Build a redacted trace report
         if: always()

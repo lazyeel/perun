@@ -96,6 +96,54 @@ def read_text(path: Path) -> str | None:
         return None
 
 
+def summarize_syscall_trace(root: Path) -> dict[str, Any]:
+    """Publish only syscall names/counts, never arguments, paths or buffers."""
+    if not root.is_dir() or root.is_symlink():
+        return {"present": False, "files": 0, "calls": {}}
+    allowed = {
+        "getrandom", "open", "openat", "read", "clock_gettime",
+        "gettimeofday", "time", "getpid", "gettid", "close", "mmap",
+    }
+    counts: dict[str, int] = {}
+    files = 0
+    pattern = re.compile(r"\\b([A-Za-z_][A-Za-z0-9_]*)\\(")
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        files += 1
+        try:
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                match = pattern.search(line)
+                if match and match.group(1) in allowed:
+                    name = match.group(1)
+                    counts[name] = counts.get(name, 0) + 1
+        except OSError:
+            continue
+    return {"present": files > 0, "files": files, "calls": dict(sorted(counts.items()))}
+
+
+def byte_diff_summary(left: Path, right: Path) -> dict[str, Any]:
+    """Compare binary outputs without exposing byte values."""
+    if (not left.is_file() or left.is_symlink()
+            or not right.is_file() or right.is_symlink()):
+        return {"status": "missing", "equal": None}
+    try:
+        a, b = left.read_bytes(), right.read_bytes()
+    except OSError:
+        return {"status": "unreadable", "equal": None}
+    overlap = min(len(a), len(b))
+    changed = sum(x != y for x, y in zip(a[:overlap], b[:overlap]))
+    length_delta = abs(len(a) - len(b))
+    return {
+        "status": "compared",
+        "equal": a == b,
+        "left_bytes": len(a),
+        "right_bytes": len(b),
+        "changed_bytes": changed + length_delta,
+        "length_delta": length_delta,
+    }
+
+
 def latest_trace_run(trace_root: Path) -> Path | None:
     if not trace_root.is_dir():
         return None
@@ -120,6 +168,9 @@ def summarize_lifecycle_trace(path: Path) -> dict[str, Any]:
     api_pattern = re.compile(r"api=([A-Za-z0-9_]+)")
     cvu_pattern = re.compile(r"coreadi_init=([A-Za-z0-9_]+)")
     for line in path.read_text(encoding="ascii", errors="replace").splitlines():
+        # Header and armed marker are metadata, not missing API/opcode events.
+        if not line or line == "adi lifecycle trace v1" or "trace=armed" in line:
+            continue
         phase_match = phase_pattern.search(line)
         if not phase_match:
             if line and not line.startswith("trace="):
@@ -330,6 +381,7 @@ def build_manifest(
         "otp-time-after.bin",
         "adi-state-after-otp.bin",
         "adi-lifecycle.trace",
+        "adi-lifecycle-args.jsonl",
         "adi-state-after-otp.bin.status",
     )
     full_lifecycle = {
@@ -346,14 +398,40 @@ def build_manifest(
             "artifact": file_fingerprint(
                 "adi_lifecycle_trace", lifecycle_root / "adi-lifecycle.trace"
             ),
+            "argument_capture": file_fingerprint(
+                "adi_lifecycle_arguments", lifecycle_root / "adi-lifecycle-args.jsonl"
+            ),
             **summarize_lifecycle_trace(lifecycle_root / "adi-lifecycle.trace"),
         },
+        "syscall_trace": summarize_syscall_trace(lifecycle_root / "syscalls"),
         "pairing_rule": (
             "All listed lifecycle inputs and outputs are captured by one native "
             "Bionic process. The state snapshots bracket ProvisioningEnd and "
-            "OTPRequest. Raw bytes remain on the ephemeral runner; only sizes "
-            "and SHA-256 fingerprints are published. A missing state file is "
-            "reported by its adjacent .status capture."
+            "OTPRequest. Raw captures are sealed as age ciphertext before upload; "
+            "this public manifest contains only lengths, hashes and derived "
+            "counts. A missing state file is reported by its adjacent .status capture."
+        ),
+    }
+
+    warm_root = lifecycle_root / "warm-offline"
+    warm_replays = {
+        "process_role": (
+            "two offline ProvisioningStart replays using the exact SPIM and "
+            "completed state/identity seed from the full-lifecycle process"
+        ),
+        "spim_source": "full_lifecycle.spim",
+        "state_seed": tree_fingerprint("completed_lifecycle_state_seed", warm_root / "seed"),
+        "outputs": [
+            file_fingerprint("warm_a_cpim", warm_root / "a.cpim"),
+            file_fingerprint("warm_b_cpim", warm_root / "b.cpim"),
+            file_fingerprint("warm_a_exit_code", warm_root / "a.rc"),
+            file_fingerprint("warm_b_exit_code", warm_root / "b.rc"),
+        ],
+        "cpim_diff": byte_diff_summary(warm_root / "a.cpim", warm_root / "b.cpim"),
+        "syscalls": summarize_syscall_trace(lifecycle_root / "syscalls"),
+        "coverage_note": (
+            "strace observes syscalls, not direct vDSO fast-path calls; no "
+            "clock_gettime syscall does not prove no clock read occurred"
         ),
     }
 
@@ -378,7 +456,7 @@ def build_manifest(
         runtime.append(file_fingerprint("android_system_image", system_image))
 
     return {
-        "manifest_version": 1,
+        "manifest_version": 2,
         "workflow": {
             "run_id": workflow_run_id,
             "source_revision": source_sha,
@@ -391,6 +469,7 @@ def build_manifest(
         "capture_groups": {
             "native_control": native,
             "full_lifecycle": full_lifecycle,
+            "warm_state_replays": warm_replays,
             "fixed_input_replays": replay,
             "gdb_trace": gdb_trace,
             "fam1_index1_probe": index1_probe,

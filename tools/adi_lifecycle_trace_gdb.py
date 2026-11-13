@@ -17,6 +17,7 @@ Harness phase markers are defined by g_adi_phase:
 
 from __future__ import annotations
 
+import json
 import os
 import gdb
 
@@ -30,6 +31,18 @@ flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_CLOEXEC", 0)
 flags |= getattr(os, "O_NOFOLLOW", 0)
 LOG_FD = os.open(LOG_PATH, flags, 0o600)
 os.fchmod(LOG_FD, 0o600)
+
+# Optional raw register/pointer snapshots. This file must remain private and
+# must be encrypted before it leaves the ephemeral runner.
+ARGS_LOG_PATH = os.environ.get("ADI_LIFECYCLE_ARGS_LOG")
+ARGS_FD = None
+if ARGS_LOG_PATH:
+    args_parent = os.path.dirname(os.path.abspath(ARGS_LOG_PATH))
+    os.makedirs(args_parent, mode=0o700, exist_ok=True)
+    args_flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_CLOEXEC", 0)
+    args_flags |= getattr(os, "O_NOFOLLOW", 0)
+    ARGS_FD = os.open(ARGS_LOG_PATH, args_flags, 0o600)
+    os.fchmod(ARGS_FD, 0o600)
 
 PHASES = {
     0: "setup",
@@ -66,6 +79,45 @@ def read_int(expression: str, default: int = -1) -> int:
         return default
 
 
+def capture_opcode_arguments(phase: int, opcode: int) -> None:
+    """Capture bounded candidate ABI state to a private JSONL file."""
+    if ARGS_FD is None or phase not in (1, 2, 4):
+        return
+
+    names = ("rsi", "rdx", "rcx", "r8", "r9", "rsp")
+    regs = {
+        name: read_int(f"${name}", 0) & 0xFFFFFFFFFFFFFFFF
+        for name in names
+    }
+    memory: dict[str, dict[str, object]] = {}
+    inferior = gdb.selected_inferior()
+
+    # These are candidate pointer values, not asserted argument types.
+    for name in names:
+        address = regs[name]
+        if address < 0x10000 or address >= 0x0000800000000000:
+            continue
+        width = 128 if name == "rsp" else 256
+        try:
+            data = bytes(inferior.read_memory(address, width))
+            memory[name] = {"bytes": len(data), "hex": data.hex()}
+        except Exception as exc:
+            memory[name] = {"read_error": type(exc).__name__}
+
+    record = {
+        "phase_id": phase,
+        "phase": PHASES.get(phase, "unknown"),
+        "opcode": f"0x{opcode:08x}",
+        "pc": f"0x{read_int('$pc', 0) & 0xFFFFFFFFFFFFFFFF:016x}",
+        "registers": {
+            name: f"0x{value:016x}" for name, value in regs.items()
+        },
+        "memory": memory,
+    }
+    payload = (json.dumps(record, separators=(",", ":")) + "\\n").encode("ascii")
+    os.write(ARGS_FD, payload)
+
+
 class VdfutBreakpoint(gdb.Breakpoint):
     def __init__(self) -> None:
         super().__init__("vdfut768ig", gdb.BP_BREAKPOINT, internal=False)
@@ -78,6 +130,7 @@ class VdfutBreakpoint(gdb.Breakpoint):
         opcode = read_int("$rdi", 0) & 0xFFFFFFFF
         STATE["vdfut"] += 1
         emit("opcode", phase, f"0x{opcode:08x}")
+        capture_opcode_arguments(phase, opcode)
         return False
 
 

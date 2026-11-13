@@ -7,7 +7,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.capture_manifest import build_manifest, file_fingerprint, tree_fingerprint
+from tools.capture_manifest import (
+    build_manifest,
+    byte_diff_summary,
+    file_fingerprint,
+    summarize_lifecycle_trace,
+    summarize_syscall_trace,
+    tree_fingerprint,
+)
 
 
 class CaptureManifestTests(unittest.TestCase):
@@ -159,6 +166,67 @@ class CaptureManifestTests(unittest.TestCase):
             self.assertNotIn("private adi.pb", serialized)
             self.assertNotIn(str(work), serialized)
             self.assertFalse(manifest["privacy"]["raw_artifacts_included"])
+
+
+    def test_lifecycle_trace_ignores_metadata_and_preserves_all_phases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "adi-lifecycle.trace"
+            path.write_text(
+                "adi lifecycle trace v1\\n"
+                "phase=0 phase_name=setup trace=armed\\n"
+                "phase=0 phase_name=setup api=aslgmuibau\\n"
+                "phase=0 phase_name=setup api=aslgmuibau\\n"
+                "phase=0 phase_name=setup opcode=0x12db31c5\\n"
+                "phase=0 phase_name=setup opcode=0xb0eda7af\\n"
+                "phase=0 phase_name=setup opcode=0xb23c691e\\n"
+                "phase=0 phase_name=setup opcode=0xc774d292\\n"
+                "phase=0 phase_name=setup opcode=0xc774d292\\n"
+                "phase=0 phase_name=setup opcode=0xb0eda7af\\n"
+                "phase=1 phase_name=provisioning_start api=rsegvyrt87\\n"
+                "phase=1 phase_name=provisioning_start opcode=0x716bd86c\\n"
+                "phase=2 phase_name=provisioning_end api=uv5t6nhkui\\n"
+                "phase=2 phase_name=provisioning_end opcode=0x0b2b3196\\n"
+                "phase=3 phase_name=login_code_after_end api=aslgmuibau\\n"
+                "phase=3 phase_name=login_code_after_end opcode=0xb0eda7af\\n"
+                "phase=4 phase_name=otp_request api=qi864985u0\\n"
+                "phase=4 phase_name=otp_request opcode=0xcfe0b46a\\n"
+                "phase=4 phase_name=otp_request opcode=0x3e58e7f9\\n"
+                "phase=4 phase_name=otp_request opcode=0x3e58e7f9\\n",
+                encoding="ascii",
+            )
+            result = summarize_lifecycle_trace(path)
+            self.assertEqual(result["unclassified_lines"], 0)
+            self.assertEqual(
+                [row["phase"] for row in result["api_calls"]],
+                ["setup", "setup", "provisioning_start", "provisioning_end",
+                 "login_code_after_end", "otp_request"],
+            )
+            self.assertEqual(len(result["opcode_sequence"]), 12)
+            self.assertEqual(
+                [row["opcode"] for row in result["opcode_sequence"][-3:]],
+                ["0xcfe0b46a", "0x3e58e7f9", "0x3e58e7f9"],
+            )
+
+    def test_syscall_summary_and_binary_diff_publish_only_aggregates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            syscall_dir = root / "syscalls"
+            syscall_dir.mkdir()
+            (syscall_dir / "trace.123").write_text(
+                '1712345678.0 getrandom(0x1234, 0x20, 0) = 32\\n'
+                '1712345678.1 openat(AT_FDCWD, "/dev/urandom", O_RDONLY) = 3\\n'
+                '1712345678.2 read(0x7fff, 0x1234, 0x20) = 32\\n',
+                encoding="ascii",
+            )
+            summary = summarize_syscall_trace(syscall_dir)
+            self.assertEqual(summary["calls"], {"getrandom": 1, "openat": 1, "read": 1})
+            self.assertNotIn("/dev/urandom", json.dumps(summary))
+            left, right = root / "a.bin", root / "b.bin"
+            left.write_bytes(b"ABCD")
+            right.write_bytes(b"ABXD!")
+            diff = byte_diff_summary(left, right)
+            self.assertEqual(diff["changed_bytes"], 2)
+            self.assertNotIn("ABXD", json.dumps(diff))
 
     def test_missing_inputs_are_explicit_not_silently_omitted(self):
         with tempfile.TemporaryDirectory() as tmp:

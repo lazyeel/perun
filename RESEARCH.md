@@ -4947,3 +4947,65 @@ The follow-up phase-counter correction was pushed separately after this
 run. Its next GDB trace must confirm that the two preflight GetLoginCode
 calls are grouped as setup and that the third is grouped as post-End.
 Do not use #117's phase labels for those three calls as ground truth.
+
+
+## 2026-11-13 — phase fallback verified; private OTP/End acquisition hardened
+
+### Trace #121 validation
+
+The public manifest `research-runs/capture-manifest-43444032409.json`
+was inspected directly. Its separate full-Bionic lifecycle process completed
+with exit code 0. The six API calls were classified as:
+
+`aslgmuibau` (setup), `aslgmuibau` (setup),
+`rsegvyrt87` (ProvisioningStart), `uv5t6nhkui` (ProvisioningEnd),
+`aslgmuibau` (post-End GetLoginCode), `qi864985u0` (OTPRequest).
+
+The opcode sequence in that same process was
+`0x12db31c5`, `0xb0eda7af`, `0xb23c691e`,
+`0xc774d292`, `0xc774d292`, `0xb0eda7af`,
+`0x716bd86c`, `0x0b2b3196`, `0xb0eda7af`,
+`0xcfe0b46a`, `0x3e58e7f9`, `0x3e58e7f9`.
+This verifies the preflight call-counter fallback fix from
+`f588f707`, including the third GetLoginCode call after End.
+
+The run captured SPIM 347 B, CPIM 276 B, ptm 487 B, tk 16 B,
+state 604 B, MID 60 B and OTP 28 B. The state hash was identical
+before and after OTPRequest. This is a single observed session; it says
+nothing yet about MID constancy across invocations or OTP time windows.
+
+The two `unclassified_lines` in the manifest are known metadata:
+the text header and `trace=armed`. The parser now excludes these
+from the event count rather than presenting them as missing calls.
+
+### New private acquisition path (source change; not yet measured)
+
+The lifecycle GDB tracer supports opt-in argument capture for phases
+Start, End and OTP. For each vdfut dispatch it records the opcode, PC,
+candidate SysV argument registers (`rsi`, `rdx`, `rcx`, `r8`, `r9`),
+stack head and bounded reads (up to 256 B per candidate pointer, 128 B
+for the stack). These are not ABI assertions; the capture is a working
+set for subsequent def-use analysis. The JSONL capture is private and
+must be age-encrypted before upload.
+
+The runner supports `ADI_STRACE_LOG_PREFIX`, wrapping only the native
+ADI inferior when GDB is disabled. The trace filters syscall names to
+getrandom, open/read, clock and process-identity calls; read/getrandom
+arguments use raw rendering so the buffer contents are not copied into
+strace output. This does not observe direct vDSO fast-path calls.
+
+After a successful full lifecycle, the workflow replays ProvisioningStart
+twice offline using the SPIM, completed `adi.pb`, and device identity
+from that same lifecycle. It restores the same state before each replay,
+compares output CPIM without exposing byte values, and stores syscall logs
+inside the private capture directory. This replaces the old empty
+start-only seed as the primary determinism probe; it is still only a
+two-run observation, not proof of causality.
+
+The workflow requires the public Actions variable
+`ADI_CAPTURE_AGE_RECIPIENT`. It age-encrypts the private lifecycle,
+argument and syscall captures before uploading a seven-day artifact;
+the age private key must remain outside GitHub. Plaintext is removed
+only after successful upload. If the variable is absent, the expensive
+capture job is skipped. These new collection paths have not yet been
+validated by a new workflow run.
