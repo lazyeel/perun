@@ -7,6 +7,7 @@ evidence, not proof that the corresponding routine is reachable from OTPRequest.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import struct
@@ -63,6 +64,7 @@ def scan_image(image: bytes, constants: list[tuple[str, int]]) -> dict[str, Any]
     return {
         "schema_version": 1,
         "image_bytes": len(image),
+        "image_sha256": hashlib.sha256(image).hexdigest(),
         "constant_count": total,
         "broadcast_key_count": broadcast_found,
         "scalar_key_count": scalar_found,

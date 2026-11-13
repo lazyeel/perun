@@ -1,0 +1,82 @@
+name: Android CoreADI fold signature scan
+
+on:
+  push:
+    branches:
+      - rnd/phase1-standalone-anisette
+    paths:
+      - tools/scan_fold_constants.py
+      - tools/test_scan_fold_constants.py
+      - crates/perun-adi-core/src/fold_zone.rs
+      - crates/perun-cli/examples/adi-android/fetch_libs496.py
+      - .github/workflows/adi-fold-static-scan.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: adi-fold-static-scan-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout research branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Validate scanner
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile tools/scan_fold_constants.py
+          python3 -m unittest tools.test_scan_fold_constants -v
+
+      - name: Fetch Apple Music x86_64 libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          LIBS="$RUNNER_TEMP/apple-music-496-libs"
+          python3 crates/perun-cli/examples/adi-android/fetch_libs496.py "$LIBS" --abi x86_64
+          test -s "$LIBS/libCoreADI.so"
+          echo "LIBS=$LIBS" >> "$GITHUB_ENV"
+
+      - name: Scan Android CoreADI for fold broadcast constants
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPORT="$RUNNER_TEMP/adi-fold-signatures.json"
+          python3 tools/scan_fold_constants.py "$LIBS/libCoreADI.so" \
+            --source crates/perun-adi-core/src/fold_zone.rs \
+            --output "$REPORT"
+          python3 - "$REPORT" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          from pathlib import Path
+          data = json.loads(Path(sys.argv[1]).read_text())
+          print("# Android CoreADI fold signature scan")
+          print()
+          print(f"- Library size: {data['image_bytes']:,} bytes")
+          print(f"- Library SHA-256: `{data['image_sha256']}`")
+          print(f"- Broadcast constants: **{data['broadcast_key_count']}/{data['constant_count']}**")
+          print(f"- Scalar-only constants found: {data['scalar_key_count']}/{data['constant_count']}")
+          print()
+          print("| Constant | Value | Broadcast file offsets | Scalar hits |")
+          print("|---|---:|---|---:|")
+          for row in data["constants"]:
+              offsets = ", ".join(row["broadcast_offsets"]) or "—"
+              print(f"| `{row['name']}` | `{row['value']}` | {offsets} | {row['scalar_match_count_capped']} |")
+          print()
+          print("> File offsets are not ELF RVAs. A complete signature is static evidence only; it does not establish reachability from OTPRequest.")
+          PY
+
+      - name: Upload scan report
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-fold-signature-scan-${{ github.run_id }}
+          path: ${{ runner.temp }}/adi-fold-signatures.json
+          if-no-files-found: error
+          retention-days: 30

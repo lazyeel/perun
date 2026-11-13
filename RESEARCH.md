@@ -5121,3 +5121,22 @@ does not dispose a pointer that aliases either primary allocation; it also
 avoids double-disposing a sample whose MID and OTP pointers alias. Distinct
 probe allocations are still released after capture. This is defensive
 ownership handling, not evidence that Apple actually reuses the pointers.
+
+
+### Run the Android fold-signature scan independently of private lifecycle capture
+
+The static fold signature scan now has a separate lightweight GitHub Actions
+workflow. It fetches the same x86_64 Apple Music 4.9.6 library set via the
+repository's range-based APK extractor, scans only the public binary for the
+21 broadcast constants in fold_zone.rs, and publishes a small JSON artifact
+with constant values, raw file offsets, match counts, library size and SHA-256.
+It does not execute ADI, generate identity/SPIM/CPIM, call Apple provisioning
+endpoints, or capture protocol data. Therefore it does not depend on the
+age-encryption recipient and can answer the static cross-platform question
+while the full private lifecycle workflow remains fail-closed.
+
+The scan records file offsets, not ELF RVAs or runtime addresses. A complete
+21/21 set would be evidence that the Android image contains the same
+broadcast constants, but still would not prove call reachability from
+OTPRequest. The independent workflow has been added to source; its first
+run is the actual measurement gate.

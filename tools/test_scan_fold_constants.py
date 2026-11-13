@@ -34,6 +34,8 @@ class FoldConstantScanTests(unittest.TestCase):
         )
         result = scan_image(image, constants)
         self.assertEqual(result["constant_count"], 3)
+        self.assertRegex(result["image_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(result["image_bytes"], len(image))
         self.assertEqual(result["broadcast_key_count"], 1)
         self.assertEqual(result["scalar_key_count"], 2)
         self.assertFalse(result["complete_broadcast_set"])
