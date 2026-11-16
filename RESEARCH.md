@@ -5355,3 +5355,8 @@ Extended the JSONL validator to reconstruct the live MID/OTP allocation ledger f
 The validation report exposes only tracked/disposed/outstanding allocation counts. Any returned MID/OTP pointer not matched to a normal Dispose return fails validation. No pointer values are copied into the report. Added tests for normal MID+OTP disposal, missing Dispose, owner mismatch, and heap address reuse.
 
 This remains an instrumentation consistency check over trace data; it cannot prove that the native allocator actually freed memory correctly without a real Bionic capture.
+
+
+#### Manifest allow-list for output allocation validation
+
+The public manifest's validation summary now includes only the aggregate counts `tracked_output_allocations`, `disposed_output_allocations`, and `outstanding_output_allocations`. Raw pointers and allocation addresses remain confined to the private encrypted capture. A synthetic manifest test verifies these fields survive the allow-list and that arbitrary private fields remain excluded.
