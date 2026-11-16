@@ -502,6 +502,8 @@ def build_manifest(
         "cpim.bin",
         "provisioning-start-rc.bin",
         "session.bin",
+        "adi-state-before-start.bin",
+        "adi-state-before-start.bin.status",
         "ptm.bin",
         "tk.bin",
         "provisioning-end-rc.bin",
