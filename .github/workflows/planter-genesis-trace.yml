@@ -360,14 +360,21 @@ jobs:
           # captures are private (0700 directory / 0600 files) and are never
           # uploaded or committed; capture_manifest publishes hashes/sizes only.
           FULL_CYCLE_RC=125
-          if [ -d "$PROBE_DIR/seed/adi-data" ] && [ -f "$PROBE_DIR/seed/adi_identifier" ]; then
-            rm -rf "$WORK/adi-data" "$WORK/adi_identifier"
-            cp -a "$PROBE_DIR/seed/adi-data" "$WORK/adi-data"
-            cp -p "$PROBE_DIR/seed/adi_identifier" "$WORK/adi_identifier"
+          # The preceding control deliberately ran ProvisioningStart only.
+          # Do not carry its state directory into this process: even a partial
+          # Start may have written state. Keep the same device identity, but
+          # force a genuinely unprovisioned ADI data directory so this process
+          # exercises GetLoginCode -> Start -> Finish -> End -> OTP.
+          if [ ! -s "$WORK/adi_identifier" ]; then
+            echo "Full lifecycle cannot reuse the start-only device identity." >&2
+            echo "identity-missing" > "$WORK/full-cycle-skip-reason.txt"
+          else
+            rm -rf "$WORK/adi-data"
+            install -d -m 0700 "$WORK/adi-data"
           fi
           mkdir -p "$WORK/full-adi-capture"
           chmod 700 "$WORK/full-adi-capture"
-          unset ADI_TRACE_START_ONLY ADI_OFFLINE_SPIM ADI_SPIM_OUT ADI_CPIM_OUT ADI_PROBE_LOG
+          unset ADI_FORCE_START ADI_TRACE_START_ONLY ADI_OFFLINE_SPIM ADI_SPIM_OUT ADI_CPIM_OUT ADI_PROBE_LOG
           export ADI_GDB=1
           export GDB_SCRIPT="$GITHUB_WORKSPACE/tools/adi_lifecycle_trace_gdb.py"
           export ADI_LIFECYCLE_TRACE_LOG="$WORK/full-adi-capture/adi-lifecycle.trace"
