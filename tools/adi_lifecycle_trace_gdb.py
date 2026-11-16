@@ -313,10 +313,19 @@ def api_output_from_slots(record: dict[str, object]) -> dict[str, object]:
     result: dict[str, object] = {}
 
     def output(name: str, pointer_slot_key: str, length_slot_key: str) -> dict[str, object]:
-        pointer_slot = int(args[pointer_slot_key])
-        length_slot = int(args[length_slot_key])
-        pointer = read_u64_at(pointer_slot)
-        length = read_u32_at(length_slot)
+        # Start's out-slot addresses are stored as hex strings; OTP's are
+        # integers. Parse both forms explicitly.
+        pointer_slot = int(str(args[pointer_slot_key]), 0)
+        length_slot = int(str(args[length_slot_key]), 0)
+        try:
+            pointer = read_u64_at(pointer_slot)
+            length = read_u32_at(length_slot)
+        except Exception as exc:
+            return {
+                "pointer": 0,
+                "length": 0,
+                "data": {"status": f"out-slot-read-error:{type(exc).__name__}"},
+            }
         return {
             "pointer": pointer,
             "length": length,
