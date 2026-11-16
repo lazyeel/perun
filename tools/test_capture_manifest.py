@@ -369,13 +369,13 @@ class CaptureManifestTests(unittest.TestCase):
             self.assertEqual(summary["lifecycle_contract"]["status"], "passed")
             self.assertEqual(summary["lifecycle_contract"]["otp_request_calls"], 5)
             self.assertTrue(summary["lifecycle_contract"]["session_matches"])
-            self.assertNotIn("private_pointer", serialized)
             self.assertEqual(summary["open_call_ids"], [2])
             self.assertEqual(
                 summary["errors"],
                 [{"event_index": 4, "code": "return-probe-creation-failed", "call_id": 2}],
             )
             serialized = json.dumps(manifest)
+            self.assertNotIn("private_pointer", serialized)
             self.assertNotIn("must-not-leak", serialized)
             self.assertNotIn("private_identity", serialized)
 
