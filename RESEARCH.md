@@ -5390,3 +5390,16 @@ The ordering is checked: Start return precedes End, End precedes the phase-3 log
 #### 2026-11-16 CI correction — lifecycle manifest privacy test
 
 The first CI run after adding the lifecycle-contract summary failed one test because its `private_pointer` assertion referenced the serialized manifest before that local variable was assigned. Moved the assertion after serialization; the failure was test ordering only, not a production sanitizer or contract-validation failure.
+
+
+### 2026-11-16 — local capture rig rebuilt; final autonomy plan published
+
+The Bionic capture rig was rebuilt from scratch on a local NixOS x86_64 machine (no CI, no age recipient needed) and the full live cycle passed on the first run: GSA lookup 200 → startMachineProvisioning 200 (SPIM 347 B) → CPIM 276 B → finishMachineProvisioning 200 → ptm/tk → ProvisioningEnd rc=0 → `GetLoginCode=0` → OTP minted. Inputs: Apple Music 4.9.6 APK (136 MB) x86_64 libs, android-21 x86_64 system image via debugfs, NDK r27c, Apple trust anchors verified against the CI-pinned fingerprints. Captures can now be grown locally under the standing privacy rules.
+
+The campaign plan replacing the Apple ADI engine with an independent Rust implementation is committed as `research-runs/plan-autonomous-anisette-2026-11-16.md`: warm-first (`OTPRequest` lift on provisioned state), then `ProvisioningEnd` + state format, then Start/CPIM genesis (planter producer `0xdd511`, WeaveFeeds transition, mixer-14 pre-tail, digest word producers, session16, Body B), with Gate 0 determinism (native ptrace entropy freeze with per-source hit counters) blocking all differential work. Per-byte GDB reverse is retired as the primary method in favour of whole-function batch traces + def-use lifting over a multi-session corpus.
+
+### 2026-11-16 — Gate 0 closed for the warm OTP path
+
+`tools/adi_freeze.c` (native ptrace freezer, per-source hit counters, bisection flags) reached working state after two instrument bugs were fixed: (1) closed `/dev/urandom` fds stayed in the tracking table, so fd reuse poisoned the engine's own `adi.pb` header read with the deterministic fill and collapsed every frozen run into `-45061` reprovisioning; (2) the vDSO auxv patch silently never fired (single-NULL envp terminator vs the double-NULL the scan expected) — the report now verifies the write and says `patched`/`patch-failed`/`auxv-scan-failed`.
+
+Result (`research-runs/gate0-determinism-2026-11-16.md`): N=5 frozen replays byte-identical (MID `93ef3da7…`, OTP `f3fd95eb…`, state unchanged); frozen-epoch differential changes OTP only. Warm classification: **MID = f(state) only; OTP = f(state, CLOCK_REALTIME), ~60 s quantum; entropy does not feed the warm OTP** (urandom 40 B / AT_RANDOM 16 B reads are dead inputs); the warm path makes no `getrandom` and no `time(2)` calls; time flows through the vDSO until it is killed. New open question for Track B: the provisioned state is bound to the absolute provisioning path (byte-identical copy accepted in its own directory, rejected elsewhere; a state re-provisioned there is accepted) — replays must run in the provisioning directory and Track B must recover the binding.
