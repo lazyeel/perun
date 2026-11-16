@@ -5341,3 +5341,8 @@ Correction:
 - Add tests for primary plus repeated calls, allocator pointer reuse, duplicate live pointer FIFO behavior, and unknown/invalid Dispose pointers.
 
 This corrects bookkeeping only. Whether the observed native Dispose order and pointer identities match the intended lifecycle still requires the first private runtime capture.
+
+
+#### Dispose correlation refinement
+
+Refined the registry so `Dispose` entry only peeks at the owning allocation; the registry entry is consumed on the matching normal `api_return`. An out-of-scope/unwind event therefore does not falsely mark the allocation as freed. The return event carries the resolved `disposed_output_owner` metadata. Added a non-consuming peek assertion.
