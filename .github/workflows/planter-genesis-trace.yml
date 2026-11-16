@@ -21,6 +21,9 @@ on:
       - tools/cpim_diff_probe.py
       - tools/test_cpim_diff_probe.py
       - tools/adi_lifecycle_trace_gdb.py
+      - tools/adi_lifecycle_trace_helpers.py
+      - tools/validate_adi_lifecycle_trace.py
+      - tools/test_adi_lifecycle_trace.py
       - tools/scan_fold_constants.py
       - .github/workflows/planter-genesis-trace.yml
   workflow_dispatch:
@@ -63,7 +66,8 @@ jobs:
           python3 -m unittest tools.test_cpim_diff_probe -v
           python3 -m py_compile tools/genesis_probe_gdb.py tools/input_probe_gdb.py tools/time_freeze_gdb.py tools/rdtsc_freeze_gdb.py tools/slot_origin_gdb.py
           python3 -m unittest tools/test_planter_trace.py -v
-          python3 -m py_compile tools/adi_lifecycle_trace_gdb.py tools/scan_fold_constants.py
+          python3 -m py_compile tools/adi_lifecycle_trace_gdb.py tools/adi_lifecycle_trace_helpers.py tools/validate_adi_lifecycle_trace.py tools/scan_fold_constants.py
+          python3 -m unittest tools.test_adi_lifecycle_trace -v
           python3 -m unittest tools.test_scan_fold_constants -v
 
       - name: Compile and run perun-adi-core tests
@@ -442,6 +446,36 @@ jobs:
           restore_warm_seed
           unset ADI_FORCE_START ADI_OFFLINE_SPIM ADI_CPIM_OUT ADI_STATE_FILE ADI_TRACE_START_ONLY
           echo "Warm-state outputs and syscall traces remain private until age encryption."
+
+      - name: Validate lifecycle API event correlation
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="${RUN_WORK:-$RUNNER_TEMP/perun-adi-gdb}"
+          CAPTURE="$WORK/full-adi-capture"
+          REPORT="$CAPTURE/adi-lifecycle-validation.json"
+          mkdir -p "$CAPTURE"
+          if [ "${FULL_CYCLE_RC:-}" != "0" ]; then
+            if [ -z "${FULL_CYCLE_RC:-}" ]; then
+              REASON="full-cycle-not-started"
+            else
+              REASON="full-cycle-exit-nonzero"
+            fi
+            printf '{"status":"not-run","reason":"%s"}\n' "$REASON" > "$REPORT"
+            chmod 600 "$REPORT"
+            echo "Lifecycle API validation not run: full-cycle exit code is ${FULL_CYCLE_RC:-unset}."
+            exit 0
+          fi
+          if [ ! -s "$CAPTURE/adi-lifecycle-args.jsonl" ]; then
+            printf '{"status":"failed","valid":false,"errors":[{"code":"missing-lifecycle-args-log"}]}\n' > "$REPORT"
+            chmod 600 "$REPORT"
+            echo "Full-cycle exited 0 but produced no lifecycle API argument log." >&2
+            exit 1
+          fi
+          python3 tools/validate_adi_lifecycle_trace.py \
+            "$CAPTURE/adi-lifecycle-args.jsonl" \
+            --output "$REPORT"
 
       - name: Build a privacy-preserving capture manifest
         if: always()
