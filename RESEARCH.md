@@ -5346,3 +5346,12 @@ This corrects bookkeeping only. Whether the observed native Dispose order and po
 #### Dispose correlation refinement
 
 Refined the registry so `Dispose` entry only peeks at the owning allocation; the registry entry is consumed on the matching normal `api_return`. An out-of-scope/unwind event therefore does not falsely mark the allocation as freed. The return event carries the resolved `disposed_output_owner` metadata. Added a non-consuming peek assertion.
+
+
+### 2026-11-16 — independently validate OTP output ownership through Dispose
+
+Extended the JSONL validator to reconstruct the live MID/OTP allocation ledger from OTPRequest return events. It now cross-checks the pointer and owner metadata at `Dispose` entry against the reconstructed ledger, then verifies `disposed_output_owner` at normal Dispose return before retiring the allocation. An unwind does not retire it. Heap address reuse after a completed Dispose is supported.
+
+The validation report exposes only tracked/disposed/outstanding allocation counts. Any returned MID/OTP pointer not matched to a normal Dispose return fails validation. No pointer values are copied into the report. Added tests for normal MID+OTP disposal, missing Dispose, owner mismatch, and heap address reuse.
+
+This remains an instrumentation consistency check over trace data; it cannot prove that the native allocator actually freed memory correctly without a real Bionic capture.
