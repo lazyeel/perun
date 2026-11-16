@@ -60,6 +60,7 @@
 #include <sys/personality.h>
 #include <sys/ptrace.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 #include <sys/user.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -103,6 +104,186 @@
 
 #define MAX_PID_SLOTS 256
 
+/* ---- whole-function batch trace mode -------------------------------------- */
+/*
+ * --trace-lib=NAME --trace-rva=0x... --trace-out=FILE:
+ * resolve the library base from /proc/<pid>/maps once the child opens the
+ * library, plant a one-shot INT3 at base+rva (the export entry), and from that
+ * stop switch to PTRACE_SINGLESTEP, logging (ip, regs) per instruction until
+ * the call returns (ip == the return address captured at entry) or the step
+ * cap is hit. Freeze rewriting stays active during the traced call, so traced
+ * runs reproduce the same frozen-epoch outputs as the plain frozen runs.
+ *
+ * Record (little-endian, sequential):
+ *   u64 ip; u64 rax,rbx,rcx,rdx,rsi,rdi,rbp,rsp,r8..r15 (15 regs);
+ *   u64 orig_rax; u8 kind (1=entry, 2=step, 3=returned, 4=cap-hit)
+ */
+static struct {
+    const char *lib_name;
+    unsigned long rva;
+    const char *out_path;
+    unsigned long long max_steps;
+    int requested;
+    int lib_seen;             /* child opened the library */
+    unsigned long base;       /* runtime base of the first lib mapping */
+    unsigned long patch_addr; /* base + rva */
+    int patched;
+    int done;                 /* trace finished: never arm or reopen again */
+    unsigned char orig_byte;
+    FILE *out;
+    unsigned long long steps;
+    unsigned long retaddr;
+    int tracing;
+    char file_path[256];      /* library path as seen in maps */
+} trc;
+
+struct trec {
+    unsigned long long ip;
+    unsigned long long r[16];   /* rax rbx rcx rdx rsi rdi rbp rsp r8..r15 */
+    unsigned long long orig_rax;
+    unsigned int tid;           /* which thread executed the step */
+    unsigned char kind;
+};
+
+/* ---- RDTSC freeze ---------------------------------------------------------- */
+/* The engine reads the raw timestamp counter directly (0f 31 rdtsc at
+ * libstoreservicescore RVA 0x1c6419 on this rig): a userspace instruction no
+ * syscall freezer can see, whose value demonstrably feeds the traced warm-OTP
+ * dataflow. While tracing, every step stop checks the instruction just
+ * executed and, if it was rdtsc/rdtscp, rewrites the returned counter with a
+ * deterministic fake clock: base + reads*step. An unverified or uncontrolled
+ * time source has already bitten once (vDSO); TSC is the same class of bug. */
+static struct {
+    unsigned long long base;   /* counter value at the first rewrite */
+    unsigned long long step;   /* advance per read */
+    unsigned long long reads;  /* rewrites performed */
+    unsigned long long cur;    /* next value to hand out */
+    int enabled;
+} tscc;
+
+/* full XSAVE area per record (XMM/YMM and friends; the engine's data flow is
+ * heavily SIMD and GP registers alone provably do not capture the OTP
+ * computation). Layout of the blob is whatever the kernel returns for
+ * NT_X86_XSTATE; the analyser reads XMM at offset 576..832 when present. */
+#ifndef NT_X86_XSTATE
+#define NT_X86_XSTATE 0x202
+#endif
+static size_t xs_len;                 /* discovered on the first record */
+static unsigned char xs_buf[4096];
+
+static void trace_capture_xstate(pid_t pid) {
+    struct iovec iov = { xs_buf, sizeof xs_buf };
+    if (ptrace(PTRACE_GETREGSET, pid, (void *)(unsigned long)NT_X86_XSTATE, &iov) < 0) {
+        xs_len = 0;
+        return;
+    }
+    if (!xs_len) xs_len = iov.iov_len;
+}
+
+static void trace_write(pid_t pid, struct user_regs_struct *r, unsigned char kind) {
+    if (!trc.out) return;
+    struct trec t;
+    memset(&t, 0, sizeof t);
+    t.ip = r->rip;
+    unsigned long long regs[16] = { r->rax, r->rbx, r->rcx, r->rdx, r->rsi, r->rdi,
+                                    r->rbp, r->rsp, r->r8, r->r9, r->r10, r->r11,
+                                    r->r12, r->r13, r->r14, r->r15 };
+    memcpy(t.r, regs, sizeof regs);
+    t.orig_rax = (unsigned long long)r->orig_rax;
+    t.tid = (unsigned int)pid;
+    t.kind = kind;
+    fwrite(&t, sizeof t, 1, trc.out);
+    trace_capture_xstate(pid);
+    if (xs_len) fwrite(xs_buf, 1, xs_len, trc.out);
+}
+
+/* find runtime bases of a library by name in /proc/<pid>/maps: every mapping
+ * whose path ends with the given name is a candidate; the real load base is
+ * the one where the runtime byte at +rva equals the FILE byte at rva
+ * (Bionic's linker may expose transient or secondary mappings). */
+static int trace_resolve_base(pid_t pid) {
+    char mpath[64];
+    snprintf(mpath, sizeof mpath, "/proc/%d/maps", pid);
+    FILE *f = fopen(mpath, "r");
+    if (!f) return -1;
+    char line[512];
+    size_t namelen = strlen(trc.lib_name);
+    while (fgets(line, sizeof line, f)) {
+        char *p = strstr(line, trc.lib_name);
+        if (!p) continue;
+        /* ensure it's the path tail, not a random substring */
+        if (p > line && p[-1] != '/' ) continue;
+        if (p[namelen] != '\n' && p[namelen] != '\0' && p[namelen] != ' ') continue;
+        unsigned long lo = strtoul(line, NULL, 16);
+        /* remember the file path once for the byte check: the path starts
+         * right after the whitespace that precedes the library name */
+        char *pstart = p;
+        while (pstart > line && pstart[-1] != ' ') pstart--;
+        size_t plen = strlen(pstart);
+        if (plen && pstart[plen - 1] == '\n') plen--;
+        snprintf(trc.file_path, sizeof trc.file_path, "%.*s", (int)plen, pstart);
+        if (!trc.base || lo < trc.base) trc.base = lo;
+    }
+    fclose(f);
+    return trc.base ? 0 : -1;
+}
+
+/* runtime byte at addr vs the byte at the same RVA in the library file */
+static int trace_byte_matches_file(pid_t pid, unsigned long addr) {
+    errno = 0;
+    long w = ptrace(PTRACE_PEEKDATA, pid, addr, 0);
+    if (errno != 0) return -1;
+    unsigned char runtime = (unsigned char)(w & 0xff);
+    FILE *f = fopen(trc.file_path, "rb");
+    if (!f) return -1;
+    unsigned char filebyte = 0;
+    int ok = 0;
+    if (fseek(f, (long)trc.rva, SEEK_SET) == 0 && fread(&filebyte, 1, 1, f) == 1)
+        ok = (runtime == filebyte);
+    fclose(f);
+    return ok;
+}
+
+static void trace_try_arm(pid_t pid) {
+    if (!trc.requested || trc.done || trc.patched || trc.tracing || !trc.lib_seen)
+        return;
+    if (!trc.base && trace_resolve_base(pid) != 0) return;
+    trc.patch_addr = trc.base + trc.rva;
+    int m = trace_byte_matches_file(pid, trc.patch_addr);
+    if (m != 1) {
+        if (getenv("ADI_FREEZE_DEBUG_MAPS")) {
+            char mp[64]; snprintf(mp, sizeof mp, "/proc/%d/maps", pid);
+            FILE *f = fopen(mp, "r");
+            char line[512];
+            while (f && fgets(line, sizeof line, f))
+                if (strstr(line, trc.lib_name))
+                    fprintf(stderr, "[maps-dbg] %s", line);
+            if (f) fclose(f);
+            errno = 0;
+            long db = ptrace(PTRACE_PEEKDATA, pid, trc.patch_addr, 0);
+            fprintf(stderr, "[maps-dbg] base=0x%lx patch=0x%lx runtime_byte=%02x errno=%d\n",
+                    trc.base, trc.patch_addr,
+                    errno == 0 ? (unsigned)(db & 0xff) : 0u, errno);
+        }
+        /* not the load bias (transient/secondary mapping): keep scanning the
+         * maps on later stops rather than patching a wrong address */
+        trc.base = 0;
+        return;
+    }
+    errno = 0;
+    long w = ptrace(PTRACE_PEEKDATA, pid, trc.patch_addr, 0);
+    if (errno != 0) return;
+    trc.orig_byte = (unsigned char)(w & 0xff);
+    long patched_w = (w & ~0xffL) | 0xcc;
+    if (ptrace(PTRACE_POKEDATA, pid, trc.patch_addr, patched_w) < 0) return;
+    trc.patched = 1;
+    if (trc.out_path) trc.out = fopen(trc.out_path, "wb");
+    if (trc.out) setvbuf(trc.out, NULL, _IOFBF, 1 << 20);
+    fprintf(stderr, "[trace] armed at %s+0x%lx = 0x%lx (orig byte 0x%02x, file-verified)\n",
+            trc.lib_name, trc.rva, trc.patch_addr, trc.orig_byte);
+}
+
+
 /* ---- options / counters -------------------------------------------------- */
 
 static struct {
@@ -121,6 +302,9 @@ static struct {
     int no_getrandom;         /* leave getrandom(2) live (bisection) */
     int no_urandom;           /* leave /dev/urandom reads live (bisection) */
     int log_syscalls;         /* trace openat/open/read/getrandom ordering to stderr */
+    int no_tsc_freeze;        /* leave rdtsc/rdtscp answers real (bisection) */
+    unsigned long long tsc_base;  /* fake counter at the first rewrite; 0 = epoch<<21 */
+    unsigned long long tsc_step;  /* fake counter advance per read; 0 = 4096 */
 } opt;
 
 static struct {
@@ -225,6 +409,9 @@ struct pstate {
     int open_is_urandom;     /* flagged at open entry, consumed at open exit */
     int exec_seen;
     long close_fd;           /* fd seen at close/dup entry */
+    int tracing;             /* this process is being single-stepped (trace mode) */
+    unsigned long prev_ip;   /* last single-stepped instruction (TSC check) */
+    int prev_valid;
 };
 static struct pstate procs[MAX_PID_SLOTS];
 static int procs_n;
@@ -240,6 +427,19 @@ static void pstate_drop(pid_t pid) {
     int w = 0;
     for (int i = 0; i < procs_n; i++) if (procs[i].pid != pid) procs[w++] = procs[i];
     procs_n = w;
+}
+
+/* stop tracing every thread: the harness capture of mid.bin/otp.bin has
+ * started, so the outputs are final. done also prevents trace_try_arm from
+ * re-arming the int3 and re-opening (truncating!) the trace file on the
+ * next syscall boundary. */
+static void trace_stop_all(void) {
+    if (!trc.tracing) return;
+    trc.tracing = 0;
+    trc.done = 1;
+    for (int i = 0; i < procs_n; i++) procs[i].tracing = 0;
+    if (trc.out) fflush(trc.out);
+    fprintf(stderr, "[trace] stopped all threads after %llu records\n", trc.steps);
 }
 
 /* /dev/urandom fd tracking per process */
@@ -450,11 +650,23 @@ static void handle_syscall_entry(pid_t pid, struct user_regs_struct *r) {
     struct pstate *ps = pstate_of(pid);
     if (!ps) return;
     long nr = (long)r->orig_rax;
-    if (nr == SYS_open || nr == SYS_openat) {
+        if (nr == SYS_open || nr == SYS_openat) {
         unsigned long patharg = nr == SYS_open ? (unsigned long)r->rdi : (unsigned long)r->rsi;
         char path[128];
         read_child_string(pid, patharg, path, sizeof path);
         ps->open_is_urandom = !strcmp(path, "/dev/urandom") || !strcmp(path, "/dev/random");
+        if (trc.requested && !trc.lib_seen && !trc.patched) {
+            const char *base = strrchr(path, '/');
+            if (base && !strcmp(base + 1, trc.lib_name)) trc.lib_seen = 1;
+        }
+        /* the harness writes the final MID/OTP captures right after pOTP
+         * returns: that is the reliable end of the async computation */
+        if (trc.tracing) {
+            const char *base = strrchr(path, '/');
+            base = base ? base + 1 : path;
+            if (!strcmp(base, "mid.bin") || !strcmp(base, "otp.bin"))
+                trace_stop_all();
+        }
         ps->close_fd = -1;
     } else {
         ps->open_is_urandom = 0;
@@ -473,13 +685,15 @@ static void report(void) {
         "\"urandom\":{\"hits\":%llu,\"bytes\":%llu},"
         "\"clock_gettime\":{\"hits\":%llu},\"gettimeofday\":{\"hits\":%llu},"
         "\"time\":{\"hits\":%llu},\"getpid\":{\"hits\":%llu},\"gettid\":{\"hits\":%llu},"
-        "\"vdso\":\"%s\",\"aslr\":\"%s\"}}\n",
+        "\"vdso\":\"%s\",\"aslr\":\"%s\","
+        "\"tsc\":{\"enabled\":%d,\"reads\":%llu,\"base\":\"%llx\",\"step\":%llu}}}\n",
         stat_.epoch_value, stat_.rng_hits, stat_.rng_bytes,
         stat_.urand_hits, stat_.urand_bytes,
         stat_.cgt_hits, stat_.gtd_hits, stat_.time_hits,
         stat_.pid_hits, stat_.tid_hits,
         vdso_s,
-        opt.no_aslr ? "off" : "on");
+        opt.no_aslr ? "off" : "on",
+        tscc.enabled, tscc.reads, tscc.base, tscc.step);
 }
 
 int main(int argc, char **argv) {
@@ -503,11 +717,22 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--no-getrandom")) opt.no_getrandom = 1;
         else if (!strcmp(a, "--no-urandom")) opt.no_urandom = 1;
         else if (!strcmp(a, "--log-syscalls")) opt.log_syscalls = 1;
+        else if (!strncmp(a, "--trace-lib=", 12)) { trc.lib_name = a + 12; trc.requested = 1; }
+        else if (!strncmp(a, "--trace-rva=", 12)) { trc.rva = strtoul(a + 12, NULL, 0); trc.requested = 1; }
+        else if (!strncmp(a, "--trace-out=", 12)) { trc.out_path = a + 12; trc.requested = 1; }
+        else if (!strncmp(a, "--trace-max=", 12)) { trc.max_steps = strtoull(a + 12, NULL, 0); }
+        else if (!strcmp(a, "--no-tsc-freeze")) opt.no_tsc_freeze = 1;
+        else if (!strncmp(a, "--tsc-base=", 11)) opt.tsc_base = strtoull(a + 11, NULL, 0);
+        else if (!strncmp(a, "--tsc-step=", 11)) opt.tsc_step = strtoull(a + 11, NULL, 0);
         else die("unknown option %s", a);
     }
     if (sep < 0 || sep + 1 >= argc)
         die("usage: adi_freeze [opts] -- PROG [ARGS...]");
     char **prog = argv + sep + 1;
+    if (trc.requested && (!trc.lib_name || !trc.rva || !trc.out_path))
+        die("--trace-lib, --trace-rva and --trace-out are required together");
+    if (!trc.max_steps) trc.max_steps = 30000000;
+    tscc.enabled = trc.requested && !opt.no_tsc_freeze;
 
     if (epoch_s) {
         char *end = NULL;
@@ -522,6 +747,12 @@ int main(int argc, char **argv) {
     stat_.epoch_value = (unsigned long long)opt.epoch;
     init_stream(opt.rng_hex, stream, &stream_len);
     init_stream(opt.urandom_hex, ustream, &ustream_len);
+
+    tscc.enabled = trc.requested && !opt.no_tsc_freeze;
+    tscc.base = opt.tsc_base ? opt.tsc_base
+                             : ((unsigned long long)opt.epoch << 21);
+    tscc.step = opt.tsc_step ? opt.tsc_step : 4096;
+    tscc.cur = tscc.base;
 
     pid_t pid = fork();
     if (pid < 0) die("fork: %s", strerror(errno));
@@ -555,6 +786,7 @@ int main(int argc, char **argv) {
         }
         if (WIFEXITED(st) || WIFSIGNALED(st)) {
             if (w == pid) {
+                if (trc.out) fclose(trc.out);
                 if (!opt.quiet) report();
                 return WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
             }
@@ -575,12 +807,16 @@ int main(int argc, char **argv) {
                 ps->in_syscall = 1;
                 if (opt.log_syscalls) log_syscall(w, "E", (long)r.orig_rax, &r);
                 handle_syscall_entry(w, &r);
+                trace_try_arm(w);
             } else {
                 ps->in_syscall = 0;
                 if (opt.log_syscalls) log_syscall(w, "X", (long)r.orig_rax, &r);
                 handle_syscall_exit(w, &r, (long)r.orig_rax);
             }
-            ptrace(PTRACE_SYSCALL, w, 0, 0);
+            /* a traced process must stay in single-step flow: resuming a
+             * syscall boundary with PTRACE_SYSCALL would skip every
+             * instruction up to the next syscall. */
+            ptrace(ps->tracing ? PTRACE_SINGLESTEP : PTRACE_SYSCALL, w, 0, 0);
             continue;
         }
         if (sig == SIGTRAP) {
@@ -612,6 +848,122 @@ int main(int argc, char **argv) {
                     }
                 }
                 patch_auxv(w);
+                ptrace(PTRACE_SYSCALL, w, 0, 0);
+                continue;
+            }
+            /* ---- trace mode: int3 entry hit, then single-steps ---- */
+            if (ps) trace_try_arm(w);
+            if (ps && trc.requested && trc.out) {
+                struct user_regs_struct r;
+                if (ptrace(PTRACE_GETREGS, w, 0, &r) == 0) {
+                    if (!ps->tracing && r.rip == trc.patch_addr + 1) {
+                        /* INT3 at the trace entry: rewind, restore the byte,
+                         * capture the return address, begin stepping. The
+                         * engine's OTP work may complete on worker threads
+                         * (libdispatch), so every existing thread steps too;
+                         * the trace stops when the harness captures the
+                         * outputs (mid.bin/otp.bin opens). */
+                        r.rip = trc.patch_addr;
+                        ptrace(PTRACE_SETREGS, w, 0, &r);
+                        errno = 0;
+                        long ow = ptrace(PTRACE_PEEKDATA, w, trc.patch_addr, 0);
+                        if (errno == 0) {
+                            long ow2 = (ow & ~0xffL) | trc.orig_byte;
+                            ptrace(PTRACE_POKEDATA, w, trc.patch_addr, ow2);
+                        }
+                        trc.patched = 0;
+                        errno = 0;
+                        long ra = ptrace(PTRACE_PEEKDATA, w, (unsigned long)r.rsp, 0);
+                        trc.retaddr = errno == 0 ? (unsigned long)ra : 0;
+                        trc.tracing = 1;
+                        trc.steps = 0;
+                        for (int i = 0; i < procs_n; i++) {
+                            procs[i].tracing = 1;
+                            procs[i].prev_valid = 0;
+                        }
+                        trace_write(w, &r, 1);
+                        fprintf(stderr, "[trace] entered tid=%d, retaddr=0x%lx args rdi=%llx rsi=%llx rdx=%llx rcx=%llx r8=%llx (all threads stepping)\n",
+                                w, trc.retaddr, (unsigned long long)r.rdi, (unsigned long long)r.rsi,
+                                (unsigned long long)r.rdx, (unsigned long long)r.rcx,
+                                (unsigned long long)r.r8);
+                        ptrace(PTRACE_SINGLESTEP, w, 0, 0);
+                        continue;
+                    }
+                    if (ps->tracing) {
+                        if (!trc.tracing) {
+                            /* capture already ended the trace for everyone */
+                            ps->tracing = 0;
+                            ptrace(PTRACE_SYSCALL, w, 0, 0);
+                            continue;
+                        }
+                        if (r.rip == trc.retaddr) {
+                            trace_write(w, &r, 3);
+                            ps->tracing = 0;
+                            fprintf(stderr, "[trace] wrapper returned tid=%d after %llu records\n", w, trc.steps);
+                            ptrace(PTRACE_SYSCALL, w, 0, 0);
+                            continue;
+                        }
+                        if (trc.steps >= trc.max_steps) {
+                            trace_write(w, &r, 4);
+                            trace_stop_all();
+                            fprintf(stderr, "[trace] step cap %llu hit tid=%d at ip=%llx\n",
+                                    trc.max_steps, w, (unsigned long long)r.rip);
+                            ptrace(PTRACE_SYSCALL, w, 0, 0);
+                            continue;
+                        }
+                        /* freeze rdtsc/rdtscp: the instruction at prev_ip has
+                         * just executed and left its counter in rax/rdx;
+                         * replace it with the fake clock before the trace
+                         * record so the log shows the value the engine sees.
+                         * ALSO freeze time syscalls that crossed under
+                         * single-step: PTRACE_SINGLESTEP executes the whole
+                         * syscall without delivering boundary stops, so the
+                         * boundary rewriter never saw it and the engine read
+                         * the host clock (observed: gettimeofday at record
+                         * ~240k of the traced window). The original pointer
+                         * args survive the syscall, so rewrite in place. */
+                        if (ps->prev_valid) {
+                            errno = 0;
+                            long iw = ptrace(PTRACE_PEEKDATA, w,
+                                             ps->prev_ip, 0);
+                            unsigned char b0 = errno == 0 ? (iw & 0xff) : 0;
+                            unsigned char b1 = errno == 0 ? ((iw >> 8) & 0xff) : 0;
+                            unsigned char b2 = errno == 0 ? ((iw >> 16) & 0xff) : 0;
+                            if (errno == 0 && tscc.enabled &&
+                                ((b0 == 0x0f && b1 == 0x31) ||   /* rdtsc  */
+                                 (b0 == 0x0f && b1 == 0x01 && b2 == 0xf9))) {
+                                r.rax = tscc.cur;
+                                r.rdx = tscc.cur >> 32;
+                                if (b0 == 0x0f && b1 == 0x01)
+                                    r.rcx = 0;   /* rdtscp: TSC_AUX */
+                                tscc.cur += tscc.step;
+                                tscc.reads++;
+                                ptrace(PTRACE_SETREGS, w, 0, &r);
+                            } else if (errno == 0 && b0 == 0x0f && b1 == 0x05) {
+                                long nr = (long)r.orig_rax;
+                                if (nr == SYS_clock_gettime &&
+                                    (unsigned)r.rdi == CLOCK_REALTIME) {
+                                    freeze_clock_answer(w, (unsigned long)r.rsi);
+                                    stat_.cgt_hits++;
+                                } else if (nr == SYS_gettimeofday && r.rdi) {
+                                    freeze_clock_answer(w, (unsigned long)r.rdi);
+                                    stat_.gtd_hits++;
+                                } else if (nr == SYS_time && r.rdi) {
+                                    freeze_clock_answer(w, (unsigned long)r.rdi);
+                                    r.rax = (unsigned long long)opt.epoch;
+                                    ptrace(PTRACE_SETREGS, w, 0, &r);
+                                    stat_.time_hits++;
+                                }
+                            }
+                        }
+                        ps->prev_ip = (unsigned long)r.rip;
+                        ps->prev_valid = 1;
+                        trc.steps++;
+                        trace_write(w, &r, 2);
+                        ptrace(PTRACE_SINGLESTEP, w, 0, 0);
+                        continue;
+                    }
+                }
             }
             ptrace(PTRACE_SYSCALL, w, 0, 0);
             continue;
