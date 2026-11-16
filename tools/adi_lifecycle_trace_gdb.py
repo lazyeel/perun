@@ -33,7 +33,12 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
-from adi_lifecycle_trace_helpers import parse_out_slot_address, resolve_output_buffer
+from adi_lifecycle_trace_helpers import (
+    parse_out_slot_address,
+    remember_output_allocation,
+    resolve_output_buffer,
+    take_output_allocation,
+)
 
 LOG_PATH = os.environ.get("ADI_LIFECYCLE_TRACE_LOG")
 if not LOG_PATH:
@@ -85,7 +90,7 @@ STATE = {
     "pending_api_return": None,
     "api_return_bps": [],
     "last_otp_call_id": None,
-    "otp_outputs": {},
+    "otp_allocations": {},
 }
 
 
@@ -288,14 +293,7 @@ def api_entry_record(symbol: str, phase: int) -> dict[str, object]:
         args["ds_id"] = f"0x{regs['rdi']:016x}"
     elif symbol == "jk24uiwqrg":  # ADI_Dispose
         ptr = regs["rdi"]
-        owner = None
-        for name, output in STATE["otp_outputs"].items():
-            if output.get("pointer") == ptr:
-                owner = {
-                    "kind": name,
-                    "call_id": output.get("call_id"),
-                }
-                break
+        owner = take_output_allocation(STATE["otp_allocations"], ptr)
         args.update({
             "pointer": f"0x{ptr:x}",
             "otp_output_owner": owner,
@@ -335,11 +333,13 @@ def api_output_from_slots(record: dict[str, object]) -> dict[str, object]:
         for name in ("mid", "otp"):
             item = result[name]
             assert isinstance(item, dict)
-            STATE["otp_outputs"][name] = {
-                "pointer": item["pointer"],
-                "length": item["length"],
-                "call_id": record["call_id"],
-            }
+            remember_output_allocation(
+                STATE["otp_allocations"],
+                item.get("pointer"),
+                kind=name,
+                call_id=int(record["call_id"]),
+                length=int(item.get("length", 0)),
+            )
     elif symbol == "rsegvyrt87":
         result["cpim"] = resolve_output_buffer(
             args["cpim_out_slot"],
