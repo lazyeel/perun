@@ -35,6 +35,7 @@ if _SCRIPT_DIR not in sys.path:
 
 from adi_lifecycle_trace_helpers import (
     parse_out_slot_address,
+    peek_output_allocation,
     remember_output_allocation,
     resolve_output_buffer,
     take_output_allocation,
@@ -293,7 +294,7 @@ def api_entry_record(symbol: str, phase: int) -> dict[str, object]:
         args["ds_id"] = f"0x{regs['rdi']:016x}"
     elif symbol == "jk24uiwqrg":  # ADI_Dispose
         ptr = regs["rdi"]
-        owner = take_output_allocation(STATE["otp_allocations"], ptr)
+        owner = peek_output_allocation(STATE["otp_allocations"], ptr)
         args.update({
             "pointer": f"0x{ptr:x}",
             "otp_output_owner": owner,
@@ -378,6 +379,16 @@ class ApiReturnBreakpoint(gdb.FinishBreakpoint):
         phase = int(record["phase_id"])
         return_value = read_int("$rax", 0) & 0xFFFFFFFF
         outputs = api_output_from_slots(record)
+        disposed_owner = None
+        if symbol == "jk24uiwqrg":
+            args = record.get("arguments", {})
+            try:
+                pointer = parse_out_slot_address(args.get("pointer"))
+                disposed_owner = take_output_allocation(
+                    STATE["otp_allocations"], pointer
+                )
+            except (TypeError, ValueError):
+                pass
         result: dict[str, object] = {
             "event": "api_return",
             "call_id": record["call_id"],
@@ -387,6 +398,7 @@ class ApiReturnBreakpoint(gdb.FinishBreakpoint):
             "phase": PHASES.get(phase, "unknown"),
             "return_value": return_value if symbol != "jk24uiwqrg" else None,
             "outputs": outputs,
+            "disposed_output_owner": disposed_owner,
         }
         write_private_event(result)
         if symbol == "qi864985u0":
