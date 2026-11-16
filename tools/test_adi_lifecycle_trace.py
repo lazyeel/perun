@@ -120,3 +120,158 @@ class OutputBufferResolutionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class ApiEventStreamValidationTests(unittest.TestCase):
+    @staticmethod
+    def entry(call_id, parent=None, api="export"):
+        return {
+            "event": "api_entry",
+            "call_id": call_id,
+            "parent_call_id": parent,
+            "api": api,
+        }
+
+    @staticmethod
+    def terminal(kind, call_id, parent=None, api="export"):
+        return {
+            "event": kind,
+            "call_id": call_id,
+            "parent_call_id": parent,
+            "api": api,
+        }
+
+    def test_balanced_entry_and_return(self):
+        from tools.adi_lifecycle_trace_helpers import validate_api_event_stream
+        result = validate_api_event_stream([
+            self.entry(1),
+            {"event": "opcode_arguments", "api_call_id": 1},
+            self.terminal("api_return", 1),
+        ])
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["api_entry_count"], 1)
+        self.assertEqual(result["api_return_count"], 1)
+        self.assertEqual(result["open_call_ids"], [])
+        self.assertEqual(result["errors"], [])
+
+    def test_nested_calls_must_return_in_lifo_order(self):
+        from tools.adi_lifecycle_trace_helpers import validate_api_event_stream
+        result = validate_api_event_stream([
+            self.entry(1, api="outer"),
+            self.entry(2, parent=1, api="inner"),
+            self.terminal("api_return", 2, parent=1, api="inner"),
+            self.terminal("api_return", 1, api="outer"),
+        ])
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["api_return_count"], 2)
+
+    def test_unwind_is_a_valid_terminal_event(self):
+        from tools.adi_lifecycle_trace_helpers import validate_api_event_stream
+        result = validate_api_event_stream([
+            self.entry(1),
+            self.terminal("api_unwind", 1),
+        ])
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["api_unwind_count"], 1)
+
+    def test_unclosed_entry_is_reported(self):
+        from tools.adi_lifecycle_trace_helpers import validate_api_event_stream
+        result = validate_api_event_stream([self.entry(7)])
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["open_call_ids"], [7])
+
+    def test_terminal_without_entry_is_reported(self):
+        from tools.adi_lifecycle_trace_helpers import validate_api_event_stream
+        result = validate_api_event_stream([self.terminal("api_return", 7)])
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["errors"][0]["code"], "terminal-without-entry")
+
+    def test_duplicate_call_id_is_reported(self):
+        from tools.adi_lifecycle_trace_helpers import validate_api_event_stream
+        result = validate_api_event_stream([self.entry(1), self.entry(1)])
+        self.assertFalse(result["valid"])
+        self.assertIn("duplicate-entry-call-id", [e["code"] for e in result["errors"]])
+
+    def test_wrong_parent_link_is_reported(self):
+        from tools.adi_lifecycle_trace_helpers import validate_api_event_stream
+        result = validate_api_event_stream([
+            self.entry(1),
+            self.entry(2, parent=99),
+            self.terminal("api_return", 2, parent=99),
+            self.terminal("api_return", 1),
+        ])
+        self.assertFalse(result["valid"])
+        self.assertIn(
+            "entry-parent-does-not-match-active-frame",
+            [e["code"] for e in result["errors"]],
+        )
+
+    def test_parent_cannot_return_while_child_is_open(self):
+        from tools.adi_lifecycle_trace_helpers import validate_api_event_stream
+        result = validate_api_event_stream([
+            self.entry(1, api="parent"),
+            self.entry(2, parent=1, api="child"),
+            self.terminal("api_return", 1, api="parent"),
+        ])
+        self.assertFalse(result["valid"])
+        self.assertIn(
+            "terminal-is-not-current-stack-top",
+            [e["code"] for e in result["errors"]],
+        )
+
+    def test_opcode_capture_must_reference_current_frame(self):
+        from tools.adi_lifecycle_trace_helpers import validate_api_event_stream
+        result = validate_api_event_stream([
+            self.entry(1),
+            self.entry(2, parent=1),
+            {"event": "opcode_arguments", "api_call_id": 1},
+        ])
+        self.assertFalse(result["valid"])
+        self.assertIn(
+            "opcode-capture-call-id-not-current-frame",
+            [e["code"] for e in result["errors"]],
+        )
+
+    def test_return_probe_failure_is_explicit(self):
+        from tools.adi_lifecycle_trace_helpers import validate_api_event_stream
+        result = validate_api_event_stream([
+            self.entry(1),
+            {"event": "api_return_probe_error", "call_id": 1},
+        ])
+        self.assertFalse(result["valid"])
+        self.assertIn(
+            "return-probe-creation-failed",
+            [e["code"] for e in result["errors"]],
+        )
+
+    def test_invalid_call_id_types_are_rejected(self):
+        from tools.adi_lifecycle_trace_helpers import validate_api_event_stream
+        for call_id in (True, 0, -1, "1", None):
+            with self.subTest(call_id=call_id):
+                result = validate_api_event_stream([self.entry(call_id)])
+                self.assertFalse(result["valid"])
+
+    def test_empty_stream_is_not_accepted_as_valid_capture(self):
+        from tools.adi_lifecycle_trace_helpers import validate_api_event_stream
+        result = validate_api_event_stream([])
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["event_count"], 0)
+
+    def test_jsonl_reader_reports_parse_errors_without_echoing_payload(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from tools.adi_lifecycle_trace_helpers import validate_api_event_log
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trace.jsonl"
+            path.write_text(
+                json.dumps(self.entry(1)) + "\n"
+                + "{secret=not-json}\n"
+                + json.dumps(self.terminal("api_return", 1)) + "\n",
+                encoding="utf-8",
+            )
+            result = validate_api_event_log(path)
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["jsonl_parse_errors"], [{"line": 2, "code": "invalid-json"}])
+        self.assertNotIn("secret", str(result))
