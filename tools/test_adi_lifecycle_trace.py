@@ -460,6 +460,105 @@ class ApiEventStreamValidationTests(unittest.TestCase):
         self.assertEqual(result["tracked_output_allocations"], 2)
         self.assertEqual(result["disposed_output_allocations"], 2)
 
+
+    def test_complete_lifecycle_contract_accepts_cold_start_end_and_five_otp_calls(self):
+        from tools.adi_lifecycle_trace_helpers import validate_complete_lifecycle_contract
+        events = [self.entry(1, api="rsegvyrt87")]
+        events[0]["phase_id"] = 1
+        events[0]["arguments"] = {"spim": {"status": "ok", "length": 347}}
+        start_return = self.terminal("api_return", 1, api="rsegvyrt87")
+        start_return.update({
+            "phase_id": 1, "return_value": 0,
+            "outputs": {
+                "cpim": {"pointer": 0x1000, "length": 276, "data": {"status": "ok"}},
+                "session": 7,
+            },
+        })
+        events.append(start_return)
+        end_entry = self.entry(2, api="uv5t6nhkui")
+        end_entry["phase_id"] = 2
+        end_entry["arguments"] = {
+            "session": 7,
+            "ptm": {"status": "ok", "length": 64},
+            "tk": {"status": "ok", "length": 32},
+        }
+        events.append(end_entry)
+        end_return = self.terminal("api_return", 2, api="uv5t6nhkui")
+        end_return.update({"phase_id": 2, "return_value": 0})
+        events.append(end_return)
+        code_entry = self.entry(3, api="aslgmuibau")
+        code_entry["phase_id"] = 3
+        events.append(code_entry)
+        code_return = self.terminal("api_return", 3, api="aslgmuibau")
+        code_return.update({"phase_id": 3, "return_value": 0})
+        events.append(code_return)
+        next_id = 4
+        for sample in range(5):
+            otp_entry = self.entry(next_id, api="qi864985u0")
+            otp_entry["phase_id"] = 4
+            events.append(otp_entry)
+            otp_return = self.terminal("api_return", next_id, api="qi864985u0")
+            otp_return.update({
+                "phase_id": 4, "return_value": 0,
+                "outputs": {
+                    "mid": {"pointer": 0x10000 + sample * 0x100, "length": 60, "data": {"status": "ok"}},
+                    "otp": {"pointer": 0x20000 + sample * 0x100, "length": 28, "data": {"status": "ok"}},
+                },
+            })
+            events.append(otp_return)
+            next_id += 1
+            for pointer, kind, length in (
+                (0x10000 + sample * 0x100, "mid", 60),
+                (0x20000 + sample * 0x100, "otp", 28),
+            ):
+                owner = {"kind": kind, "call_id": otp_entry["call_id"], "length": length}
+                events.append(self.dispose_entry(next_id, pointer, owner))
+                events.append(self.dispose_return(next_id, owner))
+                next_id += 1
+
+        result = validate_complete_lifecycle_contract(events)
+        self.assertTrue(result["valid"], result["errors"])
+        self.assertEqual(result["provisioning_start_calls"], 1)
+        self.assertEqual(result["provisioning_end_calls"], 1)
+        self.assertEqual(result["otp_request_calls"], 5)
+        self.assertEqual(result["dispose_calls"], 10)
+        self.assertEqual(result["spim_bytes"], 347)
+        self.assertEqual(result["cpim_bytes"], 276)
+        self.assertTrue(result["session_matches"])
+
+    def test_complete_lifecycle_contract_rejects_missing_end_and_out_of_order_otp(self):
+        from tools.adi_lifecycle_trace_helpers import validate_complete_lifecycle_contract
+        events = [
+            self.entry(1, api="rsegvyrt87"),
+            self.terminal("api_return", 1, api="rsegvyrt87"),
+            self.entry(2, api="qi864985u0"),
+            self.terminal("api_return", 2, api="qi864985u0"),
+        ]
+        events[0]["phase_id"] = 1
+        events[0]["arguments"] = {"spim": {"status": "ok", "length": 347}}
+        events[1].update({
+            "phase_id": 1, "return_value": 0,
+            "outputs": {
+                "cpim": {"pointer": 1, "length": 276, "data": {"status": "ok"}},
+                "session": 1,
+            },
+        })
+        events[2].update({"phase_id": 4, "arguments": {}})
+        events[3].update({
+            "phase_id": 4, "return_value": 0,
+            "outputs": {
+                "mid": {"pointer": 2, "length": 60, "data": {"status": "ok"}},
+                "otp": {"pointer": 3, "length": 28, "data": {"status": "ok"}},
+            },
+        })
+        result = validate_complete_lifecycle_contract(events)
+        self.assertFalse(result["valid"])
+        codes = [error["code"] for error in result["errors"]]
+        self.assertIn("expected-exactly-one-provisioning-end", codes)
+        self.assertIn("expected-exactly-one-post-end-login-code-check", codes)
+        self.assertIn("expected-primary-and-four-repeat-otp-requests", codes)
+
+
     def test_empty_stream_is_not_accepted_as_valid_capture(self):
         from tools.adi_lifecycle_trace_helpers import validate_api_event_stream
         result = validate_api_event_stream([])
