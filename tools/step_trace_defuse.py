@@ -40,7 +40,7 @@ OFF_TID = 144
 OFF_KIND = 148
 REGN = ['rax', 'rbx', 'rcx', 'rdx', 'rsi', 'rdi', 'rbp', 'rsp',
         'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15']
-KIND = {1: 'entry', 2: 'step', 3: 'returned', 4: 'cap-hit'}
+KIND = {1: 'entry', 2: 'step', 3: 'returned', 4: 'cap-hit', 5: 'memwrite'}
 XS_CANDIDATES = (0, 256, 288, 320, 512, 576, 832, 1088, 2440, 2560, 2696)
 
 
@@ -100,7 +100,10 @@ def read_headers(path, rec):
             meta.append((ip, kind, tid, off))
             regs[i * (OFF_ORIG - OFF_REGS):(i + 1) * (OFF_ORIG - OFF_REGS)] = \
                 b[OFF_REGS:OFF_ORIG]
-    return meta, regs, xsdef blob_region(off):
+    return meta, regs, xs
+
+
+def blob_region(off):
     if off < 32:
         return f'ctrl+{off}'
     if off < 160:

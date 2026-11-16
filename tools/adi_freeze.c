@@ -53,6 +53,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -103,6 +104,81 @@
 #define CLOCK_REALTIME     0
 
 #define MAX_PID_SLOTS 256
+
+/* ---- OTP output write watchpoint ------------------------------------------- */
+/* The engine's 16-byte OTP payload lives at otp+8 .. otp+24 (rcx at entry).
+ * Hardware write watchpoints (DR0/DR1, 8 bytes each) catch the exact store
+ * instructions even though the batch trace logs no memory operands. Debug
+ * registers are per-thread; only the calling thread is armed. */
+static int wp_on;                 /* one active watchpoint set per traced run */
+static unsigned long wp_ptrvar;   /* address of the otp* variable ([rcx] at entry) */
+static unsigned long wp_payload;  /* discovered buffer address + 8 */
+
+/* arm DR0/DR1/DR2 once the buffer address is known */
+static void wp_watch_payload(pid_t pid, unsigned long payload) {
+    ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[0]),
+           (void *)payload);
+    ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[1]),
+           (void *)(payload + 8));
+    ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[2]),
+           (void *)(payload + 16));
+    wp_payload = payload;
+    fprintf(stderr, "[trace] OTP payload watch at %lx..%lx\n",
+            payload, payload + 24);
+}
+
+static void wp_arm(pid_t pid, unsigned long ptrvar) {
+    /* DR0/DR1/DR2: 8-byte WRITE watchpoints covering payload+0..+24.
+     * DR3: write watchpoint on the otp* variable itself: the engine
+     * allocates the buffer inside the call, so at entry *otp is still NULL.
+     * DR7: Ln=1, RWn=01 (write), LENn=11 (8 bytes) for every slot. */
+    unsigned long dr7 = (1UL << 0) | (1UL << 16) | (3UL << 18) |
+                        (1UL << 2) | (1UL << 20) | (3UL << 22) |
+                        (1UL << 4) | (1UL << 24) | (3UL << 26) |
+                        (1UL << 6) | (1UL << 28) | (3UL << 30);
+    wp_ptrvar = ptrvar;
+    ptrace(PTRACE_POKEUSER, pid,
+           (void *)offsetof(struct user, u_debugreg[6]), 0);   /* clear sticky */
+    if (ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[3]),
+               (void *)wp_ptrvar) < 0 ||
+        ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[7]),
+               (void *)dr7) < 0)
+        return;
+    wp_on = 1;
+    fprintf(stderr, "[trace] OTP ptr-var watchpoint armed at %lx (dr7=%lx)\n",
+            wp_ptrvar, dr7);
+}
+
+static void wp_disarm(pid_t pid) {
+    if (!wp_on) return;
+    ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[7]), 0);
+    wp_on = 0;
+}
+
+/* returns 1 when a watched PAYLOAD store has just executed (DR6 bits 0..2) */
+static int wp_check(pid_t pid) {
+    if (!wp_on) return 0;
+    errno = 0;
+    long dr6 = ptrace(PTRACE_PEEKUSER, pid,
+                      (void *)offsetof(struct user, u_debugreg[6]), 0);
+    if (errno != 0) return 0;
+    if (dr6 & 15) {
+        if (getenv("ADI_FREEZE_DEBUG_WP"))
+            fprintf(stderr, "[wp] dr6=%lx payload=%lx\n",
+                    (unsigned long)dr6, wp_payload);
+        if (dr6 & 8) {
+            /* the engine just stored the allocated buffer address in *otp */
+            errno = 0;
+            long optr = ptrace(PTRACE_PEEKDATA, pid, wp_ptrvar, 0);
+            if (errno == 0 && optr > 0x10000)
+                wp_watch_payload(pid, (unsigned long)optr + 8);
+        }
+        /* sticky DR6 bits suppress further #DB generation: clear all of them */
+        ptrace(PTRACE_POKEUSER, pid,
+               (void *)offsetof(struct user, u_debugreg[6]), 0);
+    }
+    return (dr6 & 7) != 0;
+}
 
 /* ---- whole-function batch trace mode -------------------------------------- */
 /*
@@ -281,6 +357,18 @@ static void trace_try_arm(pid_t pid) {
     if (trc.out) setvbuf(trc.out, NULL, _IOFBF, 1 << 20);
     fprintf(stderr, "[trace] armed at %s+0x%lx = 0x%lx (orig byte 0x%02x, file-verified)\n",
             trc.lib_name, trc.rva, trc.patch_addr, trc.orig_byte);
+    if (getenv("ADI_FREEZE_DEBUG_MAPS")) {
+        /* dump every .so mapping once: the analyser needs module load biases
+         * to map traced ips back to file offsets */
+        char mp[64];
+        snprintf(mp, sizeof mp, "/proc/%d/maps", pid);
+        FILE *f = fopen(mp, "r");
+        char line[512];
+        while (f && fgets(line, sizeof line, f))
+            if (strstr(line, ".so") || strstr(line, "adi_native"))
+                fprintf(stderr, "[maps] %s", line);
+        if (f) fclose(f);
+    }
 }
 
 
@@ -292,6 +380,7 @@ static struct {
     const char *urandom_hex;
     long long fixed_pid;
     long long fixed_tid;
+    unsigned long long otp_buf;   /* known heap buffer address (no-ASLR rig) */
     int keep_vdso;
     int freeze_monotonic;
     int no_aslr;
@@ -433,11 +522,12 @@ static void pstate_drop(pid_t pid) {
  * started, so the outputs are final. done also prevents trace_try_arm from
  * re-arming the int3 and re-opening (truncating!) the trace file on the
  * next syscall boundary. */
-static void trace_stop_all(void) {
+static void trace_stop_all(pid_t pid) {
     if (!trc.tracing) return;
     trc.tracing = 0;
     trc.done = 1;
     for (int i = 0; i < procs_n; i++) procs[i].tracing = 0;
+    wp_disarm(pid);
     if (trc.out) fflush(trc.out);
     fprintf(stderr, "[trace] stopped all threads after %llu records\n", trc.steps);
 }
@@ -664,8 +754,24 @@ static void handle_syscall_entry(pid_t pid, struct user_regs_struct *r) {
         if (trc.tracing) {
             const char *base = strrchr(path, '/');
             base = base ? base + 1 : path;
-            if (!strcmp(base, "mid.bin") || !strcmp(base, "otp.bin"))
-                trace_stop_all();
+            if (!strcmp(base, "mid.bin") || !strcmp(base, "otp.bin")) {
+                if (wp_payload && getenv("ADI_FREEZE_DEBUG_WP")) {
+                    errno = 0;
+                    long optr = ptrace(PTRACE_PEEKDATA, pid, wp_ptrvar, 0);
+                    fprintf(stderr, "[wp] capture: ptrvar=%lx optr=%lx watched=%lx\n",
+                            wp_ptrvar, errno == 0 ? (unsigned long)optr : 0ul,
+                            wp_payload);
+                    for (int k = -2; k < 4; k++) {
+                        errno = 0;
+                        long w = ptrace(PTRACE_PEEKDATA, pid,
+                                        wp_payload + 8 * k, 0);
+                        fprintf(stderr, "[wp] buf%+d = %016lx%s\n", 8 * k,
+                                errno == 0 ? (unsigned long)w : 0ul,
+                                errno ? " (unmapped)" : "");
+                    }
+                }
+                trace_stop_all(pid);
+            }
         }
         ps->close_fd = -1;
     } else {
@@ -724,6 +830,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--no-tsc-freeze")) opt.no_tsc_freeze = 1;
         else if (!strncmp(a, "--tsc-base=", 11)) opt.tsc_base = strtoull(a + 11, NULL, 0);
         else if (!strncmp(a, "--tsc-step=", 11)) opt.tsc_step = strtoull(a + 11, NULL, 0);
+        else if (!strncmp(a, "--otp-buf=", 10)) opt.otp_buf = strtoull(a + 10, NULL, 0);
         else die("unknown option %s", a);
     }
     if (sep < 0 || sep + 1 >= argc)
@@ -875,6 +982,9 @@ int main(int argc, char **argv) {
                         errno = 0;
                         long ra = ptrace(PTRACE_PEEKDATA, w, (unsigned long)r.rsp, 0);
                         trc.retaddr = errno == 0 ? (unsigned long)ra : 0;
+                        wp_arm(w, (unsigned long)r.rcx);
+                        if (opt.otp_buf)
+                            wp_watch_payload(w, (unsigned long)opt.otp_buf + 8);
                         trc.tracing = 1;
                         trc.steps = 0;
                         for (int i = 0; i < procs_n; i++) {
@@ -899,13 +1009,14 @@ int main(int argc, char **argv) {
                         if (r.rip == trc.retaddr) {
                             trace_write(w, &r, 3);
                             ps->tracing = 0;
+                            wp_disarm(w);
                             fprintf(stderr, "[trace] wrapper returned tid=%d after %llu records\n", w, trc.steps);
                             ptrace(PTRACE_SYSCALL, w, 0, 0);
                             continue;
                         }
                         if (trc.steps >= trc.max_steps) {
                             trace_write(w, &r, 4);
-                            trace_stop_all();
+                            trace_stop_all(w);
                             fprintf(stderr, "[trace] step cap %llu hit tid=%d at ip=%llx\n",
                                     trc.max_steps, w, (unsigned long long)r.rip);
                             ptrace(PTRACE_SYSCALL, w, 0, 0);
@@ -959,7 +1070,16 @@ int main(int argc, char **argv) {
                         ps->prev_ip = (unsigned long)r.rip;
                         ps->prev_valid = 1;
                         trc.steps++;
-                        trace_write(w, &r, 2);
+                        {
+                            int mw = wp_check(w);
+                            if (mw)
+                                fprintf(stderr, "[trace] OTP payload store at prev_ip=%llx ip=%llx rax=%llx rbx=%llx rcx=%llx rdx=%llx\n",
+                                        (unsigned long long)ps->prev_ip,
+                                        (unsigned long long)r.rip,
+                                        (unsigned long long)r.rax, (unsigned long long)r.rbx,
+                                        (unsigned long long)r.rcx, (unsigned long long)r.rdx);
+                            trace_write(w, &r, mw ? 5 : 2);
+                        }
                         ptrace(PTRACE_SINGLESTEP, w, 0, 0);
                         continue;
                     }
