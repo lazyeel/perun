@@ -6,7 +6,7 @@ in ordinary CPython and in CI.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 
@@ -109,9 +109,9 @@ def validate_api_event_stream(events: Any) -> dict[str, Any]:
             issue(index, "event-is-not-an-object")
             continue
         kind = event.get("event")
-        if kind not in counts:
+        if not isinstance(kind, str) or kind not in counts:
             continue
-        counts[str(kind)] += 1
+        counts[kind] += 1
 
         if kind == "api_entry":
             call_id = event.get("call_id")
@@ -123,7 +123,11 @@ def validate_api_event_stream(events: Any) -> dict[str, Any]:
                 continue
             expected_parent = active[-1] if active else None
             actual_parent = event.get("parent_call_id")
-            if actual_parent != expected_parent:
+            parent_matches = (
+                actual_parent is None if expected_parent is None
+                else valid_id(actual_parent) and actual_parent == expected_parent
+            )
+            if not parent_matches:
                 issue(index, "entry-parent-does-not-match-active-frame", call_id)
             api_name = event.get("api")
             if not isinstance(api_name, str) or not api_name:
@@ -155,7 +159,13 @@ def validate_api_event_stream(events: Any) -> dict[str, Any]:
                 continue
             if event.get("api") != entry["api"]:
                 issue(index, "terminal-api-name-mismatch", call_id)
-            if event.get("parent_call_id") != entry["parent_call_id"]:
+            expected_parent = entry["parent_call_id"]
+            actual_parent = event.get("parent_call_id")
+            parent_matches = (
+                actual_parent is None if expected_parent is None
+                else valid_id(actual_parent) and actual_parent == expected_parent
+            )
+            if not parent_matches:
                 issue(index, "terminal-parent-id-mismatch", call_id)
             active.pop()
             seen_terminal.add(call_id)
