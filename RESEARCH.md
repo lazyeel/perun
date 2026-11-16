@@ -5255,3 +5255,22 @@ OTPRequest returns the actual 60-byte MID and 28-byte OTP before either
 allocation is passed to Dispose. Only then use the captured data for the
 OTP backward slice. No OTP primitive or state format is inferred by this
 instrumentation change.
+
+
+### 2026-11-16 — fix and test lifecycle export out-slot decoding
+
+The new entry/return trace exposed a concrete implementation defect during static review:
+`ADI_ProvisioningStart` records its CPIM and session out-slot addresses as hexadecimal strings (`0x...`), but the return handler previously passed those strings to `int(value)` without base 0. That raises `ValueError` at the FinishBreakpoint, before CPIM/session can be captured. OTPRequest stored slot addresses as integers, so the defect was Start-specific.
+
+Fix:
+- Added `tools/adi_lifecycle_trace_helpers.py` with pure, GDB-independent parsing and output-slot resolution.
+- Hex strings, integer addresses, and decimal strings (including leading zeroes) are now handled deliberately; booleans, malformed values, negative values, and values outside u64 are rejected.
+- Start CPIM and OTP MID/OTP outputs share the same resolver. Slot parse/read failures are represented as private trace event data instead of escaping the GDB callback.
+- Added regression tests for Start-style hex slots, OTP-style integer slots, invalid inputs, u64 bounds, memory read failures, and exact pointer/length forwarding.
+- CI now compiles the helper and runs `tools/test_adi_lifecycle_trace.py`.
+
+Evidence boundary:
+- This was a static defect found by comparing the trace record encoding with the return-side parser. The pure helper tests exercise address decoding and injected memory-read behavior.
+- The GDB/Bionic runtime path is still unvalidated: the private lifecycle workflow remains gated on `ADI_CAPTURE_AGE_RECIPIENT`, which was not configured during this iteration. No new Apple runtime output, OTP algorithm, or state-format conclusion is claimed.
+- Next runtime acceptance criteria remain one matched return/unwind per API entry, correct nesting/call IDs, CPIM/session output capture from Start, MID(60)/OTP(28) capture before Dispose, and same-session post-End state correlation.
+
