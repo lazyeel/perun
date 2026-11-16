@@ -74,3 +74,151 @@ def resolve_output_buffer(
         "length": length,
         "data": capture_bytes(pointer, length, limit),
     }
+
+
+
+def validate_api_event_stream(events: Any) -> dict[str, Any]:
+    """Validate entry/terminal pairing and nesting in private lifecycle JSONL.
+
+    Only event metadata is returned. Captured arguments, pointers and token
+    bytes are never copied into the validation report.
+    """
+    entries: dict[int, dict[str, Any]] = {}
+    active: list[int] = []
+    seen_terminal: set[int] = set()
+    errors: list[dict[str, Any]] = []
+    counts = {
+        "api_entry": 0,
+        "api_return": 0,
+        "api_unwind": 0,
+        "api_return_probe_error": 0,
+        "opcode_arguments": 0,
+    }
+
+    def issue(index: int, code: str, call_id: object = None) -> None:
+        row: dict[str, Any] = {"event_index": index, "code": code}
+        if isinstance(call_id, int) and not isinstance(call_id, bool):
+            row["call_id"] = call_id
+        errors.append(row)
+
+    def valid_id(value: object) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+    for index, event in enumerate(events):
+        if not isinstance(event, Mapping):
+            issue(index, "event-is-not-an-object")
+            continue
+        kind = event.get("event")
+        if kind not in counts:
+            continue
+        counts[str(kind)] += 1
+
+        if kind == "api_entry":
+            call_id = event.get("call_id")
+            if not valid_id(call_id):
+                issue(index, "invalid-entry-call-id", call_id)
+                continue
+            if call_id in entries:
+                issue(index, "duplicate-entry-call-id", call_id)
+                continue
+            expected_parent = active[-1] if active else None
+            actual_parent = event.get("parent_call_id")
+            if actual_parent != expected_parent:
+                issue(index, "entry-parent-does-not-match-active-frame", call_id)
+            api_name = event.get("api")
+            if not isinstance(api_name, str) or not api_name:
+                issue(index, "entry-api-name-missing", call_id)
+            entries[call_id] = {
+                "api": api_name,
+                "parent_call_id": actual_parent,
+            }
+            active.append(call_id)
+            continue
+
+        if kind in ("api_return", "api_unwind"):
+            call_id = event.get("call_id")
+            if not valid_id(call_id):
+                issue(index, "invalid-terminal-call-id", call_id)
+                continue
+            entry = entries.get(call_id)
+            if entry is None:
+                issue(index, "terminal-without-entry", call_id)
+                continue
+            if call_id in seen_terminal:
+                issue(index, "duplicate-terminal-event", call_id)
+                continue
+            if call_id not in active:
+                issue(index, "terminal-for-inactive-call", call_id)
+                continue
+            if active[-1] != call_id:
+                issue(index, "terminal-is-not-current-stack-top", call_id)
+                continue
+            if event.get("api") != entry["api"]:
+                issue(index, "terminal-api-name-mismatch", call_id)
+            if event.get("parent_call_id") != entry["parent_call_id"]:
+                issue(index, "terminal-parent-id-mismatch", call_id)
+            active.pop()
+            seen_terminal.add(call_id)
+            continue
+
+        if kind == "api_return_probe_error":
+            call_id = event.get("call_id")
+            if not valid_id(call_id) or call_id not in active:
+                issue(index, "return-probe-error-for-inactive-call", call_id)
+            else:
+                issue(index, "return-probe-creation-failed", call_id)
+            continue
+
+        if kind == "opcode_arguments":
+            call_id = event.get("api_call_id")
+            if call_id is None:
+                continue
+            if not valid_id(call_id) or not active or active[-1] != call_id:
+                issue(index, "opcode-capture-call-id-not-current-frame", call_id)
+
+    return {
+        "valid": bool(entries) and not errors and not active,
+        "event_count": index + 1 if "index" in locals() else 0,
+        "api_entry_count": counts["api_entry"],
+        "api_return_count": counts["api_return"],
+        "api_unwind_count": counts["api_unwind"],
+        "return_probe_error_count": counts["api_return_probe_error"],
+        "opcode_arguments_count": counts["opcode_arguments"],
+        "open_call_ids": list(active),
+        "errors": errors,
+    }
+
+
+def validate_api_event_log(path: "Path") -> dict[str, Any]:
+    """Read a private JSONL trace and return a metadata-only validation report."""
+    import json
+    from pathlib import Path as _Path
+
+    source = _Path(path)
+    events: list[object] = []
+    parse_errors: list[dict[str, int | str]] = []
+    try:
+        with source.open("r", encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, 1):
+                if not line.strip():
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    parse_errors.append({
+                        "line": line_number,
+                        "code": "invalid-json",
+                    })
+    except OSError as exc:
+        return {
+            "valid": False,
+            "event_count": 0,
+            "errors": [{"code": f"input-read-error:{type(exc).__name__}"}],
+            "jsonl_parse_errors": parse_errors,
+        }
+
+    summary = validate_api_event_stream(events)
+    summary["jsonl_parse_errors"] = parse_errors
+    if parse_errors:
+        summary["valid"] = False
+    return summary
