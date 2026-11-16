@@ -317,18 +317,20 @@ def summarize_api_event_validation(path: Path) -> dict[str, Any]:
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            clean: dict[str, Any] = {}
             index_value = row.get(index_key)
             code = row.get("code")
+            if type(index_value) is not int or index_value < 0:
+                continue
+            if not isinstance(code, str) or not code:
+                continue
+            clean: dict[str, Any] = {
+                index_key: index_value,
+                "code": code[:128],
+            }
             call_id = row.get("call_id")
-            if type(index_value) is int and index_value >= 0:
-                clean[index_key] = index_value
-            if isinstance(code, str):
-                clean["code"] = code[:128]
             if type(call_id) is int and call_id > 0:
                 clean["call_id"] = call_id
-            if clean:
-                clean_rows.append(clean)
+            clean_rows.append(clean)
         summary[key] = clean_rows
 
     reason = report.get("reason")
