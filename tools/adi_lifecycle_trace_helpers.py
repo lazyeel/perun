@@ -77,6 +77,47 @@ def resolve_output_buffer(
 
 
 
+def remember_output_allocation(
+    allocations: dict[int, list[dict[str, Any]]],
+    pointer: object,
+    *,
+    kind: str,
+    call_id: int,
+    length: int,
+) -> bool:
+    """Track one live ADI output allocation by its returned pointer.
+
+    A pointer may be reused after Dispose, so each address owns a FIFO of
+    allocations rather than a single latest MID/OTP slot.
+    """
+    if type(pointer) is not int or pointer <= 0:
+        return False
+    allocations.setdefault(pointer, []).append({
+        "kind": kind,
+        "call_id": call_id,
+        "length": length,
+    })
+    return True
+
+
+def take_output_allocation(
+    allocations: dict[int, list[dict[str, Any]]],
+    pointer: object,
+) -> dict[str, Any] | None:
+    """Consume the oldest live allocation associated with a Dispose pointer."""
+    if type(pointer) is not int or pointer <= 0:
+        return None
+    owners = allocations.get(pointer)
+    if not owners:
+        return None
+    owner = owners.pop(0)
+    if not owners:
+        del allocations[pointer]
+    return dict(owner)
+
+
+
+
 def validate_api_event_stream(events: Any) -> dict[str, Any]:
     """Validate entry/terminal pairing and nesting in private lifecycle JSONL.
 
