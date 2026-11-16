@@ -61,6 +61,7 @@ class CaptureManifestTests(unittest.TestCase):
             lifecycle.mkdir()
             for name, payload in (
                 ("device_identity.bin", b"private identity"),
+                ("adi-state-before-start.bin.status", b"absent"),
                 ("spim.bin", b"private SPIM"),
                 ("cpim.bin", b"private CPIM"),
                 ("ptm.bin", b"private PTM"),
@@ -182,6 +183,7 @@ class CaptureManifestTests(unittest.TestCase):
             lifecycle_group = groups["full_lifecycle"]
             self.assertEqual(lifecycle_group["exit_code"], "0")
             lifecycle_artifacts = {item["label"]: item for item in lifecycle_group["artifacts"]}
+            self.assertTrue(lifecycle_artifacts["adi-state-before-start.bin.status"]["present"])
             self.assertTrue(lifecycle_artifacts["otp.bin"]["present"])
             self.assertTrue(lifecycle_artifacts["adi-state-after-end.bin"]["present"])
             for sample in range(1, 5):
