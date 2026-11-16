@@ -57,12 +57,14 @@ PHASES = {
     2: "provisioning_end",
     3: "login_code_after_end",
     4: "otp_request",
+    5: "dispose",
 }
 API_PHASES = {
     "rsegvyrt87": 1,  # ProvisioningStart
     "uv5t6nhkui": 2,  # ProvisioningEnd
     "aslgmuibau": 3,  # GetLoginCode
     "qi864985u0": 4,  # OTPRequest
+    "jk24uiwqrg": 5,  # ADI_Dispose
 }
 STATE = {
     "vdfut": 0,
@@ -70,12 +72,23 @@ STATE = {
     "api": 0,
     "last_api_phase": 0,
     "login_code_calls": 0,
+    "api_call_seq": 0,
+    "api_stack": [],
+    "api_records": {},
+    "pending_api_return": None,
+    "api_return_bps": [],
+    "last_otp_call_id": None,
+    "otp_outputs": {},
 }
 
 
 def emit(kind: str, phase: int, detail: str) -> None:
     phase_name = PHASES.get(phase, "unknown")
-    line = f"phase={phase} phase_name={phase_name} {kind}={detail}\n"
+    active_call_id = STATE["api_stack"][-1] if STATE["api_stack"] else 0
+    line = (
+        f"phase={phase} phase_name={phase_name} "
+        f"api_call_id={active_call_id} {kind}={detail}\n"
+    )
     os.write(LOG_FD, line.encode("ascii", "replace"))
 
 
@@ -123,8 +136,10 @@ def capture_opcode_arguments(phase: int, opcode: int) -> None:
             memory[name] = {"read_error": type(exc).__name__}
 
     record = {
+        "event": "opcode_arguments",
         "phase_id": phase,
         "phase": PHASES.get(phase, "unknown"),
+        "api_call_id": STATE["api_stack"][-1] if STATE["api_stack"] else None,
         "opcode": f"0x{opcode:08x}",
         "pc": f"0x{read_int('$pc', 0) & 0xFFFFFFFFFFFFFFFF:016x}",
         "registers": {
@@ -164,15 +179,277 @@ class CvuBreakpoint(gdb.Breakpoint):
         return False
 
 
+
+
+# Export-level call correlation. The C harness prototypes in adi_test.c define
+# the x86-64 SysV argument contract. We record entry AND return so output
+# pointers/lengths are resolved after the engine has populated them. Raw
+# buffers are written only to ADI_LIFECYCLE_ARGS_LOG (mode 0600); the public
+# trace contains call IDs and status, never pointer or token material.
+API_GPRS = ("rdi", "rsi", "rdx", "rcx", "r8", "r9", "rsp")
+MAX_CAPTURE_INPUT = 8192
+MAX_CAPTURE_OUTPUT = 4096
+
+
+def read_u64_at(address: int) -> int:
+    if address <= 0x10000:
+        return 0
+    return int.from_bytes(bytes(gdb.selected_inferior().read_memory(address, 8)), "little")
+
+
+def read_u32_at(address: int) -> int:
+    if address <= 0x10000:
+        return 0
+    return int.from_bytes(bytes(gdb.selected_inferior().read_memory(address, 4)), "little")
+
+
+def capture_bytes(address: int, length: int, limit: int = MAX_CAPTURE_INPUT) -> dict[str, object]:
+    if address <= 0x10000 or length < 0 or length > limit:
+        return {"address": f"0x{address:x}", "length": length, "status": "rejected-bound"}
+    try:
+        data = bytes(gdb.selected_inferior().read_memory(address, length))
+        return {
+            "address": f"0x{address:x}",
+            "length": length,
+            "status": "ok",
+            "hex": data.hex(),
+        }
+    except Exception as exc:
+        return {
+            "address": f"0x{address:x}",
+            "length": length,
+            "status": f"read-error:{type(exc).__name__}",
+        }
+
+
+def write_private_event(record: dict[str, object]) -> None:
+    if ARGS_FD is None:
+        return
+    payload = (json.dumps(record, separators=(",", ":")) + "\n").encode("ascii")
+    os.write(ARGS_FD, payload)
+
+
+def api_entry_record(symbol: str, phase: int) -> dict[str, object]:
+    """Capture ABI-defined call arguments while keeping raw data private."""
+    STATE["api_call_seq"] += 1
+    call_id = STATE["api_call_seq"]
+    parent_id = STATE["api_stack"][-1] if STATE["api_stack"] else None
+    regs = {
+        name: read_int("$" + name, 0) & 0xFFFFFFFFFFFFFFFF
+        for name in API_GPRS
+    }
+    record: dict[str, object] = {
+        "event": "api_entry",
+        "call_id": call_id,
+        "parent_call_id": parent_id,
+        "api": symbol,
+        "phase_id": phase,
+        "phase": PHASES.get(phase, "unknown"),
+        "pc": f"0x{read_int('$pc', 0) & 0xFFFFFFFFFFFFFFFF:016x}",
+        "registers": {name: f"0x{value:016x}" for name, value in regs.items()},
+        "arguments": {},
+    }
+    args = record["arguments"]
+    assert isinstance(args, dict)
+
+    if symbol == "rsegvyrt87":  # ADI_ProvisioningStart
+        spim_ptr, spim_len = regs["rsi"], regs["rdx"] & 0xFFFFFFFF
+        args.update({
+            "ds_id": f"0x{regs['rdi']:016x}",
+            "spim": capture_bytes(spim_ptr, spim_len),
+            "cpim_out_slot": f"0x{regs['rcx']:x}",
+            "cpim_len_out_slot": f"0x{regs['r8']:x}",
+            "session_out_slot": f"0x{regs['r9']:x}",
+        })
+    elif symbol == "uv5t6nhkui":  # ADI_ProvisioningEnd
+        ptm_ptr, ptm_len = regs["rsi"], regs["rdx"] & 0xFFFFFFFF
+        tk_ptr, tk_len = regs["rcx"], regs["r8"] & 0xFFFFFFFF
+        args.update({
+            "session": regs["rdi"] & 0xFFFFFFFF,
+            "ptm": capture_bytes(ptm_ptr, ptm_len),
+            "tk": capture_bytes(tk_ptr, tk_len),
+        })
+    elif symbol == "qi864985u0":  # ADI_OTPRequest
+        args.update({
+            "ds_id": f"0x{regs['rdi']:016x}",
+            "mid_out_slot": regs["rsi"],
+            "mid_len_out_slot": regs["rdx"],
+            "otp_out_slot": regs["rcx"],
+            "otp_len_out_slot": regs["r8"],
+        })
+    elif symbol == "aslgmuibau":  # ADI_GetLoginCode
+        args["ds_id"] = f"0x{regs['rdi']:016x}"
+    elif symbol == "jk24uiwqrg":  # ADI_Dispose
+        ptr = regs["rdi"]
+        owner = None
+        for name, output in STATE["otp_outputs"].items():
+            if output.get("pointer") == ptr:
+                owner = {
+                    "kind": name,
+                    "call_id": output.get("call_id"),
+                }
+                break
+        args.update({
+            "pointer": f"0x{ptr:x}",
+            "otp_output_owner": owner,
+        })
+
+    STATE["api_records"][call_id] = record
+    STATE["api_stack"].append(call_id)
+    if symbol == "qi864985u0":
+        STATE["last_otp_call_id"] = call_id
+    STATE["pending_api_return"] = record
+    write_private_event(record)
+    emit("api_entry", phase, f"{symbol}:call_id={call_id}:parent={parent_id or 0}")
+    return record
+
+
+def api_output_from_slots(record: dict[str, object]) -> dict[str, object]:
+    """Resolve C out-parameters after return, not from their pre-call values."""
+    symbol = str(record["api"])
+    args = record.get("arguments", {})
+    if not isinstance(args, dict):
+        return {}
+    result: dict[str, object] = {}
+
+    def output(name: str, pointer_slot_key: str, length_slot_key: str) -> dict[str, object]:
+        pointer_slot = int(args[pointer_slot_key])
+        length_slot = int(args[length_slot_key])
+        pointer = read_u64_at(pointer_slot)
+        length = read_u32_at(length_slot)
+        return {
+            "pointer": pointer,
+            "length": length,
+            "data": capture_bytes(pointer, length, MAX_CAPTURE_OUTPUT),
+        }
+
+    if symbol == "qi864985u0":
+        result["mid"] = output("mid", "mid_out_slot", "mid_len_out_slot")
+        result["otp"] = output("otp", "otp_out_slot", "otp_len_out_slot")
+        for name in ("mid", "otp"):
+            item = result[name]
+            assert isinstance(item, dict)
+            STATE["otp_outputs"][name] = {
+                "pointer": item["pointer"],
+                "length": item["length"],
+                "call_id": record["call_id"],
+            }
+    elif symbol == "rsegvyrt87":
+        pointer_slot = int(args["cpim_out_slot"])
+        length_slot = int(args["cpim_len_out_slot"])
+        session_slot = int(args["session_out_slot"])
+        pointer = read_u64_at(pointer_slot)
+        length = read_u32_at(length_slot)
+        session = read_u32_at(session_slot)
+        result["cpim"] = {
+            "pointer": pointer,
+            "length": length,
+            "data": capture_bytes(pointer, length, MAX_CAPTURE_OUTPUT),
+        }
+        result["session"] = session
+    return result
+
+
+def remove_api_call(call_id: int) -> None:
+    stack = STATE["api_stack"]
+    if call_id in stack:
+        # An out-of-scope finish breakpoint means this frame and any nested
+        # frames above it did not return through their normal epilogues.
+        del stack[stack.index(call_id):]
+    STATE["api_records"].pop(call_id, None)
+
+
+class ApiReturnBreakpoint(gdb.FinishBreakpoint):
+    """One return probe per export invocation; correlates output slots to call_id."""
+    def __init__(self, record: dict[str, object]) -> None:
+        super().__init__(gdb.newest_frame(), internal=True)
+        self.record = record
+
+    def stop(self) -> bool:
+        record = self.record
+        symbol = str(record["api"])
+        phase = int(record["phase_id"])
+        return_value = read_int("$rax", 0) & 0xFFFFFFFF
+        outputs = api_output_from_slots(record)
+        result: dict[str, object] = {
+            "event": "api_return",
+            "call_id": record["call_id"],
+            "parent_call_id": record["parent_call_id"],
+            "api": symbol,
+            "phase_id": phase,
+            "phase": PHASES.get(phase, "unknown"),
+            "return_value": return_value if symbol != "jk24uiwqrg" else None,
+            "outputs": outputs,
+        }
+        write_private_event(result)
+        if symbol == "qi864985u0":
+            mid = outputs.get("mid", {})
+            otp = outputs.get("otp", {})
+            mid_len = mid.get("length", -1) if isinstance(mid, dict) else -1
+            otp_len = otp.get("length", -1) if isinstance(otp, dict) else -1
+            emit(
+                "api_return",
+                phase,
+                f"{symbol}:call_id={record['call_id']}:rc={return_value}:mid_len={mid_len}:otp_len={otp_len}",
+            )
+        else:
+            emit("api_return", phase, f"{symbol}:call_id={record['call_id']}:rc={return_value}")
+        remove_api_call(int(record["call_id"]))
+        return False
+
+    def out_of_scope(self) -> None:
+        record = self.record
+        result = {
+            "event": "api_unwind",
+            "call_id": record["call_id"],
+            "parent_call_id": record["parent_call_id"],
+            "api": record["api"],
+            "phase_id": record["phase_id"],
+            "status": "out-of-scope",
+        }
+        write_private_event(result)
+        emit("api_unwind", int(record["phase_id"]), f"{record['api']}:call_id={record['call_id']}")
+        remove_api_call(int(record["call_id"]))
+
+
+def arm_api_return() -> None:
+    """Run from a breakpoint command list because GDB cannot mutate BPs in stop()."""
+    record = STATE.pop("pending_api_return", None)
+    if record is None:
+        emit("api_trace_error", 0, "return probe requested without pending API entry")
+        return
+    try:
+        bp = ApiReturnBreakpoint(record)
+        STATE["api_return_bps"].append(bp)
+    except Exception as exc:
+        write_private_event({
+            "event": "api_return_probe_error",
+            "call_id": record["call_id"],
+            "api": record["api"],
+            "error": type(exc).__name__,
+        })
+        emit("api_trace_error", int(record["phase_id"]), f"{record['api']}:call_id={record['call_id']}:{type(exc).__name__}")
+
+
 class ExportBreakpoint(gdb.Breakpoint):
     def __init__(self, symbol: str) -> None:
         self.symbol = symbol
         super().__init__(symbol, gdb.BP_BREAKPOINT, internal=False)
         self.silent = True
+        # Defer FinishBreakpoint creation until after stop() returns; GDB does
+        # not permit mutating the breakpoint set directly inside stop().
+        self.commands = """silent
+python
+arm_api_return()
+end
+continue
+"""
 
     def stop(self) -> bool:
         phase = read_int("g_adi_phase")
-        if phase < 0:
+        if self.symbol == "jk24uiwqrg":
+            phase = 5
+        elif phase < 0:
             if self.symbol == "aslgmuibau":
                 # adi_test.c checks login status once before configuration
                 # and once after SetAndroidID; the third call follows End.
@@ -182,8 +459,8 @@ class ExportBreakpoint(gdb.Breakpoint):
                 phase = API_PHASES.get(self.symbol, -1)
         STATE["last_api_phase"] = phase
         STATE["api"] += 1
-        emit("api", phase, self.symbol)
-        return False
+        api_entry_record(self.symbol, phase)
+        return True
 
 
 gdb.execute("set pagination off", to_string=True)
@@ -199,7 +476,7 @@ with os.fdopen(os.dup(LOG_FD), "w", encoding="ascii") as stream:
 # These are the exact exports resolved by adi_test.c. Pending breakpoints are
 # resolved when dlopen maps the Apple library; unresolved symbols remain
 # harmless and are visible in the final breakpoint table if needed.
-for symbol in ("rsegvyrt87", "uv5t6nhkui", "qi864985u0", "aslgmuibau"):
+for symbol in ("rsegvyrt87", "uv5t6nhkui", "qi864985u0", "aslgmuibau", "jk24uiwqrg"):
     try:
         ExportBreakpoint(symbol)
     except Exception as exc:
