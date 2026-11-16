@@ -297,6 +297,9 @@ def summarize_api_event_validation(path: Path) -> dict[str, Any]:
         "api_unwind_count",
         "return_probe_error_count",
         "opcode_arguments_count",
+        "tracked_output_allocations",
+        "disposed_output_allocations",
+        "outstanding_output_allocations",
     ):
         value = report.get(key)
         if type(value) is int and value >= 0:
