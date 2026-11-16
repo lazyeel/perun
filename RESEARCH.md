@@ -5373,3 +5373,15 @@ The full-cycle workflow now:
 - retains the C harness's `adi-state-before-start.bin.status` capture in the private lifecycle archive and provenance manifest. For a genuinely cold state the expected status is `absent`.
 
 This makes the provisioning state precondition explicit instead of inferring it from the behavior of a prior Start-only process. The offline replay seed remains separate and is not changed.
+
+
+### 2026-11-16 — require a complete, ordered lifecycle contract before accepting the capture
+
+The private JSONL validator now runs a lifecycle-specific contract in addition to structural call-stack and allocation checks. A successful full-cycle capture must contain:
+- exactly one successful `ProvisioningStart`, with captured SPIM, nonempty CPIM, and a valid session;
+- exactly one successful `ProvisioningEnd`, with nonempty PTM/TK and the same session returned by Start;
+- exactly one successful post-End `GetLoginCode` in phase 3;
+- exactly five successful OTPRequest calls (one primary plus the four configured repeat probes), each with a captured 60-byte MID and 28-byte OTP;
+- exactly ten matching Dispose calls.
+
+The ordering is checked: Start return precedes End, End precedes the phase-3 login check, and that check precedes OTP. The contract summary is copied into the public manifest through a strict allow-list; no pointers, register data, or raw output bytes leave the encrypted private archive. The cold-start workflow reset and this contract together prevent a provisioned-state OTP-only run from passing as a full provisioning lifecycle.
