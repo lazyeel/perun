@@ -307,6 +307,51 @@ class CaptureManifestTests(unittest.TestCase):
             self.assertIsNone(manifest["capture_groups"]["full_lifecycle"]["exit_code"])
             self.assertFalse(manifest["capture_groups"]["full_lifecycle"]["artifacts"][0]["present"])
             self.assertFalse(manifest["capture_groups"]["gdb_trace"]["trace_directory_present"])
+            self.assertEqual(
+                manifest["capture_groups"]["full_lifecycle"]["api_event_validation"]["status"],
+                "not-run",
+            )
+
+
+    def test_manifest_embeds_only_allowlisted_lifecycle_validation_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            capture = work / "full-adi-capture"
+            capture.mkdir()
+            report = {
+                "valid": False,
+                "status": "failed",
+                "event_count": 5,
+                "api_entry_count": 2,
+                "api_return_count": 1,
+                "api_unwind_count": 0,
+                "return_probe_error_count": 1,
+                "opcode_arguments_count": 1,
+                "open_call_ids": [2, "private", True, -1],
+                "errors": [
+                    {"event_index": 4, "code": "return-probe-creation-failed", "call_id": 2,
+                     "captured_token": "must-not-leak"},
+                    {"event_index": "invalid", "code": "bad-index", "extra": "discard"},
+                ],
+                "jsonl_parse_errors": [{"line": 3, "code": "invalid-json", "payload": "discard"}],
+                "private_identity": "must-not-leak",
+            }
+            (capture / "adi-lifecycle-validation.json").write_text(
+                json.dumps(report), encoding="utf-8"
+            )
+
+            manifest = build_manifest(work, "sha", "run")
+            summary = manifest["capture_groups"]["full_lifecycle"]["api_event_validation"]
+            self.assertEqual(summary["status"], "failed")
+            self.assertEqual(summary["event_count"], 5)
+            self.assertEqual(summary["open_call_ids"], [2])
+            self.assertEqual(
+                summary["errors"],
+                [{"event_index": 4, "code": "return-probe-creation-failed", "call_id": 2}],
+            )
+            serialized = json.dumps(manifest)
+            self.assertNotIn("must-not-leak", serialized)
+            self.assertNotIn("private_identity", serialized)
 
 
 if __name__ == "__main__":
