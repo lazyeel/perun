@@ -356,6 +356,110 @@ class ApiEventStreamValidationTests(unittest.TestCase):
                 result = validate_api_event_stream([self.entry(call_id)])
                 self.assertFalse(result["valid"])
 
+
+    @staticmethod
+    def otp_return(call_id, outputs, api="qi864985u0"):
+        return {
+            "event": "api_return",
+            "call_id": call_id,
+            "parent_call_id": None,
+            "api": api,
+            "outputs": outputs,
+        }
+
+    @staticmethod
+    def dispose_entry(call_id, pointer, owner):
+        return {
+            "event": "api_entry",
+            "call_id": call_id,
+            "parent_call_id": None,
+            "api": "jk24uiwqrg",
+            "arguments": {
+                "pointer": hex(pointer),
+                "otp_output_owner": owner,
+            },
+        }
+
+    @staticmethod
+    def dispose_return(call_id, owner):
+        return {
+            "event": "api_return",
+            "call_id": call_id,
+            "parent_call_id": None,
+            "api": "jk24uiwqrg",
+            "disposed_output_owner": owner,
+        }
+
+    def test_otp_outputs_must_match_dispose_entry_and_return_owners(self):
+        from tools.adi_lifecycle_trace_helpers import validate_api_event_stream
+        mid_owner = {"kind": "mid", "call_id": 1, "length": 60}
+        otp_owner = {"kind": "otp", "call_id": 1, "length": 28}
+        result = validate_api_event_stream([
+            self.entry(1, api="qi864985u0"),
+            self.otp_return(1, {
+                "mid": {"pointer": 0x1000, "length": 60},
+                "otp": {"pointer": 0x2000, "length": 28},
+            }),
+            self.dispose_entry(2, 0x1000, mid_owner),
+            self.dispose_return(2, mid_owner),
+            self.dispose_entry(3, 0x2000, otp_owner),
+            self.dispose_return(3, otp_owner),
+        ])
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["tracked_output_allocations"], 2)
+        self.assertEqual(result["disposed_output_allocations"], 2)
+        self.assertEqual(result["outstanding_output_allocations"], 0)
+
+    def test_unmatched_otp_output_fails_validation(self):
+        from tools.adi_lifecycle_trace_helpers import validate_api_event_stream
+        result = validate_api_event_stream([
+            self.entry(1, api="qi864985u0"),
+            self.otp_return(1, {
+                "mid": {"pointer": 0x1100, "length": 60},
+                "otp": {"pointer": 0, "length": 0},
+            }),
+        ])
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["outstanding_output_allocations"], 1)
+        self.assertIn(
+            "output-allocation-not-disposed",
+            [e["code"] for e in result["errors"]],
+        )
+
+    def test_dispose_owner_mismatch_is_detected(self):
+        from tools.adi_lifecycle_trace_helpers import validate_api_event_stream
+        expected = {"kind": "mid", "call_id": 1, "length": 60}
+        wrong = {"kind": "otp", "call_id": 1, "length": 28}
+        result = validate_api_event_stream([
+            self.entry(1, api="qi864985u0"),
+            self.otp_return(1, {"mid": {"pointer": 0x1200, "length": 60}}),
+            self.dispose_entry(2, 0x1200, wrong),
+            self.dispose_return(2, wrong),
+        ])
+        self.assertFalse(result["valid"])
+        error_codes = [e["code"] for e in result["errors"]]
+        self.assertIn("dispose-entry-owner-mismatch", error_codes)
+        self.assertIn("dispose-return-owner-mismatch", error_codes)
+        self.assertIn("output-allocation-not-disposed", error_codes)
+
+    def test_same_heap_pointer_can_be_reused_after_dispose(self):
+        from tools.adi_lifecycle_trace_helpers import validate_api_event_stream
+        first_owner = {"kind": "mid", "call_id": 1, "length": 60}
+        second_owner = {"kind": "otp", "call_id": 3, "length": 28}
+        result = validate_api_event_stream([
+            self.entry(1, api="qi864985u0"),
+            self.otp_return(1, {"mid": {"pointer": 0x1300, "length": 60}}),
+            self.dispose_entry(2, 0x1300, first_owner),
+            self.dispose_return(2, first_owner),
+            self.entry(3, api="qi864985u0"),
+            self.otp_return(3, {"otp": {"pointer": 0x1300, "length": 28}}),
+            self.dispose_entry(4, 0x1300, second_owner),
+            self.dispose_return(4, second_owner),
+        ])
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["tracked_output_allocations"], 2)
+        self.assertEqual(result["disposed_output_allocations"], 2)
+
     def test_empty_stream_is_not_accepted_as_valid_capture(self):
         from tools.adi_lifecycle_trace_helpers import validate_api_event_stream
         result = validate_api_event_stream([])
