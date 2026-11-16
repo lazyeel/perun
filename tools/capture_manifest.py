@@ -275,6 +275,68 @@ def summarize_lifecycle_trace(path: Path) -> dict[str, Any]:
     return result
 
 
+def summarize_api_event_validation(path: Path) -> dict[str, Any]:
+    """Return only allow-listed lifecycle correlation metadata from a report."""
+    report = read_json(path)
+    if report is None:
+        return {"status": "not-run", "reason": "validation-report-missing"}
+
+    valid = report.get("valid")
+    status = report.get("status")
+    if status not in ("passed", "failed", "not-run"):
+        status = "passed" if valid is True else "failed" if valid is False else "invalid-report"
+
+    summary: dict[str, Any] = {"status": status}
+    if isinstance(valid, bool):
+        summary["valid"] = valid
+
+    for key in (
+        "event_count",
+        "api_entry_count",
+        "api_return_count",
+        "api_unwind_count",
+        "return_probe_error_count",
+        "opcode_arguments_count",
+    ):
+        value = report.get(key)
+        if type(value) is int and value >= 0:
+            summary[key] = value
+
+    open_ids = report.get("open_call_ids")
+    if isinstance(open_ids, list):
+        summary["open_call_ids"] = [
+            value for value in open_ids
+            if type(value) is int and value > 0
+        ]
+
+    for key, index_key in (("errors", "event_index"), ("jsonl_parse_errors", "line")):
+        rows = report.get(key)
+        if not isinstance(rows, list):
+            continue
+        clean_rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            clean: dict[str, Any] = {}
+            index_value = row.get(index_key)
+            code = row.get("code")
+            call_id = row.get("call_id")
+            if type(index_value) is int and index_value >= 0:
+                clean[index_key] = index_value
+            if isinstance(code, str):
+                clean["code"] = code[:128]
+            if type(call_id) is int and call_id > 0:
+                clean["call_id"] = call_id
+            if clean:
+                clean_rows.append(clean)
+        summary[key] = clean_rows
+
+    reason = report.get("reason")
+    if isinstance(reason, str):
+        summary["reason"] = reason[:128]
+    return summary
+
+
 def build_manifest(
     work: Path,
     source_sha: str,
@@ -453,6 +515,7 @@ def build_manifest(
         "adi-state-after-otp.bin",
         "adi-lifecycle.trace",
         "adi-lifecycle-args.jsonl",
+        "adi-lifecycle-validation.json",
         "adi-state-after-otp.bin.status",
     )
     lifecycle_names += tuple(
@@ -483,6 +546,9 @@ def build_manifest(
             ),
             **summarize_lifecycle_trace(lifecycle_root / "adi-lifecycle.trace"),
         },
+        "api_event_validation": summarize_api_event_validation(
+            lifecycle_root / "adi-lifecycle-validation.json"
+        ),
         "syscall_trace": summarize_syscall_trace(lifecycle_root / "syscalls"),
         "otp_repeats": summarize_otp_repeats(lifecycle_root),
         "pairing_rule": (
@@ -490,7 +556,7 @@ def build_manifest(
             "Bionic process. The state snapshots bracket ProvisioningEnd and "
             "OTPRequest. Raw captures are sealed as age ciphertext before upload; "
             "this public manifest contains only lengths, hashes and derived "
-            "counts. A missing state file is reported by its adjacent .status capture."
+            "counts and the metadata-only lifecycle API correlation report. A missing state file is reported by its adjacent .status capture."
         ),
     }
 
