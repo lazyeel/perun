@@ -5274,3 +5274,24 @@ Evidence boundary:
 - The GDB/Bionic runtime path is still unvalidated: the private lifecycle workflow remains gated on `ADI_CAPTURE_AGE_RECIPIENT`, which was not configured during this iteration. No new Apple runtime output, OTP algorithm, or state-format conclusion is claimed.
 - Next runtime acceptance criteria remain one matched return/unwind per API entry, correct nesting/call IDs, CPIM/session output capture from Start, MID(60)/OTP(28) capture before Dispose, and same-session post-End state correlation.
 
+
+
+### 2026-11-16 — add structural validator for lifecycle entry/return JSONL
+
+The private lifecycle argument log now has a standalone, GDB-independent validator:
+`tools/validate_adi_lifecycle_trace.py`, backed by `validate_api_event_stream()` and `validate_api_event_log()` in `tools/adi_lifecycle_trace_helpers.py`.
+
+The validator checks:
+- unique positive call IDs and one entry for each ID;
+- parent IDs matching the active call frame at entry;
+- exactly one terminal event (`api_return` or `api_unwind`) for each entry;
+- strict LIFO return/unwind ordering, preventing a parent return while a child frame is still active;
+- API/parent metadata consistency between entry and terminal event;
+- `opcode_arguments.api_call_id` pointing to the currently active export;
+- failed return-probe creation and malformed JSONL as hard validation errors.
+
+A completed unwind is structurally valid and counted separately from a normal return; the validator does not misclassify an observed unwind as a normal function return. A trace ending with live frames is incomplete and fails validation. The report contains only event counts, call IDs and error codes; it does not echo register snapshots, arguments, pointers, or captured bytes.
+
+Regression coverage includes balanced/nested calls, unwind, orphan and duplicate terminals/entries, invalid parent linkage, non-LIFO completion, stale opcode call IDs, probe setup failure, invalid IDs, incomplete/empty traces, and malformed JSONL.
+
+This is a static/structural quality gate only. It does not establish that the GDB FinishBreakpoint callbacks fire correctly in the Android Bionic process; that remains the next runtime-only verification once private capture is enabled.
