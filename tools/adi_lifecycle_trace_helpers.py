@@ -100,6 +100,19 @@ def remember_output_allocation(
     return True
 
 
+def peek_output_allocation(
+    allocations: dict[int, list[dict[str, Any]]],
+    pointer: object,
+) -> dict[str, Any] | None:
+    """Inspect the oldest live allocation without consuming it."""
+    if type(pointer) is not int or pointer <= 0:
+        return None
+    owners = allocations.get(pointer)
+    if not owners:
+        return None
+    return dict(owners[0])
+
+
 def take_output_allocation(
     allocations: dict[int, list[dict[str, Any]]],
     pointer: object,
