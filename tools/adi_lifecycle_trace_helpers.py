@@ -140,6 +140,9 @@ def validate_api_event_stream(events: Any) -> dict[str, Any]:
     entries: dict[int, dict[str, Any]] = {}
     active: list[int] = []
     seen_terminal: set[int] = set()
+    live_outputs: dict[int, list[dict[str, Any]]] = {}
+    tracked_outputs = 0
+    disposed_outputs = 0
     errors: list[dict[str, Any]] = []
     counts = {
         "api_entry": 0,
@@ -186,10 +189,30 @@ def validate_api_event_stream(events: Any) -> dict[str, Any]:
             api_name = event.get("api")
             if not isinstance(api_name, str) or not api_name:
                 issue(index, "entry-api-name-missing", call_id)
-            entries[call_id] = {
+            entry_record: dict[str, Any] = {
                 "api": api_name,
                 "parent_call_id": actual_parent,
             }
+            if api_name == "jk24uiwqrg":
+                arguments = event.get("arguments")
+                if not isinstance(arguments, Mapping):
+                    issue(index, "dispose-arguments-missing", call_id)
+                    entry_record["dispose_pointer"] = None
+                    entry_record["dispose_owner"] = None
+                else:
+                    try:
+                        dispose_pointer = parse_out_slot_address(arguments.get("pointer"))
+                    except (TypeError, ValueError):
+                        dispose_pointer = None
+                        issue(index, "dispose-pointer-invalid", call_id)
+                    expected_owners = live_outputs.get(dispose_pointer, []) if dispose_pointer else []
+                    expected_owner = dict(expected_owners[0]) if expected_owners else None
+                    recorded_owner = arguments.get("otp_output_owner")
+                    if recorded_owner != expected_owner:
+                        issue(index, "dispose-entry-owner-mismatch", call_id)
+                    entry_record["dispose_pointer"] = dispose_pointer
+                    entry_record["dispose_owner"] = expected_owner
+            entries[call_id] = entry_record
             active.append(call_id)
             continue
 
@@ -221,6 +244,41 @@ def validate_api_event_stream(events: Any) -> dict[str, Any]:
             )
             if not parent_matches:
                 issue(index, "terminal-parent-id-mismatch", call_id)
+
+            if kind == "api_return" and entry["api"] == "qi864985u0":
+                outputs = event.get("outputs")
+                if isinstance(outputs, Mapping):
+                    for output_kind in ("mid", "otp"):
+                        output = outputs.get(output_kind)
+                        if not isinstance(output, Mapping):
+                            continue
+                        pointer = output.get("pointer")
+                        length = output.get("length")
+                        if (type(pointer) is int and pointer > 0
+                                and type(length) is int and length >= 0):
+                            live_outputs.setdefault(pointer, []).append({
+                                "kind": output_kind,
+                                "call_id": call_id,
+                                "length": length,
+                            })
+                            tracked_outputs += 1
+
+            if kind == "api_return" and entry["api"] == "jk24uiwqrg":
+                expected_owner = entry.get("dispose_owner")
+                returned_owner = event.get("disposed_output_owner")
+                if returned_owner != expected_owner:
+                    issue(index, "dispose-return-owner-mismatch", call_id)
+                elif expected_owner is not None:
+                    pointer = entry.get("dispose_pointer")
+                    owners = live_outputs.get(pointer, []) if pointer else []
+                    if owners and owners[0] == expected_owner:
+                        owners.pop(0)
+                        disposed_outputs += 1
+                        if not owners:
+                            del live_outputs[pointer]
+                    else:
+                        issue(index, "dispose-owner-not-live", call_id)
+
             active.pop()
             seen_terminal.add(call_id)
             continue
@@ -240,6 +298,15 @@ def validate_api_event_stream(events: Any) -> dict[str, Any]:
             if not valid_id(call_id) or not active or active[-1] != call_id:
                 issue(index, "opcode-capture-call-id-not-current-frame", call_id)
 
+    outstanding_owners = [
+        {"kind": owner["kind"], "call_id": owner["call_id"], "length": owner["length"]}
+        for owners in live_outputs.values()
+        for owner in owners
+    ]
+    for owner in outstanding_owners:
+        issue(index + 1 if "index" in locals() else 0,
+              "output-allocation-not-disposed", owner.get("call_id"))
+
     return {
         "valid": bool(entries) and not errors and not active,
         "event_count": index + 1 if "index" in locals() else 0,
@@ -248,6 +315,9 @@ def validate_api_event_stream(events: Any) -> dict[str, Any]:
         "api_unwind_count": counts["api_unwind"],
         "return_probe_error_count": counts["api_return_probe_error"],
         "opcode_arguments_count": counts["opcode_arguments"],
+        "tracked_output_allocations": tracked_outputs,
+        "disposed_output_allocations": disposed_outputs,
+        "outstanding_output_allocations": len(outstanding_owners),
         "open_call_ids": list(active),
         "errors": errors,
     }
