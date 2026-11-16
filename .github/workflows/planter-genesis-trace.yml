@@ -368,10 +368,12 @@ jobs:
           if [ ! -s "$WORK/adi_identifier" ]; then
             echo "Full lifecycle cannot reuse the start-only device identity." >&2
             echo "identity-missing" > "$WORK/full-cycle-skip-reason.txt"
-          else
-            rm -rf "$WORK/adi-data"
-            install -d -m 0700 "$WORK/adi-data"
+            echo "125" > "$WORK/full-cycle-exit-code.txt"
+            echo "FULL_CYCLE_RC=125" >> "$GITHUB_ENV"
+            exit 0
           fi
+          rm -rf "$WORK/adi-data"
+          install -d -m 0700 "$WORK/adi-data"
           mkdir -p "$WORK/full-adi-capture"
           chmod 700 "$WORK/full-adi-capture"
           unset ADI_FORCE_START ADI_TRACE_START_ONLY ADI_OFFLINE_SPIM ADI_SPIM_OUT ADI_CPIM_OUT ADI_PROBE_LOG
