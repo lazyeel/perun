@@ -5295,3 +5295,16 @@ A completed unwind is structurally valid and counted separately from a normal re
 Regression coverage includes balanced/nested calls, unwind, orphan and duplicate terminals/entries, invalid parent linkage, non-LIFO completion, stale opcode call IDs, probe setup failure, invalid IDs, incomplete/empty traces, and malformed JSONL.
 
 This is a static/structural quality gate only. It does not establish that the GDB FinishBreakpoint callbacks fire correctly in the Android Bionic process; that remains the next runtime-only verification once private capture is enabled.
+
+
+#### 2026-11-16 CI correction — lifecycle validator
+
+The first CI run for the validator additions failed in the Python regression stage: `Mapping` was used by `validate_api_event_stream()` but had not been imported. The failure was isolated to the newly added validator tests; Rust checks were skipped because the Python stage failed.
+
+Correction:
+- import `Mapping` from `collections.abc`;
+- treat non-string event kinds as irrelevant/malformed records without allowing an unhashable JSON value to raise `TypeError`;
+- validate parent IDs with strict integer semantics so JSON booleans cannot compare equal to integer call IDs;
+- add regressions for malformed event-kind values and boolean parent IDs.
+
+The failed run is retained in Actions history; acceptance depends on the next full gate succeeding.
