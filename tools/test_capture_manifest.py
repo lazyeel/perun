@@ -327,6 +327,9 @@ class CaptureManifestTests(unittest.TestCase):
                 "api_unwind_count": 0,
                 "return_probe_error_count": 1,
                 "opcode_arguments_count": 1,
+                "tracked_output_allocations": 6,
+                "disposed_output_allocations": 5,
+                "outstanding_output_allocations": 1,
                 "open_call_ids": [2, "private", True, -1],
                 "errors": [
                     {"event_index": 4, "code": "return-probe-creation-failed", "call_id": 2,
@@ -344,6 +347,9 @@ class CaptureManifestTests(unittest.TestCase):
             summary = manifest["capture_groups"]["full_lifecycle"]["api_event_validation"]
             self.assertEqual(summary["status"], "failed")
             self.assertEqual(summary["event_count"], 5)
+            self.assertEqual(summary["tracked_output_allocations"], 6)
+            self.assertEqual(summary["disposed_output_allocations"], 5)
+            self.assertEqual(summary["outstanding_output_allocations"], 1)
             self.assertEqual(summary["open_call_ids"], [2])
             self.assertEqual(
                 summary["errors"],
