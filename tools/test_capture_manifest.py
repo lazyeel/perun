@@ -332,6 +332,20 @@ class CaptureManifestTests(unittest.TestCase):
                 "tracked_output_allocations": 6,
                 "disposed_output_allocations": 5,
                 "outstanding_output_allocations": 1,
+                "lifecycle_contract": {
+                    "valid": True,
+                    "provisioning_start_calls": 1,
+                    "provisioning_end_calls": 1,
+                    "post_end_login_code_calls": 1,
+                    "otp_request_calls": 5,
+                    "dispose_calls": 10,
+                    "spim_bytes": 347,
+                    "cpim_bytes": 276,
+                    "mid_output_count": 5,
+                    "otp_output_count": 5,
+                    "session_matches": True,
+                    "private_pointer": "must-not-leak",
+                },
                 "open_call_ids": [2, "private", True, -1],
                 "errors": [
                     {"event_index": 4, "code": "return-probe-creation-failed", "call_id": 2,
@@ -352,6 +366,10 @@ class CaptureManifestTests(unittest.TestCase):
             self.assertEqual(summary["tracked_output_allocations"], 6)
             self.assertEqual(summary["disposed_output_allocations"], 5)
             self.assertEqual(summary["outstanding_output_allocations"], 1)
+            self.assertEqual(summary["lifecycle_contract"]["status"], "passed")
+            self.assertEqual(summary["lifecycle_contract"]["otp_request_calls"], 5)
+            self.assertTrue(summary["lifecycle_contract"]["session_matches"])
+            self.assertNotIn("private_pointer", serialized)
             self.assertEqual(summary["open_call_ids"], [2])
             self.assertEqual(
                 summary["errors"],
