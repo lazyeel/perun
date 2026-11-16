@@ -275,3 +275,29 @@ class ApiEventStreamValidationTests(unittest.TestCase):
         self.assertFalse(result["valid"])
         self.assertEqual(result["jsonl_parse_errors"], [{"line": 2, "code": "invalid-json"}])
         self.assertNotIn("secret", str(result))
+
+    def test_non_string_event_kind_is_ignored_without_type_error(self):
+        from tools.adi_lifecycle_trace_helpers import validate_api_event_stream
+        result = validate_api_event_stream([
+            {"event": ["not", "hashable"]},
+            {"event": {"unexpected": "object"}},
+            self.entry(1),
+            self.terminal("api_return", 1),
+        ])
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["event_count"], 4)
+
+    def test_boolean_parent_id_is_not_accepted_as_integer_one(self):
+        from tools.adi_lifecycle_trace_helpers import validate_api_event_stream
+        result = validate_api_event_stream([
+            self.entry(1),
+            self.entry(2, parent=True),
+            self.terminal("api_return", 2, parent=True),
+            self.terminal("api_return", 1),
+        ])
+        self.assertFalse(result["valid"])
+        self.assertIn(
+            "entry-parent-does-not-match-active-frame",
+            [e["code"] for e in result["errors"]],
+        )
+
