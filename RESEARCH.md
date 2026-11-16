@@ -5327,3 +5327,17 @@ This integration remains a structural acceptance gate: it does not claim GDB run
 #### 2026-11-16 CI correction — strict manifest error-row allow-list
 
 The first CI run for the workflow integration failed one new manifest test. The sanitizer correctly removed arbitrary fields but still preserved a textual error code when its event index was malformed. Tightened the rule: an error row is emitted only when both its index (non-negative integer for event errors; positive line number for JSONL parse errors) and non-empty string code are valid. Invalid rows are discarded in full. This keeps malformed metadata from being partially reinterpreted in the public manifest.
+
+
+### 2026-11-16 — preserve all live OTP output allocations for Dispose correlation
+
+The harness performs four optional repeated OTPRequest calls and disposes each repeated MID/OTP pair before finally disposing the primary pair. The previous tracer kept only one latest MID and one latest OTP pointer. Every repeated call overwrote those slots, so the final primary `Dispose` entries could no longer be attributed to the primary OTPRequest.
+
+Correction:
+- Replace the two latest-output slots with a pointer-keyed live-allocation registry.
+- Track every successfully resolved non-null MID/OTP pointer with output kind, originating `call_id`, and length.
+- On `Dispose` entry, consume the oldest live record for that pointer. This records the allocation owner before the native call while allowing the same heap address to be reused after a preceding Dispose.
+- Preserve a FIFO for the unusual case of multiple live records sharing one pointer value; invalid/null pointers and unknown frees are not attributed.
+- Add tests for primary plus repeated calls, allocator pointer reuse, duplicate live pointer FIFO behavior, and unknown/invalid Dispose pointers.
+
+This corrects bookkeeping only. Whether the observed native Dispose order and pointer identities match the intended lifecycle still requires the first private runtime capture.
