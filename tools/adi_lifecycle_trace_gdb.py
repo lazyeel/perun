@@ -26,7 +26,14 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import gdb
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
+from adi_lifecycle_trace_helpers import parse_out_slot_address, resolve_output_buffer
 
 LOG_PATH = os.environ.get("ADI_LIFECYCLE_TRACE_LOG")
 if not LOG_PATH:
@@ -313,24 +320,14 @@ def api_output_from_slots(record: dict[str, object]) -> dict[str, object]:
     result: dict[str, object] = {}
 
     def output(name: str, pointer_slot_key: str, length_slot_key: str) -> dict[str, object]:
-        # Start's out-slot addresses are stored as hex strings; OTP's are
-        # integers. Parse both forms explicitly.
-        pointer_slot = int(str(args[pointer_slot_key]), 0)
-        length_slot = int(str(args[length_slot_key]), 0)
-        try:
-            pointer = read_u64_at(pointer_slot)
-            length = read_u32_at(length_slot)
-        except Exception as exc:
-            return {
-                "pointer": 0,
-                "length": 0,
-                "data": {"status": f"out-slot-read-error:{type(exc).__name__}"},
-            }
-        return {
-            "pointer": pointer,
-            "length": length,
-            "data": capture_bytes(pointer, length, MAX_CAPTURE_OUTPUT),
-        }
+        return resolve_output_buffer(
+            args[pointer_slot_key],
+            args[length_slot_key],
+            read_u64_at=read_u64_at,
+            read_u32_at=read_u32_at,
+            capture_bytes=capture_bytes,
+            limit=MAX_CAPTURE_OUTPUT,
+        )
 
     if symbol == "qi864985u0":
         result["mid"] = output("mid", "mid_out_slot", "mid_len_out_slot")
@@ -344,18 +341,19 @@ def api_output_from_slots(record: dict[str, object]) -> dict[str, object]:
                 "call_id": record["call_id"],
             }
     elif symbol == "rsegvyrt87":
-        pointer_slot = int(args["cpim_out_slot"])
-        length_slot = int(args["cpim_len_out_slot"])
-        session_slot = int(args["session_out_slot"])
-        pointer = read_u64_at(pointer_slot)
-        length = read_u32_at(length_slot)
-        session = read_u32_at(session_slot)
-        result["cpim"] = {
-            "pointer": pointer,
-            "length": length,
-            "data": capture_bytes(pointer, length, MAX_CAPTURE_OUTPUT),
-        }
-        result["session"] = session
+        result["cpim"] = resolve_output_buffer(
+            args["cpim_out_slot"],
+            args["cpim_len_out_slot"],
+            read_u64_at=read_u64_at,
+            read_u32_at=read_u32_at,
+            capture_bytes=capture_bytes,
+            limit=MAX_CAPTURE_OUTPUT,
+        )
+        try:
+            session_slot = parse_out_slot_address(args["session_out_slot"])
+            result["session"] = read_u32_at(session_slot)
+        except (TypeError, ValueError, Exception) as exc:
+            result["session"] = {"status": f"session-out-slot-error:{type(exc).__name__}"}
     return result
 
 
