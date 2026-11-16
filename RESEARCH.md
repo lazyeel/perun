@@ -5385,3 +5385,8 @@ The private JSONL validator now runs a lifecycle-specific contract in addition t
 - exactly ten matching Dispose calls.
 
 The ordering is checked: Start return precedes End, End precedes the phase-3 login check, and that check precedes OTP. The contract summary is copied into the public manifest through a strict allow-list; no pointers, register data, or raw output bytes leave the encrypted private archive. The cold-start workflow reset and this contract together prevent a provisioned-state OTP-only run from passing as a full provisioning lifecycle.
+
+
+#### 2026-11-16 CI correction — lifecycle manifest privacy test
+
+The first CI run after adding the lifecycle-contract summary failed one test because its `private_pointer` assertion referenced the serialized manifest before that local variable was assigned. Moved the assertion after serialization; the failure was test ordering only, not a production sanitizer or contract-validation failure.
