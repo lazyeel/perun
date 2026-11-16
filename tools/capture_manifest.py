@@ -305,6 +305,31 @@ def summarize_api_event_validation(path: Path) -> dict[str, Any]:
         if type(value) is int and value >= 0:
             summary[key] = value
 
+    contract = report.get("lifecycle_contract")
+    if isinstance(contract, dict):
+        contract_valid = contract.get("valid")
+        contract_summary: dict[str, Any] = {
+            "status": "passed" if contract_valid is True else "failed" if contract_valid is False else "invalid-report"
+        }
+        for key in (
+            "provisioning_start_calls",
+            "provisioning_end_calls",
+            "post_end_login_code_calls",
+            "otp_request_calls",
+            "dispose_calls",
+            "spim_bytes",
+            "cpim_bytes",
+            "mid_output_count",
+            "otp_output_count",
+        ):
+            value = contract.get(key)
+            if type(value) is int and value >= 0:
+                contract_summary[key] = value
+        session_matches = contract.get("session_matches")
+        if isinstance(session_matches, bool):
+            contract_summary["session_matches"] = session_matches
+        summary["lifecycle_contract"] = contract_summary
+
     open_ids = report.get("open_call_ids")
     if isinstance(open_ids, list):
         summary["open_call_ids"] = [
