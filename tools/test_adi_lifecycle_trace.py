@@ -123,6 +123,104 @@ if __name__ == "__main__":
 
 
 
+
+
+class OutputAllocationRegistryTests(unittest.TestCase):
+    def test_primary_and_repeated_outputs_remain_correlated_until_dispose(self):
+        from tools.adi_lifecycle_trace_helpers import (
+            remember_output_allocation,
+            take_output_allocation,
+        )
+
+        allocations = {}
+        self.assertTrue(remember_output_allocation(
+            allocations, 0x1000, kind="mid", call_id=1, length=60
+        ))
+        self.assertTrue(remember_output_allocation(
+            allocations, 0x2000, kind="otp", call_id=1, length=28
+        ))
+        self.assertTrue(remember_output_allocation(
+            allocations, 0x3000, kind="mid", call_id=2, length=60
+        ))
+        self.assertTrue(remember_output_allocation(
+            allocations, 0x4000, kind="otp", call_id=2, length=28
+        ))
+
+        self.assertEqual(
+            take_output_allocation(allocations, 0x1000),
+            {"kind": "mid", "call_id": 1, "length": 60},
+        )
+        self.assertEqual(
+            take_output_allocation(allocations, 0x2000),
+            {"kind": "otp", "call_id": 1, "length": 28},
+        )
+        self.assertEqual(
+            take_output_allocation(allocations, 0x3000),
+            {"kind": "mid", "call_id": 2, "length": 60},
+        )
+        self.assertEqual(
+            take_output_allocation(allocations, 0x4000),
+            {"kind": "otp", "call_id": 2, "length": 28},
+        )
+        self.assertEqual(allocations, {})
+
+    def test_reused_heap_address_does_not_inherit_previous_owner(self):
+        from tools.adi_lifecycle_trace_helpers import (
+            remember_output_allocation,
+            take_output_allocation,
+        )
+
+        allocations = {}
+        remember_output_allocation(
+            allocations, 0x7000, kind="mid", call_id=10, length=60
+        )
+        first = take_output_allocation(allocations, 0x7000)
+        self.assertEqual(first["call_id"], 10)
+        remember_output_allocation(
+            allocations, 0x7000, kind="otp", call_id=11, length=28
+        )
+        second = take_output_allocation(allocations, 0x7000)
+        self.assertEqual(second, {"kind": "otp", "call_id": 11, "length": 28})
+
+    def test_multiple_live_allocations_at_same_address_are_fifo(self):
+        from tools.adi_lifecycle_trace_helpers import (
+            remember_output_allocation,
+            take_output_allocation,
+        )
+
+        allocations = {}
+        remember_output_allocation(
+            allocations, 0x8000, kind="mid", call_id=20, length=60
+        )
+        remember_output_allocation(
+            allocations, 0x8000, kind="otp", call_id=21, length=28
+        )
+        self.assertEqual(
+            take_output_allocation(allocations, 0x8000)["call_id"], 20
+        )
+        self.assertEqual(
+            take_output_allocation(allocations, 0x8000)["call_id"], 21
+        )
+        self.assertIsNone(take_output_allocation(allocations, 0x8000))
+
+    def test_unknown_and_invalid_pointers_are_not_attributed(self):
+        from tools.adi_lifecycle_trace_helpers import (
+            remember_output_allocation,
+            take_output_allocation,
+        )
+
+        allocations = {}
+        self.assertFalse(remember_output_allocation(
+            allocations, 0, kind="mid", call_id=1, length=60
+        ))
+        self.assertFalse(remember_output_allocation(
+            allocations, True, kind="otp", call_id=1, length=28
+        ))
+        for pointer in (0, True, -1, "0x1000", None):
+            self.assertIsNone(take_output_allocation(allocations, pointer))
+        self.assertEqual(allocations, {})
+
+
 class ApiEventStreamValidationTests(unittest.TestCase):
     @staticmethod
     def entry(call_id, parent=None, api="export"):
