@@ -5308,3 +5308,17 @@ Correction:
 - add regressions for malformed event-kind values and boolean parent IDs.
 
 The failed run is retained in Actions history; acceptance depends on the next full gate succeeding.
+
+
+### 2026-11-16 — enforce lifecycle event validation in the capture workflow
+
+The full Bionic lifecycle workflow now validates `adi-lifecycle-args.jsonl` before manifest generation and before age-encryption/upload:
+- When the full lifecycle exits successfully, the JSONL must exist and pass the entry/return/unwind validator. A missing or structurally invalid log fails the workflow.
+- When the full lifecycle never starts or exits nonzero, validation is explicitly recorded as `not-run`; this does not get represented as a successful validation.
+- The validator writes a mode-0600 metadata-only report inside the mode-0700 private capture directory. The original JSONL remains private and is only included in the encrypted archive.
+- The public provenance manifest embeds a strict allow-list of validation status, event counts, open call IDs, and error codes/indices. It excludes arbitrary report keys and any raw arguments or register snapshots.
+- The validation report itself is fingerprinted as a private capture artifact; only its hash and byte size are exposed in the manifest.
+
+CI coverage now includes the validator in the workflow's path filters and preflight. The manifest tests exercise absent-report semantics and verify that arbitrary/private fields from a synthetic report do not leak into the public manifest.
+
+This integration remains a structural acceptance gate: it does not claim GDB runtime correctness until a real private Android/Bionic capture passes it.
