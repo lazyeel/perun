@@ -323,6 +323,168 @@ def validate_api_event_stream(events: Any) -> dict[str, Any]:
     }
 
 
+def validate_complete_lifecycle_contract(events: Any) -> dict[str, Any]:
+    """Validate the expected cold ProvisioningStart -> End -> OTP lifecycle."""
+    entries: dict[int, dict[str, Any]] = {}
+    returns: dict[int, dict[str, Any]] = {}
+    for index, event in enumerate(events):
+        if not isinstance(event, Mapping):
+            continue
+        call_id = event.get("call_id")
+        if type(call_id) is not int or call_id <= 0:
+            continue
+        if event.get("event") == "api_entry":
+            entries[call_id] = {
+                "api": event.get("api"),
+                "phase_id": event.get("phase_id"),
+                "index": index,
+                "arguments": event.get("arguments", {}),
+            }
+        elif event.get("event") == "api_return":
+            returns[call_id] = {
+                "index": index,
+                "return_value": event.get("return_value"),
+                "outputs": event.get("outputs", {}),
+            }
+
+    calls: list[dict[str, Any]] = []
+    for call_id, entry in entries.items():
+        terminal = returns.get(call_id)
+        if terminal is None:
+            continue
+        calls.append({
+            "call_id": call_id,
+            "api": entry["api"],
+            "phase_id": entry["phase_id"],
+            "entry_index": entry["index"],
+            "return_index": terminal["index"],
+            "arguments": entry["arguments"],
+            "return_value": terminal["return_value"],
+            "outputs": terminal["outputs"],
+        })
+
+    starts = [c for c in calls if c["api"] == "rsegvyrt87"]
+    ends = [c for c in calls if c["api"] == "uv5t6nhkui"]
+    post_end_codes = [
+        c for c in calls if c["api"] == "aslgmuibau" and c["phase_id"] == 3
+    ]
+    otp_calls = [
+        c for c in calls if c["api"] == "qi864985u0" and c["phase_id"] == 4
+    ]
+    dispose_calls = [c for c in calls if c["api"] == "jk24uiwqrg"]
+    errors: list[dict[str, Any]] = []
+
+    def fail(code: str, call_id: object = None) -> None:
+        row: dict[str, Any] = {"code": code}
+        if type(call_id) is int and call_id > 0:
+            row["call_id"] = call_id
+        errors.append(row)
+
+    if len(starts) != 1:
+        fail("expected-exactly-one-provisioning-start")
+    if len(ends) != 1:
+        fail("expected-exactly-one-provisioning-end")
+    if len(post_end_codes) != 1:
+        fail("expected-exactly-one-post-end-login-code-check")
+    if len(otp_calls) != 5:
+        fail("expected-primary-and-four-repeat-otp-requests")
+    if len(dispose_calls) != 10:
+        fail("expected-ten-output-dispose-calls")
+
+    start = starts[0] if len(starts) == 1 else None
+    end = ends[0] if len(ends) == 1 else None
+    post_code = post_end_codes[0] if len(post_end_codes) == 1 else None
+    spim_bytes = 0
+    cpim_bytes = 0
+    session_value = None
+
+    if start is not None:
+        if start["return_value"] != 0:
+            fail("provisioning-start-return-nonzero", start["call_id"])
+        arguments = start["arguments"]
+        spim = arguments.get("spim") if isinstance(arguments, Mapping) else None
+        if (not isinstance(spim, Mapping) or spim.get("status") != "ok"
+                or type(spim.get("length")) is not int or spim["length"] <= 0):
+            fail("provisioning-start-spim-not-captured", start["call_id"])
+        else:
+            spim_bytes = spim["length"]
+        outputs = start["outputs"]
+        cpim = outputs.get("cpim") if isinstance(outputs, Mapping) else None
+        cpim_data = cpim.get("data") if isinstance(cpim, Mapping) else None
+        if (not isinstance(cpim, Mapping) or not isinstance(cpim_data, Mapping)
+                or cpim_data.get("status") != "ok"
+                or type(cpim.get("length")) is not int or cpim["length"] <= 0):
+            fail("provisioning-start-cpim-not-captured", start["call_id"])
+        else:
+            cpim_bytes = cpim["length"]
+        session_value = outputs.get("session") if isinstance(outputs, Mapping) else None
+        if type(session_value) is not int or session_value <= 0:
+            fail("provisioning-start-session-invalid", start["call_id"])
+
+    session_matches = False
+    if end is not None:
+        if end["return_value"] != 0:
+            fail("provisioning-end-return-nonzero", end["call_id"])
+        arguments = end["arguments"]
+        if not isinstance(arguments, Mapping):
+            fail("provisioning-end-arguments-missing", end["call_id"])
+        else:
+            for name in ("ptm", "tk"):
+                item = arguments.get(name)
+                if (not isinstance(item, Mapping) or item.get("status") != "ok"
+                        or type(item.get("length")) is not int or item["length"] <= 0):
+                    fail(f"provisioning-end-{name}-not-captured", end["call_id"])
+            end_session = arguments.get("session")
+            session_matches = type(session_value) is int and end_session == session_value
+            if type(session_value) is int and not session_matches:
+                fail("provisioning-session-mismatch", end["call_id"])
+
+    if post_code is not None and post_code["return_value"] != 0:
+        fail("post-end-login-code-not-provisioned", post_code["call_id"])
+
+    mid_lengths: list[int] = []
+    otp_lengths: list[int] = []
+    for call in otp_calls:
+        if call["return_value"] != 0:
+            fail("otp-request-return-nonzero", call["call_id"])
+        outputs = call["outputs"]
+        for name, expected, bucket in (("mid", 60, mid_lengths), ("otp", 28, otp_lengths)):
+            item = outputs.get(name) if isinstance(outputs, Mapping) else None
+            data = item.get("data") if isinstance(item, Mapping) else None
+            if (not isinstance(item, Mapping) or not isinstance(data, Mapping)
+                    or data.get("status") != "ok"
+                    or type(item.get("length")) is not int or item["length"] != expected):
+                fail(f"otp-{name}-output-contract-mismatch", call["call_id"])
+            else:
+                bucket.append(item["length"])
+
+    if start is not None and end is not None and start["return_index"] >= end["entry_index"]:
+        fail("provisioning-start-does-not-precede-end", end["call_id"])
+    if end is not None and post_code is not None and end["return_index"] >= post_code["entry_index"]:
+        fail("post-end-login-check-out-of-order", post_code["call_id"])
+    if post_code is not None and otp_calls:
+        if post_code["return_index"] >= min(c["entry_index"] for c in otp_calls):
+            fail("otp-request-precedes-post-end-login-check", otp_calls[0]["call_id"])
+    elif end is not None and otp_calls:
+        if end["return_index"] >= min(c["entry_index"] for c in otp_calls):
+            fail("otp-request-precedes-provisioning-end", otp_calls[0]["call_id"])
+
+    return {
+        "valid": not errors,
+        "provisioning_start_calls": len(starts),
+        "provisioning_end_calls": len(ends),
+        "post_end_login_code_calls": len(post_end_codes),
+        "otp_request_calls": len(otp_calls),
+        "dispose_calls": len(dispose_calls),
+        "spim_bytes": spim_bytes,
+        "cpim_bytes": cpim_bytes,
+        "mid_output_count": len(mid_lengths),
+        "otp_output_count": len(otp_lengths),
+        "session_matches": session_matches,
+        "errors": errors,
+    }
+
+
 def validate_api_event_log(path: "Path") -> dict[str, Any]:
     """Read a private JSONL trace and return a metadata-only validation report."""
     import json
@@ -352,7 +514,9 @@ def validate_api_event_log(path: "Path") -> dict[str, Any]:
         }
 
     summary = validate_api_event_stream(events)
+    contract = validate_complete_lifecycle_contract(events)
+    summary["lifecycle_contract"] = contract
     summary["jsonl_parse_errors"] = parse_errors
-    if parse_errors:
+    if parse_errors or not contract["valid"]:
         summary["valid"] = False
     return summary
