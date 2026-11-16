@@ -5208,3 +5208,50 @@ This assumes the current captured state directory is represented by the
 single `adi.pb` file; the earlier full-lifecycle manifests report one file.
 If later versions add ancillary state files, the capture helper and replay
 seed must be widened together.
+
+### 2026-11-16 — correlate Android lifecycle exports by entry and return
+
+The lifecycle tracer now assigns a monotonically increasing `call_id` to each
+resolved API export invocation and records the active call ID on public
+phase/dispatch events. It instruments entry and normal return for
+`rsegvyrt87` (ProvisioningStart), `uv5t6nhkui` (ProvisioningEnd),
+`aslgmuibau` (GetLoginCode), `qi864985u0` (OTPRequest), and
+`jk24uiwqrg` (Dispose). A parent call ID is recorded where calls nest; an
+out-of-scope finish is recorded separately rather than being mistaken for a
+normal return.
+
+The ABI argument mapping follows the function-pointer prototypes in
+`crates/perun-cli/examples/adi-android/adi_test.c`. On return, the tracer
+dereferences Start's CPIM/session out-slots and OTPRequest's MID/OTP pointer
+and length out-slots. This moves output capture to the point where the engine
+has populated the buffers; it does not infer the output lengths from a
+dispatch opcode. Dispose events are correlated with the MID/OTP allocation
+when the pointer matches a previously returned output.
+
+Raw entry registers, bounded SPIM/PTM/TK input buffers, returned CPIM, and
+returned MID/OTP bytes are written only to the optional private
+`ADI_LIFECYCLE_ARGS_LOG` JSONL file (created with mode 0600). The public
+lifecycle trace records call IDs, export names, phases, return codes, and
+output lengths only; it does not publish pointers or token bytes. The
+existing private-capture encryption gate remains fail-closed.
+
+Implementation commits:
+- `43fda8a3022ba36a19e905de6695c5a1238b129e` — add lifecycle export entry/return correlation.
+- `eddab3b446eee928ed04e547e72f400f5c645742` — parse Start's hex-encoded output-slot addresses correctly.
+
+The CI gate for `eddab3b` is running as workflow run `43903801797`.
+The Planter GDB workflow was skipped because its condition requires
+`vars.ADI_CAPTURE_AGE_RECIPIENT` or a manually supplied age recipient.
+Therefore this source change is **not yet runtime-validated under GDB**.
+A successful Python compile/unit gate will establish syntax and existing
+regressions only; it will not establish that the FinishBreakpoint callbacks
+observe every export return on the Bionic inferior.
+
+Next falsifiable step: run one private full lifecycle capture with an
+age recipient configured, then verify that each API entry has exactly one
+matching return/unwind event; that the vdfut opcode events carry the correct
+active call ID; that Start returns the actual CPIM/session; and that
+OTPRequest returns the actual 60-byte MID and 28-byte OTP before either
+allocation is passed to Dispose. Only then use the captured data for the
+OTP backward slice. No OTP primitive or state format is inferred by this
+instrumentation change.
