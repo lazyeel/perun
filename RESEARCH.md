@@ -5360,3 +5360,16 @@ This remains an instrumentation consistency check over trace data; it cannot pro
 #### Manifest allow-list for output allocation validation
 
 The public manifest's validation summary now includes only the aggregate counts `tracked_output_allocations`, `disposed_output_allocations`, and `outstanding_output_allocations`. Raw pointers and allocation addresses remain confined to the private encrypted capture. A synthetic manifest test verifies these fields survive the allow-list and that arbitrary private fields remain excluded.
+
+
+### 2026-11-16 — make the full lifecycle capture cold-start deterministic
+
+Reviewing the actual capture sequence showed that the initial control is intentionally run with `ADI_FORCE_START=1` and `ADI_TRACE_START_ONLY=1`, then its `adi-data` directory was copied into the full lifecycle process. Even though that first process skips End, ProvisioningStart may have mutated persistent state. Reusing that directory made the assumption “full cycle starts unprovisioned” depend on an unverified side effect.
+
+The full-cycle workflow now:
+- reuses the same 16-byte device identity created by the start-only control;
+- discards the previous `adi-data` tree and creates a fresh mode-0700 empty directory;
+- explicitly unsets `ADI_FORCE_START` as well as start-only/offline flags, so the normal unprovisioned login-code path triggers Start;
+- retains the C harness's `adi-state-before-start.bin.status` capture in the private lifecycle archive and provenance manifest. For a genuinely cold state the expected status is `absent`.
+
+This makes the provisioning state precondition explicit instead of inferring it from the behavior of a prior Start-only process. The offline replay seed remains separate and is not changed.
