@@ -174,6 +174,12 @@ class OutputAllocationRegistryTests(unittest.TestCase):
         remember_output_allocation(
             allocations, 0x7000, kind="mid", call_id=10, length=60
         )
+        from tools.adi_lifecycle_trace_helpers import peek_output_allocation
+        self.assertEqual(
+            peek_output_allocation(allocations, 0x7000),
+            {"kind": "mid", "call_id": 10, "length": 60},
+        )
+        self.assertEqual(allocations[0x7000][0]["call_id"], 10)
         first = take_output_allocation(allocations, 0x7000)
         self.assertEqual(first["call_id"], 10)
         remember_output_allocation(
