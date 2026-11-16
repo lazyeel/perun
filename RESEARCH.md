@@ -5322,3 +5322,8 @@ The full Bionic lifecycle workflow now validates `adi-lifecycle-args.jsonl` befo
 CI coverage now includes the validator in the workflow's path filters and preflight. The manifest tests exercise absent-report semantics and verify that arbitrary/private fields from a synthetic report do not leak into the public manifest.
 
 This integration remains a structural acceptance gate: it does not claim GDB runtime correctness until a real private Android/Bionic capture passes it.
+
+
+#### 2026-11-16 CI correction — strict manifest error-row allow-list
+
+The first CI run for the workflow integration failed one new manifest test. The sanitizer correctly removed arbitrary fields but still preserved a textual error code when its event index was malformed. Tightened the rule: an error row is emitted only when both its index (non-negative integer for event errors; positive line number for JSONL parse errors) and non-empty string code are valid. Invalid rows are discarded in full. This keeps malformed metadata from being partially reinterpreted in the public manifest.
