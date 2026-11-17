@@ -116,18 +116,24 @@ def ops_of(text):
 
 
 SREG = {}
+# Size code 17 means "high byte" (bits 8..15): ah/ch/dh/bh must not be
+# confused with al/cl/dl/bl, the VM decodes 17 specially.
+HB = 17
 for _i, _n in enumerate('ax cx dx bx sp bp si di'.split()):
     SREG[f'r{_n}'] = (_i, 8)
     SREG[f'e{_n}'] = (_i, 4)
     SREG[_n] = (_i, 2)
     SREG[(_n[:-1] if _n.endswith('x') else _n) + 'l'] = (_i, 1)
-# ah/ch/dh/bh are the 8-bit high halves of the first four
-SREG['ah'] = (0, 1); SREG['ch'] = (1, 1); SREG['dh'] = (2, 1); SREG['bh'] = (3, 1)
+SREG['ah'] = (0, HB); SREG['ch'] = (1, HB)
+SREG['dh'] = (2, HB); SREG['bh'] = (3, HB)
 for _i in range(8, 16):
     SREG[f'r{_i}'] = (_i, 8)
     SREG[f'r{_i}d'] = (_i, 4)
     SREG[f'r{_i}w'] = (_i, 2)
     SREG[f'r{_i}b'] = (_i, 1)
+# REX byte-register names for the classic rsp/rbp/rsi/rdi slots
+SREG['spl'] = (4, 1); SREG['bpl'] = (5, 1)
+SREG['sil'] = (6, 1); SREG['dil'] = (7, 1)
 
 
 def reg_parse(tok):
@@ -491,7 +497,7 @@ class Lifter:
         for o in ops:
             r = reg_parse(o)
             if r is not None:
-                return r[1]
+                return 1 if r[1] == HB else r[1]
         suffix = {'b': 1, 'w': 2, 'l': 4, 'q': 8}.get(mnem[-1])
         return suffix if suffix else 4
 
@@ -567,12 +573,12 @@ class Lifter:
             return (MOV, [self._with_size(O[1], sz),
                           self._with_size(O[0], sz)])
         if mnem in ('movzbl', 'movzwl', 'movzbq', 'movzwq'):
-            src_sz = 1 if 'b' in mnem[5:6] + mnem[4:5] else 2
-            src_sz = 1 if mnem[5] == 'b' else 2
+            # 'movz' + size char (index 4) + dst size char (index 5)
+            src_sz = 1 if mnem[4] == 'b' else 2
             dst_sz = reg_parse(ops[1])[1]
             return (MOVZX, [self._with_size(O[1], dst_sz), self._with_size(O[0], src_sz)])
         if mnem in ('movsbl', 'movsbq', 'movswl', 'movswq', 'movslq'):
-            src_sz = 1 if mnem[5] == 'b' else (2 if mnem[5] == 'w' else 4)
+            src_sz = 1 if mnem[4] == 'b' else (2 if mnem[4] == 'w' else 4)
             dst_sz = reg_parse(ops[1])[1]
             return (MOVSX, [self._with_size(O[1], dst_sz), self._with_size(O[0], src_sz)])
         if mnem == 'cltq':
@@ -665,7 +671,8 @@ class Lifter:
     @staticmethod
     def _with_size(o, sz):
         if o['kind'] == 'reg':
-            return dict(kind='reg', idx=o['idx'], size=sz)
+            return dict(kind='reg', idx=o['idx'],
+                        size=o['size'] if o['size'] == HB else sz)
         if o['kind'] == 'mem':
             return dict(kind='mem', base=o['base'], index=o['index'],
                         scale=o['scale'], size=sz, disp=o['disp'])
@@ -890,9 +897,13 @@ class Lifter:
     # ---- stage 5: emit ---------------------------------------------------
     def emit(self):
         os.makedirs(self.args.out, exist_ok=True)
-        # program.bin (v2: dst-first operands, instruction length for fallthrough)
+        # program.bin v3: dst-first operands, instruction length, module table
+        # (the VM needs load biases to turn module RVAs into absolute addresses)
         out = bytearray()
-        out += struct.pack('<III', 0x50564d50, 2, len(self.prog))
+        mods = sorted(MODULES.values(), key=lambda m: m['idx'])
+        out += struct.pack('<IIII', 0x50564d50, 3, len(self.prog), len(mods))
+        for mo in mods:
+            out += struct.pack('<BQQ', mo['idx'], mo['bias'], mo['size'])
         for (name, rva), (op, operands, extra, ilen) in sorted(
                 self.prog.items(), key=lambda kv: (MODULES[kv[0][0]]['idx'], kv[0][1])):
             blob = bytearray()
@@ -934,14 +945,24 @@ class Lifter:
         """case_<case>.bin: everything warmvm needs for one run, in one file.
 
         layout (LE):
-          'PVMC' u32, ver=1 u32, entry_ip u64, tsc_base u64,
+          'PVMC' u32, ver=2 u32, entry_ip u64, stop_rec u64, tsc_base u64,
+          otp_addr u64, otp_len u32, otp bytes,
+          regs[16] u64, xmm[16][16] u8,
           nseeds u32, { addr u64, len u64, bytes } * nseeds,
           nstubs u32, { rec_call u64, rec_ret u64, ret u64, push u8,
                         regs[16] u64, xmm[16][16] u8 } * nstubs"""
+        OTP_ADDR = 0x7ffff78b0340
         for c in self.cases:
+            regs, xmm = self._record_state(c, 0)
+            otp = open(f'/home/admin/rig/cases/{c}/cap/otp.bin', 'rb').read()
             buf = bytearray()
-            buf += struct.pack('<IIQQ', 0x43564d50, 1, self.ips[c][0],
-                               (EPOCHS[c] << 21) & 0xffffffffffffffff)
+            buf += struct.pack('<IIQQQQI', 0x43564d50, 2, self.ips[c][0],
+                               self._stop_rec(c),
+                               (EPOCHS[c] << 21) & 0xffffffffffffffff,
+                               OTP_ADDR, len(otp))
+            buf += otp
+            buf += struct.pack('<16Q', *regs)
+            buf += xmm
             seeds = []
             for name, addr, size in SEED_RANGES:
                 p = os.path.join('/home/admin/rig/cases', c, 'seeds2',
@@ -979,8 +1000,15 @@ def encode_operand(o, bias):
     if k == 'imm':
         return struct.pack('<BQ', OP_IMM, o['val'] & 0xffffffffffffffff)
     if k == 'mem':
+        disp = o['disp']
+        # A base-less operand is either rip-relative or absolute; objdump's
+        # linear sweep proved every executed one is rip-relative, so the
+        # lifter folded the module RVA into disp.  Add the load bias here:
+        # the VM only ever sees absolute addresses.
+        if o['base'] == 255 and o['index'] == 255:
+            disp += bias
         return struct.pack('<BBBBbq', OP_MEM, o['base'], o['index'],
-                           o['scale'], o['size'], o['disp'])
+                           o['scale'], o['size'], disp)
     if k == 'target':
         return struct.pack('<BQ', OP_TARGET,
                            (MODULES[o['module']]['bias'] + o['rva'])
