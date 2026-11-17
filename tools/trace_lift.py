@@ -42,6 +42,22 @@ MODULES = {
 }
 
 DEFAULT_CASES = ['tM', 'tI', 'tE1794862200', 'tE1794863400', 'tE1794865200']
+
+
+def trace_path(case):
+    """The trace a case is lifted from and verified against.
+
+    v2 runs write `otp-trace.new.bin` next to the seeds they were captured with,
+    so prefer it when present: the bundle picks its seeds up from `seeds2/` and
+    entry state from this very file, and mixing an old trace with new seeds
+    would diverge at record 0 for reasons that have nothing to do with the VM.
+    """
+    root = f'/home/admin/rig/cases/{case}'
+    for name in ('otp-trace.new.bin', 'otp-trace.bin'):
+        p = os.path.join(root, name)
+        if os.path.exists(p) and os.path.getsize(p) > 0:
+            return p
+    return os.path.join(root, 'otp-trace.bin')
 # fake-clock epochs the corpus was captured with (see rig/run_seeds.sh)
 EPOCHS = {
     'tM': 1794862800,
@@ -52,9 +68,11 @@ EPOCHS = {
 }
 SEED_RANGES = [
     ('ca_rodata', 0x7ffff7679000, 0x4f000),
-    ('ca_rw',     0x7ffff77fb000, 0x3200),
+    # 0x5000, not 0x3200: libCoreADI's .bss ends at +0x186168 and holds
+    # ctor flags the cipher reads; a short seed makes them read as 0.
+    ('ca_rw',     0x7ffff77fb000, 0x5000),
     ('ss_ro',     0x7ffff742c000, 0x238320),
-    ('ss_rw',     0x7ffff7665320, 0x11000),
+    ('ss_rw',     0x7ffff7665320, 0x13000),
     ('stack',     0x7ffffffef000, 0x10000),
     ('heap',      0x7ffff7890000, 0x40000),
     ('main_data', 0x555555554000, 0x19000),
@@ -119,21 +137,31 @@ SREG = {}
 # Size code 17 means "high byte" (bits 8..15): ah/ch/dh/bh must not be
 # confused with al/cl/dl/bl, the VM decodes 17 specially.
 HB = 17
-for _i, _n in enumerate('ax cx dx bx sp bp si di'.split()):
+# The trace and the VM number registers the way ptrace's user_regs_struct
+# does: rax,rbx,rcx,rdx,rsi,rdi,rbp,rsp,r8..r15.  The x86 *encoding* order is
+# ax,cx,dx,bx,sp,bp,si,di and must not leak out of this table -- objdump only
+# ever gives us names, so this is the single place where they are mapped.
+PTRACE_ORDER = {
+    'ax': 0, 'bx': 1, 'cx': 2, 'dx': 3,
+    'si': 4, 'di': 5, 'bp': 6, 'sp': 7,
+}
+for _n, _i in PTRACE_ORDER.items():
     SREG[f'r{_n}'] = (_i, 8)
     SREG[f'e{_n}'] = (_i, 4)
     SREG[_n] = (_i, 2)
     SREG[(_n[:-1] if _n.endswith('x') else _n) + 'l'] = (_i, 1)
-SREG['ah'] = (0, HB); SREG['ch'] = (1, HB)
-SREG['dh'] = (2, HB); SREG['bh'] = (3, HB)
+SREG['ah'] = (PTRACE_ORDER['ax'], HB)
+SREG['ch'] = (PTRACE_ORDER['cx'], HB)
+SREG['dh'] = (PTRACE_ORDER['dx'], HB)
+SREG['bh'] = (PTRACE_ORDER['bx'], HB)
 for _i in range(8, 16):
     SREG[f'r{_i}'] = (_i, 8)
     SREG[f'r{_i}d'] = (_i, 4)
     SREG[f'r{_i}w'] = (_i, 2)
     SREG[f'r{_i}b'] = (_i, 1)
 # REX byte-register names for the classic rsp/rbp/rsi/rdi slots
-SREG['spl'] = (4, 1); SREG['bpl'] = (5, 1)
-SREG['sil'] = (6, 1); SREG['dil'] = (7, 1)
+SREG['spl'] = (7, 1); SREG['bpl'] = (6, 1)
+SREG['sil'] = (4, 1); SREG['dil'] = (5, 1)
 
 
 def reg_parse(tok):
@@ -278,7 +306,7 @@ class Lifter:
         self.ips = {}
         self.nrec = {}
         for case in self.cases:
-            p = f'/home/admin/rig/cases/{case}/otp-trace.bin'
+            p = trace_path(case)
             n = os.path.getsize(p) // REC
             ips = []
             with open(p, 'rb') as f:
@@ -584,10 +612,13 @@ class Lifter:
         if mnem == 'cltq':
             return (MOVSX, [dict(kind='reg', idx=0, size=8), dict(kind='reg', idx=0, size=4)])
         if mnem == 'cqto':
-            # rdx = sign(rax) (the 128-bit dividend high half)
-            return (MOVSX, [dict(kind='reg', idx=2, size=8), dict(kind='reg', idx=0, size=8)])
+            # rdx = sign(rax) (the 128-bit dividend high half); indices are
+            # ptrace slots, so rdx is 3 and rax is 0
+            return (MOVSX, [dict(kind='reg', idx=3, size=8),
+                            dict(kind='reg', idx=0, size=8)])
         if mnem == 'cltd':
-            return (MOVSX, [dict(kind='reg', idx=2, size=4), dict(kind='reg', idx=0, size=4)])
+            return (MOVSX, [dict(kind='reg', idx=3, size=4),
+                            dict(kind='reg', idx=0, size=4)])
         if mnem == 'bswap':
             return (BSWAP, [self._with_size(O[0], self._opsz(mnem, ops))])
         if mnem == 'lea':
@@ -861,7 +892,7 @@ class Lifter:
             print(f'  stubs {case}: {len(events)} events')
 
     def _stop_rec(self, case):
-        p = f'/home/admin/rig/cases/{case}/otp-trace.bin'
+        p = trace_path(case)
         with open(p, 'rb') as f:
             n = self.nrec[case]
             for i in range(n):
@@ -886,7 +917,7 @@ class Lifter:
         return None
 
     def _record_state(self, case, rec):
-        p = f'/home/admin/rig/cases/{case}/otp-trace.bin'
+        p = trace_path(case)
         with open(p, 'rb') as f:
             f.seek(rec * REC)
             b = f.read(TREC)
@@ -926,8 +957,7 @@ class Lifter:
             entry_ip={c: self.ips[c][0] for c in self.cases},
             seed_ranges=[dict(name=n, addr=a, size=s) for n, a, s in SEED_RANGES],
             epochs={c: EPOCHS[c] for c in self.cases if c in EPOCHS},
-            traces={c: f'/home/admin/rig/cases/{c}/otp-trace.bin'
-                    for c in self.cases},
+            traces={c: trace_path(c) for c in self.cases},
         )
         json.dump(meta, open(os.path.join(self.args.out, 'meta.json'), 'w'), indent=1)
         for case, evs in self.stubs.items():
@@ -998,7 +1028,10 @@ def encode_operand(o, bias):
     if k == 'xmm':
         return struct.pack('<BB', OP_XMM, o['idx'])
     if k == 'imm':
-        return struct.pack('<BQ', OP_IMM, o['val'] & 0xffffffffffffffff)
+        # tag, value, width: the VM masks immediates by width, so a 9-byte
+        # form here would shift every following operand by one.
+        return struct.pack('<BQB', OP_IMM, o['val'] & 0xffffffffffffffff,
+                           o.get('size', 8) & 0xff)
     if k == 'mem':
         disp = o['disp']
         # A base-less operand is either rip-relative or absolute; objdump's

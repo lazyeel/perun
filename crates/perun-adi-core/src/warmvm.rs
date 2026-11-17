@@ -132,6 +132,13 @@ const OP_TARGET: u8 = 5;
 /// classic first four registers (ah/ch/dh/bh), bits 8..15.
 pub const HB: u8 = 17;
 
+// Indices into `Vm::gpr` are ptrace's, not the x86 encoding's: rax, rbx, rcx,
+// rdx, rsi, rdi, rbp, rsp, r8..r15.  The mul/div/shld forms write rdx
+// implicitly, so name it once instead of hard-coding the wrong 2.
+const RDX: usize = 3;
+const RAX: usize = 0;
+const RSP: usize = 7;
+
 #[derive(Clone, Copy, Debug)]
 pub enum Operand {
     None,
@@ -500,15 +507,15 @@ impl Vm {
     }
 
     fn push(&mut self, v: u64) -> Result<(), VmError> {
-        let rsp = self.gpr[7].wrapping_sub(8);
-        self.gpr[7] = rsp;
+        let rsp = self.gpr[RSP].wrapping_sub(8);
+        self.gpr[RSP] = rsp;
         self.mem.write_uint(rsp, 8, v)
     }
 
     fn pop(&mut self) -> Result<u64, VmError> {
-        let rsp = self.gpr[7];
+        let rsp = self.gpr[RSP];
         let v = self.mem.read_uint(rsp, 8)?;
-        self.gpr[7] = rsp.wrapping_add(8);
+        self.gpr[RSP] = rsp.wrapping_add(8);
         Ok(v)
     }
 
@@ -645,8 +652,8 @@ impl Vm {
                 self.rip = next;
             }
             RDTSC => {
-                self.gpr[0] = self.tsc;
-                self.gpr[2] = self.tsc >> 32;
+                self.gpr[RAX] = self.tsc;
+                self.gpr[RDX] = self.tsc >> 32;
                 self.tsc = self.tsc.wrapping_add(self.tsc_step);
                 self.rip = next;
             }
@@ -819,11 +826,13 @@ impl Vm {
                 let a = self.read_xmm(&o[0])?;
                 let b = self.read_xmm(&o[1])?;
                 let mut r = [0u8; 16];
-                for i in 0..4 {
+                // PACKUSWB saturates eight words from each source, not four:
+                // it is the byte-wide pack, so both halves fill all 16 bytes.
+                for i in 0..8 {
                     r[i] = sat_u8(rd16(&a, i) as i16);
                 }
-                for i in 0..4 {
-                    r[4 + i] = sat_u8(rd16(&b, i) as i16);
+                for i in 0..8 {
+                    r[8 + i] = sat_u8(rd16(&b, i) as i16);
                 }
                 self.write_xmm(&o[0], &r)?;
                 self.rip = next;
@@ -920,32 +929,32 @@ impl Vm {
         let src = self.read_op(src_o)? & size_mask(size);
         match size {
             1 => {
-                let a = self.gpr[0] & 0xff;
+                let a = self.gpr[RAX] & 0xff;
                 if signed {
                     let p = (a as u8 as i8 as i16)
                         .wrapping_mul(src as u8 as i8 as i16);
                     let u = p as u16 as u64;
-                    self.gpr[0] = (self.gpr[0] & !0xffff) | u;
+                    self.gpr[RAX] = (self.gpr[RAX] & !0xffff) | u;
                     let cf = p != (u & 0xff) as u8 as i8 as i16;
                     self.flags.cf = cf;
                     self.flags.of = cf;
                 } else {
                     let p = a.wrapping_mul(src) & 0xffff;
-                    self.gpr[0] = (self.gpr[0] & !0xffff) | p;
+                    self.gpr[RAX] = (self.gpr[RAX] & !0xffff) | p;
                     let cf = (p >> 8) != 0;
                     self.flags.cf = cf;
                     self.flags.of = cf;
                 }
             }
             2 => {
-                let a = self.gpr[0] & 0xffff;
+                let a = self.gpr[RAX] & 0xffff;
                 let p = if signed {
                     ((a as u16 as i16 as i32) * (src as u16 as i16 as i32)) as u32 as u64
                 } else {
                     a.wrapping_mul(src)
                 } & 0xffff_ffff;
-                self.gpr[0] = (self.gpr[0] & !0xffff) | (p & 0xffff);
-                self.gpr[2] = (self.gpr[2] & !0xffff) | (p >> 16);
+                self.gpr[RAX] = (self.gpr[RAX] & !0xffff) | (p & 0xffff);
+                self.gpr[RDX] = (self.gpr[RDX] & !0xffff) | (p >> 16);
                 let cf = if signed {
                     p as u32 as i32 != (p & 0xffff) as u16 as i16 as i32
                 } else {
@@ -955,14 +964,14 @@ impl Vm {
                 self.flags.of = cf;
             }
             4 => {
-                let a = self.gpr[0] & 0xffff_ffff;
+                let a = self.gpr[RAX] & 0xffff_ffff;
                 let p = if signed {
                     ((a as u32 as i32 as i64) * (src as u32 as i32 as i64)) as u64
                 } else {
                     a.wrapping_mul(src)
                 };
-                self.gpr[0] = p & 0xffff_ffff;
-                self.gpr[2] = (p >> 32) & 0xffff_ffff;
+                self.gpr[RAX] = p & 0xffff_ffff;
+                self.gpr[RDX] = (p >> 32) & 0xffff_ffff;
                 let cf = if signed {
                     p as i64 != (p & 0xffff_ffff) as u32 as i32 as i64
                 } else {
@@ -973,12 +982,12 @@ impl Vm {
             }
             _ => {
                 let p = if signed {
-                    ((self.gpr[0] as i64 as i128) * (src as i64 as i128)) as u128
+                    ((self.gpr[RAX] as i64 as i128) * (src as i64 as i128)) as u128
                 } else {
-                    (self.gpr[0] as u128) * (src as u128)
+                    (self.gpr[RAX] as u128) * (src as u128)
                 };
-                self.gpr[0] = p as u64;
-                self.gpr[2] = (p >> 64) as u64;
+                self.gpr[RAX] = p as u64;
+                self.gpr[RDX] = (p >> 64) as u64;
                 let cf = if signed {
                     p as i128 != (p as u64 as i64 as i128)
                 } else {
@@ -999,7 +1008,7 @@ impl Vm {
         }
         match size {
             1 => {
-                let a = (self.gpr[0] & 0xffff) as u16;
+                let a = (self.gpr[RAX] & 0xffff) as u16;
                 let (q, r) = if signed {
                     let n = a as i16 as i32;
                     let d = src as u8 as i8 as i32;
@@ -1010,58 +1019,58 @@ impl Vm {
                 };
                 let packed =
                     ((q as u16 & 0xff) as u64) | (((r as u16 & 0xff) as u64) << 8);
-                self.gpr[0] = (self.gpr[0] & !0xffff) | packed;
+                self.gpr[RAX] = (self.gpr[RAX] & !0xffff) | packed;
             }
             2 => {
-                let a = ((self.gpr[2] & 0xffff) << 16 | (self.gpr[0] & 0xffff)) as u32;
+                let a = ((self.gpr[RDX] & 0xffff) << 16 | (self.gpr[RAX] & 0xffff)) as u32;
                 if signed {
                     let n = a as i32;
                     let d = src as u16 as i16 as i32;
                     let q = n / d;
                     let r = n % d;
-                    self.gpr[0] = (self.gpr[0] & !0xffff) | (q as u16 as u64);
-                    self.gpr[2] = (self.gpr[2] & !0xffff) | (r as u16 as u64);
+                    self.gpr[RAX] = (self.gpr[RAX] & !0xffff) | (q as u16 as u64);
+                    self.gpr[RDX] = (self.gpr[RDX] & !0xffff) | (r as u16 as u64);
                 } else {
                     let d = src as u32;
                     let q = a / d;
                     let r = a % d;
-                    self.gpr[0] = (self.gpr[0] & !0xffff) | (q as u64 & 0xffff);
-                    self.gpr[2] = (self.gpr[2] & !0xffff) | (r as u64 & 0xffff);
+                    self.gpr[RAX] = (self.gpr[RAX] & !0xffff) | (q as u64 & 0xffff);
+                    self.gpr[RDX] = (self.gpr[RDX] & !0xffff) | (r as u64 & 0xffff);
                 }
             }
             4 => {
-                let a = ((self.gpr[2] & 0xffff_ffff) << 32)
-                    | (self.gpr[0] & 0xffff_ffff);
+                let a = ((self.gpr[RDX] & 0xffff_ffff) << 32)
+                    | (self.gpr[RAX] & 0xffff_ffff);
                 if signed {
                     let n = a as i64;
                     let d = src as u32 as i32 as i64;
                     let q = n / d;
                     let r = n % d;
-                    self.gpr[0] = q as u64 & 0xffff_ffff;
-                    self.gpr[2] = r as u64 & 0xffff_ffff;
+                    self.gpr[RAX] = q as u64 & 0xffff_ffff;
+                    self.gpr[RDX] = r as u64 & 0xffff_ffff;
                 } else {
                     let d = src;
                     let q = a / d;
                     let r = a % d;
-                    self.gpr[0] = q & 0xffff_ffff;
-                    self.gpr[2] = r & 0xffff_ffff;
+                    self.gpr[RAX] = q & 0xffff_ffff;
+                    self.gpr[RDX] = r & 0xffff_ffff;
                 }
             }
             _ => {
-                let a = ((self.gpr[2] as u128) << 64) | (self.gpr[0] as u128);
+                let a = ((self.gpr[RDX] as u128) << 64) | (self.gpr[RAX] as u128);
                 if signed {
                     let n = a as i128;
                     let d = src as i64 as i128;
                     let q = n.checked_div(d).ok_or(VmError::DivZero)?;
                     let r = n % d;
-                    self.gpr[0] = q as u64;
-                    self.gpr[2] = r as u64;
+                    self.gpr[RAX] = q as u64;
+                    self.gpr[RDX] = r as u64;
                 } else {
                     let d = src as u128;
                     let q = a / d;
                     let r = a % d;
-                    self.gpr[0] = q as u64;
-                    self.gpr[2] = r as u64;
+                    self.gpr[RAX] = q as u64;
+                    self.gpr[RDX] = r as u64;
                 }
             }
         }
@@ -1611,7 +1620,7 @@ pub fn run_verified(
                 i,
                 stop,
                 fmt_loc(&vm.program, rec.ip),
-                vm.gpr[7]
+                vm.gpr[RSP]
             );
         }
         if i == stop {
