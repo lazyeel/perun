@@ -34,3 +34,5 @@ setup.crt
 /crates/perun-cli/examples/adi-bionic/libc.so
 /crates/perun-cli/examples/adi-bionic/liblog.so
 /crates/perun-cli/examples/adi-bionic/libdl.so
+
+__pycache__/

@@ -374,6 +374,9 @@ static void trace_try_arm(pid_t pid) {
 
 /* ---- options / counters -------------------------------------------------- */
 
+struct dump_range { unsigned long long addr, size; char tag[192]; };
+struct rdump { unsigned long long rec; unsigned long long addr, size; char tag[192]; };
+
 static struct {
     long long epoch;          /* fixed realtime seconds; -1 = derive from host */
     const char *rng_hex;
@@ -394,6 +397,12 @@ static struct {
     int no_tsc_freeze;        /* leave rdtsc/rdtscp answers real (bisection) */
     unsigned long long tsc_base;  /* fake counter at the first rewrite; 0 = epoch<<21 */
     unsigned long long tsc_step;  /* fake counter advance per read; 0 = 4096 */
+    struct dump_range dumps[16];
+    int ndumps;               /* dumped when tracing stops (post-state) */
+    struct dump_range sdumps[16];
+    int nstartdumps;          /* dumped at the first trace stop (entry state) */
+    struct rdump rdumps[16];
+    int nrdumps;              /* dumped when record rec is written */
 } opt;
 
 static struct {
@@ -522,12 +531,38 @@ static void pstate_drop(pid_t pid) {
  * started, so the outputs are final. done also prevents trace_try_arm from
  * re-arming the int3 and re-opening (truncating!) the trace file on the
  * next syscall boundary. */
+static void dump_ranges(pid_t pid, struct dump_range *ds, int n) {
+    for (int i = 0; i < n; i++) {
+        struct dump_range *d = &ds[i];
+        FILE *f = fopen(d->tag, "wb");
+        if (!f) { fprintf(stderr, "[dump] cannot open %s\n", d->tag); continue; }
+        for (unsigned long long off = 0; off < d->size; off += 8) {
+            errno = 0;
+            long w = ptrace(PTRACE_PEEKDATA, pid,
+                            (void *)(unsigned long)(d->addr + off), 0);
+            unsigned long long v = errno == 0 ? (unsigned long long)w : 0;
+            if (off + 8 > d->size) {
+                /* partial tail: read bytes individually */
+                unsigned long long have = d->size - off;
+                fwrite(&v, 1, (size_t)have, f);
+            } else {
+                fwrite(&v, 1, 8, f);
+            }
+        }
+        fclose(f);
+        fprintf(stderr, "[dump] %s: %llx..%llx (%llu bytes)\n", d->tag,
+                d->addr, d->addr + d->size, d->size);
+    }
+}
+
 static void trace_stop_all(pid_t pid) {
     if (!trc.tracing) return;
     trc.tracing = 0;
     trc.done = 1;
     for (int i = 0; i < procs_n; i++) procs[i].tracing = 0;
     wp_disarm(pid);
+    /* post-state memory dumps (diagnostics; VM seeds use --dump-start) */
+    dump_ranges(pid, opt.dumps, opt.ndumps);
     if (trc.out) fflush(trc.out);
     fprintf(stderr, "[trace] stopped all threads after %llu records\n", trc.steps);
 }
@@ -831,6 +866,46 @@ int main(int argc, char **argv) {
         else if (!strncmp(a, "--tsc-base=", 11)) opt.tsc_base = strtoull(a + 11, NULL, 0);
         else if (!strncmp(a, "--tsc-step=", 11)) opt.tsc_step = strtoull(a + 11, NULL, 0);
         else if (!strncmp(a, "--otp-buf=", 10)) opt.otp_buf = strtoull(a + 10, NULL, 0);
+        else if (!strncmp(a, "--dump-mem=", 11)) {
+            if (opt.ndumps >= 16) die("too many --dump-mem");
+            char spec[256];
+            snprintf(spec, sizeof spec, "%s", a + 11);
+            char *colon1 = strchr(spec, ':');
+            char *colon2 = colon1 ? strchr(colon1 + 1, ':') : NULL;
+            if (!colon1 || !colon2) die("bad --dump-mem (ADDR:SIZE:TAG)");
+            *colon1 = 0; *colon2 = 0;
+            struct dump_range *d = &opt.dumps[opt.ndumps++];
+            d->addr = strtoull(spec, NULL, 0);
+            d->size = strtoull(colon1 + 1, NULL, 0);
+            snprintf(d->tag, sizeof d->tag, "%s", colon2 + 1);
+        }
+        else if (!strncmp(a, "--dump-start=", 13)) {
+            if (opt.nstartdumps >= 16) die("too many --dump-start");
+            char spec[256];
+            snprintf(spec, sizeof spec, "%s", a + 13);
+            char *colon1 = strchr(spec, ':');
+            char *colon2 = colon1 ? strchr(colon1 + 1, ':') : NULL;
+            if (!colon1 || !colon2) die("bad --dump-start (ADDR:SIZE:TAG)");
+            *colon1 = 0; *colon2 = 0;
+            struct dump_range *d = &opt.sdumps[opt.nstartdumps++];
+            d->addr = strtoull(spec, NULL, 0);
+            d->size = strtoull(colon1 + 1, NULL, 0);
+            snprintf(d->tag, sizeof d->tag, "%s", colon2 + 1);
+        }
+        else if (!strncmp(a, "--dump-rec=", 11)) {
+            if (opt.nrdumps >= 16) die("too many --dump-rec");
+            char spec[256];
+            snprintf(spec, sizeof spec, "%s", a + 11);
+            char *c1 = strchr(spec, ':'), *c2 = c1 ? strchr(c1 + 1, ':') : NULL,
+                 *c3 = c2 ? strchr(c2 + 1, ':') : NULL;
+            if (!c1 || !c2 || !c3) die("bad --dump-rec (IDX:ADDR:SIZE:TAG)");
+            *c1 = 0; *c2 = 0; *c3 = 0;
+            struct rdump *d = &opt.rdumps[opt.nrdumps++];
+            d->rec = strtoull(spec, NULL, 0);
+            d->addr = strtoull(c1 + 1, NULL, 0);
+            d->size = strtoull(c2 + 1, NULL, 0);
+            snprintf(d->tag, sizeof d->tag, "%s", c3 + 1);
+        }
         else die("unknown option %s", a);
     }
     if (sep < 0 || sep + 1 >= argc)
@@ -992,6 +1067,8 @@ int main(int argc, char **argv) {
                             procs[i].prev_valid = 0;
                         }
                         trace_write(w, &r, 1);
+                        if (opt.nstartdumps)
+                            dump_ranges(w, opt.sdumps, opt.nstartdumps);
                         fprintf(stderr, "[trace] entered tid=%d, retaddr=0x%lx args rdi=%llx rsi=%llx rdx=%llx rcx=%llx r8=%llx (all threads stepping)\n",
                                 w, trc.retaddr, (unsigned long long)r.rdi, (unsigned long long)r.rsi,
                                 (unsigned long long)r.rdx, (unsigned long long)r.rcx,
@@ -1079,6 +1156,9 @@ int main(int argc, char **argv) {
                                         (unsigned long long)r.rax, (unsigned long long)r.rbx,
                                         (unsigned long long)r.rcx, (unsigned long long)r.rdx);
                             trace_write(w, &r, mw ? 5 : 2);
+                            for (int di = 0; di < opt.nrdumps; di++)
+                                if (opt.rdumps[di].rec == trc.steps - 1)
+                                    dump_ranges(w, (struct dump_range *)&opt.rdumps[di].addr, 1);
                         }
                         ptrace(PTRACE_SINGLESTEP, w, 0, 0);
                         continue;
