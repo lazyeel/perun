@@ -99,6 +99,14 @@
 #define SYS_dup            32
 #define SYS_dup2           33
 #define SYS_dup3           292
+#define SYS_write          1
+#define SYS_pwrite64       18
+#define SYS_lseek          8
+#define SYS_ftruncate      77
+#define SYS_rename         82
+#define SYS_unlink         87
+#define SYS_unlinkat       263
+#define SYS_exit_group     231
 
 #define AT_SYSINFO_EHDR    33
 #define AT_RANDOM          25
@@ -212,7 +220,18 @@ static struct {
     unsigned long retaddr;
     int tracing;
     char file_path[256];      /* library path as seen in maps */
+    int no_xstate;            /* --trace-noxs: GPR-only records */
+    int no_rec;               /* --trace-norec: call log only, no step file */
+    const char *calls_path;   /* --call-log: compact call/ret stream */
+    FILE *calls;
 } trc;
+
+/* --trace-dump-arg/--trace-dump-ret: dump memory at a register-relative
+ * address at the traced entry / return. This is how the internal state
+ * serializer is sampled without a multi-gigabyte step trace. */
+struct reg_dump { int reg; long long off; int deref; unsigned long long size; char tag[160]; };
+static struct reg_dump rd_arg[8], rd_ret[8];
+static int nrd_arg, nrd_ret;
 
 struct trec {
     unsigned long long ip;
@@ -258,7 +277,7 @@ static void trace_capture_xstate(pid_t pid) {
 }
 
 static void trace_write(pid_t pid, struct user_regs_struct *r, unsigned char kind) {
-    if (!trc.out) return;
+    if (!trc.out || trc.no_rec) return;
     struct trec t;
     memset(&t, 0, sizeof t);
     t.ip = r->rip;
@@ -270,6 +289,7 @@ static void trace_write(pid_t pid, struct user_regs_struct *r, unsigned char kin
     t.tid = (unsigned int)pid;
     t.kind = kind;
     fwrite(&t, sizeof t, 1, trc.out);
+    if (trc.no_xstate) return;
     trace_capture_xstate(pid);
     if (xs_len) fwrite(xs_buf, 1, xs_len, trc.out);
 }
@@ -356,6 +376,10 @@ static void trace_try_arm(pid_t pid) {
     trc.patched = 1;
     if (trc.out_path) trc.out = fopen(trc.out_path, "wb");
     if (trc.out) setvbuf(trc.out, NULL, _IOFBF, 1 << 20);
+    if (trc.calls_path) {
+        trc.calls = fopen(trc.calls_path, "w");
+        if (trc.calls) setvbuf(trc.calls, NULL, _IOFBF, 1 << 20);
+    }
 
     fprintf(stderr, "[trace] armed at %s+0x%lx = 0x%lx (orig byte 0x%02x, file-verified)\n",
             trc.lib_name, trc.rva, trc.patch_addr, trc.orig_byte);
@@ -396,6 +420,7 @@ static struct {
     int no_getrandom;         /* leave getrandom(2) live (bisection) */
     int no_urandom;           /* leave /dev/urandom reads live (bisection) */
     int log_syscalls;         /* trace openat/open/read/getrandom ordering to stderr */
+    int watch_state;          /* read watchpoints on a --trace-fd state read */
     int no_tsc_freeze;        /* leave rdtsc/rdtscp answers real (bisection) */
     unsigned long long tsc_base;  /* fake counter at the first rewrite; 0 = epoch<<21 */
     unsigned long long tsc_step;  /* fake counter advance per read; 0 = 4096 */
@@ -622,17 +647,328 @@ static void read_child_string(pid_t pid, unsigned long addr, char *buf, size_t b
     buf[i] = 0;
 }
 
+/* ---- watched-file I/O and memory scans (state-format work) ---------------- */
+/*
+ * --trace-fd=SUFFIX:DIR  dumps every read/write buffer on fds opened from a
+ *                        path ending in SUFFIX (the engine's adi.pb, for
+ *                        example) to DIR/io-NN-read.bin / io-NN-write.bin.
+ * --scan-mem=HEX:TAG     scans readable mappings at the trigger point for a
+ *                        byte pattern and dumps a window around each hit.
+ * --scan-at-path=NAME    triggers the scan when the harness opens NAME
+ *                        (e.g. adi-state-before-otp.bin, i.e. after the
+ *                        engine has parsed the state).
+ * --scan-dir=DIR         where the scan windows are written.
+ * A scan is also taken at exit_group, before the address space disappears.
+ */
+static struct {
+    const char *suffix;
+    const char *dir;
+    int fds[16];
+    int nfds;
+    int seq;
+} iow;
+
+static struct {
+    unsigned char pat[64];
+    int len;
+    char tag[32];
+} mscan[4];
+static int nmscan;
+static const char *scan_at_path;
+static const char *scan_dir;
+
+static int path_ends_with(const char *path, const char *suffix) {
+    size_t a = strlen(path), b = strlen(suffix);
+    return a >= b && strcmp(path + a - b, suffix) == 0;
+}
+
+static int iow_watched(long fd) {
+    for (int i = 0; i < iow.nfds; i++)
+        if (iow.fds[i] == fd) return 1;
+    return 0;
+}
+
+static void iow_add_fd(long fd) {
+    if (iow.nfds < (int)(sizeof iow.fds / sizeof *iow.fds)) iow.fds[iow.nfds++] = (int)fd;
+}
+
+static void iow_del_fd(long fd) {
+    for (int i = 0; i < iow.nfds; i++)
+        if (iow.fds[i] == fd) { iow.fds[i] = iow.fds[--iow.nfds]; return; }
+}
+
+static void child_mem_read(pid_t pid, unsigned long long addr, unsigned char *out, size_t len) {
+    size_t off = 0;
+    while (off < len) {
+        errno = 0;
+        long w = ptrace(PTRACE_PEEKDATA, pid, (void *)(unsigned long)(addr + off), 0);
+        if (errno != 0) { memset(out + off, 0, len - off); return; }
+        size_t n = len - off < 8 ? len - off : 8;
+        memcpy(out + off, &w, n);
+        off += n;
+    }
+}
+
+static void iow_dump(pid_t pid, const char *op, unsigned long long addr, size_t len) {
+    if (!iow.dir || len == 0 || len > (1u << 20)) return;
+    unsigned char *buf = malloc(len);
+    if (!buf) return;
+    child_mem_read(pid, addr, buf, len);
+    char path[512];
+    snprintf(path, sizeof path, "%s/io-%02d-%s.bin", iow.dir, iow.seq++, op);
+    FILE *f = fopen(path, "wb");
+    if (f) { fwrite(buf, 1, len, f); fclose(f); }
+    fprintf(stderr, "[io] %s %s %llx..%llx (%zu bytes)\n", op, path,
+            addr, addr + len, len);
+    free(buf);
+}
+
+/* ---- read watchpoints on the loaded state buffer -------------------------- */
+/*
+ * --watch-state arms DR0..DR3 with 8-byte read/write watchpoints on a state
+ * file buffer right after the engine reads it: header, blob start, and the
+ * first/last 8-byte window of the fixed 580-byte tail. Every distinct
+ * (slot, rip) pair is logged once, with the 16 bytes before rip, so the
+ * consuming instruction can be decoded offline. This locates the identity
+ * check and the tail decryption without a multi-million-record step trace.
+ */
+static int sw_on;
+static int sw_fixed_mode;         /* slots are --watch-fixed addresses */
+static int sw_epoch;              /* bumped on every arm: threads re-arm lazily */
+static unsigned long sw_addr[4];
+static const char *sw_name[4] = { "header", "blob", "tail-first", "tail-last" };
+static unsigned long sw_seen[4][64];
+static int sw_nseen[4];
+static unsigned long long sw_hits;
+
+/* the watchpoint registers are per-thread: every traced thread must be
+ * re-armed for itself after the buffer address changes (the OTP engine runs
+ * on libdispatch workers, so one arm in the reader is not enough). */
+static void state_watch_arm_thread(pid_t pid) {
+    for (int i = 0; i < 4; i++)
+        ptrace(PTRACE_POKEUSER, pid,
+               (void *)offsetof(struct user, u_debugreg[i]), (void *)sw_addr[i]);
+    ptrace(PTRACE_POKEUSER, pid,
+           (void *)offsetof(struct user, u_debugreg[6]), 0);
+    unsigned long dr7 = 0xFUL | (0xFUL << 16) | (0xFUL << 20) |
+                        (0xFUL << 24) | (0xFUL << 28);
+    if (ptrace(PTRACE_POKEUSER, pid,
+               (void *)offsetof(struct user, u_debugreg[7]), (void *)dr7) < 0)
+        fprintf(stderr, "[sw] thread arm failed tid=%d\n", pid);
+}
+
+/* --watch-state-offsets=O0,O1,O2,O3: 8-byte windows at these byte offsets
+ * from the start of the fixed 580-byte tail (default 0,8,572). */
+static unsigned long sw_off[4] = { 0, 8, 572, 0 };
+static int sw_noff = 3;
+static int sw_off_given;
+
+static void state_watch_arm(pid_t pid, unsigned long buf) {
+    unsigned char hdr[8];
+    child_mem_read(pid, buf, hdr, sizeof hdr);
+    unsigned n = ((unsigned)hdr[4] << 24) | ((unsigned)hdr[5] << 16) |
+                 ((unsigned)hdr[6] << 8) | hdr[7];
+    unsigned long tail = buf + 8 + n;
+    int tail_slots = sw_off_given ? 4 : 2;
+    int first_tail = 4 - tail_slots;
+    if (!sw_off_given) {
+        sw_addr[0] = buf & ~7UL;
+        sw_addr[1] = (buf + 8) & ~7UL;
+    }
+    for (int i = first_tail; i < 4; i++) {
+        int k = i - first_tail;
+        unsigned long off = sw_off[k < sw_noff ? k : sw_noff - 1];
+        sw_addr[i] = (tail + off) & ~7UL;
+    }
+    sw_epoch++;
+    state_watch_arm_thread(pid);
+    sw_on = 1;
+    sw_fixed_mode = 0;
+    fprintf(stderr, "[sw] armed buf=%lx n=%u tail=%lx slots %lx %lx %lx %lx offsets",
+            buf, n, tail, sw_addr[0], sw_addr[1], sw_addr[2], sw_addr[3]);
+    for (int k = 0; k < (sw_off_given ? 4 : 2); k++)
+        fprintf(stderr, " %lu", sw_off[k]);
+    fprintf(stderr, "\n");
+}
+
+/* --watch-fixed=HEX[,HEX,HEX,HEX]: arm up to four arbitrary 8-byte windows,
+ * used for stack copies discovered by --scan-mem. Armed when the harness opens
+ * --scan-at-path (immediately before the OTP call), so the window is quiet. */
+static unsigned long sw_fixed[4];
+static int sw_nfixed;
+static const char *sw_scan_tag;   /* --watch-scan-tag: arm at this scan hit */
+static unsigned long sw_scan_off; /* byte offset added to the hit */
+
+static void state_watch_arm_scan(pid_t pid, unsigned long va) {
+    unsigned long start = (va + sw_scan_off) & ~7UL;
+    sw_addr[0] = start;
+    sw_addr[1] = start + 8;
+    sw_addr[2] = start + 16;
+    sw_addr[3] = start + 24;
+    sw_epoch++;
+    state_watch_arm_thread(pid);
+    sw_on = 1;
+    sw_fixed_mode = 2;
+    fprintf(stderr, "[sw] scan-arm va=%lx off=%lu slots %lx %lx %lx %lx\n",
+            va, sw_scan_off, sw_addr[0], sw_addr[1], sw_addr[2], sw_addr[3]);
+}
+
+static void state_watch_arm_fixed(pid_t pid) {
+    for (int i = 0; i < 4; i++)
+        sw_addr[i] = i < sw_nfixed ? (sw_fixed[i] & ~7UL) : (sw_fixed[0] & ~7UL);
+    sw_epoch++;
+    state_watch_arm_thread(pid);
+    sw_on = 1;
+    sw_fixed_mode = 1;
+    fprintf(stderr, "[sw] fixed armed slots %lx %lx %lx %lx\n",
+            sw_addr[0], sw_addr[1], sw_addr[2], sw_addr[3]);
+}
+
+static void state_watch_hit(pid_t pid) {
+    if (!sw_on) return;
+    errno = 0;
+    long dr6 = ptrace(PTRACE_PEEKUSER, pid,
+                      (void *)offsetof(struct user, u_debugreg[6]), 0);
+    if (errno != 0 || !(dr6 & 0xF)) return;
+    struct user_regs_struct r;
+    if (ptrace(PTRACE_GETREGS, pid, 0, &r) == 0) {
+        unsigned char back[16];
+        child_mem_read(pid, (unsigned long long)r.rip - sizeof back, back, sizeof back);
+        for (int i = 0; i < 4; i++) {
+            if (!(dr6 & (1L << i))) continue;
+            sw_hits++;
+            int dup = 0;
+            for (int k = 0; k < sw_nseen[i]; k++)
+                if (sw_seen[i][k] == (unsigned long)r.rip) { dup = 1; break; }
+            if (!dup && sw_nseen[i] < 64) {
+                sw_seen[i][sw_nseen[i]++] = (unsigned long)r.rip;
+                fprintf(stderr,
+                        "[sw] hit tid=%d slot=%d(%s%c%d) addr=%lx rip=%lx back=",
+                        pid, i,
+                        sw_fixed_mode == 2 ? "scan" : sw_fixed_mode ? "fixed" : sw_name[i],
+                        sw_fixed_mode ? '#' : ' ', i, sw_addr[i], (unsigned long)r.rip);
+                for (size_t b = 0; b < sizeof back; b++) fprintf(stderr, "%02x", back[b]);
+                fprintf(stderr,
+                        " rax=%llx rbx=%llx rcx=%llx rdx=%llx rsi=%llx rdi=%llx "
+                        "rbp=%llx rsp=%llx r8=%llx r9=%llx r10=%llx r11=%llx "
+                        "r12=%llx r13=%llx r14=%llx r15=%llx\n",
+                        (unsigned long long)r.rax, (unsigned long long)r.rbx,
+                        (unsigned long long)r.rcx, (unsigned long long)r.rdx,
+                        (unsigned long long)r.rsi, (unsigned long long)r.rdi,
+                        (unsigned long long)r.rbp, (unsigned long long)r.rsp,
+                        (unsigned long long)r.r8, (unsigned long long)r.r9,
+                        (unsigned long long)r.r10, (unsigned long long)r.r11,
+                        (unsigned long long)r.r12, (unsigned long long)r.r13,
+                        (unsigned long long)r.r14, (unsigned long long)r.r15);
+            }
+        }
+    }
+    ptrace(PTRACE_POKEUSER, pid,
+           (void *)offsetof(struct user, u_debugreg[6]), 0);   /* clear sticky */
+}
+
+static void scan_memory(pid_t pid, const char *why) {
+    if (!nmscan) return;
+    char mp[64];
+    snprintf(mp, sizeof mp, "/proc/%d/maps", pid);
+    FILE *mf = fopen(mp, "r");
+    if (!mf) return;
+    char memp[64];
+    snprintf(memp, sizeof memp, "/proc/%d/mem", pid);
+    int mfd = open(memp, O_RDONLY);
+    if (mfd < 0) { fclose(mf); return; }
+    char line[512];
+    unsigned char *chunk = malloc((1u << 16) + 64);
+    if (!chunk) { close(mfd); fclose(mf); return; }
+    unsigned long long scanned = 0;
+    fprintf(stderr, "[scan] trigger=%s pid=%d patterns=%d\n", why, pid, nmscan);
+    while (fgets(line, sizeof line, mf)) {
+        unsigned long lo, hi;
+        char perms[16], rest[256] = "";
+        if (sscanf(line, "%lx-%lx %15s %*s %*s %*s %255[^\n]", &lo, &hi, perms, rest) < 3)
+            continue;
+        /* decrypted state lives in writable anonymous memory: scanning the
+         * file-backed library/oat mappings as well made the first version take
+         * minutes on a Bionic address space, so restrict to rw and skip DEX/
+         * native images explicitly. */
+        if (perms[0] != 'r' || perms[1] != 'w') continue;
+        if (strstr(rest, ".so") || strstr(rest, ".dex") || strstr(rest, ".oat") ||
+            strstr(rest, ".art") || strstr(rest, ".apk"))
+            continue;
+        unsigned long long size = hi - lo;
+        if (size == 0 || size > (64ull << 20)) continue;
+        if (scanned + size > (256ull << 20)) break;
+        scanned += size;
+        if (getenv("ADI_SCAN_DEBUG"))
+            fprintf(stderr, "[scan] map %lx-%lx (%llu) %s\n", lo, hi, size, rest);
+        for (int s = 0; s < nmscan; s++) {
+            int hits = 0;
+            unsigned long long off = 0;
+            while (off < size && hits < 8) {
+                size_t want = sizeof(unsigned char) * (1u << 16);
+                if (size - off < want) want = (size_t)(size - off);
+                errno = 0;
+                ssize_t got = pread(mfd, chunk, want, (off_t)(lo + off));
+                if (got <= 0) break;
+                unsigned char *p = chunk, *end = chunk + got;
+                while (p + mscan[s].len <= end && hits < 8) {
+                    unsigned char *m = memmem(p, (size_t)(end - p),
+                                              mscan[s].pat, (size_t)mscan[s].len);
+                    if (!m) break;
+                    unsigned long long va = lo + off + (unsigned long long)(m - chunk);
+                    unsigned long long ws = va > 256 ? va - 256 : 0;
+                    unsigned long long we = va + 256;
+                    if (we > hi) we = hi;
+                    char path[512];
+                    snprintf(path, sizeof path, "%s/scan-%s-%d-%d.bin",
+                             scan_dir ? scan_dir : ".", mscan[s].tag, pid, hits);
+                    FILE *f = fopen(path, "wb");
+                    if (f) {
+                        unsigned long long wl = we - ws;
+                        unsigned char *w = malloc(wl ? wl : 1);
+                        if (w) {
+                            child_mem_read(pid, ws, w, (size_t)wl);
+                            fwrite(w, 1, (size_t)wl, f);
+                            free(w);
+                        }
+                        fclose(f);
+                    }
+                    fprintf(stderr, "[scan] %s hit at %llx (%s)\n",
+                            mscan[s].tag, va, path);
+                    if (sw_scan_tag && !strcmp(mscan[s].tag, sw_scan_tag))
+                        state_watch_arm_scan(pid, (unsigned long)va);
+                    hits++;
+                    p = m + 1;
+                }
+                if ((size_t)got < want) break;
+                if (off + (unsigned long long)got >= size) break;
+                off += (size_t)got - (mscan[s].len > 1 ? (size_t)mscan[s].len - 1 : 0);
+            }
+        }
+    }
+    free(chunk);
+    close(mfd);
+    fclose(mf);
+}
+
 /* ---- per-process state ----------------------------------------------------- */
 
 struct pstate {
     pid_t pid;
     int in_syscall;          /* 0 = last stop was entry, 1 = exit pending */
     int open_is_urandom;     /* flagged at open entry, consumed at open exit */
+    int open_watch;          /* flagged at open entry: path matched --trace-fd */
     int exec_seen;
     long close_fd;           /* fd seen at close/dup entry */
     int tracing;             /* this process is being single-stepped (trace mode) */
     unsigned long prev_ip;   /* last single-stepped instruction (TSC check) */
     int prev_valid;
+    /* --trace-fd: pending read of a watched fd */
+    int watch_read_pending;
+    int watch_read_fd;
+    unsigned long long watch_read_buf;
+    int call_depth;          /* --call-log nesting for this thread */
+    int sw_epoch_seen;       /* which state-watch generation this thread has */
 };
 static struct pstate procs[MAX_PID_SLOTS];
 static int procs_n;
@@ -648,6 +984,39 @@ static void pstate_drop(pid_t pid) {
     int w = 0;
     for (int i = 0; i < procs_n; i++) if (procs[i].pid != pid) procs[w++] = procs[i];
     procs_n = w;
+}
+
+/* arm this thread if a newer state buffer was read since its last stop */
+static void state_watch_sync(pid_t pid) {
+    struct pstate *ps = pstate_of(pid);
+    if (!ps || !sw_on || ps->sw_epoch_seen == sw_epoch) return;
+    state_watch_arm_thread(pid);
+    ps->sw_epoch_seen = sw_epoch;
+}
+
+/* compact call stream: C <depth> <site> <target> <next-ip> / R <depth> <ret-ip> <next-ip>.
+ * The instruction at prev_ip has just executed; a direct call is decoded from
+ * the file-verified bytes, an indirect call's target is the new rip. */
+static void trace_calllog(pid_t tid, struct pstate *ps, unsigned long long rip) {
+    if (!trc.calls || !ps->prev_valid) return;
+    errno = 0;
+    long iw = ptrace(PTRACE_PEEKDATA, tid, ps->prev_ip, 0);
+    if (errno != 0) return;
+    unsigned char b0 = (unsigned char)(iw & 0xff);
+    unsigned char b1 = (unsigned char)((iw >> 8) & 0xff);
+    if (b0 == 0xe8) {
+        long long rel = (long long)(int32_t)(((unsigned long long)iw >> 8) & 0xffffffffu);
+        fprintf(trc.calls, "C %d %llx %llx %llx\n", ps->call_depth++,
+                (unsigned long long)ps->prev_ip,
+                (unsigned long long)((long long)ps->prev_ip + 5 + rel), rip);
+    } else if (b0 == 0xff && (((b1 >> 3) & 7) == 2)) {
+        fprintf(trc.calls, "C %d %llx %llx %llx\n", ps->call_depth++,
+                (unsigned long long)ps->prev_ip, rip, rip);
+    } else if (b0 == 0xc3 || b0 == 0xc2) {
+        if (ps->call_depth > 0) ps->call_depth--;
+        fprintf(trc.calls, "R %d %llx %llx\n", ps->call_depth,
+                (unsigned long long)ps->prev_ip, rip);
+    }
 }
 
 /* stop tracing every thread: the harness capture of mid.bin/otp.bin has
@@ -675,6 +1044,50 @@ static void dump_ranges(pid_t pid, struct dump_range *ds, int n) {
         fclose(f);
         fprintf(stderr, "[dump] %s: %llx..%llx (%llu bytes)\n", d->tag,
                 d->addr, d->addr + d->size, d->size);
+    }
+}
+
+static int reg_index(const char *name) {
+    static const char *names[16] = { "rax", "rbx", "rcx", "rdx", "rsi", "rdi",
+                                     "rbp", "rsp", "r8", "r9", "r10", "r11",
+                                     "r12", "r13", "r14", "r15" };
+    for (int i = 0; i < 16; i++) if (!strcmp(name, names[i])) return i;
+    return -1;
+}
+
+static unsigned long long reg_get(const struct user_regs_struct *r, int i) {
+    switch (i) {
+    case 0: return r->rax;   case 1: return r->rbx;
+    case 2: return r->rcx;   case 3: return r->rdx;
+    case 4: return r->rsi;   case 5: return r->rdi;
+    case 6: return r->rbp;   case 7: return r->rsp;
+    case 8: return r->r8;    case 9: return r->r9;
+    case 10: return r->r10;  case 11: return r->r11;
+    case 12: return r->r12;  case 13: return r->r13;
+    case 14: return r->r14;  case 15: return r->r15;
+    default: return 0;
+    }
+}
+
+static void dump_reg_dumps(pid_t pid, const struct user_regs_struct *r,
+                           const struct reg_dump *ds, int n, const char *when) {
+    for (int i = 0; i < n; i++) {
+        unsigned long long a = reg_get(r, ds[i].reg) + (unsigned long long)ds[i].off;
+        if (ds[i].deref) {
+            unsigned long long ptr = 0;
+            child_mem_read(pid, a, (unsigned char *)&ptr, sizeof ptr);
+            a = ptr;
+        }
+        size_t len = (size_t)ds[i].size;
+        unsigned char *buf = malloc(len ? len : 1);
+        if (!buf) continue;
+        memset(buf, 0, len);
+        child_mem_read(pid, a, buf, len);
+        FILE *f = fopen(ds[i].tag, "wb");
+        if (f) { fwrite(buf, 1, len, f); fclose(f); }
+        fprintf(stderr, "[dump] %s %s: %llx..%llx (%zu bytes)\n",
+                when, ds[i].tag, a, a + len, len);
+        free(buf);
     }
 }
 
@@ -779,6 +1192,32 @@ static void freeze_clock_answer(pid_t pid, unsigned long addr) {
 }
 
 static void log_syscall(pid_t pid, const char *dir, long nr, struct user_regs_struct *r) {
+    if (nr == SYS_read || nr == SYS_write || nr == SYS_pwrite64) {
+        fprintf(stderr, "%s pid=%d nr=%ld fd=%lld buf=%llx len=%llu ret=%lld\n",
+                dir, pid, nr, (long long)r->rdi,
+                (unsigned long long)r->rsi, (unsigned long long)r->rdx,
+                (long long)r->rax);
+        return;
+    }
+    if (nr == SYS_lseek) {
+        fprintf(stderr, "%s pid=%d lseek fd=%lld off=%lld whence=%lld ret=%lld\n",
+                dir, pid, (long long)r->rdi, (long long)r->rsi,
+                (long long)r->rdx, (long long)r->rax);
+        return;
+    }
+    if (nr == SYS_ftruncate) {
+        fprintf(stderr, "%s pid=%d ftruncate fd=%lld len=%lld ret=%lld\n",
+                dir, pid, (long long)r->rdi, (long long)r->rsi, (long long)r->rax);
+        return;
+    }
+    if (nr == SYS_rename || nr == SYS_unlink || nr == SYS_unlinkat) {
+        unsigned long pa = r->rdi;
+        if (nr == SYS_unlinkat) pa = (unsigned long)r->rsi;
+        char tmp[96];
+        read_child_string(pid, pa, tmp, sizeof tmp);
+        fprintf(stderr, "%s pid=%d nr=%ld %s ret=%lld\n", dir, pid, nr, tmp, (long long)r->rax);
+        return;
+    }
     long interesting[13] = { SYS_read, SYS_open, SYS_openat, SYS_close,
                              SYS_dup, SYS_dup2, SYS_dup3, SYS_getrandom,
                              SYS_clock_gettime, SYS_gettimeofday, SYS_time,
@@ -810,17 +1249,28 @@ static void handle_syscall_exit(pid_t pid, struct user_regs_struct *r, long nr) 
                         stream, stream_len, &stat_.rng_hits, &stat_.rng_bytes);
         break;
     case SYS_read:
-    case SYS_pread64:
+    case SYS_pread64: {
+        struct pstate *ps = pstate_of(pid);
+        if (ps && ps->watch_read_pending && ps->watch_read_fd == (int)r->rdi &&
+            (long)r->rax > 0) {
+            iow_dump(pid, "read", ps->watch_read_buf, (size_t)r->rax);
+            if (opt.watch_state)
+                state_watch_arm(pid, (unsigned long)ps->watch_read_buf);
+        }
+        if (ps) ps->watch_read_pending = 0;
         if (is_urandom_fd(pid, (long)r->rdi) && !opt.no_rng && !opt.no_urandom)
             fill_stream(pid, (unsigned long)r->rsi, (unsigned long)r->rax,
                         ustream, ustream_len, &stat_.urand_hits, &stat_.urand_bytes);
         break;
+    }
     case SYS_open:
     case SYS_openat: {
         struct pstate *ps = pstate_of(pid);
         if (ps && ps->open_is_urandom && r->rax >= 0 && r->rax < 0x7fffffff)
             mark_urandom_fd(pid, (int)r->rax);
-        if (ps) ps->open_is_urandom = 0;
+        if (ps && ps->open_watch && r->rax >= 0 && r->rax < 0x7fffffff)
+            iow_add_fd((long)r->rax);
+        if (ps) { ps->open_is_urandom = 0; ps->open_watch = 0; }
         break;
     }
     case SYS_close: {
@@ -828,8 +1278,10 @@ static void handle_syscall_exit(pid_t pid, struct user_regs_struct *r, long nr) 
          * its number will be silently reused by the next open and our fill
          * would poison an unrelated read (this corrupted adi.pb reads). */
         struct pstate *ps = pstate_of(pid);
-        if (ps && ps->close_fd >= 0 && r->rax == 0)
+        if (ps && ps->close_fd >= 0 && r->rax == 0) {
             forget_urandom_fd(pid, (int)ps->close_fd);
+            iow_del_fd(ps->close_fd);
+        }
         break;
     }
     case SYS_dup:
@@ -898,11 +1350,35 @@ static void handle_syscall_entry(pid_t pid, struct user_regs_struct *r) {
     struct pstate *ps = pstate_of(pid);
     if (!ps) return;
     long nr = (long)r->orig_rax;
+
+    if (nr == SYS_exit_group) scan_memory(pid, "exit_group");
+
+    if (iow.suffix && (nr == SYS_write || nr == SYS_pwrite64)) {
+        long fd = (long)r->rdi;
+        if (iow_watched(fd))
+            iow_dump(pid, nr == SYS_write ? "write" : "pwrite",
+                     (unsigned long long)r->rsi, (size_t)r->rdx);
+    }
+    if (nr == SYS_read && iow_watched((long)r->rdi)) {
+        ps->watch_read_pending = 1;
+        ps->watch_read_fd = (int)r->rdi;
+        ps->watch_read_buf = (unsigned long long)r->rsi;
+    }
+
         if (nr == SYS_open || nr == SYS_openat) {
         unsigned long patharg = nr == SYS_open ? (unsigned long)r->rdi : (unsigned long)r->rsi;
         char path[128];
         read_child_string(pid, patharg, path, sizeof path);
         ps->open_is_urandom = !strcmp(path, "/dev/urandom") || !strcmp(path, "/dev/random");
+        ps->open_watch = iow.suffix && path_ends_with(path, iow.suffix);
+        if (scan_at_path) {
+            const char *base = strrchr(path, '/');
+            base = base ? base + 1 : path;
+            if (!strcmp(base, scan_at_path)) {
+                scan_memory(pid, base);
+                if (sw_nfixed) state_watch_arm_fixed(pid);
+            }
+        }
         if (trc.requested && !trc.lib_seen && !trc.patched) {
             const char *base = strrchr(path, '/');
             if (base && !strcmp(base + 1, trc.lib_name)) trc.lib_seen = 1;
@@ -981,10 +1457,86 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--no-getrandom")) opt.no_getrandom = 1;
         else if (!strcmp(a, "--no-urandom")) opt.no_urandom = 1;
         else if (!strcmp(a, "--log-syscalls")) opt.log_syscalls = 1;
+        else if (!strcmp(a, "--watch-state")) opt.watch_state = 1;
+        else if (!strncmp(a, "--watch-state-offsets=", 22)) {
+            char *p = (char *)a + 22;
+            sw_noff = 0;
+            while (*p && sw_noff < 4) {
+                sw_off[sw_noff++] = strtoul(p, &p, 0);
+                if (*p == ',') p++;
+                else break;
+            }
+            sw_off_given = sw_noff > 0;
+        }
+        else if (!strncmp(a, "--watch-fixed=", 14)) {
+            char *p = (char *)a + 14;
+            while (*p && sw_nfixed < 4) {
+                sw_fixed[sw_nfixed++] = strtoul(p, &p, 16);
+                if (*p == ',') p++;
+                else break;
+            }
+        }
+        else if (!strncmp(a, "--watch-scan-tag=", 17)) sw_scan_tag = a + 17;
+        else if (!strncmp(a, "--watch-scan-offset=", 20))
+            sw_scan_off = strtoul(a + 20, NULL, 0);
+        else if (!strncmp(a, "--trace-dump-arg=", 17) ||
+                 !strncmp(a, "--trace-dump-ret=", 17)) {
+            int is_ret = a[13] == 'r';
+            char *spec = (char *)a + 17;
+            char *c1 = strchr(spec, ':');
+            if (!c1) die("bad --trace-dump-arg/ret (REG[+OFF|@OFF]:SIZE:FILE)");
+            *c1 = 0;
+            char *c2 = strchr(c1 + 1, ':');
+            if (!c2) die("bad --trace-dump-arg/ret (REG[+OFF|@OFF]:SIZE:FILE)");
+            *c2 = 0;
+            char *sep = strpbrk(spec, "+@");
+            if (sep) *sep = 0;
+            int ri = reg_index(spec);
+            if (ri < 0) die("unknown register in --trace-dump-arg/ret");
+            struct reg_dump *d = is_ret ? &rd_ret[nrd_ret] : &rd_arg[nrd_arg];
+            if ((is_ret ? nrd_ret : nrd_arg) >= 8)
+                die("too many --trace-dump-arg/ret");
+            d->reg = ri;
+            d->off = sep ? strtoll(sep + 1, NULL, 0) : 0;
+            d->deref = sep && *sep == '@';
+            d->size = strtoull(c1 + 1, NULL, 0);
+            snprintf(d->tag, sizeof d->tag, "%s", c2 + 1);
+            if (is_ret) nrd_ret++; else nrd_arg++;
+        }
+        else if (!strncmp(a, "--trace-fd=", 11)) {
+            char *spec = (char *)a + 11;
+            char *colon = strchr(spec, ':');
+            if (!colon) die("bad --trace-fd (SUFFIX:DIR)");
+            *colon = 0;
+            iow.suffix = spec;
+            iow.dir = colon + 1;
+        }
+        else if (!strncmp(a, "--scan-mem=", 11)) {
+            if (nmscan >= 4) die("too many --scan-mem");
+            char *spec = (char *)a + 11;
+            char *colon = strchr(spec, ':');
+            if (!colon) die("bad --scan-mem (HEX:TAG)");
+            *colon = 0;
+            int n = 0;
+            for (char *p = spec; *p && n < 64; p += 2) {
+                unsigned v = 0;
+                if (sscanf(p, "%2x", &v) != 1) die("bad hex in --scan-mem");
+                mscan[nmscan].pat[n++] = (unsigned char)v;
+                if (!p[2]) break;
+            }
+            mscan[nmscan].len = n;
+            snprintf(mscan[nmscan].tag, sizeof mscan[nmscan].tag, "%s", colon + 1);
+            nmscan++;
+        }
+        else if (!strncmp(a, "--scan-at-path=", 15)) scan_at_path = a + 15;
+        else if (!strncmp(a, "--scan-dir=", 11)) scan_dir = a + 11;
         else if (!strncmp(a, "--trace-lib=", 12)) { trc.lib_name = a + 12; trc.requested = 1; }
         else if (!strncmp(a, "--trace-rva=", 12)) { trc.rva = strtoul(a + 12, NULL, 0); trc.requested = 1; }
         else if (!strncmp(a, "--trace-out=", 12)) { trc.out_path = a + 12; trc.requested = 1; }
         else if (!strncmp(a, "--trace-max=", 12)) { trc.max_steps = strtoull(a + 12, NULL, 0); }
+        else if (!strcmp(a, "--trace-noxs")) trc.no_xstate = 1;
+        else if (!strcmp(a, "--trace-norec")) trc.no_rec = 1;
+        else if (!strncmp(a, "--call-log=", 11)) { trc.calls_path = a + 11; trc.requested = 1; }
         else if (!strcmp(a, "--no-tsc-freeze")) opt.no_tsc_freeze = 1;
         else if (!strncmp(a, "--tsc-base=", 11)) opt.tsc_base = strtoull(a + 11, NULL, 0);
         else if (!strncmp(a, "--tsc-step=", 11)) opt.tsc_step = strtoull(a + 11, NULL, 0);
@@ -1048,7 +1600,8 @@ int main(int argc, char **argv) {
     if (sep < 0 || sep + 1 >= argc)
         die("usage: adi_freeze [opts] -- PROG [ARGS...]");
     char **prog = argv + sep + 1;
-    if (trc.requested && (!trc.lib_name || !trc.rva || !trc.out_path))
+    if (trc.requested && (!trc.lib_name || !trc.rva ||
+                          (!trc.out_path && !trc.no_rec && !trc.calls_path)))
         die("--trace-lib, --trace-rva and --trace-out are required together");
     if (!trc.max_steps) trc.max_steps = 30000000;
     tscc.enabled = trc.requested && !opt.no_tsc_freeze;
@@ -1106,6 +1659,7 @@ int main(int argc, char **argv) {
         if (WIFEXITED(st) || WIFSIGNALED(st)) {
             if (w == pid) {
                 if (trc.out) fclose(trc.out);
+                if (trc.calls) fclose(trc.calls);
                 if (!opt.quiet) report();
                 return WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
             }
@@ -1122,6 +1676,7 @@ int main(int argc, char **argv) {
             if (ptrace(PTRACE_GETREGS, w, 0, &r) < 0) { ptrace(PTRACE_SYSCALL, w, 0, 0); continue; }
             struct pstate *ps = pstate_of(w);
             if (!ps) { ptrace(PTRACE_SYSCALL, w, 0, 0); continue; }
+            state_watch_sync(w);
             if (!ps->in_syscall) {
                 ps->in_syscall = 1;
                 if (opt.log_syscalls) log_syscall(w, "E", (long)r.orig_rax, &r);
@@ -1139,12 +1694,14 @@ int main(int argc, char **argv) {
             continue;
         }
         if (sig == SIGTRAP) {
+            state_watch_sync(w);
             if (ev == PTRACE_EVENT_CLONE || ev == PTRACE_EVENT_FORK || ev == PTRACE_EVENT_VFORK) {
                 unsigned long msg = 0;
                 ptrace(PTRACE_GETEVENTMSG, w, 0, &msg);
                 ptrace(PTRACE_SYSCALL, w, 0, 0);
                 if (msg) {
                     ptrace(PTRACE_SETOPTIONS, (pid_t)msg, 0, (void *)clo);
+                    state_watch_sync((pid_t)msg);
                     ptrace(PTRACE_SYSCALL, (pid_t)msg, 0, 0);
                 }
                 continue;
@@ -1172,7 +1729,7 @@ int main(int argc, char **argv) {
             }
             /* ---- trace mode: int3 entry hit, then single-steps ---- */
             if (ps) trace_try_arm(w);
-            if (ps && trc.requested && trc.out) {
+            if (ps && trc.requested && (trc.out || trc.no_rec)) {
                 struct user_regs_struct r;
                 if (ptrace(PTRACE_GETREGS, w, 0, &r) == 0) {
                     if (!ps->tracing && r.rip == trc.patch_addr + 1) {
@@ -1224,6 +1781,7 @@ int main(int argc, char **argv) {
                                 w, trc.retaddr, (unsigned long long)r.rdi, (unsigned long long)r.rsi,
                                 (unsigned long long)r.rdx, (unsigned long long)r.rcx,
                                 (unsigned long long)r.r8);
+                        if (nrd_arg) dump_reg_dumps(w, &r, rd_arg, nrd_arg, "arg");
                         ptrace(PTRACE_SINGLESTEP, w, 0, 0);
                         continue;
                     }
@@ -1238,6 +1796,7 @@ int main(int argc, char **argv) {
                             trace_write(w, &r, 3);
                             ps->tracing = 0;
                             wp_disarm(w);
+                            if (nrd_ret) dump_reg_dumps(w, &r, rd_ret, nrd_ret, "ret");
                             fprintf(stderr, "[trace] wrapper returned tid=%d after %llu records\n", w, trc.steps);
                             ptrace(PTRACE_SYSCALL, w, 0, 0);
                             continue;
@@ -1295,6 +1854,7 @@ int main(int argc, char **argv) {
                                 }
                             }
                         }
+                        trace_calllog(w, ps, (unsigned long long)r.rip);
                         ps->prev_ip = (unsigned long)r.rip;
                         ps->prev_valid = 1;
                         trc.steps++;
@@ -1333,6 +1893,7 @@ int main(int argc, char **argv) {
                     }
                 }
             }
+            state_watch_hit(w);
             ptrace(PTRACE_SYSCALL, w, 0, 0);
             continue;
         }

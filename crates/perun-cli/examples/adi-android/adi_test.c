@@ -734,11 +734,16 @@ int main(int argc, char **argv) {
         die("dump_init(%s) failed", libdir);
 #endif
 
-    /* probe: is the engine responsive at all before any configuration? */
-    int code = pCode(DS_ID);
-    info("adi", "pre-config ADIGetLoginCode=%d%s", code,
-         code == 0 ? " (provisioned)" :
-         code == -45061 ? " (not provisioned)" : "");
+    /* probe: is the engine responsive at all before any configuration?
+     * ADI_SKIP_PRECONFIG keeps the call out of a one-shot trace: the state
+     * load happens on the post-configuration GetLoginCode, not this probe. */
+    int code = -45061;
+    if (!getenv("ADI_SKIP_PRECONFIG")) {
+        code = pCode(DS_ID);
+        info("adi", "pre-config ADIGetLoginCode=%d%s", code,
+             code == 0 ? " (provisioned)" :
+             code == -45061 ? " (not provisioned)" : "");
+    }
 
     /* provisioning storage path must exist; make it absolute */
     char absdata[512];
@@ -778,6 +783,11 @@ int main(int argc, char **argv) {
          code == -45061 ? " (not provisioned: provisioning now)" : "");
 
     if (code != 0 && code != -45061) die("ADI login code %d: unexpected", code);
+
+    /* Mutation probes only need the state verdict: stop before the
+     * provisioning branch so a rejected state never starts a session. */
+    if (getenv("ADI_CODE_ONLY") && strcmp(getenv("ADI_CODE_ONLY"), "1") == 0)
+        return 0;
 
     const char *force_start_env = getenv("ADI_FORCE_START");
     int force_start = force_start_env && strcmp(force_start_env, "1") == 0;
