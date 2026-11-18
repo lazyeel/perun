@@ -5510,3 +5510,35 @@ metadata is never read -- stands unchanged; what changes is that a caller-visibl
 Runtime is one `pread` per watched word per excursion (four regions, 92 excursions
 on tM), so a re-capture stays in the same seconds-scale envelope as the frozen
 runs.
+
+**Gate passed.** After the deltas landed, `warmvm` verifies every trace record and
+the OTP against the native reference on all five epochs:
+
+| case | records verified | libc stubs | OTP |
+|---|---|---|---|
+| tM | 614,673 | 92 | MATCH (28 B) |
+| tI | 614,588 | 92 | MATCH (28 B) |
+| tE1794862200 | 614,731 | 92 | MATCH (28 B) |
+| tE1794863400 | 614,777 | 92 | MATCH (28 B) |
+| tE1794865200 | 614,777 | 92 | MATCH (28 B) |
+
+Verification compares `rip`, all 16 GP registers, and 16 XMM registers on every
+record; the OTP comparison covers the whole 28-byte buffer (`00 00 00 05`,
+`00 00 00 10`, the 16-byte payload, `00 00 00 04`). The TSC bases are the five
+distinct fake-clock origins, so the payloads differ from epoch to epoch as they
+must -- what matches is byte-for-byte the native computation of each one.
+
+Two seed ranges also had to grow to the *file* end of their segments rather than a
+convenient window: `ss_rw` 0x11000 -> 0x13000 and `ca_rw` 0x3200 -> 0x5000 cover
+`libstoreservicescore`+0x24c0a0 and `libCoreADI`+0x186168, and both flags the engine
+reads early (0x24adc8 and 0x186158) live in the zero-filled `.bss` tail past the
+old cut. The heap seed similarly now spans the whole jemalloc arena
+(`0x7ffff77ff000`, 0x201000) instead of one 0x40000 window inside it: the engine
+walks *below* its allocation cursor into arena metadata, which is why the short
+seed failed at record 234,157 with an unmapped read.
+
+Also note the multi-thread question this settles empirically: the traced window
+has one thread for all 622,415 records (a single tid, 92 excursions all taken on
+it), so the all-threads single-step in the tracer costs nothing here and the
+"one thread, deterministic" assumption the stub model rests on is measured, not
+assumed.
