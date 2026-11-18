@@ -5411,3 +5411,84 @@ The trace mode of `tools/adi_freeze.c` (INT3 at the `qi864985u0` wrapper, RVA `0
 ### 2026-11-16 — OTP payload output boundary decoded; two-epoch trace corpus
 
 The deterministic trace corpus now covers two frozen epochs (2800 → OTP `f3fd95eb…`, 4600 → OTP `cf9da8e1…`, two byte-identical runs each, both matching plain native). Hardware write watchpoints (`--otp-buf=ADDR`, DR0–DR3) located the exact output boundary: the 16-byte payload is serialized in libCoreADI at RVA `0x139931..0x139aaf` from four 32-bit words (`r15d`, `r13d`, `r9d`, `ebx`) via 16 byte-extract-XOR equations, all verified against the captured payload; the trailer `00 00 00 04` is written at RVA `0xcca65..0xcca93`. The time-dependent branch into the generator was pinned to libstoreservicescore RVA `0x1c77a2` (computed-goto dispatch at `0x1c779d`, first epoch divergence at record 13135), and the hottest arithmetic loop (384 iterations) to libCoreADI RVA `0x12e53f…`. Report: `research-runs/warmotp-output-2026-11-16.md`.
+
+### 2026-11-18 — the standalone oracle hangs were one 16-bit bug; warm-VM replay reaches 233k records
+
+Two threads converged on the same day: the Android oracle (`adi_native` against the
+patched Bionic images) had been wedging in three successive places, and the lifted
+warm-OTP program was being replayed by the new Rust VM (`perun-adi-core::warmvm`).
+
+**The oracle was not wedging in three places.** All three hangs were one defect in the
+android-21 Bionic mutex. The 32-bit lock word stores the owner thread id in bits 16..31,
+but `pthread_mutex_lock` compares that field against the **full** 32-bit `gettid()`:
+
+```
+pthread_mutex_lock+0xb8:  call  __get_thread
+pthread_mutex_lock+0xbb:  mov   %ebp,%edx
+pthread_mutex_lock+0xbd:  shr   $0x10,%edx        ; owner = word >> 16
+pthread_mutex_lock+0xc0:  cmp   0x10(%rax),%edx   ; thread->tid is a 32-bit int
+```
+
+while `pthread_mutex_unlock` writes the same field with the same `shr $0x10`, so a full
+tid above 0xffff can never match its own 16-bit copy: unlock returns EPERM without
+clearing the word, and the next lock of that (recursive, static) mutex futex-waits
+forever in a single-threaded process. Observed lock words carried owner fields
+`0x391e` and `0x5445`, which are exactly the low 16 bits of two consecutive test pids
+(80158 and 87109); `gettid` was in the 0x1xxxx range for both. The host's
+`kernel.pid_max` was 4194304.
+
+The three symptoms that had been read as separate bugs — `read(/proc/stat)` in
+`sysconf`, `fopen(/proc/filesystems)` followed by `flockfile`, and the static lock
+behind `arc4random`'s pthread-atfork registration — are the same pathology. Pinning
+`kernel.pid_max=65535` on the rig (a `sysctl`, not a code change; it does not survive a
+reboot past the next id cycle unless re-applied) makes the standalone oracle pass:
+`=== SUCCESS ===`, exit 0, in well under the 60 s budget. The loader/libc patches
+already carried by this lane remain harmless under that precondition but are no
+longer load-bearing, which is the right place for them: recorded, not required.
+
+**Corpus v2 is self-consistent.** All five epochs were re-captured from the standalone
+oracle in one run each (trace + entry-state dumps, `--no-aslr`), byte sizes unchanged:
+`ss_ro` 2,327,328 B, `ss_rw` 0x13000, `ca_rodata` 323,584 B, `ca_rw` 0x5000,
+`stack` 0x10000, `heap` 0x40000, `main` 0x19000; traces 612,456,360 B (tM) and
+612,372,720 / 612,513,432 / 612,558,696 / 612,558,696 B for the others. The five OTP
+payloads are byte-identical to the v1 references
+(`f3fd95eb…`, `cf9da8e1…`, `1b383314…`, `5900554d…`, `77fd1b8d…`); only the TSC base
+moved, and the RDTSC model (step 4096, base `epoch<<21`) still reproduces every
+observed `rax` pair. Two seed ranges were wrong in the first v2 pass and are now
+0x5000 (`ca_rw`, reaching `libCoreADI`'s `.bss` end at RVA 0x186168) and 0x13000
+(`ss_rw`): both are *file* images followed by zero-filled `.bss`, and any flag stored
+in that tail reads as zero to a VM seeded short.
+
+**Warm-VM replay.** The interpreter verifies `rip` plus all 16 GP registers and 16 XMM
+registers against every one of the 622,415 trace records and stops at the first
+mismatch, printing the last twelve decoded steps. Defects it caught, in the order they
+appeared, each a silent state corruption rather than a crash:
+
+* Lifted register indices were in x86 *encoding* order (`ax cx dx bx sp bp si di`),
+  while the trace and the VM use ptrace `user_regs_struct` order
+  (`rax rbx rcx rdx rsi rdi rbp rsp`). `push %rbp` therefore pushed `rdi` and
+  `mov %rsp,%rbp` wrote `rsi`; divergence at record 2.
+* `rdtsc` split into the same wrong pair, so the TSC high half landed in `rcx`
+  (record 641).
+* `PACKUSWB` saturated four words per source instead of eight, zeroing the upper
+  halves (record 233,808).
+* An immediate operand is `tag, u64, width`; the lifter wrote `tag, u64` and every
+  following operand was decoded one byte short (program header rejected on load).
+
+After those, replay runs 233,808 records into tM (and the same point in the other four
+epochs) before the next class of divergence: a `fstatat` stub. Stubs currently
+replay the recorded GP/XMM state and the return address only. The engine then tests
+`st_mode` against `S_IFMT` at libCoreADI RVA 0x59e10, and the `struct stat` that
+`fstatat` filled on the caller's stack still holds the pre-call seed, so the branch
+goes the wrong way. The same argument applies to any libc call whose output is a
+pointer or a struct rather than a register value.
+
+The fix being implemented is capture-side and does not change the trace record layout
+(or invalidate the existing corpus): `adi_freeze` gains `--trace-mem=ADDR:SIZE` regions
+and `--trace-mem-out=FILE`, and for each libc excursion writes the 8-byte-granular
+delta between the state at the call record and the state at the return record, keyed
+by `(rec_call, rec_ret)`. The lifter folds those deltas into the case bundle, and
+`warmvm` applies them when it takes a stub. Only the caller-visible memory moves
+across, so allocator metadata stays out of the model exactly as before — but a
+`struct stat`, an `iovec`, or a caller buffer the engine later reads is no longer
+lost.
