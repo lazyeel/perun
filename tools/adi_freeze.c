@@ -51,6 +51,7 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -355,6 +356,7 @@ static void trace_try_arm(pid_t pid) {
     trc.patched = 1;
     if (trc.out_path) trc.out = fopen(trc.out_path, "wb");
     if (trc.out) setvbuf(trc.out, NULL, _IOFBF, 1 << 20);
+
     fprintf(stderr, "[trace] armed at %s+0x%lx = 0x%lx (orig byte 0x%02x, file-verified)\n",
             trc.lib_name, trc.rva, trc.patch_addr, trc.orig_byte);
     if (getenv("ADI_FREEZE_DEBUG_MAPS")) {
@@ -401,8 +403,11 @@ static struct {
     int ndumps;               /* dumped when tracing stops (post-state) */
     struct dump_range sdumps[16];
     int nstartdumps;          /* dumped at the first trace stop (entry state) */
-    struct rdump rdumps[16];
+    struct rdump rdumps[256];
     int nrdumps;              /* dumped when record rec is written */
+    struct dump_range mregions[16];
+    int nmregions;            /* watched for cross-libc memory deltas */
+    const char *mout_path;    /* delta log, written at trace stop */
 } opt;
 
 static struct {
@@ -413,6 +418,123 @@ static struct {
     int vdso_scan_ok;         /* auxv scan found the vDSO entry at all */
     int vdso_patched;         /* and the zero-write was verified */
 } stat_;
+
+/* ---- memory deltas across libc excursions -------------------------------- */
+/* A stub replays the GP/XMM state at the call record, so any memory the libc
+ * call wrote -- a struct stat, an iovec, a caller buffer -- would still hold
+ * its pre-call contents in a VM that seeds only the entry state.  The libc
+ * code itself is not lifted, so its stores have to cross the boundary as
+ * data.  Instead of snapshotting the whole address space (tens of MiB) we
+ * watch the regions the VM actually seeds, named with --trace-mem: at the
+ * first libc record of an excursion take an image, at the first record back
+ * in the engine diff 8-byte words and log (call, ret, addr, value) for the
+ * ones that moved.
+ * The 984-byte record layout is untouched: the log is a side file, one line
+ * per changed word, "rec_call rec_ret addr value" in hex. */
+#define MAX_MREGIONS 16
+#define MAX_MLRANGES 16
+static struct {
+    unsigned long long addr, size;
+} mregions[MAX_MREGIONS];
+static int nmregions;
+static unsigned long long *msnap[MAX_MREGIONS];
+static unsigned long long mem_call_rec;
+static int mem_prev_in_libc;
+static struct {
+    unsigned long long lo, hi;
+} mlr[MAX_MLRANGES];
+static int nmlr;
+
+static void mem_resolve_libc(pid_t pid) {
+    nmlr = 0;
+    char mp[64];
+    snprintf(mp, sizeof mp, "/proc/%d/maps", pid);
+    FILE *f = fopen(mp, "r");
+    if (!f) return;
+    char line[512];
+    while (fgets(line, sizeof line, f) && nmlr < MAX_MLRANGES) {
+        unsigned long lo, hi;
+        char perms[16];
+        if (sscanf(line, "%lx-%lx %15s", &lo, &hi, perms) != 3) continue;
+        if (!strchr(perms, 'x')) continue;
+        if (!strstr(line, "libc.so")) continue;
+        mlr[nmlr].lo = lo;
+        mlr[nmlr].hi = hi;
+        nmlr++;
+    }
+    fclose(f);
+    fprintf(stderr, "[mem] libc executable ranges: %d\n", nmlr);
+}
+
+static int mem_in_libc(unsigned long long ip) {
+    for (int i = 0; i < nmlr; i++)
+        if (ip >= mlr[i].lo && ip < mlr[i].hi) return 1;
+    return 0;
+}
+
+static void mem_snapshot(pid_t pid) {
+    for (int i = 0; i < nmregions; i++) {
+        unsigned long long words = (mregions[i].size + 7) / 8;
+        if (!msnap[i]) msnap[i] = malloc(words * sizeof *msnap[i]);
+        if (!msnap[i]) continue;
+        char mp[64];
+        snprintf(mp, sizeof mp, "/proc/%d/mem", pid);
+        int fd = open(mp, O_RDONLY);
+        if (fd < 0) continue;
+        for (unsigned long long w = 0; w < words; w++) {
+            unsigned long long va = mregions[i].addr + 8 * w;
+            errno = 0;
+            ssize_t got = pread(fd, &msnap[i][w], 8, (off_t)va);
+            if (got != 8) msnap[i][w] = 0;
+        }
+        close(fd);
+    }
+}
+
+static void mem_deltas(pid_t pid, unsigned long long rec_ret) {
+    if (!opt.mout_path || !nmregions) return;
+    FILE *f = fopen(opt.mout_path, "a");
+    if (!f) return;
+    char mp[64];
+    snprintf(mp, sizeof mp, "/proc/%d/mem", pid);
+    int fd = open(mp, O_RDONLY);
+    if (fd < 0) { fclose(f); return; }
+    unsigned long long changed = 0;
+    for (int i = 0; i < nmregions; i++) {
+        if (!msnap[i]) continue;
+        unsigned long long words = (mregions[i].size + 7) / 8;
+        for (unsigned long long w = 0; w < words; w++) {
+            unsigned long long va = mregions[i].addr + 8 * w;
+            unsigned long long cur = 0;
+            errno = 0;
+            if (pread(fd, &cur, 8, (off_t)va) != 8) continue;
+            if (cur != msnap[i][w]) {
+                fprintf(f, "%llu %llu %llx %016llx\n",
+                        mem_call_rec, rec_ret, va, cur);
+                changed++;
+            }
+        }
+    }
+    close(fd);
+    fclose(f);
+    if (changed)
+        fprintf(stderr, "[mem] rec %llu -> %llu: %llu word(s)\n",
+                mem_call_rec, rec_ret, changed);
+}
+
+static void mem_setup(pid_t pid) {
+    if (!nmregions) return;
+    if (!opt.mout_path) {
+        fprintf(stderr, "[mem] --trace-mem needs --trace-mem-out, ignoring\n");
+        nmregions = 0;
+        return;
+    }
+    mem_resolve_libc(pid);
+    if (!nmlr) {
+        fprintf(stderr, "[mem] no executable libc mapping found\n");
+        nmregions = 0;
+    }
+}
 
 /* ---- deterministic byte stream ------------------------------------------- */
 
@@ -866,6 +988,19 @@ int main(int argc, char **argv) {
         else if (!strncmp(a, "--tsc-base=", 11)) opt.tsc_base = strtoull(a + 11, NULL, 0);
         else if (!strncmp(a, "--tsc-step=", 11)) opt.tsc_step = strtoull(a + 11, NULL, 0);
         else if (!strncmp(a, "--otp-buf=", 10)) opt.otp_buf = strtoull(a + 10, NULL, 0);
+        else if (!strncmp(a, "--trace-mem=", 12)) {
+            char spec[256];
+            snprintf(spec, sizeof spec, "%s", a + 12);
+            char *colon1 = strchr(spec, ':');
+            char *colon2 = colon1 ? strchr(colon1 + 1, ':') : NULL;
+            if (!colon1 || !colon2) die("bad --trace-mem (ADDR:SIZE:TAG)");
+            *colon1 = 0; *colon2 = 0;
+            if (nmregions >= MAX_MREGIONS) die("too many --trace-mem");
+            mregions[nmregions].addr = strtoull(spec, NULL, 0);
+            mregions[nmregions].size = strtoull(colon1 + 1, NULL, 0);
+            nmregions++;
+        }
+        else if (!strncmp(a, "--trace-mem-out=", 16)) opt.mout_path = a + 16;
         else if (!strncmp(a, "--dump-mem=", 11)) {
             if (opt.ndumps >= 16) die("too many --dump-mem");
             char spec[256];
@@ -893,7 +1028,7 @@ int main(int argc, char **argv) {
             snprintf(d->tag, sizeof d->tag, "%s", colon2 + 1);
         }
         else if (!strncmp(a, "--dump-rec=", 11)) {
-            if (opt.nrdumps >= 16) die("too many --dump-rec");
+            if (opt.nrdumps >= 256) die("too many --dump-rec");
             char spec[256];
             snprintf(spec, sizeof spec, "%s", a + 11);
             char *c1 = strchr(spec, ':'), *c2 = c1 ? strchr(c1 + 1, ':') : NULL,
@@ -1062,6 +1197,7 @@ int main(int argc, char **argv) {
                             wp_watch_payload(w, (unsigned long)opt.otp_buf + 8);
                         trc.tracing = 1;
                         trc.steps = 0;
+                        mem_setup(w);
                         for (int i = 0; i < procs_n; i++) {
                             procs[i].tracing = 1;
                             procs[i].prev_valid = 0;
@@ -1156,6 +1292,20 @@ int main(int argc, char **argv) {
                                         (unsigned long long)r.rax, (unsigned long long)r.rbx,
                                         (unsigned long long)r.rcx, (unsigned long long)r.rdx);
                             trace_write(w, &r, mw ? 5 : 2);
+                            if (nmlr) {
+                                /* libc is not lifted: carry the caller-visible
+                                 * stores across the boundary as a delta log.
+                                 * The record written just now is trc.steps - 1,
+                                 * so the call/ret records are exact. */
+                                int in_libc = mem_in_libc((unsigned long long)r.rip);
+                                if (in_libc && !mem_prev_in_libc) {
+                                    mem_call_rec = trc.steps - 1;
+                                    mem_snapshot(w);
+                                } else if (!in_libc && mem_prev_in_libc) {
+                                    mem_deltas(w, trc.steps - 1);
+                                }
+                                mem_prev_in_libc = in_libc;
+                            }
                             for (int di = 0; di < opt.nrdumps; di++)
                                 if (opt.rdumps[di].rec == trc.steps - 1)
                                     dump_ranges(w, (struct dump_range *)&opt.rdumps[di].addr, 1);

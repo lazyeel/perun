@@ -5483,12 +5483,30 @@ replay the recorded GP/XMM state and the return address only. The engine then te
 goes the wrong way. The same argument applies to any libc call whose output is a
 pointer or a struct rather than a register value.
 
-The fix being implemented is capture-side and does not change the trace record layout
-(or invalidate the existing corpus): `adi_freeze` gains `--trace-mem=ADDR:SIZE` regions
-and `--trace-mem-out=FILE`, and for each libc excursion writes the 8-byte-granular
-delta between the state at the call record and the state at the return record, keyed
-by `(rec_call, rec_ret)`. The lifter folds those deltas into the case bundle, and
-`warmvm` applies them when it takes a stub. Only the caller-visible memory moves
-across, so allocator metadata stays out of the model exactly as before — but a
-`struct stat`, an `iovec`, or a caller buffer the engine later reads is no longer
-lost.
+The fix is capture-side and does not change the trace record layout outside one
+side file, so the existing 984-byte corpus stays valid: `adi_freeze` gains repeated
+`--trace-mem=ADDR:SIZE:TAG` regions and `--trace-mem-out=FILE`.  It resolves the
+executable libc mappings from the child's own maps, snapshots the watched regions
+at the first record that lands in libc, and at the first record back in the engine
+writes every changed 8-byte word as `rec_call rec_ret addr value` (hex).  The call
+and return records come from the record counter itself, so a tail-`jmp` excursion
+that pushed no return address is covered by the same code path -- the snapshot is
+keyed on the excursion, not on the ABI shape of the call.
+
+Only regions the VM actually seeds need watching, which is why the cost is
+bounded: a full maps snapshot of this run is 3.6 MiB of writable private memory
+across 113 regions, and the four that matter -- `.bss` of the two engine images,
+the heap, and the live frame area of the stack -- are named explicitly.  Reading
+goes through the child's `/proc/<pid>/mem`, not `PTRACE_PEEKDATA`: the latter
+aborts on the first unmapped word inside a large range and reports a word of
+garbage rather than an error the caller can act on.
+
+The lifter folds the log into each case bundle as `(rec_call, rec_ret, addr,
+value)` records; `warmvm` applies them when it takes the stub with that
+`(rec_call, rec_ret)` pair.  Nothing about allocator internals moves across,
+so the earlier model -- stubs replay registers, the engine's own allocation
+metadata is never read -- stands unchanged; what changes is that a caller-visible
+`struct stat`, `iovec`, or output buffer the engine later reads is no longer lost.
+Runtime is one `pread` per watched word per excursion (four regions, 92 excursions
+on tM), so a re-capture stays in the same seconds-scale envelope as the frozen
+runs.
