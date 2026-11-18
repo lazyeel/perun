@@ -137,6 +137,47 @@ pub struct ProvisioningRecord {
 }
 
 impl ProvisioningRecord {
+    /// Build a record from a native Start/End capture.
+    ///
+    /// This is the hybrid path: the CPIM comes from the oracle and is stored
+    /// opaquely, while End's ptm/tk and the harness identity carry the rest.
+    /// No CPIM byte is interpreted or re-derived; the CPIM length is the only
+    /// check.
+    pub fn from_apple_capture(
+        identifier: &Identity,
+        session: u32,
+        provisioned_at: u64,
+        cpim: &[u8],
+        ptm: &[u8],
+        tk: &[u8],
+        spim: Option<&[u8]>,
+    ) -> Result<Self, StateError> {
+        let cpim: [u8; CPIM_LEN] = cpim.try_into().map_err(|_| StateError::CaptureLength {
+            field: "cpim",
+            expected: CPIM_LEN,
+            got: cpim.len(),
+        })?;
+        let ptm: [u8; PTM_LEN] = ptm.try_into().map_err(|_| StateError::CaptureLength {
+            field: "ptm",
+            expected: PTM_LEN,
+            got: ptm.len(),
+        })?;
+        let tk: [u8; TK_LEN] = tk.try_into().map_err(|_| StateError::CaptureLength {
+            field: "tk",
+            expected: TK_LEN,
+            got: tk.len(),
+        })?;
+        Ok(Self {
+            identity: *identifier.bound(),
+            session,
+            provisioned_at,
+            cpim,
+            ptm,
+            tk,
+            spim: spim.map(<[u8]>::to_vec),
+        })
+    }
+
     fn encode_body(&self) -> Result<Vec<u8>, StateError> {
         let spim_len = self.spim.as_ref().map_or(0, Vec::len);
         let mut body = Vec::with_capacity(
@@ -419,6 +460,15 @@ pub enum StateError {
     BadTag,
     /// An Apple blob does not fit the container's `u32` length field.
     AppleBlobTooLong(usize),
+    /// A native capture section has the wrong length.
+    CaptureLength {
+        /// Section name.
+        field: &'static str,
+        /// Expected length.
+        expected: usize,
+        /// Observed length.
+        got: usize,
+    },
     /// The Apple `n` value does not describe the file size.
     AppleLengthMismatch {
         /// `n` read from the Apple header.
@@ -455,6 +505,11 @@ impl fmt::Display for StateError {
             Self::AppleBlobTooLong(len) => {
                 write!(f, "Apple blob length {len} does not fit in u32")
             }
+            Self::CaptureLength {
+                field,
+                expected,
+                got,
+            } => write!(f, "capture {field} must be {expected} bytes, got {got}"),
             Self::AppleLengthMismatch { declared } => {
                 write!(
                     f,
@@ -1014,5 +1069,74 @@ mod tests {
             record()
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    fn pattern<const N: usize>(seed: u8) -> [u8; N] {
+        let mut out = [0u8; N];
+        for (index, byte) in out.iter_mut().enumerate() {
+            *byte = (index as u8).wrapping_mul(17).wrapping_add(seed);
+        }
+        out
+    }
+
+    #[test]
+    fn capture_round_trips_through_the_container() {
+        let mut identifier_bytes = [0u8; IDENTIFIER_LEN];
+        identifier_bytes[..IDENTITY_BIND_LEN].copy_from_slice(&pattern::<8>(0x30));
+        identifier_bytes[IDENTITY_BIND_LEN..].copy_from_slice(&pattern::<8>(0x40));
+        let identifier = Identity::from_bytes(identifier_bytes);
+
+        let cpim = pattern::<CPIM_LEN>(0x11);
+        let ptm = pattern::<PTM_LEN>(0x22);
+        let tk = pattern::<TK_LEN>(0x33);
+        let spim = pattern::<347>(0x44);
+
+        let record = ProvisioningRecord::from_apple_capture(
+            &identifier,
+            0x2101_68c6,
+            1_763_000_000,
+            &cpim,
+            &ptm,
+            &tk,
+            Some(&spim),
+        )
+        .unwrap();
+        assert_eq!(record.identity, *identifier.bound());
+        assert_eq!(record.cpim, cpim);
+        assert_eq!(record.ptm, ptm);
+        assert_eq!(record.tk, tk);
+        assert_eq!(record.spim.as_deref(), Some(&spim[..]));
+
+        let sealed = seal(&record).unwrap();
+        assert_eq!(open(&sealed, &identifier).unwrap(), record);
+    }
+
+    #[test]
+    fn a_capture_with_a_wrong_section_fails_loudly() {
+        let identifier = Identity::from_bytes([0u8; IDENTIFIER_LEN]);
+        let cpim = [0u8; CPIM_LEN - 1];
+        let error = ProvisioningRecord::from_apple_capture(
+            &identifier,
+            0,
+            0,
+            &cpim,
+            &[0u8; PTM_LEN],
+            &[0u8; TK_LEN],
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StateError::CaptureLength {
+                field: "cpim",
+                expected: CPIM_LEN,
+                got: 275
+            }
+        ));
     }
 }

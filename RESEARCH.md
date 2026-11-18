@@ -6126,3 +6126,33 @@ uses only synthetic bodies.
 The `PERUN_APPLE_STATE` gated test was run manually against three native
 captures (617/n29, 619/n31, 612/n24). Each parsed and re-encoded byte-for-byte,
 including the opaque tail; the bodies never entered the repository.
+
+#### The hybrid path is closed on the container side
+
+The plan's three paths now map to three concrete entry points in
+`perun-adi-core`:
+
+* **Hybrid (works today).** `ProvisioningRecord::from_apple_capture` takes a
+  native Start/End capture (CPIM 276 B, PTM 487 B, TK 16 B, the 32-bit session,
+  the optional SPIM) plus the harness `Identity`, and stores it in a PERUNST v1
+  container. `adi_state seal --capture <dir>` and
+  `adi_state open --capture <dir>` are the two directions. The CPIM is
+  opaque -- no byte is interpreted or re-derived -- and the round-trip is
+  byte-identical on the private `tb-end1` capture: `cpim.bin`, `ptm.bin`,
+  `tk.bin`, `spim.bin` and `session.bin` all compare equal, and the container
+  is 1219 bytes at mode `0600`. `tests/state_cli.rs` pins the reader side and
+  the writer side in two separate processes.
+* **Product (Rust-to-Rust).** Still needs the Rust End serializer and the Rust
+  OTP mock to agree on the PERUNST record; the state layer is the file contract
+  and is now exercised.
+* **Cold live (Apple accepts a Rust CPIM).** Still blocked by the missing KDF
+  and Body-A transform, both now measured only as differential laws.
+
+The hybrid path is honest about its boundary: it proves the container, not the
+crypto. A native CPIM sealed here will be consumed by a Rust OTP only if the
+Rust OTP implements the same CPIM *semantics* that the native OTP does -- which
+Track A's warm VM already demonstrates on the captured state, but not yet on a
+re-serialized CPIM.
+
+`adi_state` also writes the identity at `0600` (`Identity::write`) and the state
+at `0600`; the native `0664` is kept only for files the native engine owns.

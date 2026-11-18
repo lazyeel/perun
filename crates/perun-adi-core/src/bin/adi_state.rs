@@ -62,22 +62,44 @@ fn seal(args: &[String]) -> Result<(), String> {
     let mut opts = Options::parse(args);
     let identity = opts.identity()?;
     let state_path = opts.take("--state")?;
-    let session = parse_u32(&opts.take("--session")?)?;
-    let cpim = opts.bytes("--cpim", CPIM_LEN)?;
-    let ptm = opts.bytes("--ptm", PTM_LEN)?;
-    let tk = opts.bytes("--tk", TK_LEN)?;
-    let spim = if opts.has("--spim") {
-        Some(opts.bytes("--spim", 347)?)
+
+    // Hybrid form: --capture reads a native case directory's
+    // cpim/spim/ptm/tk, so a native oracle artifact can be sealed without
+    // copy-pasting four files through the shell.
+    let capture = opts.take_optional("--capture");
+    let (session, cpim, ptm, tk, spim, provisioned_at) = if let Some(dir) = capture {
+        let session = parse_u32(&opts.take("--session")?)?;
+        let cpim = read_len(&format!("{dir}/cpim.bin"), CPIM_LEN)?;
+        let ptm = read_len(&format!("{dir}/ptm.bin"), PTM_LEN)?;
+        let tk = read_len(&format!("{dir}/tk.bin"), TK_LEN)?;
+        let spim_path = format!("{dir}/spim.bin");
+        let spim = if std::path::Path::new(&spim_path).exists() {
+            Some(read_len(&spim_path, 347)?)
+        } else {
+            None
+        };
+        let at = if opts.has("--at") {
+            parse_u64(&opts.take("--at")?)?
+        } else {
+            now()?
+        };
+        (session, cpim, ptm, tk, spim, at)
     } else {
-        None
-    };
-    let provisioned_at = if opts.has("--at") {
-        parse_u64(&opts.take("--at")?)?
-    } else {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| error.to_string())?
-            .as_secs()
+        let session = parse_u32(&opts.take("--session")?)?;
+        let cpim = opts.bytes("--cpim", CPIM_LEN)?;
+        let ptm = opts.bytes("--ptm", PTM_LEN)?;
+        let tk = opts.bytes("--tk", TK_LEN)?;
+        let spim = if opts.has("--spim") {
+            Some(opts.bytes("--spim", 347)?)
+        } else {
+            None
+        };
+        let at = if opts.has("--at") {
+            parse_u64(&opts.take("--at")?)?
+        } else {
+            now()?
+        };
+        (session, cpim, ptm, tk, spim, at)
     };
     opts.reject_rest()?;
 
@@ -92,14 +114,28 @@ fn seal(args: &[String]) -> Result<(), String> {
     };
     state::store(state_path, &record).map_err(|error| error.to_string())
 }
+
 fn open(args: &[String]) -> Result<(), String> {
     let mut opts = Options::parse(args);
     let identity = opts.identity()?;
     let state_path = opts.take("--state")?;
+    let capture = opts.take_optional("--capture");
     let summary = opts.toggle("--summary")?;
     opts.reject_rest()?;
 
     let record = state::load(state_path, &identity).map_err(|error| error.to_string())?;
+    if let Some(dir) = capture {
+        std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        std::fs::write(format!("{dir}/cpim.bin"), record.cpim)
+            .map_err(|error| error.to_string())?;
+        std::fs::write(format!("{dir}/ptm.bin"), record.ptm).map_err(|error| error.to_string())?;
+        std::fs::write(format!("{dir}/tk.bin"), record.tk).map_err(|error| error.to_string())?;
+        if let Some(spim) = &record.spim {
+            std::fs::write(format!("{dir}/spim.bin"), spim).map_err(|error| error.to_string())?;
+        }
+        std::fs::write(format!("{dir}/session.bin"), record.session.to_le_bytes())
+            .map_err(|error| error.to_string())?;
+    }
     if summary {
         println!(
             "identity={} session={:#010x} provisioned_at={} cpim={} ptm={} tk={} spim={}",
@@ -166,6 +202,21 @@ fn apple_roundtrip(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn now() -> Result<u64, String> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|error| error.to_string())
+}
+
+fn read_len(path: &str, len: usize) -> Result<Vec<u8>, String> {
+    let value = std::fs::read(path).map_err(|error| format!("{path}: {error}"))?;
+    if value.len() != len {
+        return Err(format!("{path}: expected {len} bytes, got {}", value.len()));
+    }
+    Ok(value)
+}
+
 struct Options {
     values: Vec<String>,
 }
@@ -227,6 +278,10 @@ impl Options {
             return Err(format!("{key} must be {len} bytes, got {}", value.len()));
         }
         Ok(value)
+    }
+
+    fn take_optional(&mut self, key: &str) -> Option<String> {
+        self.take(key).ok()
     }
 
     fn identity(&mut self) -> Result<Identity, String> {

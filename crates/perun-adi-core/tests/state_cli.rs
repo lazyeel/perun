@@ -154,3 +154,70 @@ fn seal_in_one_process_opens_in_another() {
 
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn native_capture_round_trips_through_the_container() {
+    let dir = temp_dir();
+    let capture = dir.join("capture");
+    fs::create_dir_all(&capture).unwrap();
+
+    let mut identity_bytes = [0u8; 16];
+    identity_bytes[..8].copy_from_slice(&pattern::<8>(0x70));
+    identity_bytes[8..].copy_from_slice(&pattern::<8>(0x80));
+    let identity = dir.join("id.bin");
+    write_identity(&identity, identity_bytes);
+
+    fs::write(capture.join("cpim.bin"), pattern::<276>(0x91)).unwrap();
+    fs::write(capture.join("ptm.bin"), pattern::<487>(0x92)).unwrap();
+    fs::write(capture.join("tk.bin"), pattern::<16>(0x93)).unwrap();
+    fs::write(capture.join("spim.bin"), pattern::<347>(0x94)).unwrap();
+
+    let state = dir.join("state.bin");
+    let sealed = run(&[
+        "seal",
+        "--identity",
+        identity.to_str().unwrap(),
+        "--state",
+        state.to_str().unwrap(),
+        "--capture",
+        capture.to_str().unwrap(),
+        "--session",
+        "0x210168c6",
+        "--at",
+        "1763000000",
+    ]);
+    assert!(
+        sealed.status.success(),
+        "seal --capture failed: {}",
+        String::from_utf8_lossy(&sealed.stderr)
+    );
+
+    let exported = dir.join("exported");
+    let opened = run(&[
+        "open",
+        "--identity",
+        identity.to_str().unwrap(),
+        "--state",
+        state.to_str().unwrap(),
+        "--capture",
+        exported.to_str().unwrap(),
+        "--summary",
+    ]);
+    assert!(
+        opened.status.success(),
+        "open --capture failed: {}",
+        String::from_utf8_lossy(&opened.stderr)
+    );
+
+    for name in ["cpim.bin", "ptm.bin", "tk.bin", "spim.bin"] {
+        assert_eq!(
+            fs::read(capture.join(name)).unwrap(),
+            fs::read(exported.join(name)).unwrap(),
+            "{name} must survive the container byte for byte"
+        );
+    }
+    let session = fs::read(exported.join("session.bin")).unwrap();
+    assert_eq!(session, 0x2101_68c6u32.to_le_bytes());
+
+    fs::remove_dir_all(dir).unwrap();
+}
