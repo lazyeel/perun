@@ -6095,10 +6095,14 @@ small harness binary, not the product API:
 * `seal --identity <raw16> --state <out> --session <u32|0x..> --cpim <276>
   --ptm <487> --tk <16> [--spim <347>] [--at <unix>]` writes a PERUNST v1
   container; `--at` defaults to the current time and exists so the vector is
-  reproducible.
-* `open --identity <raw16> --state <in> [--summary]` verifies and prints it;
-  `--summary` prints the one-line identity/session/time/section-length form,
-  without the secret bodies.
+  reproducible. The alternative form `seal ... --capture <dir> --session
+  <u32|0x..>` reads the same four sections from a native case directory and
+  builds the record through `ProvisioningRecord::from_apple_capture`.
+* `open --identity <raw16> --state <in> [--summary] [--capture <dir>]`
+  verifies it and prints it; `--summary` prints the one-line
+  identity/session/time/section-length form, without the secret bodies, and
+  `--capture` re-materializes the native `cpim.bin`/`ptm.bin`/`tk.bin`/
+  `spim.bin`/`session.bin` files from the record.
 * `apple-inspect --state <adi.pb>` prints the Apple header (`bytes`, `version`,
   `native_supported`, `blob_len`, `tail_len`) and, when the blob has the 276-byte
   CPIM shape, its version, session, digest and Body B metadata.
