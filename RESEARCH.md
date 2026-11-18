@@ -5793,16 +5793,16 @@ ec = -29002
 em = "This action could not be completed because of a server error. Try again."
 ```
 
-The same `-29002` has two independent triggers in this lane, and the second one cost
-several runs before it was isolated:
-
-1. a frozen or stale clock at provisioning time (the original 2026-11-16 note);
-2. **repeated provisioning of the same machine identity**. After several successful
-   cold cycles with one `adi_identifier`, `finishMachineProvisioning` returned 433
-   `-29002` consistently, including with `--epoch=$(date +%s)`. Generating a fresh
-   random 16-byte `adi_identifier` and re-running with the tool's normal frozen epoch
-   succeeded on the first attempt. The time was not the variable in that differential;
-   the identity's provisioning history was.
+The same `-29002` had been attributed to a frozen or stale clock at provisioning
+time. Today's differential shows that clock staleness cannot be the whole story:
+after several successful cold cycles with one `adi_identifier`,
+`finishMachineProvisioning` returned 433 `-29002` consistently, including with
+`--epoch=$(date +%s)`. Generating a fresh random 16-byte `adi_identifier` and
+re-running with the tool's normal frozen epoch succeeded on the first attempt. In
+that differential the time was not the variable; the identity's provisioning
+history was. Whether a frozen clock is a second, independent trigger is not
+established by these runs -- it may have been the same identity effect in the
+earlier observations.
 
 Operationally: use a fresh identity for every fresh-End experiment, and do not retry
 a rejected finish in a loop. Warm replays (`ADI_SKIP_PRECONFIG=1`, offline SPIM) do
