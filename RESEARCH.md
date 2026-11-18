@@ -5923,9 +5923,12 @@ store/load path including truncation of a longer pre-existing file.
   parity gate and the Rust `ProvisioningEnd`. The CFF body of `fp_dh_38fa04bb` is not
   lifted; the 142 KB function is recorded as the last non-libc call before the write,
   not claimed as understood.
-* **Track C/D — unchanged.** Start/CPIM genesis (planter source producer `0xdd511`,
-  WeaveFeeds, mixer-14, digest words, session16, Body B) and the live verdict remain
-  after B's parity gate.
+* **Track C — opened; one boundary closed.** The SPIM tail carries CPIM Body B
+  verbatim (`23/23` local pairs), so Body B no longer needs a Rust producer
+  (`CpimLayout::from_spim_tail`). Start/CPIM genesis still needs the planter source
+  producer `0xdd511`, WeaveFeeds, mixer-14, the digest words and `session16`; the
+  `session16` correlation above is the oracle for that producer. Track D (live
+  verdict) remains after B's parity gate.
 
 The private artifacts for this entry live under the rig's `cases/tb-*` directories
 (0700), with raw state bodies, CPIM/ptm/tk and dumps kept local. Only sizes, hashes,
@@ -5967,17 +5970,17 @@ Comparing CPIM Body A across identities and sessions at fixed SPIM:
 
 | pair | shared Body-A bytes | regions |
 |---|---:|---|
-| `tb-id1` vs `tb-id4` (same SPIM, same sessionaffe) | 65/160 | `[0..64]`, plus byte 64 |
-| `tb-id4` vs `uC1` (same SPIM, same session) | 64/160 | `[0..64]` |
-| `uC1` vs `uC2tab` (same identity, different SPIM) | 0/160 | none |
+| `tb-id1` vs `tb-id4` (same SPIM, same session) | `[0..64)` identical, 95/96 differ in `[64..160)` |
+| `tb-id4` vs `uC1` (same SPIM, same session) | `[0..64)` identical |
+| `uC1` vs `uC2` (same identity, different SPIM) | 0/160 | none |
 
-So `BodyA[0..64]` is a function of the Start input/session, not of the identity;
+So `BodyA[0..64)` is a function of the Start input/session, not of the identity;
 the region that moves with the identity starts at offset 64, not at the beginning
 of the body. An earlier reading of the three `tb-id*` dumps suggested that the
 whole 96-byte remainder was identity-determined: the two same-SPIM identities
-differ in `[64..160]`, but `uC1`/`uC2` show that a different SPIM moves every
+differ in `[64..160)`, but `uC1`/`uC2` show that a different SPIM moves every
 Body-A byte, so SPIM is an input to that region too. The honest statement is the
-conditional one: at fixed SPIM and session, the identity selects `[64..160]`.
+conditional one: at fixed SPIM and session, the identity selects `[64..160)`.
 
 #### `session16` is a function of the 32-bit session alone
 
@@ -6008,7 +6011,7 @@ The remaining implementation order is now:
 
 1. `session16` producer inside Start (the correlation above is the test oracle:
    fixed session handle -> fixed 16-byte block, independent of identity/ASLR);
-2. the Body-A region `[64..160]` (identity and SPIM both enter; fixed-SPIM
+2. the Body-A region `[64..160)` (identity and SPIM both enter; fixed-SPIM
    differentials isolate the identity input);
 3. the digest words (still the only CPIM section with no candidate producer);
 4. planter genesis / WeaveFeeds / mixer-14, then the SPIM-only CPIM assembly.
