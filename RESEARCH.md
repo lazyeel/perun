@@ -5402,7 +5402,7 @@ The campaign plan replacing the Apple ADI engine with an independent Rust implem
 
 `tools/adi_freeze.c` (native ptrace freezer, per-source hit counters, bisection flags) reached working state after two instrument bugs were fixed: (1) closed `/dev/urandom` fds stayed in the tracking table, so fd reuse poisoned the engine's own `adi.pb` header read with the deterministic fill and collapsed every frozen run into `-45061` reprovisioning; (2) the vDSO auxv patch silently never fired (single-NULL envp terminator vs the double-NULL the scan expected) — the report now verifies the write and says `patched`/`patch-failed`/`auxv-scan-failed`.
 
-Result (`research-runs/gate0-determinism-2026-11-16.md`): N=5 frozen replays byte-identical (MID `93ef3da7…`, OTP `f3fd95eb…`, state unchanged); frozen-epoch differential changes OTP only. Warm classification: **MID = f(state) only; OTP = f(state, CLOCK_REALTIME), ~60 s quantum; entropy does not feed the warm OTP** (urandom 40 B / AT_RANDOM 16 B reads are dead inputs); the warm path makes no `getrandom` and no `time(2)` calls; time flows through the vDSO until it is killed. New open question for Track B: the provisioned state is bound to the absolute provisioning path (byte-identical copy accepted in its own directory, rejected elsewhere; a state re-provisioned there is accepted) — replays must run in the provisioning directory and Track B must recover the binding.
+Result (`research-runs/gate0-determinism-2026-11-16.md`): N=5 frozen replays byte-identical (MID `93ef3da7…`, OTP `f3fd95eb…`, state unchanged); frozen-epoch differential changes OTP only. Warm classification: **MID = f(state) only; OTP = f(state, CLOCK_REALTIME), ~60 s quantum; entropy does not feed the warm OTP** (urandom 40 B / AT_RANDOM 16 B reads are dead inputs); the warm path makes no `getrandom` and no `time(2)` calls; time flows through the vDSO until it is killed. New open question for Track B (the first reading, **superseded 2026-11-18**): the provisioned state appeared bound to the absolute provisioning path (byte-identical copy accepted in its own directory, rejected elsewhere; a state re-provisioned there is accepted). The Track B entry below refutes the path binding: the reference state is accepted in fresh directories, and the real binding is the device identity. The earlier "rejected elsewhere" result was almost certainly the harness generating a new `adi_identifier` in each directory, not a path check.
 
 ### 2026-11-16 — deterministic whole-function trace that reproduces the native warm OTP
 
@@ -5542,3 +5542,323 @@ has one thread for all 622,415 records (a single tid, 92 excursions all taken on
 it), so the all-threads single-step in the tracer costs nothing here and the
 "one thread, deterministic" assumption the stub model rests on is measured, not
 assumed.
+
+### 2026-11-18 — Track B: `ProvisioningEnd`, the `adi.pb` state container, and the GSA identity throttle
+
+Track B started from the state file itself rather than from the End disassembly. The
+Android oracle writes one file, `adi-data/adi.pb`; if its format is understood, End's
+job can be stated as a data transformation and the previous warm-OTP work (Track A)
+already consumes the same state. The campaign plan allows an own versioned format for
+the final Rust engine and treats Apple disk-format fidelity as a hybrid-testing aid,
+not a hard requirement (`research-runs/plan-autonomous-anisette-2026-11-16.md` §4),
+so the work split into two questions:
+
+1. what exactly does the native End write, and which parts of it are load-bearing;
+2. what must a Rust state container carry so that Rust-End and Rust-OTP agree without
+   the Apple libraries.
+
+The first question is now measured end to end; the second is the implementation that
+follows this entry.
+
+#### Instrumentation added for Track B
+
+`tools/adi_freeze.c` grew the probes needed to see the state without recording a
+multi-gigabyte instruction trace:
+
+* `--trace-fd=SUFFIX:DIR` — dumps every `read`/`write` buffer on an fd whose `open`
+  path ends in `SUFFIX`. This produced the three 617-byte warm reads and the single
+  End write.
+* `--call-log=FILE` — a compact `C depth site target next-ip` / `R depth ret-ip`
+  stream. With `--trace-norec` it gives the call tree without the step file; the End
+  run produced 971 lines (481 calls).
+* `--trace-dump-arg=REG[+OFF|@OFF]:SIZE:FILE` and
+  `--trace-dump-ret=...` — memory dumps at the traced entry/return. `@OFF`
+  dereferences the register first (`rdi@0x20` is "the pointer stored at `rdi+0x20`"),
+  which is how the VM context and the state buffer were sampled.
+* `--watch-state`, `--watch-state-offsets`, `--watch-fixed`, `--watch-scan-tag`,
+  `--watch-scan-offset`, `--scan-mem=HEX:TAG`, `--scan-at-path`, `--scan-dir`,
+  `--maps-out` — hardware read watchpoints and whole-map scans at a chosen harness
+  trigger.
+
+Two instrument traps cost runs and are worth recording. The register dump limit was
+four per kind while a five-argument function was being sampled; the tool now allows
+eight. And in zsh, `--scan-mem=$var:tag` is parsed as a parameter modifier — the
+colon disappears and the value becomes `…dpim`; the correct spelling is
+`--scan-mem="${var}:tag"`. The harness gained `ADI_CODE_ONLY=1`, which returns
+immediately after the post-config `ADIGetLoginCode`, so a state mutation can be
+classified without ever starting a provisioning session or touching the network.
+
+`adi_native` was rebuilt (NDK r27c, android-21 x86_64, PT_INTERP patched to
+`/tmp/pa.so` → the sysroot linker) and is 30,664 bytes. `adi_freeze3` is built with
+the host `gcc -O2 -Wall` and is 49,352 bytes.
+
+#### End's real call path and the state write
+
+`uv5t6nhkui` (libstoreservicescore `0x1c58c0`, 764 bytes) reserves `0x1030` bytes of
+stack, lays out a `0x1000`-byte buffer and a `0x1028`-byte marshalling structure, and
+calls `asabc800ag+0x290` (`0x1c63e0`). The End call-log then shows:
+
+```
+uv5t6nhkui+0x244            -> asabc800ag+0x290
+asabc800ag+0x3bf            -> 0x1c5d60                 (unnamed state-check thunk)
+asabc800ag+0x9d2d           -> libCoreADI:vdfut768ig+0   (the engine)
+```
+
+Inside `vdfut768ig` (`0x87550`, `0xb8ba3` bytes) the file operations are ordinary
+libc calls from the flattened body:
+
+| site (RVA) | call | role |
+|---|---|---|
+| `0x4081b` | `open64` | open the state file |
+| `0x40897` | `ftruncate64` | truncate to the exact size |
+| `0x408f3` | `write` | one write of the whole file |
+| `0x40951` | `fstat64` | post-write stat |
+| `0x1c5e5` | `close` | close |
+
+The write site is `vdfut768ig+0x408f3` = `0xc7e43`. At that instruction the calling
+convention is `rsi = state buffer` (held in `[rbp-0x518]`), `rdx = length` (held in
+`[rbp-0x30]`), `rdi = fd`; the code is `mov -0x518(%rbp),%rsi; mov -0x30(%rbp),%rbx;
+mov %rbx,%rdx; call *%rcx`. Breaking there with `--trace-dump-arg` captures the exact
+bytes the native engine is about to persist.
+
+The measured sequence under `strace -y` (full fresh cycle, ASLR on) is:
+
+```
+openat(AT_FDCWD, "<cwd>/adi-data/adi.pb",
+       O_WRONLY|O_CREAT|O_NOFOLLOW, 0664) = 7
+ftruncate(7, 619) = 0
+write(7, <buffer>, 619) = 619
+close(7)
+```
+
+(The `strace` filter covered openat/open/write/ftruncate/close/rename/unlink; the
+`fstat64` between write and close is visible in the call-log, not in that `strace`
+file.) There is no temp file, no rename and no second write: the file is truncated
+to the final size and overwritten in one operation, and the call-log window contains
+no `fsync`. This is the write-side contract a Rust serializer must reproduce if it
+wants the native reader to accept it.
+
+Two log-reading traps follow from this. The tracer prints register values in hex
+without a prefix, so `rdx=269` in the write log is `0x269` = 617 bytes, and the warm
+read of the file is the whole 617 bytes, not 269. And the buffer captured at the
+write call starts with the container header, so the file is exactly `buf[0..len]` —
+there is no framing added by libc.
+
+Immediately before the open/truncate/write, at `vdfut768ig+0x3597c` (`0xbcecc`), the
+engine calls `libCoreADI:fp_dh_38fa04bb` (`0x149170`, `0x22d39` = 142,649 bytes). The
+call is an indirect CFF table call; at entry the registers are a VM context, not a
+plain `(out, in, len)` triple: `rdi` points to a stack frame whose `+0x20` holds a
+heap pointer, `rsi` points at a libCoreADI rodata table at RVA `0x48e80` (16-byte
+key-like prefix, then four 8-byte ASCII rows, then 16-byte blocks), `rdx = 0x2a`,
+`r8` is a per-run 32-bit value, and `rcx` is the function's own entry. The function
+returns the sentinel `0x7f3c7ec0`, which the caller compares at `0xbcedd`. Stepping
+the first call to its return took 52,064 records. The call is on the state-writing
+path, but calling it "the serializer" would overstate the evidence: the CFF body has
+not been lifted. What is proven is that the complete file buffer exists at the write
+site, and that this 142 KB virtualized function is the last non-libc call before the
+file I/O.
+
+#### The container anatomy
+
+The file is **not** protobuf, despite the name. It is a fixed big-endian header, a
+variable-length blob, and a fixed 580-byte tail:
+
+```
+offset  size      field
+0x00    4         u32 BE version = 1
+0x04    4         u32 BE n
+0x08    n         blob
+0x08+n  580       tail
+total   8 + n + 580
+```
+
+Every observed state obeys `size = 8 + n + 580`:
+
+| run | size | n | sha256 (first 16 hex) |
+|---|---:|---:|---|
+| WORK reference (warm) | 617 | 29 | `99147e4d6e461dcb` |
+| uC1 post-End | 617 | 29 | `6222ad8d356aee5d` |
+| tb-end1 (tracer, no-ASLR) | 617 | 29 | `16c6379c38645fb4` |
+| tb-end-noaslr | 617 | 29 | `20abf95233af4e94` |
+| tb-end2 (strace, ASLR) | 619 | 31 | `b2a24e559e7f079a` |
+| tb-end-aslr | 618 | 30 | `b6593544b27fac68` |
+| tb-prov2 | 612 | 24 | `f63d9f0b3ae6db00` |
+| tb-serial1 (fresh identity) | 617 | 29 | `2817325715576158` |
+| tb-write1 (fresh identity) | 617 | 29 | `2c909b1945000f42` |
+
+The variable `n` is not a version artifact: it changes with ASLR and with the
+provisioning attempt (24, 29, 30, 31 observed), while the tail is always 580 bytes.
+The file is read whole on the warm path (617 bytes for the 29-byte blob), and the
+version is checked before anything else: `version=2` and `n+1` both produce
+`GetLoginCode=-45061`.
+
+#### Integrity: no unchecked byte in the file
+
+The mutation matrix was run through `ADI_SKIP_PRECONFIG=1 ADI_CODE_ONLY=1`, which
+stops after the state verdict and never contacts Apple. Against the 617-byte
+reference state:
+
+| mutation | `GetLoginCode` |
+|---|---:|
+| baseline | 0 |
+| `tail[0:112] = 0` | -45061 |
+| `tail[0:112] = random` | -45061 |
+| `tail[112:580] = 0` | -45061 |
+| `tail[112:580] = random` | -45061 |
+| `blob = 0` | -45061 |
+| `blob = random` | -45061 |
+| `version = 2` | -45061 |
+| `n + 1` (parse) | -45061 |
+
+So the state is authenticated as a whole: there is no plaintext or ignored padding
+region. A Rust reader must reject any byte change just as strictly, and a Rust writer
+must produce a MAC that covers header, blob and tail.
+
+#### Binding: identity, not path
+
+The Gate-0 note had recorded an apparent absolute-path binding. It does not survive a
+controlled copy. The warm reference state (`99147e4d…`) and the uC1 post-End state
+(`6222ad8d…`) both answer `GetLoginCode=0` when placed in a fresh directory, with no
+file left at the original provisioning path. The earlier "rejected elsewhere" result
+was almost certainly the harness: `adi_identifier` is a per-directory file, so a
+directory without a copy generates a new identity, and a new identity is rejected by
+the state. The state does not encode the directory.
+
+The identity binding is narrower than "the device identity file". Mutating the
+16-byte `adi_identifier` one byte at a time:
+
+* changing any byte in `id[0..8]` → `-45061`;
+* changing any byte in `id[8..16]` → `0`.
+
+So the state is bound to the **first 8 bytes** of the identifier only. In this
+harness the first 2 bytes become the 4-hex `adiIdentifier` passed to
+`ADISetAndroidID`, bytes 2..9 become the 16-hex `X-Apple-I-MD-LU`, and all 16 bytes
+become the dashed `X-Mme-Device-Id`. The measured partition says the MAC/key input
+is the first half of that file; the last half (including the tail of the LU string
+and the whole UUID rendering) is not checked. This is consistent with the harness's
+own identity layout and is the rule a Rust identity-binding must reproduce.
+
+`ADISetAndroidID` itself is stricter than the old 4-hex example: in the current
+harness `ADISetAndroidID("8e3c")` returns `-45001`, while the full 16-hex form
+returns 0. The old capture that showed a 4-hex success was a different call shape;
+the current oracle wants eight bytes.
+
+#### The 580-byte tail is layered, not random
+
+Byte-by-byte comparison of the fixed-base runs shows the tail is three regions:
+
+| tail range | length | behaviour |
+|---|---:|---|
+| `0..16` | 16 | identical in every fixed-base run, across identities and sessions |
+| `16..112` | 96 | identical for runs of the same identity at fixed base; changes with identity |
+| `112..580` | 468 | changes on every provisioning run (entropy ≈ 7.9 bits/byte) |
+
+The first 112 bytes are therefore not a per-session nonce: four runs with the same
+identity but different CPIM/ptm/tk (WORK, uC1, tb-end1, tb-end-noaslr) agree on all
+112 bytes while their `112..580` regions differ. Two fresh identities at fixed base
+agree on bytes `0..16` but diverge from byte 16 onward. Under ASLR the first 112
+bytes change as well, so at least the first 16 are tied to the load layout rather
+than to the device. A plausible reading is a serialized key schedule or an
+address-keyed header followed by an identity-wrapped 96-byte record and a
+session-encrypted body; that reading is a hypothesis, not a lifted structure. The
+practical consequence is the same either way: the tail cannot be regenerated from
+the identity alone, and any byte-exact Rust writer would need the address-dependent
+material as well.
+
+The blob is layered too. At fixed base and with the session value this lane returns
+(`0x210168c6`), it is a 29-byte constant (`sha256` prefix `935f65b3c51d390a`) across
+identities and provisioning runs. ASLR runs have different blob lengths and contents.
+That makes the blob a function of the environment/session, not of the device identity;
+it is still covered by the integrity check.
+
+#### Apple server behaviour observed on this lane
+
+A full cold cycle on 2026-11-18 was:
+
+```
+GET  https://gsa.apple.com/grandslam/GsService2/lookup                  -> 200 (25,613 B)
+POST https://gsa.apple.com/grandslam/MidService/startMachineProvisioning -> 200 (1,109 B)
+     decoded SPIM: 347 B
+     CPIM produced locally: 276 B
+POST https://gsa.apple.com/grandslam/MidService/finishMachineProvisioning -> 200 (672 B)
+     ptm 487 B + tk 16 B
+```
+
+On failure the finish endpoint answers **HTTP 433** with a plist body, not a 403.
+The body's `Response.Status.ec` is authoritative; the observed failure was:
+
+```
+HTTP 433
+ec = -29002
+em = "This action could not be completed because of a server error. Try again."
+```
+
+The same `-29002` has two independent triggers in this lane, and the second one cost
+several runs before it was isolated:
+
+1. a frozen or stale clock at provisioning time (the original 2026-11-16 note);
+2. **repeated provisioning of the same machine identity**. After several successful
+   cold cycles with one `adi_identifier`, `finishMachineProvisioning` returned 433
+   `-29002` consistently, including with `--epoch=$(date +%s)`. Generating a fresh
+   random 16-byte `adi_identifier` and re-running with the tool's normal frozen epoch
+   succeeded on the first attempt. The time was not the variable in that differential;
+   the identity's provisioning history was.
+
+Operationally: use a fresh identity for every fresh-End experiment, and do not retry
+a rejected finish in a loop. Warm replays (`ADI_SKIP_PRECONFIG=1`, offline SPIM) do
+not touch the server at all. `-29003` (`environment mismatch`) is documented in the
+harness as the identity/CPIM-envelope mismatch; it was not re-measured this round.
+`-45061` is local (state rejected or not provisioned); `-45001` is local
+(`SetAndroidID` argument shape). Neither is a server verdict.
+
+The GSA-side constraints recorded earlier still apply to the live ladder:
+`X-Mme-Client-Info` must describe the same platform as the ADI lane (Android here),
+and `gsd.apple.com` rejects `text/x-xml-plist` — use `text/xml`. These are separate
+from the ADI crypto and should not be read as state failures.
+
+#### What this means for the Rust state format
+
+For the final engine the format does **not** have to be Apple's 617-byte container.
+The plan's pragmatic rule is explicit: the product needs Rust-End ⇄ Rust-OTP
+agreement on a versioned own format; Apple disk fidelity is for hybrid testing. The
+measured facts that the own format must preserve are:
+
+* the full provisioning record — session, CPIM (276 B), ptm (487 B), tk (16 B),
+  identity and the time of provisioning — because OTP consumes exactly these;
+* a version and exact length fields, with strict rejection of any mismatch;
+* an integrity tag over the whole record, not over a payload only;
+* binding to the first 8 bytes of `adi_identifier`, and explicit rejection of a
+  state presented with a different identity;
+* a single atomic write path (truncate to final size, one write, close) with no
+  partial-file state.
+
+The Apple container stays useful as an interop codec: parse `version/n/blob/tail`,
+preserve the tail opaquely, and round-trip byte-for-byte. That gives the private
+corpus a lossless path into Rust tests without pretending the tail is understood.
+
+#### Campaign status at this point
+
+* **Track A — closed.** The warm VM verifies five epochs record by record
+  (614,588–614,777 records each, 92 libc-stub excursions), and reproduces the native
+  28-byte OTP byte-for-byte: `f3fd95eb…` (tM), `cf9da8e1…` (tI), `1b383314…`,
+  `5900554d…`, `77fd1b8d…` (three frozen epochs). Local clippy/test are green and CI
+  run `44283397063` on `8ae9554` is green.
+* **Gate 0 — closed with a correction.** The Android oracle's three "different"
+  hangs were one android-21 Bionic mutex defect: the owner tid is stored in 16 bits
+  and compared against the full 32-bit tid, so a process id above 0xffff leaves a
+  static mutex locked forever. `kernel.pid_max=65535` fixes the rig; the setting is
+  global and does not survive a reboot. The earlier path-binding claim is retracted
+  above.
+* **Track B — where this entry ends.** End's file contract, the container, the
+  integrity/binding matrix, and the tail's three-layer behaviour are measured. The
+  Rust `state.rs` container and serializer are the next implementation step, followed
+  by round-trip tests and the Rust-End ⇄ Rust-OTP parity gate. The CFF body of
+  `fp_dh_38fa04bb` is not lifted; the 142 KB function is recorded as the last
+  non-libc call before the write, not claimed as understood.
+* **Track C/D — unchanged.** Start/CPIM genesis (planter source producer `0xdd511`,
+  WeaveFeeds, mixer-14, digest words, session16, Body B) and the live verdict remain
+  after B's parity gate.
+
+The private artifacts for this entry live under the rig's `cases/tb-*` directories
+(0700), with raw state bodies, CPIM/ptm/tk and dumps kept local. Only sizes, hashes,
+RVAs, opcodes and counters are reproduced here.
