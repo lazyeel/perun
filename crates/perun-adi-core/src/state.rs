@@ -272,15 +272,30 @@ pub fn load(
 /// size, and overwritten with one buffer, matching the native writer's
 /// measured `open` -> `ftruncate` -> `write` -> `close` sequence. Parent
 /// directories are not created, and there is no temporary file or rename.
+///
+/// On Unix the file is made private (`0600`) after the write. The native
+/// file is `0664`, but the own format stores the CPIM, PTM and TK without
+/// Apple's obfuscation, so it is treated as a secret rather than as a
+/// shared cache entry.
 pub fn store(path: impl AsRef<Path>, record: &ProvisioningRecord) -> Result<(), StateIoError> {
     let bytes = seal(record)?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path.as_ref())?;
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path.as_ref())?;
     file.set_len(bytes.len() as u64)?;
     file.write_all(&bytes)?;
+    drop(file);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path.as_ref(), std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 

@@ -6020,3 +6020,43 @@ The new `CpimLayout::from_spim_tail` test is synthetic: it pins the copy
 relationship and the declared length, and deliberately does not pretend to
 derive Body B from anything other than the SPIM bytes. The corpus check above
 is the measured part and stays local under the privacy rule.
+
+#### The state layer becomes executable
+
+The library tests now cover the same contract from a shell. `adi_state` is a
+small harness binary, not the product API:
+
+* `seal --identity <raw16> --state <out> --session <u32|0x..> --cpim <276>
+  --ptm <487> --tk <16> [--spim <347>] [--at <unix>]` writes a PERUNST v1
+  container; `--at` defaults to the current time and exists so the vector is
+  reproducible.
+* `open --identity <raw16> --state <in> [--summary]` verifies and prints it;
+  `--summary` prints the one-line identity/session/time/section-length form,
+  without the secret bodies.
+* `apple-inspect --state <adi.pb>` prints the Apple header (`bytes`, `version`,
+  `native_supported`, `blob_len`, `tail_len`) and, when the blob has the 276-byte
+  CPIM shape, its version, session, digest and Body B metadata.
+* `apple-roundtrip --state <adi.pb> --out <copy.pb>` proves the codec is
+  byte-exact.
+
+Two more decisions are now enforced in code:
+
+1. `store` creates the file at `0600` (and reapplies the mode through
+   `set_permissions`, because `create` does not change an existing wider inode's
+   mode). The native state is `0664`, but the own format carries CPIM/PTM/TK in
+   the clear, so private-by-default is the correct asymmetry.
+2. `Identity` is the single 16-byte type; `state::open`/`load` take it instead of
+   a raw array, so "first 8 bytes bind, last 8 are ignored" is expressed by the
+   API rather than by a comment. `Identity::random` reads `/dev/urandom` and
+   rejects a constant 16-byte draw; `Identity::write` sets `0600`.
+
+`tests/state_cli.rs` closes the same-process gap: it runs the built binary twice Os,
+so the sealed file is the only channel between the writer and the reader. The checks are:
+`seal` succeeds and produces mode `0600`; `open --summary` returns the session and
+all four section lengths; a mutation in the first half of the identity fails with
+`different identity`; the same mutation in the last half is accepted. The test
+uses only synthetic bodies.
+
+The `PERUN_APPLE_STATE` gated test was run manually against three native
+captures (617/n29, 619/n31, 612/n24). Each parsed and re-encoded byte-for-byte,
+including the opaque tail; the bodies never entered the repository.
