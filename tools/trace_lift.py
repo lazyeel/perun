@@ -74,7 +74,9 @@ SEED_RANGES = [
     ('ss_ro',     0x7ffff742c000, 0x238320),
     ('ss_rw',     0x7ffff7665320, 0x13000),
     ('stack',     0x7ffffffef000, 0x10000),
-    ('heap',      0x7ffff7890000, 0x40000),
+    # the full jemalloc arena, not one 256 KiB window inside it: the
+    # engine walks backwards into metadata below its allocation cursor
+    ('heap',      0x7ffff77ff000, 0x201000),
     ('main_data', 0x555555554000, 0x19000),
 ]
 
@@ -902,6 +904,31 @@ class Lifter:
                     return i
         return n
 
+    def _memdeltas(self, case):
+        """Words the libc calls wrote, from adi_freeze --trace-mem-out.
+
+        One line per changed 8-byte word: rec_call rec_ret addr value.  The
+        two record indices are decimal (they come from a %llu counter), the
+        address and the value are hex.  rec_ret is the record whose ip is first
+        back in the engine, which is exactly the stub return record computed
+        above, so the VM can key on it without knowing which libc function ran.
+        """
+        p = f'/home/admin/rig/cases/{case}/memdelta.txt'
+        out = []
+        if not os.path.exists(p):
+            return out
+        with open(p) as f:
+            for line in f:
+                q = line.split()
+                if len(q) != 4:
+                    continue
+                try:
+                    out.append((int(q[0], 10), int(q[1], 10),
+                                int(q[2], 16), int(q[3], 16)))
+                except ValueError:
+                    continue
+        return out
+
     def _decode_abs(self, ip):
         for name, mo in MODULES.items():
             if mo['bias'] <= ip < mo['bias'] + mo['size']:
@@ -975,18 +1002,19 @@ class Lifter:
         """case_<case>.bin: everything warmvm needs for one run, in one file.
 
         layout (LE):
-          'PVMC' u32, ver=2 u32, entry_ip u64, stop_rec u64, tsc_base u64,
+          "PVMC" u32, ver=3 u32, entry_ip u64, stop_rec u64, tsc_base u64,
           otp_addr u64, otp_len u32, otp bytes,
           regs[16] u64, xmm[16][16] u8,
           nseeds u32, { addr u64, len u64, bytes } * nseeds,
           nstubs u32, { rec_call u64, rec_ret u64, ret u64, push u8,
-                        regs[16] u64, xmm[16][16] u8 } * nstubs"""
+                        regs[16] u64, xmm[16][16] u8 } * nstubs,
+          nmem u32, { rec_call u64, rec_ret u64, addr u64, value u64 } * nmem"""
         OTP_ADDR = 0x7ffff78b0340
         for c in self.cases:
             regs, xmm = self._record_state(c, 0)
             otp = open(f'/home/admin/rig/cases/{c}/cap/otp.bin', 'rb').read()
             buf = bytearray()
-            buf += struct.pack('<IIQQQQI', 0x43564d50, 2, self.ips[c][0],
+            buf += struct.pack('<IIQQQQI', 0x43564d50, 3, self.ips[c][0],
                                self._stop_rec(c),
                                (EPOCHS[c] << 21) & 0xffffffffffffffff,
                                OTP_ADDR, len(otp))
@@ -1013,11 +1041,15 @@ class Lifter:
                                    e['ret'] or 0, 1 if e['push'] else 0)
                 buf += struct.pack('<16Q', *e['regs'])
                 buf += bytes.fromhex(e['xmm'])
+            changes = self._memdeltas(c)
+            buf += struct.pack('<I', len(changes))
+            for call, ret, addr, value in changes:
+                buf += struct.pack('<QQQQ', call, ret, addr, value)
             p = os.path.join(self.args.out, f'case_{c}.bin')
             with open(p, 'wb') as f:
                 f.write(buf)
             print(f'  bundle {c}: {len(buf)} bytes, {len(seeds)} seeds, '
-                  f'{len(evs)} stubs')
+                  f'{len(evs)} stubs, {len(changes)} mem words')
 
 
 def encode_operand(o, bias):

@@ -1372,6 +1372,18 @@ pub struct Stub {
     pub xmm: [[u8; 16]; 16],
 }
 
+/// One 8-byte word a libc call wrote, as observed by the tracer.
+///
+/// `rec_call`/`rec_ret` label the excursion, so the VM can apply the whole
+/// batch when it takes that stub without knowing which libc function ran.
+#[derive(Clone, Copy, Debug)]
+pub struct MemDelta {
+    pub rec_call: u64,
+    pub rec_ret: u64,
+    pub addr: u64,
+    pub value: u64,
+}
+
 pub struct CaseBundle {
     pub entry_ip: u64,
     pub stop_rec: u64,
@@ -1382,6 +1394,7 @@ pub struct CaseBundle {
     pub xmm: [[u8; 16]; 16],
     pub seeds: Vec<(u64, Vec<u8>)>,
     pub stubs: Vec<Stub>,
+    pub mem: Vec<MemDelta>,
 }
 
 impl CaseBundle {
@@ -1397,7 +1410,7 @@ impl CaseBundle {
             return Err(VmError::BadBundle(format!("magic {magic:#x}")));
         }
         let ver = c.u32()?;
-        if ver != 2 {
+        if !(2..=3).contains(&ver) {
             return Err(VmError::BadBundle(format!("version {ver}")));
         }
         let entry_ip = c.u64()?;
@@ -1433,6 +1446,19 @@ impl CaseBundle {
             let xmm = read_xmm_block(&mut c)?;
             stubs.push(Stub { rec_call, rec_ret, ret, push, gpr, xmm });
         }
+        let mut mem = Vec::new();
+        if ver >= 3 {
+            let nmem = c.u32()? as usize;
+            mem.reserve(nmem);
+            for _ in 0..nmem {
+                                mem.push(MemDelta {
+                    rec_call: c.u64()?,
+                    rec_ret: c.u64()?,
+                    addr: c.u64()?,
+                    value: c.u64()?,
+                });
+            }
+        }
         Ok(CaseBundle {
             entry_ip,
             stop_rec,
@@ -1443,6 +1469,7 @@ impl CaseBundle {
             xmm,
             seeds,
             stubs,
+            mem,
         })
     }
 }
@@ -1631,6 +1658,20 @@ pub fn run_verified(
             let call_rec = i;
             vm.gpr = st.gpr;
             vm.xmm = st.xmm;
+            // libc is not lifted, but its caller-visible stores are: replay
+            // them before resuming so the engine reads what it wrote.
+            for d in &bundle.mem {
+                if d.rec_call == call_rec && d.rec_ret == st.rec_ret {
+                    // a VM-side write error here is a diagnostic, not an
+                    // escape: map it into the same Mismatch box the caller
+                    // already handles for every other stop.
+                    if let Err(e) = vm.mem.write_uint(d.addr, 8, d.value) {
+                        let mut mm = fail(i, vm, d.addr, Some(e.to_string()));
+                        mm.last = history.iter().cloned().collect();
+                        return Err(Box::new(mm));
+                    }
+                }
+            }
             vm.rip = st.ret;
             stub_at += 1;
             stats.stubs += 1;

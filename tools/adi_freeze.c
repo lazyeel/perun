@@ -408,6 +408,7 @@ static struct {
     struct dump_range mregions[16];
     int nmregions;            /* watched for cross-libc memory deltas */
     const char *mout_path;    /* delta log, written at trace stop */
+    const char *maps_out;     /* /proc/<pid>/maps as of the traced entry */
 } opt;
 
 static struct {
@@ -1001,6 +1002,7 @@ int main(int argc, char **argv) {
             nmregions++;
         }
         else if (!strncmp(a, "--trace-mem-out=", 16)) opt.mout_path = a + 16;
+        else if (!strncmp(a, "--maps-out=", 11)) opt.maps_out = a + 11;
         else if (!strncmp(a, "--dump-mem=", 11)) {
             if (opt.ndumps >= 16) die("too many --dump-mem");
             char spec[256];
@@ -1197,6 +1199,19 @@ int main(int argc, char **argv) {
                             wp_watch_payload(w, (unsigned long)opt.otp_buf + 8);
                         trc.tracing = 1;
                         trc.steps = 0;
+                        if (opt.maps_out) {
+                            char mp[64];
+                            snprintf(mp, sizeof mp, "/proc/%d/maps", w);
+                            FILE *mi = fopen(mp, "r");
+                            FILE *mo = mi ? fopen(opt.maps_out, "w") : NULL;
+                            if (mi && mo) {
+                                char ln[512];
+                                while (fgets(ln, sizeof ln, mi))
+                                    fputs(ln, mo);
+                            }
+                            if (mi) fclose(mi);
+                            if (mo) fclose(mo);
+                        }
                         mem_setup(w);
                         for (int i = 0; i < procs_n; i++) {
                             procs[i].tracing = 1;
@@ -1302,7 +1317,10 @@ int main(int argc, char **argv) {
                                     mem_call_rec = trc.steps - 1;
                                     mem_snapshot(w);
                                 } else if (!in_libc && mem_prev_in_libc) {
-                                    mem_deltas(w, trc.steps - 1);
+                                    /* trace_write files the record whose ip
+                                     * is r.rip, and trc.steps was advanced just
+                                     * above: that record is rec_ret. */
+                                    mem_deltas(w, trc.steps);
                                 }
                                 mem_prev_in_libc = in_libc;
                             }
