@@ -73,6 +73,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 
+use crate::identity::Identity;
 use crate::sha256;
 
 /// Magic of the Perun state container.
@@ -91,10 +92,10 @@ pub const HEADER_PREFIX_LEN: usize = 8 + 4 + 4 + 4;
 pub const TAG_LEN: usize = 32;
 
 /// Number of `adi_identifier` bytes the state is bound to.
-pub const IDENTITY_BIND_LEN: usize = 8;
+pub const IDENTITY_BIND_LEN: usize = crate::identity::IDENTITY_BIND_LEN;
 
 /// Length of the full `adi_identifier` file.
-pub const IDENTIFIER_LEN: usize = 16;
+pub const IDENTIFIER_LEN: usize = crate::identity::IDENTITY_LEN;
 
 /// Length of the CPIM section.
 pub const CPIM_LEN: usize = 276;
@@ -252,19 +253,14 @@ pub fn seal(record: &ProvisioningRecord) -> Result<Vec<u8>, StateError> {
 /// The body is parsed strictly before the tag is checked so that an
 /// identity mismatch is reported as such rather than as a generic tag
 /// failure. No record is returned until the tag has been verified.
-pub fn open(
-    bytes: &[u8],
-    identifier: &[u8; IDENTIFIER_LEN],
-) -> Result<ProvisioningRecord, StateError> {
-    let mut identity = [0u8; IDENTITY_BIND_LEN];
-    identity.copy_from_slice(&identifier[..IDENTITY_BIND_LEN]);
-    open_bound(bytes, &identity)
+pub fn open(bytes: &[u8], identifier: &Identity) -> Result<ProvisioningRecord, StateError> {
+    open_bound(bytes, identifier.bound())
 }
 
 /// Read and open a state file.
 pub fn load(
     path: impl AsRef<Path>,
-    identifier: &[u8; IDENTIFIER_LEN],
+    identifier: &Identity,
 ) -> Result<ProvisioningRecord, StateIoError> {
     let bytes = std::fs::read(path.as_ref())?;
     Ok(open(&bytes, identifier)?)
@@ -634,11 +630,11 @@ mod tests {
         }
     }
 
-    fn identifier() -> [u8; IDENTIFIER_LEN] {
+    fn identifier() -> Identity {
         let mut out = [0u8; IDENTIFIER_LEN];
         out[..IDENTITY_BIND_LEN].copy_from_slice(&IDENTITY);
         out[IDENTITY_BIND_LEN..].copy_from_slice(&pattern::<8>(0x99));
-        out
+        Identity::from_bytes(out)
     }
 
     fn apple_tail() -> [u8; APPLE_TAIL_LEN] {
@@ -701,15 +697,18 @@ mod tests {
     fn only_the_first_eight_identity_bytes_are_bound() {
         let sealed = seal(&record()).unwrap();
 
-        let mut other_last_half = identifier();
+        let mut other_last_half = *identifier().as_bytes();
         other_last_half[IDENTITY_BIND_LEN..].fill(0xa5);
-        assert_eq!(open(&sealed, &other_last_half).unwrap(), record());
+        assert_eq!(
+            open(&sealed, &Identity::from_bytes(other_last_half)).unwrap(),
+            record()
+        );
 
         for index in 0..IDENTITY_BIND_LEN {
-            let mut other_first_half = identifier();
+            let mut other_first_half = *identifier().as_bytes();
             other_first_half[index] ^= 0x01;
             assert_eq!(
-                open(&sealed, &other_first_half).unwrap_err(),
+                open(&sealed, &Identity::from_bytes(other_first_half)).unwrap_err(),
                 StateError::IdentityMismatch,
                 "identity byte {index}"
             );
@@ -986,16 +985,19 @@ mod tests {
         let path = dir.join("adi-state.bin");
         store(&path, &record()).unwrap();
 
-        let mut other = identifier();
+        let mut other = *identifier().as_bytes();
         other[0] ^= 0x01;
         assert!(matches!(
-            load(&path, &other),
+            load(&path, &Identity::from_bytes(other)),
             Err(StateIoError::State(StateError::IdentityMismatch))
         ));
 
-        let mut other_last_half = identifier();
+        let mut other_last_half = *identifier().as_bytes();
         other_last_half[IDENTITY_BIND_LEN..].fill(0x5a);
-        assert_eq!(load(&path, &other_last_half).unwrap(), record());
+        assert_eq!(
+            load(&path, &Identity::from_bytes(other_last_half)).unwrap(),
+            record()
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

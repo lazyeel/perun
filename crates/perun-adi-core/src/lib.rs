@@ -20,6 +20,7 @@
 //!   cold-canon dump parsed to its length-delimited sections);
 //! * [`state`]       -- the versioned provisioning-state container and
 //!   the lossless codec for Apple's `adi.pb`;
+//! * [`identity`]    -- the 16-byte `adi_identifier` and its bound half;
 //! * [`sha256`]      -- the dependency-free SHA-256/HMAC used by the
 //!   state tag.
 //!
@@ -36,6 +37,7 @@ pub mod digest;
 pub mod early_series;
 pub mod early_zone;
 pub mod fold_zone;
+pub mod identity;
 pub mod sha256;
 pub mod simd_cycles;
 pub mod state;
