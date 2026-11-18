@@ -1826,11 +1826,11 @@ fn compare(vm: &Vm, rec: &TraceRec, verify_xmm: bool) -> Result<(), Diffs> {
     if vm.rip != rec.ip {
         ip_ok = false;
     }
-    for i in 0..16 {
+    for (i, name) in REG_NAMES.iter().enumerate() {
         if vm.gpr[i] != rec.gpr[i] {
             regs.push(format!(
                 "{}: vm {:#018x} != trace {:#018x}",
-                REG_NAMES[i], vm.gpr[i], rec.gpr[i]
+                name, vm.gpr[i], rec.gpr[i]
             ));
         }
     }
