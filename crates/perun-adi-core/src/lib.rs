@@ -21,6 +21,7 @@
 //! * [`state`]       -- the versioned provisioning-state container and
 //!   the lossless codec for Apple's `adi.pb`;
 //! * [`identity`]    -- the 16-byte `adi_identifier` and its bound half;
+//! * [`spim`]        -- the 347-byte Start input: 264 payload + Body B + tag;
 //! * [`sha256`]      -- the dependency-free SHA-256/HMAC used by the
 //!   state tag.
 //!
@@ -40,6 +41,7 @@ pub mod fold_zone;
 pub mod identity;
 pub mod sha256;
 pub mod simd_cycles;
+pub mod spim;
 pub mod state;
 pub mod warmvm;
 pub mod word_channels;

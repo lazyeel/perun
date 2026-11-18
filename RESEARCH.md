@@ -5923,103 +5923,169 @@ store/load path including truncation of a longer pre-existing file.
   parity gate and the Rust `ProvisioningEnd`. The CFF body of `fp_dh_38fa04bb` is not
   lifted; the 142 KB function is recorded as the last non-libc call before the write,
   not claimed as understood.
-* **Track C — opened; one boundary closed.** The SPIM tail carries CPIM Body B
-  verbatim (`23/23` local pairs), so Body B no longer needs a Rust producer
-  (`CpimLayout::from_spim_tail`). Start/CPIM genesis still needs the planter source
-  producer `0xdd511`, WeaveFeeds, mixer-14, the digest words and `session16`; the
-  `session16` correlation above is the oracle for that producer. Track D (live
-  verdict) remains after B's parity gate.
+* **Track C — opened; the Start input is closed, the transform is not.** The
+  347-byte SPIM anatomy is measured (`spim.rs`): 264 payload, Body B length and
+  version, 52 Body B bytes, a 20-byte opaque tag, three ignored padding bytes.
+  Body B is the SPIM tail copied verbatim (`23/23`), so it needs no producer.
+  Start is entropy-driven: `session16` and the 32-bit session come from the
+  40-byte `/dev/urandom` draw, not from the SPIM, the identity or the clock.
+  Still open: the Body-A `[0x40..0xa0)` transform (deterministic in SPIM,
+  identity `[0..8)` and epoch), the 32-byte digest, and the planter genesis
+  (`0xdd511`, WeaveFeeds, mixer-14). Track D remains after B's parity gate.
 
 The private artifacts for this entry live under the rig's `cases/tb-*` directories
 (0700), with raw state bodies, CPIM/ptm/tk and dumps kept local. Only sizes, hashes,
 RVAs, opcodes and counters are reproduced here.
 
-### 2026-11-18 — Track C begins: the SPIM tail is CPIM Body B, and `session16` is decided by the 32-bit session
+### 2026-11-18 — Track C: Start is entropy-driven; the SPIM anatomy is closed
 
 Track C was opened with the cheapest measurable questions rather than with the
 planter lift: which CPIM sections are already present in the Start input, and
-which inputs actually move them. The local corpus is 23 SPIM/CPIM pairs across
-15 case directories (five distinct sessions, several identities, ASLR on and
-off), so a relation either holds on all of them or it is not a relation yet.
+which inputs actually move them. The existing corpus (23 SPIM/CPIM pairs across
+15 case directories) is correlational and, as the first pass showed, easy to
+misread: several of those runs replayed one frozen entropy stream. It was
+therefore followed by a controlled matrix on the local rig -- one input changed
+per run, everything else held byte-identical, a fresh process and a fresh
+directory per run, constant cwd and file names, `--no-aslr`, the offline SPIM
+path, and the 276-byte CPIM compared byte for byte.
 
-#### Body B is an input, not an End output
+The matrix inputs were the byte bodies of `spim.bin` and `adi_identifier`, the
+freezer's `--epoch`, `--urandom-hex` (the 40-byte `/dev/urandom` draw) and
+`--rng-hex` (the 16-byte `getrandom` draw). Repeating a run with the same four
+values is byte-identical across processes, so the transform is a pure function
+of them; it is not a hidden counter.
 
-Byte comparison of every pair shows
+#### The SPIM anatomy (closed)
+
+`ADIProvisioningStart` consumes exactly 347 bytes. Every other length is
+rejected with `-45033`, which the error table names `invalidDataBody`:
 
 ```text
-CPIM[0xd8..0x114] == SPIM[264..324]     23/23
+offset  size  field
+0x000   264   server payload (opaque)
+0x108   4     Body B length, BE u32 = 52
+0x10c   4     Body B version, BE u32
+0x110   52    Body B
+0x144   20    integrity tag
+0x158   3     ignored padding
 ```
 
-with no transformation: `SPIM[264..268]` is the Body B length `0x00000034`
-(52), `SPIM[268..272]` is its version word (4 in the measured lane), and the
-following 52 bytes are the body itself. The same equality holds for the
-fixed-base and ASLR runs, for every identity, and for every session. Consequently
-`CpimLayout::from_spim_tail` now splices that region from the SPIM instead of
-accepting a caller-supplied Body B; the only End-derived inputs it still takes
-are `session`, `body_a` and `body_a_digest`. This closes boundary (e) of the six
-listed in the campaign plan: Body B does not need a producer in the Rust fold,
-it needs a byte-exact SPIM reader.
+The boundary was measured one byte at a time. Truncating to any length from
+320 through 346 is refused, and appending even one byte is refused. Flipping
+any bit in `[0x000..0x144)` is refused with `-45033`, as is zeroing the tag.
+Flipping bits in `[0x158..0x15b)` is accepted, and the emitted CPIM is
+bit-identical: SHA-256 of the 276-byte container is unchanged, not merely the
+session block, so those three bytes are true padding.
 
-The 264-byte prefix is the server-issued part. Nothing in the local corpus shows
-the native engine modifying it before the SPIM reaches Start, and the CPIM does
-not copy it, so it stays opaque input.
+The tag `[0x144..0x158)` is not identity-bound. The same SPIM is accepted with
+a different identity, and the identity can be changed without touching the
+tag. No standard hash of the flat prefix, of the Body B, or of any of their
+concatenations reproduces it (MD5/SHA-1/SHA-256/SHA-3/BLAKE2s, both
+endiannesses), and the tag bytes do not occur in either library. Start rejects
+a zeroed tag, but a bit-flip anywhere in it gives the same `-45033` as a bit
+flip in the payload, so the rejection does not distinguish "signature" from
+"checksum over parsed fields". The tag is therefore carried as an opaque
+authenticated field: we validate the structure and preserve the tag on
+re-encode, and we do not claim to verify it.
 
-#### Body A's first 64 bytes are not identity material
+Body B sits inside that authenticated region and is a straight copy:
 
-Comparing CPIM Body A across identities and sessions at fixed SPIM:
+```text
+CPIM[0xd8..0x114] == SPIM[264..324]     23/23 local pairs, all swap runs
+```
 
-| pair | shared Body-A bytes | regions |
-|---|---:|---|
-| `tb-id1` vs `tb-id4` (same SPIM, same session) | `[0..64)` identical, 95/96 differ in `[64..160)` |
-| `tb-id4` vs `uC1` (same SPIM, same session) | `[0..64)` identical |
-| `uC1` vs `uC2` (same identity, different SPIM) | 0/160 | none |
+`CpimLayout::from_spim` now takes a parsed `Spim`, so an invalid length or a
+wrong Body B length word cannot reach the splice. This closes boundary (e) of
+the six in the campaign plan without needing a producer in the Rust fold.
 
-So `BodyA[0..64)` is a function of the Start input/session, not of the identity;
-the region that moves with the identity starts at offset 64, not at the beginning
-of the body. An earlier reading of the three `tb-id*` dumps suggested that the
-whole 96-byte remainder was identity-determined: the two same-SPIM identities
-differ in `[64..160)`, but `uC1`/`uC2` show that a different SPIM moves every
-Body-A byte, so SPIM is an input to that region too. The honest statement is the
-conditional one: at fixed SPIM and session, the identity selects `[64..160)`.
+#### CPIM attribution matrix (controlled)
 
-#### `session16` is a function of the 32-bit session alone
+Regions are CPIM-relative. The first 4 bytes are the constant version 5, and
+`0xd8..0xe0` holds the Body B length/version words copied from the SPIM.
 
-Across the corpus, `session16` is constant whenever the 32-bit `session` value
-returned by Start is constant, even when the SPIM, the identity reflecting it and
-the ASLR layout all differ:
+| varied input | CPIM bytes that move | reading |
+|---|---|---|
+| entropy draw (40 B) | `[0x04..0x14)` and `[0x18..0xd8)` | session16, Body A and digest are entropy-derived |
+| epoch, +100 s or +3600 s | `[0x98..0xd8)`, 64 B | epoch enters the Body-A tail and the digest |
+| identity byte `[0..8)` | `[0x58..0xd8)`, 128 B | identity enters Body-A offset 0x40 and the digest |
+| identity byte `[8..16)` | none | the last eight identity bytes never enter the container |
+| a different valid SPIM | `[0x18..0xd8)` and `[0xe0..0x114)` | Body A+digest change; Body B is copied from the new SPIM |
+| SPIM tag `[0x144..0x158)` | rejected | Start authenticates it before any CPIM byte |
+| SPIM padding `[0x158..0x15b)` | none | never read |
 
-| session (dec) | session (hex) | `session16` | SPIM(s) sharing it |
-|---:|---|---|---|
-| 553740486 | `0x210168c6` | `6c6a9ee628cf853ddf792f53032646ac` | 8 distinct |
-| 2123333095 | `0x7e8f7de7` | `0ea1de22ceb4b1b040e9c64d95c69d63` | 1 |
-| 4256028080 | `0xfdadd5b0` | `b83289a286987bfd40bd36484aa94abe` | 1 |
-| 481991086 | `0x1cba99ae` | `d0b53b0215b0b26250adc6ab534ab597` | 1 |
-| 1092198700 | `0x4119a12c` | `221c9fc57dcf79847baca5bfbceb0c1d` | 1 |
+Two results overturn earlier readings.
 
-No plain standard hash of the session word, of the SPIM, of its 16-byte zone,
-or of the identity reproduces the block (MD5/SHA-1/SHA-256/SHA-3/BLAKE2s,
-both endiannesses, single and concatenated parts). The block is also absent
-from the state file and from the 347-byte SPIM. That is consistent with the
-measured shape: a 16-byte value produced inside Start alongside the CPIM and
-the 32-bit handle, not a serialization of either. It stays a Track C producer
-boundary -- `generate_cpim` can splice it but cannot yet derive it.
+First, `session16` is not tied to SPIM, identity or epoch. The earlier corpus
+table (one block per 32-bit handle) was an artifact of the frozen entropy
+stream: the same `/dev/urandom` pattern was replayed into every run, so runs
+that shared a frozen stream also shared the handle and the block. With the
+draw varied and everything else fixed, the handle and `session16` both change;
+with the draw fixed, both are reproduced even when the SPIM or the identity
+changes. The corpus correlation is fully explained by the shared draw.
 
-#### What this changes in the plan
+Second, the block is not a direct slice of that draw. Flipping any one of the
+40 bytes changes all 16 bytes of `session16` (15/16 for three of them) -- the
+avalanche of a hash or a DRBG; a sliced buffer would change one byte. The
+16-byte `getrandom` stream has no effect on this lane in the matrix, so the
+consumer is the 40-byte `/dev/urandom` draw. No plain MD5/SHA-1/SHA-256/SHA-512/
+SHA-3/BLAKE2s of that draw, and no 4- or 16-byte window of those digests,
+reproduces either the handle or the block. The exact KDF is not identified. The
+measured law is: "deterministic in the 40-byte draw, avalanche across it",
+not "equal to its first 16 bytes".
 
-The six Track C boundaries shrink by one: Body B is closed by the SPIM splice.
-The remaining implementation order is now:
+The matrix does not prove `session16` is independent of the handle -- both are
+outputs of the same draw, so a derivation from one to the other cannot be
+excluded by varying the draw alone. It does prove that SPIM, identity and
+epoch are not inputs to either, and that the old "session decides session16"
+reading has no evidential support left.
 
-1. `session16` producer inside Start (the correlation above is the test oracle:
-   fixed session handle -> fixed 16-byte block, independent of identity/ASLR);
-2. the Body-A region `[64..160)` (identity and SPIM both enter; fixed-SPIM
-   differentials isolate the identity input);
-3. the digest words (still the only CPIM section with no candidate producer);
-4. planter genesis / WeaveFeeds / mixer-14, then the SPIM-only CPIM assembly.
+#### Body A and the digest
 
-The new `CpimLayout::from_spim_tail` test is synthetic: it pins the copy
-relationship and the declared length, and deliberately does not pretend to
-derive Body B from anything other than the SPIM bytes. The corpus check above
-is the measured part and stays local under the privacy rule.
+Body A starts at CPIM `0x18`, is 160 bytes, and ends at `0xb8`; the digest is
+`0xb8..0xd8`. Under the controlled matrix:
+
+* Body A `[0x00..0x40)` (CPIM `0x18..0x58`) is independent of the identity, but
+  changes with the SPIM and with the entropy draw.
+* Body A `[0x40..0xa0)` (CPIM `0x58..0xb8`) changes with the identity.
+* The last 32 Body-A bytes and the digest both move with the epoch, and both
+  move with a different draw; no run showed the digest constant while the
+  tail changed.
+* The digest is not a plain hash of the serialized Body A, of the SPIM
+  prefix, or of their concatenations, with or without the epoch appended in
+  BE/LE u32/u64/decimal/hex. It is also not `HMAC(key, bodyA)` over any of the
+  byte strings we can name. It is either computed over a parsed internal
+  structure or keyed with material the library holds privately.
+
+So the deterministic story is: Start draws 40 bytes, derives `session16` and
+the 32-bit session from that draw, mixes the draw with the SPIM and identity
+`[0..8)` into Body A, and derives the 32-byte digest from the result and the
+clock. Body B is copied. Identity `[8..16)` and the SPIM padding are never read.
+
+#### Plan correction
+
+The Track C acceptance criterion in the campaign plan -- "byte-exact CPIM on
+three fresh SPIMs not used during derivation" -- is underspecified: a CPIM is
+not a function of `(SPIM, identity)` alone. It also needs the entropy draw and
+the clock. A Rust Start cannot reproduce a *native* CPIM from a fresh SPIM
+unless it also receives the native draw and epoch, and fixing only the clock
+will fail on `session16`.
+
+The right split is:
+
+* **Product path (Rust End -> Rust OTP):** Rust Start draws its own nonce and
+  session, derives Body A and the digest with its own KDF, and records the draw
+  in the PERUNST state. Parity is Rust-to-Rust, which the plan already allows
+  for the own format.
+* **Hybrid path (native CPIM -> Rust End -> Rust OTP):** store the native
+  276-byte CPIM in the state and consume it; no KDF reproduction is needed.
+  This is the path the private corpus can exercise today.
+* **Cold live acceptance (Apple accepts a Rust CPIM):** still needs the real
+  KDF and the real Body-A transform. That remains Track C's open frontier, and
+  the controlled matrix is its differential oracle.
+
+`spim.rs` pins the anatomy and the tag/padding opacity; its tests are
+synthetic. The corpus checks above (23/23, the matrix rows) are the measured
+part and stay local under the privacy rule.
 
 #### The state layer becomes executable
 
@@ -6050,7 +6116,7 @@ Two more decisions are now enforced in code:
    API rather than by a comment. `Identity::random` reads `/dev/urandom` and
    rejects a constant 16-byte draw; `Identity::write` sets `0600`.
 
-`tests/state_cli.rs` closes the same-process gap: it runs the built binary twice Os,
+`tests/state_cli.rs` closes the same-process gap: it runs the built binary twice,
 so the sealed file is the only channel between the writer and the reader. The checks are:
 `seal` succeeds and produces mode `0600`; `open --summary` returns the session and
 all four section lengths; a mutation in the first half of the identity fails with
