@@ -107,14 +107,71 @@ pub const SSE_BLENDVPS: u16 = 65;
 
 pub fn op_name(op: u16) -> &'static str {
     const NAMES: [&str; 66] = [
-        "?", "mov", "movzx", "movsx", "lea", "add", "sub", "and", "or", "xor",
-        "adc", "sbb", "cmp", "test", "neg", "not", "mul", "imul1", "imul2",
-        "imul3", "div", "idiv", "shl", "shr", "sar", "rol", "ror", "shld",
-        "shrd", "setcc", "cmovcc", "jcc", "jmp", "call", "ret", "push", "pop",
-        "rdtsc", "syscall", "nop", "bswap", "movdqa", "movdqu", "movups",
-        "movq", "movd", "paddd", "psubd", "pand", "por", "pxor", "pmulld",
-        "pmullw", "pshufd", "pshufb", "pmovzx", "pinsrd", "pextrd", "pextrq",
-        "packusdw", "packuswb", "punpcklqdq", "pcmpeqd", "pslld", "psrld",
+        "?",
+        "mov",
+        "movzx",
+        "movsx",
+        "lea",
+        "add",
+        "sub",
+        "and",
+        "or",
+        "xor",
+        "adc",
+        "sbb",
+        "cmp",
+        "test",
+        "neg",
+        "not",
+        "mul",
+        "imul1",
+        "imul2",
+        "imul3",
+        "div",
+        "idiv",
+        "shl",
+        "shr",
+        "sar",
+        "rol",
+        "ror",
+        "shld",
+        "shrd",
+        "setcc",
+        "cmovcc",
+        "jcc",
+        "jmp",
+        "call",
+        "ret",
+        "push",
+        "pop",
+        "rdtsc",
+        "syscall",
+        "nop",
+        "bswap",
+        "movdqa",
+        "movdqu",
+        "movups",
+        "movq",
+        "movd",
+        "paddd",
+        "psubd",
+        "pand",
+        "por",
+        "pxor",
+        "pmulld",
+        "pmullw",
+        "pshufd",
+        "pshufb",
+        "pmovzx",
+        "pinsrd",
+        "pextrd",
+        "pextrq",
+        "packusdw",
+        "packuswb",
+        "punpcklqdq",
+        "pcmpeqd",
+        "pslld",
+        "psrld",
         "blendvps",
     ];
     NAMES.get(op as usize).copied().unwrap_or("?")
@@ -142,19 +199,33 @@ const RSP: usize = 7;
 #[derive(Clone, Copy, Debug)]
 pub enum Operand {
     None,
-    Reg { idx: u8, size: u8 },
-    Mem { base: u8, index: u8, scale: u8, size: u8, disp: i64 },
-    Imm { val: u64, size: u8 },
-    Xmm { idx: u8 },
+    Reg {
+        idx: u8,
+        size: u8,
+    },
+    Mem {
+        base: u8,
+        index: u8,
+        scale: u8,
+        size: u8,
+        disp: i64,
+    },
+    Imm {
+        val: u64,
+        size: u8,
+    },
+    Xmm {
+        idx: u8,
+    },
     Target(u64),
 }
 
 impl Operand {
     pub fn size(&self) -> u8 {
         match self {
-            Operand::Reg { size, .. }
-            | Operand::Mem { size, .. }
-            | Operand::Imm { size, .. } => *size,
+            Operand::Reg { size, .. } | Operand::Mem { size, .. } | Operand::Imm { size, .. } => {
+                *size
+            }
             _ => 8,
         }
     }
@@ -222,7 +293,9 @@ impl Default for Memory {
 
 impl Memory {
     pub fn new() -> Self {
-        Memory { pages: HashMap::new() }
+        Memory {
+            pages: HashMap::new(),
+        }
     }
 
     pub fn seed(&mut self, addr: u64, data: &[u8]) {
@@ -287,8 +360,8 @@ pub struct Flags {
 }
 
 pub const REG_NAMES: [&str; 16] = [
-    "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "r8", "r9", "r10",
-    "r11", "r12", "r13", "r14", "r15",
+    "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "r8", "r9", "r10", "r11", "r12", "r13",
+    "r14", "r15",
 ];
 
 fn size_mask(size: u8) -> u64 {
@@ -326,7 +399,7 @@ fn sext128(v: u64, size: u8) -> i128 {
 }
 
 fn parity(v: u64) -> bool {
-    (v & 0xff).count_ones() % 2 == 0
+    (v & 0xff).count_ones().is_multiple_of(2)
 }
 
 pub struct Vm {
@@ -357,15 +430,19 @@ impl Vm {
     // -- operand helpers ---------------------------------------------------
     fn ea(&self, o: &Operand) -> u64 {
         match o {
-            Operand::Mem { base, index, scale, disp, .. } => {
+            Operand::Mem {
+                base,
+                index,
+                scale,
+                disp,
+                ..
+            } => {
                 let mut a = *disp as u64;
                 if *base != 0xff {
                     a = a.wrapping_add(self.gpr[*base as usize]);
                 }
                 if *index != 0xff {
-                    a = a.wrapping_add(
-                        self.gpr[*index as usize].wrapping_mul(*scale as u64),
-                    );
+                    a = a.wrapping_add(self.gpr[*index as usize].wrapping_mul(*scale as u64));
                 }
                 a
             }
@@ -389,9 +466,7 @@ impl Vm {
                 reg_write(&mut self.gpr, *idx as usize, *size, v);
                 Ok(())
             }
-            Operand::Mem { size, .. } => {
-                self.mem.write_uint(self.ea(o), *size as usize, v)
-            }
+            Operand::Mem { size, .. } => self.mem.write_uint(self.ea(o), *size as usize, v),
             _ => Err(VmError::BadOperand("write")),
         }
     }
@@ -680,8 +755,8 @@ impl Vm {
                 self.write_wide(&o[0], len, v)?;
                 self.rip = next;
             }
-            SSE_PADDD | SSE_PSUBD | SSE_PAND | SSE_POR | SSE_PXOR | SSE_PMULLD
-            | SSE_PMULLW | SSE_PCMPEQD => {
+            SSE_PADDD | SSE_PSUBD | SSE_PAND | SSE_POR | SSE_PXOR | SSE_PMULLD | SSE_PMULLW
+            | SSE_PCMPEQD => {
                 let a = self.read_xmm(&o[0])?;
                 let b = self.read_xmm(&o[1])?;
                 let mut r = [0u8; 16];
@@ -771,14 +846,14 @@ impl Vm {
                 match insn.extra {
                     0 => {
                         // pmovzxbd: 4 bytes -> 4 dwords
-                        for i in 0..4 {
-                            wr32(&mut r, i, a[i] as u32);
+                        for (i, &byte) in a.iter().take(4).enumerate() {
+                            wr32(&mut r, i, byte as u32);
                         }
                     }
                     1 => {
                         // pmovzxbw: 8 bytes -> 8 words
-                        for i in 0..8 {
-                            wr16(&mut r, i, a[i] as u16);
+                        for (i, &byte) in a.iter().take(8).enumerate() {
+                            wr16(&mut r, i, byte as u16);
                         }
                     }
                     _ => {
@@ -828,8 +903,8 @@ impl Vm {
                 let mut r = [0u8; 16];
                 // PACKUSWB saturates eight words from each source, not four:
                 // it is the byte-wide pack, so both halves fill all 16 bytes.
-                for i in 0..8 {
-                    r[i] = sat_u8(rd16(&a, i) as i16);
+                for (i, slot) in r.iter_mut().take(8).enumerate() {
+                    *slot = sat_u8(rd16(&a, i) as i16);
                 }
                 for i in 0..8 {
                     r[8 + i] = sat_u8(rd16(&b, i) as i16);
@@ -931,8 +1006,7 @@ impl Vm {
             1 => {
                 let a = self.gpr[RAX] & 0xff;
                 if signed {
-                    let p = (a as u8 as i8 as i16)
-                        .wrapping_mul(src as u8 as i8 as i16);
+                    let p = (a as u8 as i8 as i16).wrapping_mul(src as u8 as i8 as i16);
                     let u = p as u16 as u64;
                     self.gpr[RAX] = (self.gpr[RAX] & !0xffff) | u;
                     let cf = p != (u & 0xff) as u8 as i8 as i16;
@@ -1017,8 +1091,7 @@ impl Vm {
                     let d = src as u16;
                     ((a / d) as i32, (a % d) as i32)
                 };
-                let packed =
-                    ((q as u16 & 0xff) as u64) | (((r as u16 & 0xff) as u64) << 8);
+                let packed = ((q as u16 & 0xff) as u64) | (((r as u16 & 0xff) as u64) << 8);
                 self.gpr[RAX] = (self.gpr[RAX] & !0xffff) | packed;
             }
             2 => {
@@ -1039,8 +1112,7 @@ impl Vm {
                 }
             }
             4 => {
-                let a = ((self.gpr[RDX] & 0xffff_ffff) << 32)
-                    | (self.gpr[RAX] & 0xffff_ffff);
+                let a = ((self.gpr[RDX] & 0xffff_ffff) << 32) | (self.gpr[RAX] & 0xffff_ffff);
                 if signed {
                     let n = a as i64;
                     let d = src as u32 as i32 as i64;
@@ -1105,32 +1177,30 @@ impl Vm {
                 self.flags.of = ((dst >> (bits - 1)) & 1) != 0;
             }
             SAR => {
-                let s = sext128(dst, size) as i128;
+                let s = sext128(dst, size);
                 res = ((s >> cnt) as u64) & mask;
                 self.flags.cf = ((dst >> (cnt - 1)) & 1) != 0;
                 self.flags.of = false;
             }
             ROL => {
-                let c = (cnt as u32) % bits;
+                let c = cnt % bits;
                 res = if c == 0 {
                     dst
                 } else {
                     ((dst << c) | (dst >> (bits - c))) & mask
                 };
                 self.flags.cf = (res & 1) != 0;
-                self.flags.of =
-                    ((res >> (bits - 1)) & 1) != self.flags.cf as u64;
+                self.flags.of = ((res >> (bits - 1)) & 1) != self.flags.cf as u64;
             }
             ROR => {
-                let c = (cnt as u32) % bits;
+                let c = cnt % bits;
                 res = if c == 0 {
                     dst
                 } else {
                     ((dst >> c) | (dst << (bits - c))) & mask
                 };
                 self.flags.cf = ((res >> (bits - 1)) & 1) != 0;
-                self.flags.of = ((res >> (bits - 1)) & 1)
-                    != ((res >> (bits - 2)) & 1);
+                self.flags.of = ((res >> (bits - 1)) & 1) != ((res >> (bits - 2)) & 1);
             }
             _ => unreachable!(),
         }
@@ -1159,13 +1229,11 @@ impl Vm {
         if op == SHLD {
             res = ((dst << cnt) | (src >> (bits - cnt))) & mask;
             self.flags.cf = ((dst >> (bits - cnt)) & 1) != 0;
-            self.flags.of = ((dst >> (bits - 1)) & 1)
-                != ((res >> (bits - 1)) & 1);
+            self.flags.of = ((dst >> (bits - 1)) & 1) != ((res >> (bits - 1)) & 1);
         } else {
             res = ((dst >> cnt) | (src << (bits - cnt))) & mask;
             self.flags.cf = ((dst >> (cnt - 1)) & 1) != 0;
-            self.flags.of = ((dst >> (bits - 1)) & 1)
-                != ((res >> (bits - 1)) & 1);
+            self.flags.of = ((dst >> (bits - 1)) & 1) != ((res >> (bits - 1)) & 1);
         }
         self.set_szp(res, size);
         self.write_op(dst_o, res)?;
@@ -1284,7 +1352,13 @@ impl Program {
                 .ok_or_else(|| VmError::BadProgram(format!("module {module}")))?;
             insns.insert(
                 bias.wrapping_add(rva),
-                Insn { op, extra, ilen, ops, nops },
+                Insn {
+                    op,
+                    extra,
+                    ilen,
+                    ops,
+                    nops,
+                },
             );
         }
         Ok(Program { insns, modules })
@@ -1343,7 +1417,10 @@ impl<'a> Cursor<'a> {
         let tag = self.u8()?;
         Ok(match tag {
             OP_NONE => Operand::None,
-            OP_REG => Operand::Reg { idx: self.u8()?, size: self.u8()? },
+            OP_REG => Operand::Reg {
+                idx: self.u8()?,
+                size: self.u8()?,
+            },
             OP_MEM => Operand::Mem {
                 base: self.u8()?,
                 index: self.u8()?,
@@ -1351,12 +1428,13 @@ impl<'a> Cursor<'a> {
                 size: self.u8()?,
                 disp: self.i64()?,
             },
-            OP_IMM => Operand::Imm { val: self.u64()?, size: self.u8()? },
+            OP_IMM => Operand::Imm {
+                val: self.u64()?,
+                size: self.u8()?,
+            },
             OP_XMM => Operand::Xmm { idx: self.u8()? },
             OP_TARGET => Operand::Target(self.u64()?),
-            other => {
-                return Err(VmError::BadProgram(format!("operand tag {other}")))
-            }
+            other => return Err(VmError::BadProgram(format!("operand tag {other}"))),
         })
     }
 }
@@ -1444,14 +1522,21 @@ impl CaseBundle {
                 *v = c.u64()?;
             }
             let xmm = read_xmm_block(&mut c)?;
-            stubs.push(Stub { rec_call, rec_ret, ret, push, gpr, xmm });
+            stubs.push(Stub {
+                rec_call,
+                rec_ret,
+                ret,
+                push,
+                gpr,
+                xmm,
+            });
         }
         let mut mem = Vec::new();
         if ver >= 3 {
             let nmem = c.u32()? as usize;
             mem.reserve(nmem);
             for _ in 0..nmem {
-                                mem.push(MemDelta {
+                mem.push(MemDelta {
                     rec_call: c.u64()?,
                     rec_ret: c.u64()?,
                     addr: c.u64()?,
@@ -1528,16 +1613,19 @@ impl TraceReader {
         let ip = u64::from_le_bytes(buf[0..8].try_into().unwrap());
         let mut gpr = [0u64; 16];
         for (i, v) in gpr.iter_mut().enumerate() {
-            *v = u64::from_le_bytes(
-                buf[8 + 8 * i..16 + 8 * i].try_into().unwrap(),
-            );
+            *v = u64::from_le_bytes(buf[8 + 8 * i..16 + 8 * i].try_into().unwrap());
         }
         let mut xmm = [[0u8; 16]; 16];
         let base = TREC + XMM_OFF;
         for (i, x) in xmm.iter_mut().enumerate() {
             x.copy_from_slice(&buf[base + 16 * i..base + 16 * i + 16]);
         }
-        Ok(Some(TraceRec { ip, gpr, xmm, kind: buf[148] }))
+        Ok(Some(TraceRec {
+            ip,
+            gpr,
+            xmm,
+            kind: buf[148],
+        }))
     }
 }
 
@@ -1619,29 +1707,25 @@ pub fn run_verified(
     let mut i = 0u64;
     let mut stub_at = 0usize;
     let mut history: VecDeque<String> = VecDeque::with_capacity(12);
-    trace.seek_rec(0).map_err(|e| Box::new(fail(0, vm, 0, Some(e.to_string()))))?;
+    trace
+        .seek_rec(0)
+        .map_err(|e| Box::new(fail(0, vm, 0, Some(e.to_string()))))?;
 
     while i <= stop {
         let rec = match trace.next_record() {
             Ok(Some(r)) => r,
-            Ok(None) => {
-                return Err(Box::new(fail(i, vm, 0, Some("trace ended".into()))))
-            }
-            Err(e) => {
-                return Err(Box::new(fail(i, vm, 0, Some(e.to_string()))))
-            }
+            Ok(None) => return Err(Box::new(fail(i, vm, 0, Some("trace ended".into())))),
+            Err(e) => return Err(Box::new(fail(i, vm, 0, Some(e.to_string())))),
         };
         stats.records += 1;
-        if let Err((_ip_ok, reg_diffs, xmm_diffs)) =
-            compare(vm, &rec, opt.verify_xmm)
-        {
+        if let Err((_ip_ok, reg_diffs, xmm_diffs)) = compare(vm, &rec, opt.verify_xmm) {
             let mut mm = fail(i, vm, rec.ip, None);
             mm.reg_diffs = reg_diffs;
             mm.xmm_diffs = xmm_diffs;
             mm.last = history.iter().cloned().collect();
             return Err(Box::new(mm));
         }
-        if !opt.quiet && opt.progress_every > 0 && i % opt.progress_every == 0 {
+        if !opt.quiet && opt.progress_every > 0 && i.is_multiple_of(opt.progress_every) {
             eprintln!(
                 "  rec {}/{} ip {} grip {:#x}",
                 i,
@@ -1794,6 +1878,9 @@ pub fn otp(vm: &Vm, bundle: &CaseBundle) -> Result<Vec<u8>, VmError> {
     let mut out = vec![0u8; bundle.otp.len()];
     vm.mem
         .read_bytes(bundle.otp_addr, &mut out)
-        .map_err(|addr| VmError::Read { addr, len: out.len() })?;
+        .map_err(|addr| VmError::Read {
+            addr,
+            len: out.len(),
+        })?;
     Ok(out)
 }
