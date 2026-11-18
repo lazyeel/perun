@@ -93,6 +93,52 @@ impl CpimLayout {
         })
     }
 
+    /// The SPIM offset of the serialized Body B section.
+    ///
+    /// Measured across the local corpus: `SPIM[264..268]` is the Body B
+    /// length (52), `SPIM[268..272]` its version word, and `SPIM[272..324)`
+    /// its 52 bytes. The first 264 bytes are the server-issued prefix.
+    pub const SPIM_BODY_B_OFFSET: usize = 264;
+
+    /// Body B length in both the SPIM tail and the CPIM container.
+    pub const BODY_B_LEN: usize = 52;
+
+    /// Assemble a CPIM around the SPIM the session started from.
+    ///
+    /// `session`, `body_a` and `body_a_digest` are the Rust End fold's
+    /// outputs. The Body B section is taken verbatim from the SPIM tail:
+    /// across every local SPIM/CPIM pair (different identities, sessions
+    /// and ASLR layouts) `CPIM[0xd8..0x114] == SPIM[264..324]` held without
+    /// exception, so it is an input of the pair, not an End-derived value.
+    /// Passing a different Body B would break the native reader.
+    pub fn from_spim_tail(
+        spim: &[u8],
+        session: [u8; 16],
+        body_a: [u8; 160],
+        body_a_digest: [u8; 32],
+    ) -> Result<Self, String> {
+        if spim.len() != 347 {
+            return Err(format!("SPIM must be 347 bytes, got {}", spim.len()));
+        }
+        let tail = &spim[Self::SPIM_BODY_B_OFFSET..];
+        let body_b_len = u32::from_be_bytes([tail[0], tail[1], tail[2], tail[3]]);
+        let body_b_version = u32::from_be_bytes([tail[4], tail[5], tail[6], tail[7]]);
+        if body_b_len as usize != Self::BODY_B_LEN {
+            return Err(format!(
+                "SPIM Body B length {body_b_len:#x} differs from {:#x}",
+                Self::BODY_B_LEN
+            ));
+        }
+        Ok(Self {
+            version: 5,
+            session,
+            body_a: body_a.to_vec(),
+            body_a_digest: body_a_digest.to_vec(),
+            body_b: tail[8..8 + Self::BODY_B_LEN].to_vec(),
+            body_b_version,
+        })
+    }
+
     /// Serialize the layout back -- the generator's output shape.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -112,6 +158,53 @@ impl CpimLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The SPIM tail is copied into the CPIM verbatim: build the layout
+    /// from synthetic sections, splice the SPIM tail, and read it back.
+    #[test]
+    fn spim_tail_splices_body_b() {
+        let mut spim = vec![0u8; 347];
+        for (index, byte) in spim.iter_mut().enumerate() {
+            *byte = (index as u8).wrapping_mul(29).wrapping_add(7);
+        }
+        spim[264..268].copy_from_slice(&(CpimLayout::BODY_B_LEN as u32).to_be_bytes());
+        spim[268..272].copy_from_slice(&4u32.to_be_bytes());
+
+        let body_b = &spim[CpimLayout::SPIM_BODY_B_OFFSET + 8
+            ..CpimLayout::SPIM_BODY_B_OFFSET + 8 + CpimLayout::BODY_B_LEN];
+        let layout =
+            CpimLayout::from_spim_tail(&spim, [0x22; 16], [0x33; 160], [0x44; 32]).expect("valid");
+        assert_eq!(layout.body_b, body_b);
+        assert_eq!(layout.body_b_version, 4);
+        assert_eq!(layout.version, 5);
+
+        let encoded = layout.to_bytes();
+        assert_eq!(encoded.len(), CpimLayout::REFERENCE_LEN);
+        assert_eq!(
+            &encoded[0xd8..0xdc],
+            &(CpimLayout::BODY_B_LEN as u32).to_be_bytes()
+        );
+        assert_eq!(&encoded[0xdc..0xe0], &4u32.to_be_bytes());
+        assert_eq!(&encoded[0xe0..0x114], body_b);
+        assert_eq!(CpimLayout::parse(&encoded).unwrap(), layout);
+    }
+
+    #[test]
+    fn spim_tail_rejects_a_wrong_length_or_declared_body_b() {
+        let spim = [0u8; 347];
+        assert!(
+            CpimLayout::from_spim_tail(&spim[..346], [0; 16], [0; 160], [0; 32]).is_err(),
+            "a short SPIM has no Body B tail"
+        );
+
+        let mut wrong = [0u8; 347];
+        wrong[264..268].copy_from_slice(&51u32.to_be_bytes());
+        assert!(
+            CpimLayout::from_spim_tail(&wrong, [0; 16], [0; 160], [0; 32])
+                .unwrap_err()
+                .contains("Body B length")
+        );
+    }
 
     /// The reference cold-canon dump: parse, round-trip, pin every
     /// section length. The bytes travel as an env-gated path (the

@@ -5930,3 +5930,90 @@ store/load path including truncation of a longer pre-existing file.
 The private artifacts for this entry live under the rig's `cases/tb-*` directories
 (0700), with raw state bodies, CPIM/ptm/tk and dumps kept local. Only sizes, hashes,
 RVAs, opcodes and counters are reproduced here.
+
+### 2026-11-18 — Track C begins: the SPIM tail is CPIM Body B, and `session16` is decided by the 32-bit session
+
+Track C was opened with the cheapest measurable questions rather than with the
+planter lift: which CPIM sections are already present in the Start input, and
+which inputs actually move them. The local corpus is 23 SPIM/CPIM pairs across
+15 case directories (five distinct sessions, several identities, ASLR on and
+off), so a relation either holds on all of them or it is not a relation yet.
+
+#### Body B is an input, not an End output
+
+Byte comparison of every pair shows
+
+```text
+CPIM[0xd8..0x114] == SPIM[264..324]     23/23
+```
+
+with no transformation: `SPIM[264..268]` is the Body B length `0x00000034`
+(52), `SPIM[268..272]` is its version word (4 in the measured lane), and the
+following 52 bytes are the body itself. The same equality holds for the
+fixed-base and ASLR runs, for every identity, and for every session. Consequently
+`CpimLayout::from_spim_tail` now splices that region from the SPIM instead of
+accepting a caller-supplied Body B; the only End-derived inputs it still takes
+are `session`, `body_a` and `body_a_digest`. This closes boundary (e) of the six
+listed in the campaign plan: Body B does not need a producer in the Rust fold,
+it needs a byte-exact SPIM reader.
+
+The 264-byte prefix is the server-issued part. Nothing in the local corpus shows
+the native engine modifying it before the SPIM reaches Start, and the CPIM does
+not copy it, so it stays opaque input.
+
+#### Body A's first 64 bytes are not identity material
+
+Comparing CPIM Body A across identities and sessions at fixed SPIM:
+
+| pair | shared Body-A bytes | regions |
+|---|---:|---|
+| `tb-id1` vs `tb-id4` (same SPIM, same sessionaffe) | 65/160 | `[0..64]`, plus byte 64 |
+| `tb-id4` vs `uC1` (same SPIM, same session) | 64/160 | `[0..64]` |
+| `uC1` vs `uC2tab` (same identity, different SPIM) | 0/160 | none |
+
+So `BodyA[0..64]` is a function of the Start input/session, not of the identity;
+the region that moves with the identity starts at offset 64, not at the beginning
+of the body. An earlier reading of the three `tb-id*` dumps suggested that the
+whole 96-byte remainder was identity-determined: the two same-SPIM identities
+differ in `[64..160]`, but `uC1`/`uC2` show that a different SPIM moves every
+Body-A byte, so SPIM is an input to that region too. The honest statement is the
+conditional one: at fixed SPIM and session, the identity selects `[64..160]`.
+
+#### `session16` is a function of the 32-bit session alone
+
+Across the corpus, `session16` is constant whenever the 32-bit `session` value
+returned by Start is constant, even when the SPIM, the identity reflecting it and
+the ASLR layout all differ:
+
+| session (dec) | session (hex) | `session16` | SPIM(s) sharing it |
+|---:|---|---|---|
+| 553740486 | `0x210168c6` | `6c6a9ee628cf853ddf792f53032646ac` | 8 distinct |
+| 2123333095 | `0x7e8f7de7` | `0ea1de22ceb4b1b040e9c64d95c69d63` | 1 |
+| 4256028080 | `0xfdadd5b0` | `b83289a286987bfd40bd36484aa94abe` | 1 |
+| 481991086 | `0x1cba99ae` | `d0b53b0215b0b26250adc6ab534ab597` | 1 |
+| 1092198700 | `0x4119a12c` | `221c9fc57dcf79847baca5bfbceb0c1d` | 1 |
+
+No plain standard hash of the session word, of the SPIM, of its 16-byte zone,
+or of the identity reproduces the block (MD5/SHA-1/SHA-256/SHA-3/BLAKE2s,
+both endiannesses, single and concatenated parts). The block is also absent
+from the state file and from the 347-byte SPIM. That is consistent with the
+measured shape: a 16-byte value produced inside Start alongside the CPIM and
+the 32-bit handle, not a serialization of either. It stays a Track C producer
+boundary -- `generate_cpim` can splice it but cannot yet derive it.
+
+#### What this changes in the plan
+
+The six Track C boundaries shrink by one: Body B is closed by the SPIM splice.
+The remaining implementation order is now:
+
+1. `session16` producer inside Start (the correlation above is the test oracle:
+   fixed session handle -> fixed 16-byte block, independent of identity/ASLR);
+2. the Body-A region `[64..160]` (identity and SPIM both enter; fixed-SPIM
+   differentials isolate the identity input);
+3. the digest words (still the only CPIM section with no candidate producer);
+4. planter genesis / WeaveFeeds / mixer-14, then the SPIM-only CPIM assembly.
+
+The new `CpimLayout::from_spim_tail` test is synthetic: it pins the copy
+relationship and the declared length, and deliberately does not pretend to
+derive Body B from anything other than the SPIM bytes. The corpus check above
+is the measured part and stays local under the privacy rule.
