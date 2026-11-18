@@ -45,15 +45,17 @@ pub const BODY_A_ROUNDS: usize = 10;
 /// One M14 post-tail byte per round is carried from the same-session giant tape.
 pub const BODY_A_M14_TAPE_RESULTS: usize = BODY_A_ROUNDS;
 
-pub const STORES: [u32; 16] = [0xE6B9D, 0xE6BE2, 0xE6C47, 0xE6CA0, 0xE6D06, 0xE6D3E,
-                               0xE6D8B, 0xE6DC1, 0xE6E28, 0xE6E5F, 0xE6EAA, 0xE6EE4,
-                               0xE6F42, 0xE6F73, 0xE6FC4, 0xE7023];
+pub const STORES: [u32; 16] = [
+    0xE6B9D, 0xE6BE2, 0xE6C47, 0xE6CA0, 0xE6D06, 0xE6D3E, 0xE6D8B, 0xE6DC1, 0xE6E28, 0xE6E5F,
+    0xE6EAA, 0xE6EE4, 0xE6F42, 0xE6F73, 0xE6FC4, 0xE7023,
+];
 
 /// Per-mixer (lane, final_xor). The planter xors are already folded
 /// into the measured lane values; the final xors are the tails' own.
 pub const LANE_OF: [u8; 16] = [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
-pub const FINAL_XOR: [u8; 16] = [0x98, 0xB8, 0x5F, 0x6D, 0x85, 0x64, 0x54, 0x17,
-                                  0x65, 0x7C, 0xE2, 0x12, 0x4E, 0xF2, 0x70, 0xBD];
+pub const FINAL_XOR: [u8; 16] = [
+    0x98, 0xB8, 0x5F, 0x6D, 0x85, 0x64, 0x54, 0x17, 0x65, 0x7C, 0xE2, 0x12, 0x4E, 0xF2, 0x70, 0xBD,
+];
 
 /// The position ladder: cycle k, mixer j -> depot[ROW_POS[j] + 0x10*(k-1)].
 pub const ROW_POS: [usize; 16] = [3, 2, 1, 0, 7, 6, 5, 4, 0xB, 0xA, 9, 8, 0xF, 0xE, 0xD, 0xC];
@@ -98,14 +100,25 @@ impl Zones {
         };
         // c1 defaults to the old baked-in alignment until the test
         // feeds the session's own first lane values.
-        Ok(Self { a: read("fam1_zone.bin", BAKED_A), b: read("fam2_zone.bin", BAKED_B),
-                  c: read("fam3_zone.bin", BAKED_C), d: read("fam4_zone.bin", BAKED_D),
-                  c1a: 0x90, c1b: 0x52, c1c: 0xB0, c1d: 0x37 })
+        Ok(Self {
+            a: read("fam1_zone.bin", BAKED_A),
+            b: read("fam2_zone.bin", BAKED_B),
+            c: read("fam3_zone.bin", BAKED_C),
+            d: read("fam4_zone.bin", BAKED_D),
+            c1a: 0x90,
+            c1b: 0x52,
+            c1c: 0xB0,
+            c1d: 0x37,
+        })
     }
 
     fn read_at(z: &[u8; ZONE_WINDOW], v: u8, c1: u8) -> Option<u8> {
         let idx = v as i32 - c1 as i32 + 0x100;
-        if (0..ZONE_WINDOW as i32).contains(&idx) { Some(z[idx as usize]) } else { None }
+        if (0..ZONE_WINDOW as i32).contains(&idx) {
+            Some(z[idx as usize])
+        } else {
+            None
+        }
     }
 }
 
@@ -121,14 +134,17 @@ pub fn mixer_byte(mixer: usize, inp: &MixerInputs, zones: &Zones) -> Option<u8> 
     let fx = FINAL_XOR[mixer];
     let v = inp.lane_value;
     match lane {
-        0 => Zones::read_at(&zones.a, v, zones.c1a)
-            .map(|r| inp.mul.wrapping_add(r) ^ fx),
-        1 => Zones::read_at(&zones.b, v, zones.c1b)
-            .map(|r| inp.mul.wrapping_add(r) ^ fx),
-        2 => Zones::read_at(&zones.c, v, zones.c1c)
-            .map(|read| (read.wrapping_sub(v | 0x35)) ^ ((read.wrapping_sub(v | 0x15)).wrapping_shl(3)) ^ fx),
+        0 => Zones::read_at(&zones.a, v, zones.c1a).map(|r| inp.mul.wrapping_add(r) ^ fx),
+        1 => Zones::read_at(&zones.b, v, zones.c1b).map(|r| inp.mul.wrapping_add(r) ^ fx),
+        2 => Zones::read_at(&zones.c, v, zones.c1c).map(|read| {
+            (read.wrapping_sub(v | 0x35)) ^ ((read.wrapping_sub(v | 0x15)).wrapping_shl(3)) ^ fx
+        }),
         _ => Zones::read_at(&zones.d, v, zones.c1d).map(|read| {
-            if mixer == 3 { nibble_tail(read, v, fx) } else { read.wrapping_sub(v | 0xA2) ^ fx }
+            if mixer == 3 {
+                nibble_tail(read, v, fx)
+            } else {
+                read.wrapping_sub(v | 0xA2) ^ fx
+            }
         }),
     }
 }
@@ -154,7 +170,6 @@ pub fn generate_body_a(rounds: &[[MixerInputs; 16]; 10], zones: &Zones) -> [u8; 
     }
     body
 }
-
 
 // ---------------------------------------------------------------------------
 // THE SELECTOR WEAVE (verified live, runs 33/34: 16 formulas x 11/11 cycles).
@@ -186,33 +201,39 @@ pub const C_C: u32 = 0x09A9202F;
 /// live registers/slots they were taped on.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WeaveFeeds {
-    pub rbx: u32,   // the round key
+    pub rbx: u32,    // the round key
     pub r15_in: u32, // r15d at the m4 hit (cascade A's product input)
-    pub f8: u32,    // [rbp-0xf8]
-    pub r10d: u32,  // cascade A's xor feed
+    pub f8: u32,     // [rbp-0xf8]
+    pub r10d: u32,   // cascade A's xor feed
     pub eax_in: u32, // eax at the m8 hit (cascade B's product input, +0x08801806)
-    pub r8d: u32,   // cascade B's multiplier
-    pub r12d: u32,  // cascade B's xor feed
-    pub r9d: u32,   // cascade C's pre-xor input
-    pub f78: u32,   // [rbp-0x78]
-    pub r13d: u32,  // cascade C's multiplier
-    pub f148: u32,  // cascade C's xor feed
+    pub r8d: u32,    // cascade B's multiplier
+    pub r12d: u32,   // cascade B's xor feed
+    pub r9d: u32,    // cascade C's pre-xor input
+    pub f78: u32,    // [rbp-0x78]
+    pub r13d: u32,   // cascade C's multiplier
+    pub f148: u32,   // cascade C's xor feed
 }
 
 impl WeaveFeeds {
     /// The three cascade words, in measured order A, B, C.
     pub fn cascade_words(&self) -> [u32; 3] {
         let a = term_mask(
-            self.r15_in.wrapping_mul(self.f8), A_K, A_C,
+            self.r15_in.wrapping_mul(self.f8),
+            A_K,
+            A_C,
             self.r10d ^ A_R_XOR,
         );
         let b = term_mask(
             self.eax_in.wrapping_add(B_MUL_ADD).wrapping_mul(self.r8d),
-            B_K, B_C, self.r12d,
+            B_K,
+            B_C,
+            self.r12d,
         );
         let c = term_mask(
             (self.r9d ^ self.f78 ^ C_PRE_XOR).wrapping_mul(self.r13d),
-            C_K, C_C, self.f148,
+            C_K,
+            C_C,
+            self.f148,
         );
         [a, b, c]
     }
@@ -243,7 +264,6 @@ pub fn selectors(f: &WeaveFeeds, planter_1390: &[u8; 256]) -> [u8; 16] {
     ]
 }
 
-
 // ---------------------------------------------------------------------------
 // THE TAPE ASSEMBLERS: the one-session depot zone, built from the
 // capture tapes (giant + planter + word watchpoints). These are the
@@ -258,7 +278,8 @@ pub fn selectors(f: &WeaveFeeds, planter_1390: &[u8; 256]) -> [u8; 16] {
 /// post-tail output is read from tape directly, not recomputed here.
 pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String> {
     let mut zones = Zones::from_files(dir)?;
-    let tape = std::fs::read_to_string(format!("{dir}/zone26_tape.txt")).map_err(|e| e.to_string())?;
+    let tape =
+        std::fs::read_to_string(format!("{dir}/zone26_tape.txt")).map_err(|e| e.to_string())?;
     let sel_txt = std::fs::read_to_string(format!("{dir}/sel34_tape.txt")).ok();
 
     // the session's first lane values (rcx for fam1/2, rdx fam3, rax fam4)
@@ -268,7 +289,9 @@ pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String
         for line in tape.lines() {
             let mut d = std::collections::HashMap::new();
             for f in line.split_whitespace() {
-                if let Some((k, v)) = f.split_once('=') { d.insert(k.to_string(), v.to_string()); }
+                if let Some((k, v)) = f.split_once('=') {
+                    d.insert(k.to_string(), v.to_string());
+                }
             }
             let Some(s) = d.get("store") else { continue };
             let sv = s.trim_start_matches("0x");
@@ -280,13 +303,22 @@ pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String
                 _ => 99,
             };
             if ci < 4 {
-                let key = match ci { 2 => "dl", 3 => "al", _ => "cl" };
+                let key = match ci {
+                    2 => "dl",
+                    3 => "al",
+                    _ => "cl",
+                };
                 got[ci] = u8::from_str_radix(d[key].trim_start_matches("0x"), 16).unwrap_or(0);
                 have[ci] = true;
             }
         }
-        if !have.iter().all(|&h| h) { return Err("the tape lacks a family first hit".into()); }
-        zones.c1a = got[0]; zones.c1b = got[1]; zones.c1c = got[2]; zones.c1d = got[3];
+        if !have.iter().all(|&h| h) {
+            return Err("the tape lacks a family first hit".into());
+        }
+        zones.c1a = got[0];
+        zones.c1b = got[1];
+        zones.c1c = got[2];
+        zones.c1d = got[3];
     }
 
     // the giant tape rows
@@ -297,11 +329,17 @@ pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String
         let _n = fields.next();
         let mut d = std::collections::HashMap::new();
         for f in fields {
-            if let Some((k, v)) = f.split_once('=') { d.insert(k.to_string(), v.to_string()); }
+            if let Some((k, v)) = f.split_once('=') {
+                d.insert(k.to_string(), v.to_string());
+            }
         }
         let store = u32::from_str_radix(d["store"].trim_start_matches("0x"), 16).unwrap_or(0);
-        if store == STORES[0] && !cur.is_empty() { rounds_raw.push(std::mem::take(&mut cur)); }
-        let Some(mixer) = STORES.iter().position(|&s| s == store) else { continue };
+        if store == STORES[0] && !cur.is_empty() {
+            rounds_raw.push(std::mem::take(&mut cur));
+        }
+        let Some(mixer) = STORES.iter().position(|&s| s == store) else {
+            continue;
+        };
         let rcx = u64::from_str_radix(d["rcx"].trim_start_matches("0x"), 16).unwrap_or(0);
         let al = u8::from_str_radix(d["al"].trim_start_matches("0x"), 16).unwrap_or(0);
         let rdx = u64::from_str_radix(d["rdx"].trim_start_matches("0x"), 16).unwrap_or(0);
@@ -317,10 +355,21 @@ pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String
             _ => rax as u8,
         };
         // m12's breakpoint catches rax BEFORE the s-box xor: c12 ^ 0xDD.
-        if mixer == 11 { lane_value ^= 0xDD; }
-        cur.push((mixer, MixerInputs { lane_value, mul: al, m4_round1: false }));
+        if mixer == 11 {
+            lane_value ^= 0xDD;
+        }
+        cur.push((
+            mixer,
+            MixerInputs {
+                lane_value,
+                mul: al,
+                m4_round1: false,
+            },
+        ));
     }
-    if !cur.is_empty() { rounds_raw.push(cur); }
+    if !cur.is_empty() {
+        rounds_raw.push(cur);
+    }
 
     // the sel-tape backfill (m12 rows without hits, the m4 first round)
     if let Some(st) = sel_txt {
@@ -331,29 +380,62 @@ pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String
             let mut sel = 0u8;
             for f in line.split_whitespace() {
                 if let Some((k, v)) = f.split_once('=') {
-                    if k == "store" { is_m1 = v.trim_start_matches("0x") == "e6b9d"; }
-                    if k == "sel" { sel = u8::from_str_radix(v, 16).unwrap_or(0); }
+                    if k == "store" {
+                        is_m1 = v.trim_start_matches("0x") == "e6b9d";
+                    }
+                    if k == "sel" {
+                        sel = u8::from_str_radix(v, 16).unwrap_or(0);
+                    }
                 }
             }
-            if is_m1 && !srow.is_empty() { sel_rounds.push(std::mem::take(&mut srow)); }
+            if is_m1 && !srow.is_empty() {
+                sel_rounds.push(std::mem::take(&mut srow));
+            }
             srow.push(sel);
         }
-        if !srow.is_empty() { sel_rounds.push(srow); }
+        if !srow.is_empty() {
+            sel_rounds.push(srow);
+        }
         for (k, rnd) in rounds_raw.iter_mut().enumerate() {
-            let Some(sr) = sel_rounds.get(k) else { continue };
-            if sr.len() < 16 { continue; }
+            let Some(sr) = sel_rounds.get(k) else {
+                continue;
+            };
+            if sr.len() < 16 {
+                continue;
+            }
             if !rnd.iter().any(|(j, _)| *j == 11) {
-                rnd.push((11, MixerInputs { lane_value: sr[11], mul: 0, m4_round1: false }));
+                rnd.push((
+                    11,
+                    MixerInputs {
+                        lane_value: sr[11],
+                        mul: 0,
+                        m4_round1: false,
+                    },
+                ));
             }
             if !rnd.iter().any(|(j, _)| *j == 3) {
-                rnd.push((3, MixerInputs { lane_value: sr[3], mul: 0, m4_round1: false }));
+                rnd.push((
+                    3,
+                    MixerInputs {
+                        lane_value: sr[3],
+                        mul: 0,
+                        m4_round1: false,
+                    },
+                ));
             }
             if !rnd.iter().any(|(j, _)| *j == 14) {
                 // m15's tail takes the SELECTOR as v (the family-3 law's
                 // measured exception: the planter value passes the s-box
                 // xor 0x28 first -- disassembly 0xe6f8d), and its zone
                 // read indexes by the same selector.
-                rnd.push((14, MixerInputs { lane_value: sr[14], mul: 0, m4_round1: false }));
+                rnd.push((
+                    14,
+                    MixerInputs {
+                        lane_value: sr[14],
+                        mul: 0,
+                        m4_round1: false,
+                    },
+                ));
             }
         }
     }
@@ -365,33 +447,59 @@ pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String
     let mut written = [false; 0xA0];
     let mut body_bytes = 0usize;
     if rounds_raw.len() < 10 {
-        return Err(format!("the giant tape has only {} body-A rounds; ten are required", rounds_raw.len()));
+        return Err(format!(
+            "the giant tape has only {} body-A rounds; ten are required",
+            rounds_raw.len()
+        ));
     }
     for (k, round) in rounds_raw.iter().take(10).enumerate() {
         let mut mixer_seen = [false; 16];
         for (j, inp) in round {
-            if *j >= 16 { return Err(format!("invalid mixer index {j} in round {}", k + 1)); }
+            if *j >= 16 {
+                return Err(format!("invalid mixer index {j} in round {}", k + 1));
+            }
             if std::mem::replace(&mut mixer_seen[*j], true) {
                 return Err(format!("duplicate mixer {} in round {}", j + 1, k + 1));
             }
             let pos = ROW_POS[*j] + 0x10 * k;
             if std::mem::replace(&mut written[pos], true) {
-                return Err(format!("duplicate body-A destination {pos:#x} in round {}", k + 1));
+                return Err(format!(
+                    "duplicate body-A destination {pos:#x} in round {}",
+                    k + 1
+                ));
             }
-            let got = if *j == 13 { Some(inp.mul) } else { mixer_byte(*j, inp, &zones) };
+            let got = if *j == 13 {
+                Some(inp.mul)
+            } else {
+                mixer_byte(*j, inp, &zones)
+            };
             let Some(b) = got else {
-                return Err(format!("mixer {} round {} indexed outside its 0x300-byte zone window", j + 1, k + 1));
+                return Err(format!(
+                    "mixer {} round {} indexed outside its 0x300-byte zone window",
+                    j + 1,
+                    k + 1
+                ));
             };
             depot[pos] = b;
             body_bytes += 1;
         }
         if !mixer_seen.iter().all(|&v| v) {
-            let missing: Vec<usize> = mixer_seen.iter().enumerate().filter_map(|(j, seen)| if *seen { None } else { Some(j + 1) }).collect();
-            return Err(format!("round {} is missing mixer rows {:?}", k + 1, missing));
+            let missing: Vec<usize> = mixer_seen
+                .iter()
+                .enumerate()
+                .filter_map(|(j, seen)| if *seen { None } else { Some(j + 1) })
+                .collect();
+            return Err(format!(
+                "round {} is missing mixer rows {:?}",
+                k + 1,
+                missing
+            ));
         }
     }
     if body_bytes != 160 || !written.iter().all(|&v| v) {
-        return Err(format!("body-A coverage is {body_bytes}/160; a complete depot is required"));
+        return Err(format!(
+            "body-A coverage is {body_bytes}/160; a complete depot is required"
+        ));
     }
     // the digest zone, resolved from the word tape (all eight blocks;
     // the 0xA0 word is the prologue cascade, taped at the stores)
@@ -409,12 +517,18 @@ fn read_paired_cpim(dir: &str) -> Result<Vec<u8>, String> {
     let cpim = std::fs::read(format!("{dir}/live_prov_out.bin"))
         .map_err(|e| format!("read live CPIM: {e}"))?;
     if cpim.len() != 0x114 {
-        return Err(format!("reference CPIM must be 0x114 bytes, got {:#x}", cpim.len()));
+        return Err(format!(
+            "reference CPIM must be 0x114 bytes, got {:#x}",
+            cpim.len()
+        ));
     }
     let depot = std::fs::read(format!("{dir}/pair_depot.bin"))
         .map_err(|e| format!("read same-session pair_depot.bin: {e}"))?;
     if depot.len() < 0xC0 {
-        return Err(format!("pair_depot.bin is shorter than 0xC0 bytes: {:#x}", depot.len()));
+        return Err(format!(
+            "pair_depot.bin is shorter than 0xC0 bytes: {:#x}",
+            depot.len()
+        ));
     }
     if depot[..0xC0] != cpim[0x18..0xD8] {
         return Err("pair_depot.bin[0..0xC0] does not match live_prov_out.bin[0x18..0xD8]; refusing cross-session tape pairing".into());
@@ -430,10 +544,13 @@ fn read_paired_cpim(dir: &str) -> Result<Vec<u8>, String> {
 pub fn generate_digest_from_tapes(dir: &str) -> Result<[u8; 32], String> {
     use crate::digest::{generate_digest, DigestInputs, K_HIGH, K_LOW};
     let cpim = read_paired_cpim(dir)?;
-    let ttxt = std::fs::read_to_string(format!("{dir}/pair_wp_words.txt")).map_err(|e| e.to_string())?;
+    let ttxt =
+        std::fs::read_to_string(format!("{dir}/pair_wp_words.txt")).map_err(|e| e.to_string())?;
     let mut rows: Vec<Vec<(String, u32)>> = Vec::new();
     for line in ttxt.lines() {
-        if !line.starts_with("hit") { continue; }
+        if !line.starts_with("hit") {
+            continue;
+        }
         let mut fields = Vec::new();
         for f in line.split_whitespace() {
             if let Some((k, v)) = f.split_once('=') {
@@ -445,10 +562,14 @@ pub fn generate_digest_from_tapes(dir: &str) -> Result<[u8; 32], String> {
         rows.push(fields);
     }
     const CANON: [(usize, &str, u32); 8] = [
-        (0xA0, "RCX", K_LOW), (0xA4, "W8", K_LOW),
-        (0xA8, "W6", K_LOW), (0xAC, "W2", K_LOW),
-        (0xB0, "W1", K_HIGH), (0xB4, "W3", K_HIGH),
-        (0xB8, "W5", K_HIGH), (0xBC, "W4", K_HIGH),
+        (0xA0, "RCX", K_LOW),
+        (0xA4, "W8", K_LOW),
+        (0xA8, "W6", K_LOW),
+        (0xAC, "W2", K_LOW),
+        (0xB0, "W1", K_HIGH),
+        (0xB4, "W3", K_HIGH),
+        (0xB8, "W5", K_HIGH),
+        (0xBC, "W4", K_HIGH),
     ];
     let mut words = DigestInputs::default();
     for (block, key, k) in CANON {
@@ -486,8 +607,6 @@ fn expect_sum(cpim: &[u8], block: usize) -> u32 {
     s
 }
 
-
-
 // ---------------------------------------------------------------------------
 // CAPTURE-BACKED BODY-A REPLAY / DIAGNOSTIC INPUTS
 //
@@ -520,24 +639,36 @@ pub struct RoundOneFeeds {
 impl RoundOneFeeds {
     /// Round one's feeds, read off the planter tape's first round.
     pub fn from_sel_tape(dir: &str) -> Result<Self, String> {
-        let st = std::fs::read_to_string(format!("{dir}/sel34_tape.txt"))
-            .map_err(|e| e.to_string())?;
+        let st =
+            std::fs::read_to_string(format!("{dir}/sel34_tape.txt")).map_err(|e| e.to_string())?;
         let mut rounds: Vec<Vec<std::collections::HashMap<String, String>>> = Vec::new();
         let mut cur: Vec<std::collections::HashMap<String, String>> = Vec::new();
         for line in st.lines() {
             let mut d = std::collections::HashMap::new();
             for f in line.split_whitespace() {
-                if let Some((k, v)) = f.split_once('=') { d.insert(k.to_string(), v.to_string()); }
+                if let Some((k, v)) = f.split_once('=') {
+                    d.insert(k.to_string(), v.to_string());
+                }
             }
-            let is_m1 = d.get("store").is_some_and(|s| s.trim_start_matches("0x") == "e6b9d");
-            if is_m1 && !cur.is_empty() { rounds.push(std::mem::take(&mut cur)); }
+            let is_m1 = d
+                .get("store")
+                .is_some_and(|s| s.trim_start_matches("0x") == "e6b9d");
+            if is_m1 && !cur.is_empty() {
+                rounds.push(std::mem::take(&mut cur));
+            }
             cur.push(d);
         }
-        if !cur.is_empty() { rounds.push(cur); }
+        if !cur.is_empty() {
+            rounds.push(cur);
+        }
         let r1 = rounds.first().ok_or("no rounds on the sel tape")?;
-        if r1.len() < 16 { return Err("round one is short".into()); }
+        if r1.len() < 16 {
+            return Err("round one is short".into());
+        }
         let g = |row: usize, key: &str| -> u32 {
-            r1[row].get(key).map_or(0, |v| u32::from_str_radix(v.trim_start_matches("0x"), 16).unwrap_or(0))
+            r1[row].get(key).map_or(0, |v| {
+                u32::from_str_radix(v.trim_start_matches("0x"), 16).unwrap_or(0)
+            })
         };
         Ok(Self {
             r15_in: g(3, "r15d"),
@@ -580,13 +711,19 @@ impl OracleCaptureInputs {
         let captured_spim = std::fs::read(format!("{dir}/live_prov_in.bin"))
             .map_err(|e| format!("read captured SPIM: {e}"))?;
         if captured_spim.len() != 347 {
-            return Err(format!("captured SPIM must be 347 bytes, got {}", captured_spim.len()));
+            return Err(format!(
+                "captured SPIM must be 347 bytes, got {}",
+                captured_spim.len()
+            ));
         }
 
         let cpim = std::fs::read(format!("{dir}/live_prov_out.bin"))
             .map_err(|e| format!("read reference CPIM: {e}"))?;
         if cpim.len() != 0x114 {
-            return Err(format!("reference CPIM must be 0x114 bytes, got {:#x}", cpim.len()));
+            return Err(format!(
+                "reference CPIM must be 0x114 bytes, got {:#x}",
+                cpim.len()
+            ));
         }
 
         let (assembled_depot, body_bytes) = generate_body_from_tapes(dir)?;
@@ -621,15 +758,19 @@ impl OracleCaptureInputs {
 /// session16 and Body B came from the reference CPIM; the 192-byte depot
 /// came from a tape assembler whose digest word selection is CPIM-anchored.
 pub fn assemble_cpim_from_oracle_capture(inputs: &OracleCaptureInputs) -> [u8; 0x114] {
-    assert_eq!(inputs.captured_spim.len(), 347, "the captured SPIM is 347 bytes");
+    assert_eq!(
+        inputs.captured_spim.len(),
+        347,
+        "the captured SPIM is 347 bytes"
+    );
     let mut out = [0u8; 0x114];
-    out[0..4].copy_from_slice(&5u32.to_be_bytes());              // version: observed constant
-    out[4..0x14].copy_from_slice(&inputs.reference_session16);  // copied from reference CPIM
-    out[0x14..0x18].copy_from_slice(&0xa0u32.to_be_bytes());    // body A length: observed constant
+    out[0..4].copy_from_slice(&5u32.to_be_bytes()); // version: observed constant
+    out[4..0x14].copy_from_slice(&inputs.reference_session16); // copied from reference CPIM
+    out[0x14..0x18].copy_from_slice(&0xa0u32.to_be_bytes()); // body A length: observed constant
     out[0x18..0xb8].copy_from_slice(&inputs.assembled_depot[0..0xa0]);
     out[0xb8..0xd8].copy_from_slice(&inputs.assembled_depot[0xa0..0xc0]);
-    out[0xd8..0xdc].copy_from_slice(&0x34u32.to_be_bytes());    // body B length: observed constant
-    out[0xdc..0xe0].copy_from_slice(&4u32.to_be_bytes());       // body B version: observed constant
+    out[0xd8..0xdc].copy_from_slice(&0x34u32.to_be_bytes()); // body B length: observed constant
+    out[0xdc..0xe0].copy_from_slice(&4u32.to_be_bytes()); // body B version: observed constant
     out[0xe0..0x114].copy_from_slice(&inputs.reference_body_b); // copied from reference CPIM
     out
 }
@@ -655,9 +796,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "perun-paired-cpim-{}-{nonce}", std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("perun-paired-cpim-{}-{nonce}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temporary test directory");
         let mut cpim = vec![0u8; 0x114];
         for (i, byte) in cpim[0x18..0xD8].iter_mut().enumerate() {
@@ -667,10 +807,16 @@ mod tests {
         std::fs::write(dir.join("live_prov_out.bin"), &cpim).expect("write reference CPIM");
         std::fs::write(dir.join("pair_depot.bin"), &depot).expect("write paired depot");
         let path = dir.to_str().expect("UTF-8 temporary path");
-        assert!(read_paired_cpim(path).is_ok(), "matching pair must be accepted");
+        assert!(
+            read_paired_cpim(path).is_ok(),
+            "matching pair must be accepted"
+        );
         depot[0x7F] ^= 1;
         std::fs::write(dir.join("pair_depot.bin"), &depot).expect("write stale depot");
-        assert!(read_paired_cpim(path).is_err(), "mismatched pair must be rejected");
+        assert!(
+            read_paired_cpim(path).is_err(),
+            "mismatched pair must be rejected"
+        );
         let error = generate_digest_from_tapes(path)
             .expect_err("the production resolver must reject a mismatched CPIM/depot pair");
         assert!(
@@ -690,7 +836,9 @@ mod tests {
     #[ignore = "requires same-session zone-26 tapes and paired CPIM; set PERUN_BODY_A_PAIR_READY=1"]
     fn live_body_a_parity() {
         assert_eq!(
-            std::env::var("PERUN_BODY_A_PAIR_READY").as_deref().unwrap_or(""),
+            std::env::var("PERUN_BODY_A_PAIR_READY")
+                .as_deref()
+                .unwrap_or(""),
             "1",
             "set PERUN_BODY_A_PAIR_READY=1 only for same-session zone-26 artifacts"
         );
@@ -714,7 +862,9 @@ mod tests {
             for line in tape.lines() {
                 let mut d = std::collections::HashMap::new();
                 for f in line.split_whitespace() {
-                    if let Some((k, v)) = f.split_once('=') { d.insert(k.to_string(), v.to_string()); }
+                    if let Some((k, v)) = f.split_once('=') {
+                        d.insert(k.to_string(), v.to_string());
+                    }
                 }
                 let Some(s) = d.get("store") else { continue };
                 let sv = s.trim_start_matches("0x");
@@ -728,18 +878,24 @@ mod tests {
                 if ci < 4 {
                     // fam1/fam2 giant reads index by rcx, fam3 by rdx,
                     // and the fam4 lane by RAX -- the selector itself.
-                    let key = match ci { 2 => "dl", 3 => "al", _ => "cl" };
+                    let key = match ci {
+                        2 => "dl",
+                        3 => "al",
+                        _ => "cl",
+                    };
                     got[ci] = u8::from_str_radix(d[key].trim_start_matches("0x"), 16).unwrap_or(0);
                     have[ci] = true;
                 }
             }
-            assert!(have.iter().all(|&h| h), "the tape must carry the four family first hits");
+            assert!(
+                have.iter().all(|&h| h),
+                "the tape must carry the four family first hits"
+            );
             zones.c1a = got[0];
             zones.c1b = got[1];
             zones.c1c = got[2];
             zones.c1d = got[3];
         }
-
 
         // parse the tape into rounds, each opened at mixer 1 (m15 rows
         // are absent in round 1 -- the tape is parsed by boundaries,
@@ -762,7 +918,10 @@ mod tests {
             let al = u8::from_str_radix(d["al"].trim_start_matches("0x"), 16).unwrap();
             let rdx = u64::from_str_radix(d["rdx"].trim_start_matches("0x"), 16).unwrap();
             let rax = u64::from_str_radix(d["rax"].trim_start_matches("0x"), 16).unwrap();
-            let mixer = STORES.iter().position(|&s| s == store).expect("store in census");
+            let mixer = STORES
+                .iter()
+                .position(|&s| s == store)
+                .expect("store in census");
             let lane = LANE_OF[mixer];
             let lane_value = match lane {
                 0 | 1 => rcx as u8,
@@ -775,8 +934,19 @@ mod tests {
             // m12's giant breakpoint (0xe6ec8) catches rax BEFORE the
             // fam4 s-box xor -- the planter value c12, not the selector.
             // The fam4 lane indexes by the SELECTOR: c12 ^ 0xDD.
-            let lane_value = if mixer == 11 { lane_value ^ 0xDD } else { lane_value };
-            cur.push((mixer, MixerInputs { lane_value, mul: al, m4_round1: false }));
+            let lane_value = if mixer == 11 {
+                lane_value ^ 0xDD
+            } else {
+                lane_value
+            };
+            cur.push((
+                mixer,
+                MixerInputs {
+                    lane_value,
+                    mul: al,
+                    m4_round1: false,
+                },
+            ));
         }
         if !cur.is_empty() {
             rounds_raw.push(cur);
@@ -793,38 +963,83 @@ mod tests {
                 let mut sel = 0u8;
                 for f in line.split_whitespace() {
                     if let Some((k, v)) = f.split_once('=') {
-                        if k == "store" { is_m1 = v.trim_start_matches("0x") == "e6b9d"; }
-                        if k == "sel" { sel = u8::from_str_radix(v, 16).unwrap_or(0); }
+                        if k == "store" {
+                            is_m1 = v.trim_start_matches("0x") == "e6b9d";
+                        }
+                        if k == "sel" {
+                            sel = u8::from_str_radix(v, 16).unwrap_or(0);
+                        }
                     }
                 }
-                if is_m1 && !srow.is_empty() { sel_rounds.push(std::mem::take(&mut srow)); }
+                if is_m1 && !srow.is_empty() {
+                    sel_rounds.push(std::mem::take(&mut srow));
+                }
                 srow.push(sel);
             }
-            if !srow.is_empty() { sel_rounds.push(srow); }
+            if !srow.is_empty() {
+                sel_rounds.push(srow);
+            }
             for (k, rnd) in rounds_raw.iter_mut().enumerate() {
-                let Some(sr) = sel_rounds.get(k) else { continue };
-                if sr.len() < 16 { continue; }
+                let Some(sr) = sel_rounds.get(k) else {
+                    continue;
+                };
+                if sr.len() < 16 {
+                    continue;
+                }
                 if !rnd.iter().any(|(j, _)| *j == 11) {
-                    rnd.push((11, MixerInputs { lane_value: sr[11], mul: 0, m4_round1: false }));
+                    rnd.push((
+                        11,
+                        MixerInputs {
+                            lane_value: sr[11],
+                            mul: 0,
+                            m4_round1: false,
+                        },
+                    ));
                 }
                 if !rnd.iter().any(|(j, _)| *j == 3) {
-                    rnd.push((3, MixerInputs { lane_value: sr[3], mul: 0, m4_round1: false }));
+                    rnd.push((
+                        3,
+                        MixerInputs {
+                            lane_value: sr[3],
+                            mul: 0,
+                            m4_round1: false,
+                        },
+                    ));
                 }
                 if !rnd.iter().any(|(j, _)| *j == 14) {
                     // m15 is a lane-C exception: its tail consumes the
                     // selector after the 0x28 S-box xor, captured on sel tape.
-                    rnd.push((14, MixerInputs { lane_value: sr[14], mul: 0, m4_round1: false }));
+                    rnd.push((
+                        14,
+                        MixerInputs {
+                            lane_value: sr[14],
+                            mul: 0,
+                            m4_round1: false,
+                        },
+                    ));
                 }
             }
         }
-        assert!(rounds_raw.len() >= 10, "the giant tape must carry ten body-A rounds");
+        assert!(
+            rounds_raw.len() >= 10,
+            "the giant tape must carry ten body-A rounds"
+        );
         for (round_no, round) in rounds_raw.iter().take(10).enumerate() {
             let mut seen = [false; 16];
             for (mixer, _) in round {
                 assert!(*mixer < 16, "invalid mixer index in round {}", round_no + 1);
-                assert!(!std::mem::replace(&mut seen[*mixer], true), "duplicate mixer {} in round {}", mixer + 1, round_no + 1);
+                assert!(
+                    !std::mem::replace(&mut seen[*mixer], true),
+                    "duplicate mixer {} in round {}",
+                    mixer + 1,
+                    round_no + 1
+                );
             }
-            assert!(seen.iter().all(|&v| v), "round {} lacks one or more mixer rows", round_no + 1);
+            assert!(
+                seen.iter().all(|&v| v),
+                "round {} lacks one or more mixer rows",
+                round_no + 1
+            );
         }
         let mut checked = 0;
         let mut ok = 0;
@@ -835,11 +1050,21 @@ mod tests {
                 let expect = cpim[0x18 + pos];
                 // m14's breakpoint (0xe6f6c) sits AFTER its tail -- the
                 // tape row carries the finished byte itself (10/10 live).
-                let got = if *j == 13 { Some(inp.mul) } else { mixer_byte(*j, inp, &zones) };
+                let got = if *j == 13 {
+                    Some(inp.mul)
+                } else {
+                    mixer_byte(*j, inp, &zones)
+                };
                 match got {
                     Some(b) => {
-                        assert_eq!(b, expect,
-                            "mixer {} round {}: {b:#04x} != cpim+{:#04x}", *j + 1, k + 1, 0x18 + pos);
+                        assert_eq!(
+                            b,
+                            expect,
+                            "mixer {} round {}: {b:#04x} != cpim+{:#04x}",
+                            *j + 1,
+                            k + 1,
+                            0x18 + pos
+                        );
                         ok += 1;
                         checked += 1;
                     }
@@ -848,7 +1073,10 @@ mod tests {
             }
         }
         assert_eq!(checked, 160, "all ten body-A rounds must be fully covered");
-        assert_eq!(ok, 160, "every body-A byte must match the same-session CPIM");
+        assert_eq!(
+            ok, 160,
+            "every body-A byte must match the same-session CPIM"
+        );
         eprintln!("BODY A live parity: {ok}/{checked} (named skips: {skipped_named})");
     }
 
@@ -863,13 +1091,14 @@ mod tests {
     #[ignore = "requires same-session zone, word, depot, and CPIM artifacts; set PERUN_DIGEST_PAIR_READY=1"]
     fn live_full_depot_parity() {
         assert_eq!(
-            std::env::var("PERUN_DIGEST_PAIR_READY").as_deref().unwrap_or(""),
+            std::env::var("PERUN_DIGEST_PAIR_READY")
+                .as_deref()
+                .unwrap_or(""),
             "1",
             "set PERUN_DIGEST_PAIR_READY=1 only for a complete same-session pair"
         );
         use crate::digest::{generate_digest, DigestInputs, K_HIGH, K_LOW};
-        let dir = std::env::var("PERUN_LIVE_DIR")
-            .unwrap_or_else(|_| "/opt/data/adi-re".into());
+        let dir = std::env::var("PERUN_LIVE_DIR").unwrap_or_else(|_| "/opt/data/adi-re".into());
         let mut zones = Zones::from_files(&dir).expect("same-session zone files");
         let tape = std::fs::read_to_string(format!("{dir}/zone26_tape.txt"))
             .expect("same-session zone-26 tape");
@@ -885,7 +1114,9 @@ mod tests {
             for line in tape.lines() {
                 let mut d = std::collections::HashMap::new();
                 for f in line.split_whitespace() {
-                    if let Some((k, v)) = f.split_once('=') { d.insert(k.to_string(), v.to_string()); }
+                    if let Some((k, v)) = f.split_once('=') {
+                        d.insert(k.to_string(), v.to_string());
+                    }
                 }
                 let Some(s) = d.get("store") else { continue };
                 let sv = s.trim_start_matches("0x");
@@ -899,12 +1130,19 @@ mod tests {
                 if ci < 4 {
                     // fam1/fam2 giant reads index by rcx, fam3 by rdx,
                     // and the fam4 lane by RAX -- the selector itself.
-                    let key = match ci { 2 => "dl", 3 => "al", _ => "cl" };
+                    let key = match ci {
+                        2 => "dl",
+                        3 => "al",
+                        _ => "cl",
+                    };
                     got[ci] = u8::from_str_radix(d[key].trim_start_matches("0x"), 16).unwrap_or(0);
                     have[ci] = true;
                 }
             }
-            assert!(have.iter().all(|&h| h), "the tape must carry the four family first hits");
+            assert!(
+                have.iter().all(|&h| h),
+                "the tape must carry the four family first hits"
+            );
             zones.c1a = got[0];
             zones.c1b = got[1];
             zones.c1c = got[2];
@@ -932,7 +1170,10 @@ mod tests {
             let al = u8::from_str_radix(d["al"].trim_start_matches("0x"), 16).unwrap();
             let rdx = u64::from_str_radix(d["rdx"].trim_start_matches("0x"), 16).unwrap();
             let rax = u64::from_str_radix(d["rax"].trim_start_matches("0x"), 16).unwrap();
-            let mixer = STORES.iter().position(|&s| s == store).expect("store in census");
+            let mixer = STORES
+                .iter()
+                .position(|&s| s == store)
+                .expect("store in census");
             let lane = LANE_OF[mixer];
             let lane_value = match lane {
                 0 | 1 => rcx as u8,
@@ -945,13 +1186,24 @@ mod tests {
             // m12's giant breakpoint (0xe6ec8) catches rax BEFORE the
             // fam4 s-box xor -- the planter value c12, not the selector.
             // The fam4 lane indexes by the SELECTOR: c12 ^ 0xDD.
-            let lane_value = if mixer == 11 { lane_value ^ 0xDD } else { lane_value };
-            cur.push((mixer, MixerInputs { lane_value, mul: al, m4_round1: false }));
+            let lane_value = if mixer == 11 {
+                lane_value ^ 0xDD
+            } else {
+                lane_value
+            };
+            cur.push((
+                mixer,
+                MixerInputs {
+                    lane_value,
+                    mul: al,
+                    m4_round1: false,
+                },
+            ));
         }
         if !cur.is_empty() {
             rounds_raw.push(cur);
         }
-// THE SEL-TAPE BACKFILL: m12 and m4 have known breakpoint gaps;
+        // THE SEL-TAPE BACKFILL: m12 and m4 have known breakpoint gaps;
         // m15's lane-C input is the post-S-box selector (measured at
         // the selector tape), not the pre-xor register from the giant hit.
         if let Ok(st) = std::fs::read_to_string(format!("{dir}/sel34_tape.txt")) {
@@ -962,38 +1214,83 @@ mod tests {
                 let mut sel = 0u8;
                 for f in line.split_whitespace() {
                     if let Some((k, v)) = f.split_once('=') {
-                        if k == "store" { is_m1 = v.trim_start_matches("0x") == "e6b9d"; }
-                        if k == "sel" { sel = u8::from_str_radix(v, 16).unwrap_or(0); }
+                        if k == "store" {
+                            is_m1 = v.trim_start_matches("0x") == "e6b9d";
+                        }
+                        if k == "sel" {
+                            sel = u8::from_str_radix(v, 16).unwrap_or(0);
+                        }
                     }
                 }
-                if is_m1 && !srow.is_empty() { sel_rounds.push(std::mem::take(&mut srow)); }
+                if is_m1 && !srow.is_empty() {
+                    sel_rounds.push(std::mem::take(&mut srow));
+                }
                 srow.push(sel);
             }
-            if !srow.is_empty() { sel_rounds.push(srow); }
+            if !srow.is_empty() {
+                sel_rounds.push(srow);
+            }
             for (k, rnd) in rounds_raw.iter_mut().enumerate() {
-                let Some(sr) = sel_rounds.get(k) else { continue };
-                if sr.len() < 16 { continue; }
+                let Some(sr) = sel_rounds.get(k) else {
+                    continue;
+                };
+                if sr.len() < 16 {
+                    continue;
+                }
                 if !rnd.iter().any(|(j, _)| *j == 11) {
-                    rnd.push((11, MixerInputs { lane_value: sr[11], mul: 0, m4_round1: false }));
+                    rnd.push((
+                        11,
+                        MixerInputs {
+                            lane_value: sr[11],
+                            mul: 0,
+                            m4_round1: false,
+                        },
+                    ));
                 }
                 if !rnd.iter().any(|(j, _)| *j == 3) {
-                    rnd.push((3, MixerInputs { lane_value: sr[3], mul: 0, m4_round1: false }));
+                    rnd.push((
+                        3,
+                        MixerInputs {
+                            lane_value: sr[3],
+                            mul: 0,
+                            m4_round1: false,
+                        },
+                    ));
                 }
                 if !rnd.iter().any(|(j, _)| *j == 14) {
                     // m15 is a lane-C exception: its tail consumes the
                     // selector after the 0x28 S-box xor, captured on sel tape.
-                    rnd.push((14, MixerInputs { lane_value: sr[14], mul: 0, m4_round1: false }));
+                    rnd.push((
+                        14,
+                        MixerInputs {
+                            lane_value: sr[14],
+                            mul: 0,
+                            m4_round1: false,
+                        },
+                    ));
                 }
             }
         }
-        assert!(rounds_raw.len() >= 10, "the giant tape must carry ten body-A rounds");
+        assert!(
+            rounds_raw.len() >= 10,
+            "the giant tape must carry ten body-A rounds"
+        );
         for (round_no, round) in rounds_raw.iter().take(10).enumerate() {
             let mut mixer_seen = [false; 16];
             for (mixer, _) in round {
                 assert!(*mixer < 16, "invalid mixer index in round {}", round_no + 1);
-                assert!(!std::mem::replace(&mut mixer_seen[*mixer], true), "duplicate mixer {} in round {}", mixer + 1, round_no + 1);
+                assert!(
+                    !std::mem::replace(&mut mixer_seen[*mixer], true),
+                    "duplicate mixer {} in round {}",
+                    mixer + 1,
+                    round_no + 1
+                );
             }
-            assert!(mixer_seen.iter().all(|&v| v), "round {} lacks one or more mixer rows", round_no + 1);
+            assert!(
+                mixer_seen.iter().all(|&v| v),
+                "round {} lacks one or more mixer rows",
+                round_no + 1
+            );
         }
         let mut body_bytes = 0;
         for (k, round) in rounds_raw.iter().take(10).enumerate() {
@@ -1001,7 +1298,11 @@ mod tests {
                 let pos = ROW_POS[*j] + 0x10 * k;
                 // m14's row carries the finished byte (the breakpoint
                 // sits after the tail, measured 10/10).
-                let got = if *j == 13 { Some(inp.mul) } else { mixer_byte(*j, inp, &zones) };
+                let got = if *j == 13 {
+                    Some(inp.mul)
+                } else {
+                    mixer_byte(*j, inp, &zones)
+                };
                 if let Some(b) = got {
                     depot[pos] = b;
                     seen[pos] = true;
@@ -1009,8 +1310,14 @@ mod tests {
                 }
             }
         }
-        assert_eq!(body_bytes, 160, "the assembled body A must cover all ten rounds");
-        assert!(seen[..0xA0].iter().all(|&v| v), "no body-A position may remain unassembled");
+        assert_eq!(
+            body_bytes, 160,
+            "the assembled body A must cover all ten rounds"
+        );
+        assert!(
+            seen[..0xA0].iter().all(|&v| v),
+            "no body-A position may remain unassembled"
+        );
         // the digest: resolve the eight words from measured hits
         let mut rows: Vec<Vec<(String, u32)>> = Vec::new();
         for line in wtape.lines() {
@@ -1027,10 +1334,14 @@ mod tests {
             }
         }
         const CANON: [(usize, &str, u32); 8] = [
-            (0xA0, "RCX", K_LOW), (0xA4, "W8", K_LOW),
-            (0xA8, "W6", K_LOW), (0xAC, "W2", K_LOW),
-            (0xB0, "W1", K_HIGH), (0xB4, "W3", K_HIGH),
-            (0xB8, "W5", K_HIGH), (0xBC, "W4", K_HIGH),
+            (0xA0, "RCX", K_LOW),
+            (0xA4, "W8", K_LOW),
+            (0xA8, "W6", K_LOW),
+            (0xAC, "W2", K_LOW),
+            (0xB0, "W1", K_HIGH),
+            (0xB4, "W3", K_HIGH),
+            (0xB8, "W5", K_HIGH),
+            (0xBC, "W4", K_HIGH),
         ];
         let mut words = DigestInputs::default();
         for (block, key, k) in CANON {
@@ -1049,7 +1360,10 @@ mod tests {
             }
             let Some(w) = word else {
                 // the prologue-cascade block may stay gated, named, never silent
-                assert_eq!(block, 0xA0, "only the prologue-cascade block may stay gated");
+                assert_eq!(
+                    block, 0xA0,
+                    "only the prologue-cascade block may stay gated"
+                );
                 continue;
             };
             match block {
@@ -1076,13 +1390,21 @@ mod tests {
             if !seen[j] {
                 continue; // the body-A skips are not asserted here
             }
-            assert_eq!(depot[j], cpim[0x18 + j], "depot+{j:#04x} vs cpim+{:#04x}", 0x18 + j);
+            assert_eq!(
+                depot[j],
+                cpim[0x18 + j],
+                "depot+{j:#04x} vs cpim+{:#04x}",
+                0x18 + j
+            );
             ok += 1;
         }
-        assert_eq!(ok, body_bytes + digest_live, "the through count is body bytes plus the live digest");
+        assert_eq!(
+            ok,
+            body_bytes + digest_live,
+            "the through count is body bytes plus the live digest"
+        );
         eprintln!("THROUGH depot parity: {ok}/192 positions live (body A {body_bytes} + digest {digest_live}; body skips {}/160)", 160 - body_bytes);
     }
-
 
     /// THE WEAVE PARITY: the sixteen selector formulas against the
     /// live planter tape (sel34_tape.txt, 10 complete rounds of one
@@ -1096,13 +1418,15 @@ mod tests {
             "1",
             "set PERUN_WEAVE_READY=1 only for same-session selector artifacts"
         );
-        let dir = std::env::var("PERUN_LIVE_DIR")
-            .unwrap_or_else(|_| "/opt/data/adi-re".into());
+        let dir = std::env::var("PERUN_LIVE_DIR").unwrap_or_else(|_| "/opt/data/adi-re".into());
         let tape = std::fs::read_to_string(format!("{dir}/sel34_tape.txt"))
             .expect("same-session selector tape");
-        let planter = std::fs::read(format!("{dir}/planter34.bin"))
-            .expect("same-session planter dump");
-        assert!(planter.len() >= 0x1490, "the planter dump covers the 0x1390 window");
+        let planter =
+            std::fs::read(format!("{dir}/planter34.bin")).expect("same-session planter dump");
+        assert!(
+            planter.len() >= 0x1490,
+            "the planter dump covers the 0x1390 window"
+        );
         let mut sbox = [0u8; 256];
         sbox.copy_from_slice(&planter[0x1390..0x1490]);
         // rows -> rounds of 16 (store m1 opens each round)
@@ -1128,13 +1452,18 @@ mod tests {
         }
         assert!(rounds.len() >= 10, "the tape carries ten rounds");
         let get = |row: &[(String, u32)], key: &str| -> u32 {
-            row.iter().find(|(k, _)| k == key).map(|(_, v)| *v).unwrap_or(0)
+            row.iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| *v)
+                .unwrap_or(0)
         };
         let sel_of = |row: &[(String, u32)]| -> u8 { get(row, "sel") as u8 };
         let mut ok = 0;
         let mut total = 0;
         for c in rounds.iter().take(10) {
-            if c.len() < 16 { continue; }
+            if c.len() < 16 {
+                continue;
+            }
             let feeds = WeaveFeeds {
                 rbx: get(&c[0], "rbx"),
                 r15_in: get(&c[3], "r15d"),
@@ -1158,7 +1487,6 @@ mod tests {
         assert_eq!(total, 160, "ten complete rounds");
         eprintln!("WEAVE live parity: {ok}/160 selectors across ten rounds");
     }
-
 
     /// Regression: a mixer ordinal and its destination row are different
     /// coordinate systems. Also pin mixer 14's post-tail tape semantics.
@@ -1243,7 +1571,4 @@ mod tests {
         other.captured_spim.fill(0x55);
         assert_eq!(assemble_cpim_from_oracle_capture(&other), out);
     }
-
-
-
 }

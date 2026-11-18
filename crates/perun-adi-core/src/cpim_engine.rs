@@ -83,16 +83,16 @@ mod tests {
             .unwrap_or_else(|_| "/opt/data/adi-re/r14_table.bin".to_string());
         let cpim_path = std::env::var("PERUN_CPIM_LIVE")
             .unwrap_or_else(|_| "/opt/data/adi-re/gdb_pair_cpim.bin".to_string());
-        let (Ok(depot_blob), Ok(cpim_blob)) = (
-            std::fs::read(&depot_path),
-            std::fs::read(&cpim_path),
-        ) else {
+        let (Ok(depot_blob), Ok(cpim_blob)) =
+            (std::fs::read(&depot_path), std::fs::read(&cpim_path))
+        else {
             eprintln!("gating: {depot_path} / {cpim_path} not present");
             return;
         };
         assert_eq!(cpim_blob.len(), 0x114, "the live CPIM is 276 bytes");
-        let depot: [u8; DEPOT_SLICE] =
-            depot_blob[..DEPOT_SLICE].try_into().expect("depot dump covers 0xC0");
+        let depot: [u8; DEPOT_SLICE] = depot_blob[..DEPOT_SLICE]
+            .try_into()
+            .expect("depot dump covers 0xC0");
 
         // the measured law, first: the zone is the depot slice verbatim
         for (k, (&d, &c)) in depot.iter().zip(cpim_blob[0x18..0xd8].iter()).enumerate() {

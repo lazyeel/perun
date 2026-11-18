@@ -44,12 +44,24 @@ fn b64_encode(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -60,11 +72,15 @@ fn b64_decode(s: &str) -> Vec<u8> {
     let bytes: Vec<u8> = s.bytes().filter(|&c| c != b'=' && c != b'\n').collect();
     let mut out = Vec::new();
     for chunk in bytes.chunks(4) {
-        let n = chunk.iter().fold(0u32, |a, &c| (a << 6) | val(c))
-            << (6 * (4 - chunk.len()) as u32);
+        let n =
+            chunk.iter().fold(0u32, |a, &c| (a << 6) | val(c)) << (6 * (4 - chunk.len()) as u32);
         out.push((n >> 16) as u8);
-        if chunk.len() > 2 { out.push((n >> 8) as u8); }
-        if chunk.len() > 3 { out.push(n as u8); }
+        if chunk.len() > 2 {
+            out.push((n >> 8) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push(n as u8);
+        }
     }
     out
 }
@@ -85,8 +101,9 @@ fn agent() -> ureq::Agent {
     // The Apple chain is pinned (the measured stand's own CA strategy:
     // the system store carries no Apple roots on this host). The chain
     // lives with the capture workflow; ureq gets an explicit root store.
-    let chain_path = std::env::var("APPLE_CHAIN")
-        .unwrap_or_else(|_| "/opt/data/perun/crates/perun-cli/examples/adi-android/apple_chain.pem".into());
+    let chain_path = std::env::var("APPLE_CHAIN").unwrap_or_else(|_| {
+        "/opt/data/perun/crates/perun-cli/examples/adi-android/apple_chain.pem".into()
+    });
     let pem = std::fs::read(&chain_path).expect("read the Apple chain pem");
     let mut roots = rustls::RootCertStore::empty();
     let mut rd = pem.as_slice();
@@ -110,7 +127,8 @@ fn main() {
 
     // 1. The URL bag.
     println!("[net] GET lookup ...");
-    let lookup = a.get("https://gsa.apple.com/grandslam/GsService2/lookup")
+    let lookup = a
+        .get("https://gsa.apple.com/grandslam/GsService2/lookup")
         .set("Content-Type", "application/x-www-form-urlencoded")
         .set("X-Mme-Device-Id", UUID)
         .set("X-MMe-Client-Info", CLIENT_INFO)
@@ -128,7 +146,8 @@ fn main() {
     // 2. The fresh SPIM.
     let body = format!("{PLIST_HEAD}<key>Header</key><dict/><key>Request</key><dict/>{PLIST_TAIL}");
     println!("[net] POST start ...");
-    let r1 = a.post(&u_start)
+    let r1 = a
+        .post(&u_start)
         .set("Content-Type", "application/x-www-form-urlencoded")
         .set("X-Mme-Device-Id", UUID)
         .set("X-MMe-Client-Info", CLIENT_INFO)
@@ -145,16 +164,24 @@ fn main() {
     // 3. Assemble only the saved capture's oracle-backed CPIM fields.
     let inputs = OracleCaptureInputs::from_capture_dir(&dir).expect("the measured inject layer");
     if spim != inputs.captured_spim {
-        println!("[verdict] FRESH SPIM: the oracle rotated the challenge ({} bytes).", spim.len());
+        println!(
+            "[verdict] FRESH SPIM: the oracle rotated the challenge ({} bytes).",
+            spim.len()
+        );
         println!("[verdict] The crate's CPIM is bound to the reference session's SPIM;");
         println!("[verdict] saved tapes and reference CPIM cannot answer this fresh challenge.");
-        println!("[verdict] planter/feed genesis, session16, Body B and digest provenance remain open.");
+        println!(
+            "[verdict] planter/feed genesis, session16, Body B and digest provenance remain open."
+        );
         println!("[verdict] The fresh SPIM is saved: {dir}/fresh_spim_live.bin");
         return;
     }
     println!("[net] SPIM matches the saved capture; assembling its oracle-backed CPIM");
     let cpim = assemble_cpim_from_oracle_capture(&inputs);
-    println!("[prov] oracle-capture CPIM assembled ({} bytes)", cpim.len());
+    println!(
+        "[prov] oracle-capture CPIM assembled ({} bytes)",
+        cpim.len()
+    );
 
     // 4. finishMachineProvisioning with the crate's CPIM.
     let cpim_b64 = b64_encode(&cpim);
@@ -163,7 +190,8 @@ fn main() {
          <key>Request</key><dict><key>cpim</key><string>{cpim_b64}</string></dict>{PLIST_TAIL}"
     );
     println!("[net] POST finish ...");
-    let r2 = a.post(&u_fin)
+    let r2 = a
+        .post(&u_fin)
         .set("Content-Type", "application/x-www-form-urlencoded")
         .set("X-Mme-Device-Id", UUID)
         .set("X-MMe-Client-Info", CLIENT_INFO)
@@ -176,9 +204,30 @@ fn main() {
     let ptm = string_after_key(&r2_xml, "ptm");
     let tk = string_after_key(&r2_xml, "tk");
     let rinfo = string_after_key(&r2_xml, "X-Apple-I-MD-RINFO");
-    println!("[verdict] ptm: {}", ptm.as_deref().map(|s| if s.len() > 48 { format!("{}... ({} bytes)", &s[..48], s.len()) } else { s.to_string() }).unwrap_or_else(|| "NONE".into()));
-    println!("[verdict] tk:  {}", tk.as_deref().map(|s| if s.len() > 48 { format!("{}... ({} bytes)", &s[..48], s.len()) } else { s.to_string() }).unwrap_or_else(|| "NONE".into()));
-    println!("[verdict] routing info: {}", rinfo.as_deref().unwrap_or("(none)"));
+    println!(
+        "[verdict] ptm: {}",
+        ptm.as_deref()
+            .map(|s| if s.len() > 48 {
+                format!("{}... ({} bytes)", &s[..48], s.len())
+            } else {
+                s.to_string()
+            })
+            .unwrap_or_else(|| "NONE".into())
+    );
+    println!(
+        "[verdict] tk:  {}",
+        tk.as_deref()
+            .map(|s| if s.len() > 48 {
+                format!("{}... ({} bytes)", &s[..48], s.len())
+            } else {
+                s.to_string()
+            })
+            .unwrap_or_else(|| "NONE".into())
+    );
+    println!(
+        "[verdict] routing info: {}",
+        rinfo.as_deref().unwrap_or("(none)")
+    );
     if ptm.is_some() && tk.is_some() {
         println!("[verdict] *** THE ORACLE-CAPTURE CPIM WAS ACCEPTED BY THE LIVE BACKEND ***");
     } else {

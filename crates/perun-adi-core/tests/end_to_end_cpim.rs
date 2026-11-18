@@ -30,12 +30,13 @@ use perun_adi_core::body_a::generate_body_from_tapes;
 #[ignore = "requires same-session live CPIM/tape artifacts; run explicitly with PERUN_CPIM_E2E_READY=1"]
 fn cpim_end_to_end() {
     assert_eq!(
-        std::env::var("PERUN_CPIM_E2E_READY").as_deref().unwrap_or(""),
+        std::env::var("PERUN_CPIM_E2E_READY")
+            .as_deref()
+            .unwrap_or(""),
         "1",
         "set PERUN_CPIM_E2E_READY=1 for the live CPIM parity test"
     );
-    let dir = std::env::var("PERUN_LIVE_DIR")
-        .unwrap_or_else(|_| "/opt/data/adi-re".into());
+    let dir = std::env::var("PERUN_LIVE_DIR").unwrap_or_else(|_| "/opt/data/adi-re".into());
     let cpim = std::fs::read(format!("{dir}/live_prov_out.bin"))
         .expect("same-session live CPIM is required for this ignored integration test");
     assert_eq!(cpim.len(), 0x114, "the live CPIM is 276 bytes");
@@ -44,21 +45,24 @@ fn cpim_end_to_end() {
     let Ok((depot, body_bytes)) = generate_body_from_tapes(&dir) else {
         panic!("the body-a tapes did not assemble under {dir}");
     };
-    assert_eq!(body_bytes, 160, "the tape assembler must fill all body-A positions");
+    assert_eq!(
+        body_bytes, 160,
+        "the tape assembler must fill all body-A positions"
+    );
 
     // THE CONTAINER, per the measured anatomy:
     //   [0..4) version 5 | [4..0x14) session | [0x14..0x18) 0xa0
     //   [0x18..0xb8) body A | [0xb8..0xd8) digest
     //   [0xd8..0xdc) 0x34 | [0xdc..0xe0) 4 | [0xe0..0x114) body B
     let mut out = [0u8; 0x114];
-    out[0..4].copy_from_slice(&5u32.to_be_bytes());          // version: written
-    out[4..0x14].copy_from_slice(&cpim[4..0x14]);           // session: carried
+    out[0..4].copy_from_slice(&5u32.to_be_bytes()); // version: written
+    out[4..0x14].copy_from_slice(&cpim[4..0x14]); // session: carried
     out[0x14..0x18].copy_from_slice(&0xa0u32.to_be_bytes()); // A len: written
-    out[0x18..0xb8].copy_from_slice(&depot[0..0xa0]);        // body A: assembled from formulas + M14 tape results
-    out[0xb8..0xd8].copy_from_slice(&depot[0xa0..0xc0]);     // digest: generated
+    out[0x18..0xb8].copy_from_slice(&depot[0..0xa0]); // body A: assembled from formulas + M14 tape results
+    out[0xb8..0xd8].copy_from_slice(&depot[0xa0..0xc0]); // digest: generated
     out[0xd8..0xdc].copy_from_slice(&0x34u32.to_be_bytes()); // B len: written
-    out[0xdc..0xe0].copy_from_slice(&4u32.to_be_bytes());    // B ver: written
-    out[0xe0..0x114].copy_from_slice(&cpim[0xe0..0x114]);    // body B: carried
+    out[0xdc..0xe0].copy_from_slice(&4u32.to_be_bytes()); // B ver: written
+    out[0xe0..0x114].copy_from_slice(&cpim[0xe0..0x114]); // body B: carried
 
     // THE COMPARISON: all 276 bytes against the oracle.
     let mut equal = 0;
@@ -74,8 +78,10 @@ fn cpim_end_to_end() {
     let tape_finalized = BODY_A_M14_TAPE_RESULTS;
     let cpim_carried = 16 + 52; // session + body B
     assert_eq!(body_a_formula, 150);
-    assert_eq!(body_a_formula + digest_formula + structure_formula
-               + tape_finalized + cpim_carried, 276);
+    assert_eq!(
+        body_a_formula + digest_formula + structure_formula + tape_finalized + cpim_carried,
+        276
+    );
     eprintln!(
         "CPIM e2e: {equal}/276 parity; body-A formula={body_a_formula}, digest arithmetic={digest_formula} (word selection CPIM-anchored), structure={structure_formula}; M14 post-tail tape={tape_finalized}; CPIM copied={cpim_carried} (session 16 + body B 52)"
     );

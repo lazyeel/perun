@@ -102,16 +102,28 @@ mod tests {
     #[test]
     fn digest_layout_is_big_endian_two_constants() {
         let inp = DigestInputs {
-            a0: 0x01020304, a4: 0x11111111, a8: 0x12121212, ac: 0x13131313,
-            b0: 0x14141414, b4: 0x15151515, b8: 0x16161616, bc: 0x17171717,
+            a0: 0x01020304,
+            a4: 0x11111111,
+            a8: 0x12121212,
+            ac: 0x13131313,
+            b0: 0x14141414,
+            b4: 0x15151515,
+            b8: 0x16161616,
+            bc: 0x17171717,
         };
         let d = generate_digest(&inp);
         // block 0xA0: the low half constant
         let s = 0x01020304u32.wrapping_add(K_LOW);
-        assert_eq!(&d[0..4], &[(s >> 24) as u8, (s >> 16) as u8, (s >> 8) as u8, s as u8]);
+        assert_eq!(
+            &d[0..4],
+            &[(s >> 24) as u8, (s >> 16) as u8, (s >> 8) as u8, s as u8]
+        );
         // block 0xBC: the high half constant, MSB first
         let s = 0x17171717u32.wrapping_add(K_HIGH);
-        assert_eq!(&d[0x1C..0x20], &[(s >> 24) as u8, (s >> 16) as u8, (s >> 8) as u8, s as u8]);
+        assert_eq!(
+            &d[0x1C..0x20],
+            &[(s >> 24) as u8, (s >> 16) as u8, (s >> 8) as u8, s as u8]
+        );
         // the constants' two's-complement twin
         assert_eq!(K_HIGH.wrapping_add(0x64E9699E), 0);
         // eight sums, four bytes each, tile the zone exactly
@@ -125,18 +137,18 @@ mod tests {
     #[ignore = "requires same-session digest word tape, depot slice and CPIM; set PERUN_DIGEST_PAIR_READY=1"]
     fn live_digest_parity() {
         assert_eq!(
-            std::env::var("PERUN_DIGEST_PAIR_READY").as_deref().unwrap_or(""),
+            std::env::var("PERUN_DIGEST_PAIR_READY")
+                .as_deref()
+                .unwrap_or(""),
             "1",
             "set PERUN_DIGEST_PAIR_READY=1 only for a complete same-session digest pair"
         );
-        let dir = std::env::var("PERUN_LIVE_DIR")
-            .unwrap_or_else(|_| "/opt/data/adi-re".into());
+        let dir = std::env::var("PERUN_LIVE_DIR").unwrap_or_else(|_| "/opt/data/adi-re".into());
         let tape = format!("{dir}/pair_wp_words.txt");
         let cpim_path = format!("{dir}/live_prov_out.bin");
-        let ttxt = std::fs::read_to_string(&tape)
-            .expect("same-session digest word tape is required");
-        let cpim = std::fs::read(&cpim_path)
-            .expect("same-session live CPIM is required");
+        let ttxt =
+            std::fs::read_to_string(&tape).expect("same-session digest word tape is required");
+        let cpim = std::fs::read(&cpim_path).expect("same-session live CPIM is required");
         assert_eq!(cpim.len(), 0x114, "the live CPIM is 276 bytes");
         // parse the tape rows: channel words per hit
         let mut rows: Vec<Vec<(String, u32)>> = Vec::new();
@@ -159,18 +171,28 @@ mod tests {
         // depot window -- if the two disagree the artifacts are from
         // different runs and the parity must not fire.
         if let Ok(dump) = std::fs::read(format!("{dir}/pair_depot.bin")) {
-            assert!(dump.len() >= 0xC0, "the paired depot dump must contain 0xC0 bytes");
-            assert_eq!(&dump[..0xC0], &cpim[0x18..0x18 + 0xC0],
-                       "the depot slice and the CPIM must be one session");
+            assert!(
+                dump.len() >= 0xC0,
+                "the paired depot dump must contain 0xC0 bytes"
+            );
+            assert_eq!(
+                &dump[..0xC0],
+                &cpim[0x18..0x18 + 0xC0],
+                "the depot slice and the CPIM must be one session"
+            );
         } else {
             panic!("no writer depot slice -- the pair is incomplete");
         }
         // the block map: (depot block, channel key, constant)
         const CANON: [(usize, &str, u32); 8] = [
-            (0xA0, "RCX", K_LOW), (0xA4, "W8", K_LOW),
-            (0xA8, "W6", K_LOW), (0xAC, "W2", K_LOW),
-            (0xB0, "W1", K_HIGH), (0xB4, "W3", K_HIGH),
-            (0xB8, "W5", K_HIGH), (0xBC, "W4", K_HIGH),
+            (0xA0, "RCX", K_LOW),
+            (0xA4, "W8", K_LOW),
+            (0xA8, "W6", K_LOW),
+            (0xAC, "W2", K_LOW),
+            (0xB0, "W1", K_HIGH),
+            (0xB4, "W3", K_HIGH),
+            (0xB8, "W5", K_HIGH),
+            (0xBC, "W4", K_HIGH),
         ];
         let get = |cpim: &[u8], pos: usize| cpim[0x18 + pos];
         let mut words = DigestInputs::default();
@@ -197,7 +219,10 @@ mod tests {
             // watchpoint tape does not always carry. An unresolved
             // 0xA0 is the named gate, never a silent pass.
             let Some(w) = word else {
-                assert_eq!(block, 0xA0, "only the prologue-cascade block may stay gated");
+                assert_eq!(
+                    block, 0xA0,
+                    "only the prologue-cascade block may stay gated"
+                );
                 gated += 4;
                 continue;
             };
@@ -216,7 +241,11 @@ mod tests {
         // the full zone, one generation: the resolved blocks byte for
         // byte; the gated block (if any) is skipped by position, named.
         let d = generate_digest(&words);
-        let gated_base = if gated > 0 { Some(0xA0 - DIGEST_ZONE) } else { None };
+        let gated_base = if gated > 0 {
+            Some(0xA0 - DIGEST_ZONE)
+        } else {
+            None
+        };
         for (i, &b) in d.iter().enumerate() {
             if let Some(g) = gated_base {
                 if (g..g + 4).contains(&i) {

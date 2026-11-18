@@ -19,15 +19,20 @@ use perun_adi_core::body_a::{assemble_cpim_from_oracle_capture, OracleCaptureInp
 #[ignore = "requires same-session live SPIM/tapes/CPIM; run explicitly with PERUN_CPIM_E2E_READY=1"]
 fn oracle_capture_assembly_matches_the_reference_cpim() {
     assert_eq!(
-        std::env::var("PERUN_CPIM_E2E_READY").as_deref().unwrap_or(""),
+        std::env::var("PERUN_CPIM_E2E_READY")
+            .as_deref()
+            .unwrap_or(""),
         "1",
         "set PERUN_CPIM_E2E_READY=1 only for a complete same-session capture"
     );
-    let dir = std::env::var("PERUN_LIVE_DIR")
-        .unwrap_or_else(|_| "/opt/data/adi-re".into());
-    let inputs = OracleCaptureInputs::from_capture_dir(&dir)
-        .expect("the measured inject layer assembles");
-    assert_eq!(inputs.captured_spim.len(), 347, "the captured SPIM is retained for session comparison");
+    let dir = std::env::var("PERUN_LIVE_DIR").unwrap_or_else(|_| "/opt/data/adi-re".into());
+    let inputs =
+        OracleCaptureInputs::from_capture_dir(&dir).expect("the measured inject layer assembles");
+    assert_eq!(
+        inputs.captured_spim.len(),
+        347,
+        "the captured SPIM is retained for session comparison"
+    );
     let cpim = assemble_cpim_from_oracle_capture(&inputs);
 
     let reference = std::fs::read(format!("{dir}/live_prov_out.bin")).expect("the reference");
