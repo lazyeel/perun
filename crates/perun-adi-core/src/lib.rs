@@ -17,21 +17,27 @@
 //!   (the tape fold over the four T-tables), transcribed from the
 //!   measured round-0 entry state;
 //! * [`cpim`]        -- the 276-byte CPIM anatomy (the reference
-//!   cold-canon dump parsed to its length-delimited sections).
+//!   cold-canon dump parsed to its length-delimited sections);
+//! * [`state`]       -- the versioned provisioning-state container and
+//!   the lossless codec for Apple's `adi.pb`;
+//! * [`sha256`]      -- the dependency-free SHA-256/HMAC used by the
+//!   state tag.
 //!
 //! The integration layer lives in [`chain`]: the entry vector ->
 //! fold/conveyor -> word channels -> the verdict word, and the CPIM
 //! reference validator used by the parity_cpim test.
 
+pub mod body_a;
 pub mod chain;
 pub mod conveyor;
 pub mod cpim;
-pub mod body_a;
 pub mod cpim_engine;
 pub mod digest;
 pub mod early_series;
 pub mod early_zone;
 pub mod fold_zone;
+pub mod sha256;
 pub mod simd_cycles;
+pub mod state;
 pub mod warmvm;
 pub mod word_channels;

@@ -5836,6 +5836,73 @@ The Apple container stays useful as an interop codec: parse `version/n/blob/tail
 preserve the tail opaquely, and round-trip byte-for-byte. That gives the private
 corpus a lossless path into Rust tests without pretending the tail is understood.
 
+#### The Rust implementation: PERUNST v1
+
+The first Rust artifact lives in `crates/perun-adi-core`: `sha256.rs` is a
+dependency-free SHA-256/HMAC-SHA-256, and `state.rs` is the state container plus
+the Apple codec. `Cargo.toml` still has no dependencies.
+
+The own format keeps the measured requirements literal:
+
+```text
+offset  size  field
+0x00    8     magic "PERUNST\0"
+0x08    4     format version = 1, BE u32
+0x0c    4     flags = 0, BE u32
+0x10    4     body length, BE u32
+0x14    32    HMAC-SHA-256 tag over bytes 0x00..0x14 and the body
+0x34    ...   TLV body
+```
+
+```text
+tag  field           length
+1    identity        8
+2    session         4
+3    provisioned_at  8
+4    cpim            276
+5    ptm             487
+6    tk              16
+7    spim            variable, optional
+```
+
+The body is canonical: strictly ascending tags, each tag at most once, exact
+fixed lengths, no padding, no trailing bytes, and all mandatory tags present.
+`open` rejects a bad magic, a non-1 version, non-zero flags, a declared length
+that differs from the remaining input, an unknown, duplicate or out-of-order tag,
+a wrong field length, and a missing field. The tag itself covers the header
+prefix and the whole body, so every byte of the file is authenticated, matching
+the native matrix where even zeroing a region yields `-45061`.
+
+Binding is to `identity[0..8]` only. The tag key is
+HMAC-SHA-256(`KEY_CONTEXT`, `identity[0..8]`) with
+`KEY_CONTEXT = "perun-adi state key v1"`, while bytes 8..15 of the
+`adi_identifier` presented to `open` are accepted and ignored. That is the
+measured native split: changing a byte in the first half rejects, changing the
+last half does not. The caveat is written into the module docs: this is an
+integrity and cross-device-copy check, not an adversarial authentication
+boundary. The derivation is public, and the CPIM/PTM/TK are stored in the clear;
+confidentiality remains the transport's job.
+
+`store` mirrors the native write-side contract: open write+create without the
+truncate flag, `set_len` to the final container size, one `write_all` of the
+whole buffer, close on drop. No temp file, no rename, no second write. `fsync`
+is deliberately absent because the measured native writer does not call it
+either; adding it would change the durability contract without evidence.
+
+`AppleState` is the interop codec, not the engine. `parse` requires the exact
+`len = 8 + n + 580` relation, takes `n` from the header, and preserves the
+version, the blob and the opaque 580-byte tail byte for byte. It does not
+pretend to authenticate the tail; `is_native_supported` is the separate
+version-1 gate. The gated local test `PERUN_APPLE_STATE=<path>` round-trips the
+three captures used here — 617/n29, 619/n31 and 612/n24 — without committing
+any of their bytes.
+
+The unit tests pin the FIPS 180-4 and RFC 4231 vectors, incremental hashing
+across the block boundary on both sides, one-bit mutation of every
+sealed byte, every truncation prefix, the canonical-order and duplicate-tag
+rejections, first-half versus last-half identity binding, and the file
+store/load path including truncation of a longer pre-existing file.
+
 #### Campaign status at this point
 
 * **Track A — closed.** The warm VM verifies five epochs record by record
@@ -5849,12 +5916,13 @@ corpus a lossless path into Rust tests without pretending the tail is understood
   static mutex locked forever. `kernel.pid_max=65535` fixes the rig; the setting is
   global and does not survive a reboot. The earlier path-binding claim is retracted
   above.
-* **Track B — where this entry ends.** End's file contract, the container, the
-  integrity/binding matrix, and the tail's three-layer behaviour are measured. The
-  Rust `state.rs` container and serializer are the next implementation step, followed
-  by round-trip tests and the Rust-End ⇄ Rust-OTP parity gate. The CFF body of
-  `fp_dh_38fa04bb` is not lifted; the 142 KB function is recorded as the last
-  non-libc call before the write, not claimed as understood.
+* **Track B — measured; Rust foundation landed.** End's file contract, the
+  container, the integrity/binding matrix, and the tail's three-layer behaviour are
+  measured. `sha256.rs` and `state.rs` now implement the own PERUNST v1 container and
+  the Apple interop codec and their tests; what remains is the Rust-End ⇄ Rust-OTP
+  parity gate and the Rust `ProvisioningEnd`. The CFF body of `fp_dh_38fa04bb` is not
+  lifted; the 142 KB function is recorded as the last non-libc call before the write,
+  not claimed as understood.
 * **Track C/D — unchanged.** Start/CPIM genesis (planter source producer `0xdd511`,
   WeaveFeeds, mixer-14, digest words, session16, Body B) and the live verdict remain
   after B's parity gate.
