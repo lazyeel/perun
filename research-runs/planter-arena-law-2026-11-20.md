@@ -102,3 +102,58 @@ measured for the planter.
   **P(x|p:=a) ^=P(x|p:=b)** against context `x`.
 * Rust port: `expand_planter(spim) = windows_from_arena(spim[8:248])`
   is now the correct signature; the seed is off the planter path.
+
+## 6. Verification pass (2026-11-20, corrected lab)
+
+**Lab bug found and fixed.** The first replay lab installed a `UC_HOOK_CODE`
+callback on every `run()` and never removed it, so every "repeat" probe was
+stopped by the *first* invocation's counter at the first loop tail. All
+structural numbers produced before the fix are void (including a spurious
+"per-byte XOR bundle" and a spurious "not separable"). The lab now builds one
+hook at construction, resets the machine by rewriting every PT_LOAD from the
+core image plus the saved register file, and zeroes the hit counter per probe.
+
+**Lab verification (`lab_check.py`).**
+- A1 replay schedule == the independent gdb dump `pre-A1-pre/planter.bin`
+  at `+0x18D0..+0x19C0` (True).
+- Three consecutive probes on one machine are bit-identical (True).
+- All seven windows are permutations with the same constants as gdb (True).
+- C replay reproduces all seven C windows of the gdb dump (True).
+
+**Diffusion map in the real A1 context (`diffusion_real.json`).**
+For every one of the 240 arena bytes `i`, flipping `i` in the *real* A1 arena
+changes:
+- all 16 bytes of schedule block `i // 16` (220/240 do exactly 16; the rest
+  15 or 16 of the same block),
+- exactly one byte of block `i // 16 + 1`, at position `(i % 16) ^ 3`, for
+  every block `b < 14` (0 deviations over 224 probes),
+- nothing else. No input reaches a non-adjacent block.
+
+Only the degenerate all-zero arena changes all 240 (a branch/`if` artifact of
+the zero context), which is why the real-context map is the one to trust.
+
+**Separability (`sep_test.py`).** For every block `b = 0..14`, with random
+16-byte `z, w` and all other arena blocks at the real A1 values:
+`H(z,w) ^ H(z,0) ^ H(0,w) ^ H(0,0) = 0` on all 16 output bytes.
+So the schedule is fifteen separable 16-byte mixers with a one-block XOR
+feed-forward:
+
+    S[b] = P_b(x_b) ^ R_b(x_{b-1})
+
+with `P_b`, `R_b` independent 16->16 maps (and the diffusion map says `R_b` is
+only a single byte `p^3` of its argument).
+
+**Suffix sufficiency, re-confirmed on the corrected lab.** Replacing
+`arena[160:240]` by C's suffix in the A1 arena reproduces all C windows
+(`== C True`, 56 differing bytes vs A1), while replacing `arena[0:160]`
+leaves the A1 windows bit-identical (0 differing bytes). Random suffix changes
+the windows density. This reproduces the earlier conclusion on a lab that is
+now known-deterministic, so it stands.
+
+**What this means for the port.** The genesis is
+`windows(arena) = f(spim[168:248])` through fifteen 16-byte mixers whose
+`R_b` are literally "copy byte p^3 of the previous block". The only remaining
+unknown substance is the 16-byte map `P_b` (one per block, or one reused);
+it is not GF(2)-affine and not a per-byte XOR bundle, so it is a byte-level
+S-box network over 16 bytes. The next probe measures `P_b` as a 16x16 table
+of 256-entry byte curves to expose its S-box layer and byte wiring.
