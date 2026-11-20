@@ -39,6 +39,7 @@ pub mod early_series;
 pub mod early_zone;
 pub mod fold_zone;
 pub mod identity;
+pub mod planter;
 pub mod sha256;
 pub mod simd_cycles;
 pub mod spim;

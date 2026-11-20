@@ -81,10 +81,10 @@ Point probes `put X in block k` (X = 01..10, all other blocks zero) give
 
     S[0]   = P(X) ^ IV
     S[k]   = P(X) ^ Q(0)      for k = 1..14
-    S[k+1] = P(0) ^ Q(X Short)  for k = 1..13
+    S[k+1] = P(0) ^ Q(X)      for k = 1..13
 
 with `P(0) ^ Q(0) = cbd0a5c2a3867086e70081ade60d568b` and the same
-`P(X) ^ Q(0)` for every `k >= riv virt 1`, i.e. the schedule is the separable
+`P(X) ^ Q(0)` for every `k >= 1`, i.e. the schedule is the separable
 recurrence
 
     S[b] = P(in[b]) ^ Q(in[b-1])
@@ -152,8 +152,8 @@ now known-deterministic, so it stands.
 
 **What this means for the port.** The genesis is
 `windows(arena) = f(spim[168:248])` through fifteen 16-byte mixers whose
-`R_b` are literally "copy byte p^3 of the previous block". The only remaining
-unknown substance is the 16-byte map `P_b` (one per block, or one reused);
+`R_b` are literally "copy byte p^3 of the previous block". The remaining
+unknown substance is the 16-byte map `P` (measured shared by every `b >= 1`);
 it is not GF(2)-affine and not a per-byte XOR bundle, so it is a byte-level
-S-box network over 16 bytes. The next probe measures `P_b` as a 16x16 table
+S-box network over 16 bytes. The next probe measures `P` as a 16x16 table
 of 256-entry byte curves to expose its S-box layer and byte wiring.
