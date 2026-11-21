@@ -187,3 +187,105 @@ plus a live `finishMachineProvisioning` `ec=0` with a Rust CPIM for a fresh SPIM
 
 Tracks A and B are strictly sequential in verification (A's read-set maps the state
 format B must write). Track C proceeds in parallel against its own criteria.
+
+---
+
+## 10. Status and corrections — 2026-11-21 (measured, not re-planned)
+
+This section supersedes any earlier row it contradicts. It is a status report on the
+plan as written, not a new plan. Measurements are by replay of `gcore` checkpoints
+on the Android `libCoreADI.so` oracle in Unicorn, plus direct inspection of
+`crates/perun-adi-core` and `crates/perun-adi-bionic`. The plan text above is left
+intact so the delta is auditable.
+
+### Tracks, against evidence
+
+| Plan item | Plan said | Measured now |
+|---|---|---|
+| Gate 0 | done | done (N=5 warm replays byte-identical; MID=f(state), OTP=f(state, epoch), 60 s quantum, entropy reads dead). |
+| Track A, `OTPRequest` | "closed" (RESEARCH 2026-11-18) | **Not closed as specified.** §3.3 asks for `state.rs` + `otp.rs`; there is no `otp.rs`. What exists is `warmvm.rs`, an interpreter for a lifted IR of one captured execution, with libc call-site replays and 4.79 MiB of memory seeds. That is a trace verifier, not a generator. Its `otp()` only reads VM memory at `otp_addr`; I verified the OTP bytes are *not* pre-seeded there (`pre_seeded_equals_native=False` on all five cases), so the VM does compute them, but the computation is a transcription of the recorded stream, not an independent algorithm. |
+| Track B, `ProvisioningEnd` + format | measured | `state.rs` implements the PERUNST v1 container and the Apple codec. There is **no Rust ProvisioningEnd** (`fp_dh_38fa04bb` is not lifted), so §4.3's two-way parity cannot be run yet. |
+| Track C, Start/CPIM genesis | six boundaries open | SPIM anatomy and the Body B splice are closed. `session16` is entropy-derived but its KDF is not identified, so it is not implementable. The digest is assembled by comparing candidate words against the reference CPIM (oracle-anchored selection). The planter *window law* is now closed; the *producer* is not. |
+| Track D, integration + live | live ladder | `perun adi-android headers` spawns `sudo unshare -m --propagation private` + the native `adi_native` with Apple's own libraries. §6's acceptance (clean env with no Apple `.so`, Bionic or capture dirs) therefore cannot be demonstrated today. |
+
+### Corrections to specific lines
+
+1. **§5.1, the value-transform model is wrong and must be rewritten.** It reads
+   "the value-transforms are bijective (fam1 x^0x3B, fam2 x^0x67, fam3 (x^1)+0xC7), so
+   permutation structure comes from the SOURCE — lift the producer of `[rbp-0x11a8]`,
+   not the per-window relabels".
+   On seven captured lineages every canonical window is exactly
+   `w[i] = c ^ XOR_{k : bit k of i set} basis[k]`, with basis bytes of GF(2) rank 8.
+   So a window is a full affine map with **eight** basis bytes, not a constant XOR
+   relabel, and `w[i] = i ^ K` does not hold anywhere: the basis is *not* powers of two
+   on any of A1, A2, B, C, D, E, F. The named constants also mismatch measurement:
+   fam2's constant is `0x07`, not `0x67`; fam3's is `0x39`, not `(x^1)+0xC7`.
+   The inference "permutation structure comes from the source" is backwards: replaying
+   random arenas keeps the same affine law with the same constants but drops the basis
+   below rank 8, and the tables then repeat. **Bijectivity is a property of the basis,
+   not of the source.** The `[rbp-0x11a8]` producer is not the source of the windows:
+   at the checkpointed instruction `0xDD511` (`mov [rbp-0x11a8], rcx`) the slot holds
+   `0xd`, while the measured input is a 240-byte arena in `libCoreADI+0x19B600`.
+2. **§5.1, the corpus design answers a non-question.** "≥3 fresh SPIMs × ≥3 identities
+   (explains sparse-vs-256/256 window variance)". The sparse snapshots are the *pre-loop*
+   dumps: at `0xDD511` the windows at `+0xC50`, `+0xD60`, `+0x1280`, `+0x1390`, `+0x1A00`
+   are all zero and are trivially affine. Sample only after the loop tail `0xE26DE`.
+   Identity is also not an input to this stage: the read census shows the stage reads
+   the arena (240 bytes), its own frame (16 bytes) and static image tables, with zero
+   reads of any identity buffer, and `arena == SPIM[8:248]` byte for byte.
+3. **Window count.** "four 256-byte windows" / "five known writers" is stale. Seven
+   windows are written by one-byte stores inside a single 256-iteration loop
+   (`0xE1F74..0xE26DE`): the five canonical affine ones plus two extras. The fifth
+   window at `+0x1F30` is therefore *proven canonical* by mechanism, which retires the
+   earlier "a fifth S-box candidate, not a proven fifth member" note. Both extras are
+   complete permutations on every capture and never obey the affine law.
+4. **§3.3 names a file that does not exist.** There is no `crates/perun-adi-core/src/otp.rs`.
+5. **§5.3's acceptance is not met.** `generate_body_from_tapes` still requires
+   `zone26_tape.txt`, `pair_wp_words.txt`, `live_prov_out.bin`, and `pair_depot.bin`;
+   `generate_digest_from_tapes` still selects candidates by matching the reference CPIM
+   (oracle-anchored); `assemble_cpim_from_oracle_capture` still copies session16 and
+   Body B from the reference CPIM. So "zero reads of reference CPIM, tapes, or captured
+   planter" is not achieved.
+6. **§7's standing rule is currently violated in code.** Digest sum-matching against
+   the reference CPIM is still in `digest.rs`; session16 and Body B are still copied in
+   `OracleCaptureInputs`; and `if mixer == 13 { Some(inp.mul) }` is still present at five
+   sites in `body_a.rs` (lines 160, 472, 1054, 1302, 1520). Either those lines change or
+   the plan must say plainly that integration has not started.
+7. **§8 lists an instrument that is not in the repo.** `tools/adi_step_trace.c` is absent
+   (only `step_trace_defuse.py` is present). Either it is restored or removed from the list.
+8. **§6's CI split has no committed golden vectors.** The golden-vector regression gate
+   named in §6 does not exist yet: the corpus-consuming tests are env-gated and skip in
+   CI. That is also how `matrix3.rs` was able to fail on every run from `fb713f7` to
+   `0ec829f`/`8a93d9a` before being fixed at `9010444`.
+
+### What actually closed since the plan
+
+- The arena slice is exact: `arena = SPIM[8:248]`, 240/240 across A1/A2/C/D, and only
+  `arena[160:240]` reaches the windows (all 160 prefix bytes individually inert).
+- The stage is a fixed straight-line circuit: 171 016 instructions, identical `RBP`/`RSP`,
+  1852 frame stores and one SHA-256 of the executed PC sequence, identical for the real
+  arena and for unrelated random arenas. The earlier reading of `0xDD946` as an S-box
+  round is withdrawn: it sits inside the CFF dispatcher.
+- The schedule is read back, not dead: 16 dword loads at `0xE0C1F..0xE117D` consume
+  `schedule[0xB0..0xF0)`. Patching that slice moves 51 of 63 canonical parameters;
+  patching `schedule[0x00..0xB0)` moves none.
+- The cross-block coupling is one byte at `p ^ 3`, affine at 16/16 positions, with a
+  linear part that depends only on `q % 4` and is identical across blocks, lineages and
+  random contexts (four rank-8 tables). Only the affine constant varies with context.
+- The canonical window law is closed: nine bytes per window, rank 8 on all seven
+  captures, with a byte-exact `Window::from_params` round trip. `Params`,
+  `Window::params`, `PlanterWindows::canonical_params` and `canonical_basis_ranks` are
+  in the crate and gated by the corpus test.
+
+### Remaining queue, in plan order
+
+1. The fifteen round maps `R_b` that turn an arena block into a schedule block, i.e.
+   `arena[160:240]` (80 bytes) → the 64 live bytes at `planter+0x18D0`. Everything after
+   them is closed. This is the whole of the planter genesis still open.
+2. Decide what Track A is: keep `warmvm` as a named trace verifier, or write `otp.rs`.
+   Right now there is no Rust OTP implementation to validate.
+3. Rust `ProvisioningEnd` serializer, then the Rust-End ⇄ Rust-OTP parity gate.
+4. Track D's real acceptance: a run whose process contains no `libCoreADI.so`, no Bionic
+   linker and no capture directory. The current CLI cannot pass it.
+5. Restore or delete `tools/adi_step_trace.c`, and add the committed golden vectors §6
+   calls for, so that a green CI run stops meaning "all parity checks skipped".
