@@ -89,6 +89,41 @@ fn planter_windows_match_the_private_captures() {
             planter_path.display()
         );
 
+        // And their eight basis bytes are GF(2)-independent, so the law is a
+        // bijection. This is what makes the nine bytes of `Params` a total
+        // description of each canonical window.
+        assert_eq!(
+            windows.canonical_basis_ranks(),
+            [8, 8, 8, 8, 8],
+            "{}: a canonical window has a dependent basis",
+            planter_path.display()
+        );
+
+        // Every canonical window must round-trip through the nine bytes.
+        for family in Family::CANONICAL {
+            let window = windows.window(family);
+            let rebuilt = Window::from_params(&window.params());
+            assert_eq!(
+                rebuilt.as_bytes(),
+                window.as_bytes(),
+                "{} {} did not round-trip through Params",
+                case.display(),
+                family.name()
+            );
+        }
+
+        // The two extras are filled by a different path: they are permutations
+        // here, but they do not obey the affine law on any of the seven
+        // captures. Pinning the negative keeps a future affine finding visible.
+        for family in [Family::ExtraC50, Family::Extra1280] {
+            assert!(
+                !windows.window(family).affine_matches_table(),
+                "{} {} unexpectedly obeys the affine law",
+                case.display(),
+                family.name()
+            );
+        }
+
         checked += 1;
     }
 
