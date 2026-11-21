@@ -1,10 +1,12 @@
-# The planter arena: measured input law for the window schedule
+# The planter arena: the genesis pipeline, measured
 
-Date: 2026-11-19 → 2026-11-20
+Date: 2026-11-19 → 2026-11-21
 Lane: Android x86_64, offline-SPIM harness (`ADI_OFFLINE_SPIM`,
 `ADI_FORCE_START=1`), `rig/WORK/libs` oracle.
-Status: late stage closed as an executable oracle; early stage measured to a
-240-byte input; closed form still open.
+Status: the pipeline is closed end to end (arena → schedule → live tail →
+window parameters) except for one explicit unknown: the fifteen 16-byte round
+maps themselves. The constants, the wiring, the read order, the live slice and
+the affine window law are measured.
 
 Raw bytes (SPIM, planter, core dumps, gdb logs) stay in `/tmp/opencode` and are
 **not** committed. This note records only sizes, RVAs, offsets and laws.
@@ -29,9 +31,11 @@ block `0xE1F74..0xE26DE`, executed 256 times. Its coefficients come from a
 
 (not from the stack).
 
-Measured with Unicorn replay of `gcore` checkpoints taken at `0xDD511`:
+Measured with Unicorn replay of `gcore` checkpoints taken at `0xDD511`
+(the checkpoint-raised privilege is not a factor: every replay starts from the
+saved register file and a full rewrite of every `PT_LOAD`):
 
-* The replay is cartesian-exact: 171 017 instructions to the 256th hit of the
+* The replay is cartesian-exact: 171 016 instructions to the 256th hit of the
   loop tail `0xE26DE`; it reproduces the A1 windows byte for byte
   (`0xD60 c=3b basis=cc19f442a86e5eeb`, `0x1390 c=64 d61b182b5fe32725`,
   `0x1A00 c=07 909c4f7dcf031a52`, `0x1F30 c=57 92b2e4e715ab2714`,
@@ -59,101 +63,220 @@ So the only SPIM slice the planter windows consume is
 and, because the 347-byte SPIM tail is 3 ignored padding bytes, this is
 `spim[8:248]`, i.e. the 240 bytes after the 8-byte SPIM header.
 
-The `0xA958D..0xA966E/0x?` unrolled copy block writes these 240 bytes into the
-global arena (writes arrive in reverse with stride; final contents are the
-faithful slice above).
+The `0xA958D..0xA966E` unrolled copy block writes these 240 bytes into the
+global arena, 60 dword stores in the order `+0,+12,+4,+8` within each 16-byte
+block.
 
-## 4. The late stage is a 16-byte block recurrence
+## 4. The stage is one straight line, not a branch network
 
-Diffusion map (240 probes of one byte each, zero arena, read out of the 240-byte
-planter schedule):
+Executed-instruction count, final `RBP`/`RSP`, and the number of frame writes are
+**identical** for the real A1 arena and for four independent random arenas:
 
-* block size 16, 15 blocks (240 bytes);
-* input block `b` changes output blocks `b` and `b+1` only - no other block,
-  no long-range propagation;
-* within block `b` all 16 output bytes move;
-* in block `b+1` exactly one byte moves: position `p XOR 3` for input byte `p`;
-* block 14 has no `b+1`;
-* the window constants `c` are identical on all seven lineages
-  (`20 3b 15 64 07 57 39`); only the eight basis bytes vary.
+| arena | instructions | final RBP | final RSP | frame writes |
+|---|---|---|---|---|
+| A1 | 171 016 | `0x7fffffffa1b0` | `0x7fffffff5ce0` | 1852 |
+| random ×4 | 171 016 | same | same | 1852 |
 
-Point probes `put X in block k` (X = 01..10, all other blocks zero) give
+The **SHA-256 of the whole executed-PC sequence** is the same on A1 and on
+three random arenas (`c6dcf41b34d4453a…`). The stage is therefore a fixed
+data-independent circuit; all of its structure is memory accesses observed at
+run time, and all data dependence is in the values loaded.
 
-    S[0]   = P(X) ^ IV
-    S[k]   = P(X) ^ Q(0)      for k = 1..14
-    S[k+1] = P(0) ^ Q(X)      for k = 1..13
+The 1852 frame writes decompose exactly:
 
-with `P(0) ^ Q(0) = cbd0a5c2a3867086e70081ade60d568b` and the same
-`P(X) ^ Q(0)` for every `k >= 1`, i.e. the schedule is the separable
-recurrence
+    7 windows x 256 bytes        = 1792
+    60 schedule dwords x 4 bytes  =   240
+                        total    = 1852
 
-    S[b] = P(in[b]) ^ Q(in[b-1])
+and there are **zero** writes back into the arena. So the arena is a pure input Keeping the
+and the seven windows + schedule are the only outputs.
 
-(`S[0] = P(in[0]) ^ IV`, `IV` constant). This matches the suite's known
-"one same-structure block per step" behaviour of the fold engine, but here it is
-measured for the planter.
+The 1792 window stores are one byte each, from **seven** store PCs inside one
+256-iteration loop (`0xE1F74..0xE26DE`), one PC per window:
 
-## 5. Open
+| window | store PC |
+|---|---|
+| `+0xD60`  | `0xE2441` |
+| `+0x1F30` | `0xE24C9` |
+| `+0x1A00` | `0xE2508` |
+| `+0x0C50` | `0xE25A4` |
+| `+0x2460` | `0xE25C2` |
+| `+0x1280` | `0xE2626` |
+| `+0x1390` | `0xE26AA` |
 
-* Closed form of `P` and `Q` (16-byte ->r 16-byte each). They are not
-* GF(2)-affine on the full 240-byte input, and not per-byte XOR bundles.
-* Whether `P`/`Q` are "XOR of 16 byte S-box lookups" (the classic 16x16
-  table shape) is the natural next probe: difference-invariance
-  **P(x|p:=a) ^=P(x|p:=b)** against context `x`.
-* Rust port: `expand_planter(spim) = windows_from_arena(spim[8:248])`
-  is now the correct signature; the seed is off the planter path.
+A 256-iteration loop with one store per window is an **affine evaluator over
+the loop index**: the eight bits of `i` are the only thing that distinguishes
+iteration `i` from any other. That is the mechanism behind the measured
+`w[i] = c ^ XOR_{k : bit k(i)} basis[k]` law of § 6.
 
-## 6. Verification pass (2026-11-20, corrected lab)
+The schedule, by contrast, has 60 dword stores from four PCs
+(`0xE090F` at `+0`, `0xE09B7` at `+0xC`, `0xE09D5` at `+0x4`, `0xE09F5` at
+`+0x8`), fired 15 times each in a fixed rotation, three rounds per block.
+It is written **before** the window loop and is not written by it.
 
-**Lab bug found and fixed.** The first replay lab installed a `UC_HOOK_CODE`
-callback on every `run()` and never removed it, so every "repeat" probe was
-stopped by the *first* invocation's counter at the first loop tail. All
-structural numbers produced before the fix are void (including a spurious
-"per-byte XOR bundle" and a spurious "not separable"). The lab now builds one
-hook at construction, resets the machine by rewriting every PT_LOAD from the
-core image plus the saved register file, and zeroes the hit counter per probe.
+## 5. The schedule is block-local, then handed to the windows as 64 bytes
 
-**Lab verification (`lab_check.py`).**
-- A1 replay schedule == the independent gdb dump `pre-A1-pre/planter.bin`
-  at `+0x18D0..+0x19C0` (True).
-- Three consecutive probes on one machine are bit-identical (True).
-- All seven windows are permutations with the same constants as gdb (True).
-- C replay reproduces all seven C windows of the gdb dump (True).
+The 240 arena reads are exactly 15 rounds × 16 bytes, and each round reads
+exactly one block's worth of positions:
 
-**Diffusion map in the real A1 context (`diffusion_real.json`).**
-For every one of the 240 arena bytes `i`, flipping `i` in the *real* A1 arena
-changes:
-- all 16 bytes of schedule block `i // 16` (220/240 do exactly 16; the rest
-  15 or 16 of the same block),
-- exactly one byte of block `i // 16 + 1`, at position `(i % 16) ^ 3`, for
-  every block `b < 14` (0 deviations over 224 probes),
-- nothing else. No input reaches a non-adjacent block.
+| round | arena byte offsets read (mod 16) |
+|---|---|
+| 0 | `01 06 03 0a 00 04 09 0f 08 0b 02 05 07 0c 0e 0d` |
+| 3 | same set, block 3 |
+| … | identical in every round, every lineage |
 
-Only the degenerate all-zero arena changes all 240 (a branch/`if` artifact of
-the zero context), which is why the real-context map is the one to trust.
+Every arena byte is read **exactly once** (read census: min = max = 1).
+The same 16 store PCs write the round's 4 dwords into `schedule[16b..16b+16)`,
+with block offsets `+0x00, +0x0C, +0x04, +0x08`.
 
-**Separability (`sep_test.py`).** For every block `b = 0..14`, with random
-16-byte `z, w` and all other arena blocks at the real A1 values:
-`H(z,w) ^ H(z,0) ^ H(0,w) ^ H(0,0) = 0` on all 16 output bytes.
-So the schedule is fifteen separable 16-byte mixers with a one-block XOR
-feed-forward:
+At the end of the schedule phase the stage **reads back** the schedule:
+16 dword loads at `0xE0C1F..0xE117D`, consuming `schedule[0xB0..0xF0)`
+(64 bytes) and nothing else. The first 176 bytes of the schedule are dead
+output.
 
-    S[b] = P_b(x_b) ^ R_b(x_{b-1})
+This was measured by patching schedule bytes at the first read-back
+instruction and diffing the seven windows:
 
-with `P_b`, `R_b` independent 16->16 maps (and the diffusion map says `R_b` is
-only a single byte `p^3` of its argument).
+| patched region | differing window parameters (of 63) |
+|---|---|
+| `schedule[0x00..0xB0)` | **0** |
+| `schedule[0xB0..0xF0)` | **51** |
 
-**Suffix sufficiency, re-confirmed on the corrected lab.** Replacing
-`arena[160:240]` by C's suffix in the A1 arena reproduces all C windows
-(`== C True`, 56 differing bytes vs A1), while replacing `arena[0:160]`
-leaves the A1 windows bit-identical (0 differing bytes). Random suffix changes
-the windows density. This reproduces the earlier conclusion on a lab that is
-now known-deterministic, so it stands.
+and by varying one byte of the live 64 at a time, which moves between 0 and 6
+parameters. The 64 live bytes are therefore the **only** channel from the
+arena into the windows: only the last five arena blocks
+(`arena[160:240]` = `SPIM[168:248]`) can reach them. That is why randomising
+`arena[0:160]` is a no-op for the windows, verified on all 160 prefix bytes.
 
-**What this means for the port.** The genesis is
-`windows(arena) = f(spim[168:248])` through fifteen 16-byte mixers whose
-`R_b` are literally "copy byte p^3 of the previous block". The remaining
-unknown substance is the 16-byte map `P` (measured shared by every `b >= 1`);
-it is not GF(2)-affine and not a per-byte XOR bundle, so it is a byte-level
-S-box network over 16 bytes. The next probe measures `P` as a 16x16 table
-of 256-entry byte curves to expose its S-box layer and byte wiring.
+## 6. The window law is affine and it is a bijection
+
+Every canonical window is, byte for byte on all seven captures:
+
+    w[i] = c ^ XOR_{k : bit k of i is set} basis[k]
+
+so a window is nine bytes: its constant `c` and an eight-byte basis.
+The constants are lineage-invariant:
+
+    0xC50=20  0xD60=3b  0x1280=15  0x1390=64
+    0x1A00=07 0x1F30=57  0x2460=39
+
+(canonical roles read `fam1=3b`, `fam4=64`, `fam2=07`, `fifth=57`, `fam3=39`)
+and the eight canonical bases have GF(2) rank 8 on every capture, which is
+exactly why `w` is a permutation. Rank 8 <=> bijection; the law holds whenever
+the basis is independent.
+
+The two extras are the exception: on all seven captures they are permutations,
+but they **never** obey the affine law (`affine_matches_table` is false for
+`+0x0C50` and `+0x1280` on A1, A2, B, C, D, E and F). They are not written by
+the canonical evaluator and their role is still open. The earlier note that
+put them in the same "affine" class was an artefact of reading the
+intermediate `pre-A1` replay, where they are not yet filled (see § 8).
+
+## 7. The 15 round maps are the only unknown substance
+
+The stage is a fixed circuit over 240 input bytes, so it is exactly fifteen
+16-byte → 16-byte maps:
+
+    schedule[16b .. 16b+16) = R_b( arena[16b .. 16b+16) )   for b = 0..14
+
+with the measured cross-round coupling
+
+    S[b][q] depends on arena block b, and on exactly one byte
+    of arena block b-1, at position q ^ 3.
+
+Measured on the fixed lab:
+
+* for each source byte `p` of a block, flipping it moves all 16 bytes of
+  `S[b]` and exactly one byte of `S[b+1]`, at `p ^ 3` -- 0 deviations over 224
+  probes (`verify_genesis.py`);
+* the value map on that one byte, `v -> S[b+1][p^3]`, is GF(2)-affine at
+  **16/16** positions;
+* the **linear part** of that map is not context-dependent: at 30 (block, q)
+  positions and 4 unrelated random contexts it is a fixed 8x8 matrix
+  determined only by `q mod 4`, and the four matrices are rank 8, hence
+  bijections (`ctx_free2.py`, `masks.py`);
+* the same four matrices come back on the **A1 and the C checkpoints** and at
+  every block measured -- so they are lineage-invariant and block-invariant
+  and are four 256-byte tables of the port (`masks.py`);
+* it is the affine **constant** that varies with context: it carries `R_b`'s
+  dependence on the whole block, which is why the map is not a separable
+  per-byte table;
+* none of the four is a xorshift or a GF(2^8) multiply form in the polynomials
+  tried, so the four tables are carried as data where they are needed,
+  not regenerated by a formula;
+* the full 240-byte map is therefore not GF(2)-affine and not a per-byte XOR
+  bundle, but every observed structure (16-byte blocks, 4-dword stores,
+  one-byte `p^3` back-coupling with a 4-table mask) is consistent with fifteen
+  applications of one round function;
+
+so `R_b` is the right object to lift: 15 × 16 × 16 = 3840 byte-outputs, each a
+function of 16 byte-inputs, and with `S[b]` separable (measured mixed
+difference = 0 on all 15 blocks) it is 15 × 16 independent 16 → 1 byte maps.
+
+## 8. The extras are not a later path -- they are the same loop, non-affine
+
+A tempting reading is that the two extras at `+0x0C50`/`+0x1280` are filled by a
+different routine, because they are the only windows that break the affine law.
+The measured store PCs refute that: all seven windows are written by one-byte
+stores inside the *same* 256-iteration loop `0xE1F74..0xE26DE` (§ 4).
+
+The apparent "extras are affine before the loop" reading comes from comparing the
+wrong objects. The `pre-*` dumps are taken at `0xDD511`, before the evaluator has
+filled the windows, and they are almost entirely unwritten:
+
+| window | pre-A1 distinct bytes | pre-A1 first eight |
+|---|---|---|
+| `+0x0C50` | 1 (all zero) | `00 …` |
+| `+0x0D60` | 1 (all zero) | `00 …` |
+| `+0x1280` | 1 (all zero) | `00 …` |
+| `+0x1390` | 1 (all zero) | `00 …` |
+| `+0x1A00` | 1 (all zero) | `00 …` |
+| `+0x1F30` | 13 | `00 …` |
+| `+0x2460` | 9 | `5c e9 b3 5f …` |
+
+An all-zero table passes any affine test trivially, so the pre-fix labels say
+nothing about the generator. The only object that does is the final snapshot,
+and there the split is sharp and stable across A1..F: the five canonical windows
+are affine, both extras are complete permutations that are not affine.
+
+So the extras are written by the same index loop but their stored value is not an
+affine function of the index. They are genuine 256-byte key-dependent tables,
+not nine-byte schedules; that is why the port carries them as tables and closes
+the *law* only for the canonical five.
+
+## 9. What this means for the port
+
+    windows(arena) = E( schedule_final(arena[160:240]) )
+
+where `schedule_final` is the last 64 bytes the stage leaves in
+`planter+0x18D0`, and `E` is the affine evaluator of § 6 for the five
+canonical windows.
+
+* `arena_from_spim(spim) = spim[8:248]` -- `ARENA_LEN = 240`, exact, 240/240.
+* `windows_from_arena(arena) = E(schedule_final(arena[160:240]))` -- `E` is
+  a nine-byte affine table per canonical window; implemented as
+  [`perun_adi_core::planter::Window::from_params`] and pinned by the
+  `params_round_trip_reproduces_the_window` and
+  `canonical_basis_ranks` tests.
+* `expand_planter(spim)` = the above composition, **gated on the native
+  oracle** only until the fifteen `R_b` are transcribed. It is not gated on
+  the window law; the window law is closed.
+
+The remaining work is exactly the fifteen round maps. A first port attempt
+that lifted them as a single 256-byte S-box was wrong and is withdrawn: the
+`0xDD946` block is not a round function, it is the flattened dispatcher of the
+round (`movsxd rax, [r14+rax*4]; lea rcx; add rcx, rax; jmp rcx`), and its
+`r8/r9/r13` loads are the CFF tables it dispatches through. The next probe
+walks the dispatcher once per round with the round's 16 bytes fixed, which is
+the same method that closed the Windows CFF body.
+
+## Data channels
+
+- Unicorn replay: `/tmp/opencode/replay_lab.py` (`Lab.run_windows` = full
+  stage, `Lab.run_arena` = to the schedule loop tail).
+- Read/write census: `readset.py`, `stripes.py`, `round_map.py`, `writers.py`,
+  `sched_reads.py`.
+- Coupling and law: `influence.py`, `verify_genesis.py`, `coupling_law.py`,
+  `coupling_bank.py`, `caps_law.py`, `extra_law.py`, `pre_vs_fin.py`.
+- A failed probe is retained in the name only if it still tells a reader what
+  not to repeat.

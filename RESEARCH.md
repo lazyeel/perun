@@ -6160,3 +6160,141 @@ re-serialized CPIM.
 
 `adi_state` also writes the identity at `0600` (`Identity::write`) and the state
 at `0600`; the native `0664` is kept only for files the native engine owns.
+
+## 2026-11-21 — The planter genesis is a fixed circuit, and its window law is closed
+
+The planter frontier from the Track C entry (2026-11-18) is the map
+`arena -> seven 256-byte windows`. This entry records what that map is, as
+far as it can be measured without transcribing the fifteen round bodies:
+its shape, its data channels, its outputs, and the exact law of the output
+stage. Raw SPIM/planter bytes and the core dumps remain in `/tmp/opencode`
+under the privacy rule; only sizes, RVAs, offsets, opcodes and counters are
+reproduced.
+
+**The frontier is a straight-line circuit, not a branch network.** Replaying
+`gcore` checkpoints taken at RVA `0xDD511` in Unicorn, with every `PT_LOAD` and
+the saved register file rewritten before each probe, the real A1 arena and
+four independent random arenas execute **171 016** instructions each, end with
+the same `RBP` (`0x7fffffffa1b0`) and `RSP` (`0x7fffffff5ce0`), and perform the
+same **1852** store events into the planter frame. The SHA-256 of the whole
+executed PC sequence is byte-identical on A1 and on three random arenas. So
+there is no data-dependent branch on this path: everything the circuit does is
+decided by the values it loads, and the structure is fully visible at run time.
+The 1852 store events decompose exactly:
+
+    7 windows x 256 byte-stores  = 1792 events   1792 bytes
+    15 rounds x 4 dword-stores   =   60 events    240 bytes
+                          total  = 1852 events   2032 bytes
+
+with **zero** writes back into the arena: the arena is a pure input, and the
+seven windows plus the schedule are the only outputs.
+
+**Instrument failure found, and one earlier claim withdrawn.** Unicorn does not
+instrument a translation block that was generated before a memory hook was
+installed, and a hook added after the first `emu_start` therefore reports
+nothing even though it is live. This was proven on a four-instruction synthetic
+machine (`hook_probe.py`): hooks before the run see 3 reads, a hook added after
+a completed run sees 0, and the same hook sees 3 again after `ctl_flush_tb()`.
+Every zero read count in this campaign's earlier probes was that artefact, not
+a property of the guest. Re-measured with hooks installed before the first
+entry and the TB flushed, the planter stage reads the 240-byte arena **exactly
+once per byte**, 240 reads over 16 PCs, in 15 rounds of 16 -- the block-column
+pattern of a transpose, not the probe pattern of an S-box network. The earlier
+note that called `0xDD946` an S-box round and `P` a "byte-level S-box network
+over 16 bytes" is withdrawn; `0xDD946` is inside the flattened dispatcher
+(`movsxd rax, [r14+rax*4]; lea rcx; add rcx, rax; jmp rcx`), where `r8/r9/r13`
+load the CFF tables and `r14` is the dispatch table itself.
+
+**The arena reaches the windows only through 64 schedule bytes.** The stage
+writes 60 dwords at `planter+0x18D0` from four store PCs
+(`0xE090F` `+0x00`, `0xE09B7` `+0x0C`, `0xE09D5` `+0x04`, `0xE09F5` `+0x08`),
+four dwords per block, one round per block, then — before the window loop —
+**reads sixteen dwords back**, `schedule[0xB0..0xF0)`,
+at `0xE0C1F..0xE117D`. Patching the schedule at the first of those loads and
+diffing the windows splits it cleanly:
+
+| patched region | differing window parameters (of 63) |
+|---|---|
+| `schedule[0x00..0xB0)` | 0 |
+| `schedule[0xB0..0xF0)` | 51 |
+
+So the first 176 bytes are dead output, and only the last five arena blocks
+(`arena[160:240]` = `SPIM[168:248]`) can reach the windows. That supersedes the
+2026-11-20 statement that the schedule "is never read" and the related claim
+that `arena[160:240]` sufficiency was an unexplained property: it is exactly
+those 64 live bytes.
+
+**The cross-block coupling is one byte at `p ^ 3`, affine, with four fixed masks.**
+240 single-byte probes on the fixed lab: flipping arena byte `p` of block `b`
+moves all 16 bytes of `S[b]` and exactly one byte of `S[b+1]`, at position
+`p ^ 3` (0 deviations). Sweeping that source byte over 0..255 at each of the 16
+positions, the curve `v -> S[b+1][p^3]` is GF(2)-affine at **16/16** positions
+in the real A1 context. Separating the curve into its linear part and its
+constant fixes the shape:
+
+* the **linear part** is a fixed 8x8 GF(2) matrix that depends only on `q mod 4`,
+  not on the block, not on the lineage wave, not on the context: 30 (block, q)
+  positions x 4 unrelated random arenas, 0 deviations; the four matrices are
+  rank 8, hence byte bijections; A1 and C give the same four (`ctx_free2.py`,
+  `masks.py`);
+* the **constant** is the context-dependent part. It carries `R_b`'s
+  dependence on the whole 16-byte block, and it is why the map is not a
+  separable per-byte table;
+* none of the four matrices is a xorshift or a GF(2^8) multiply in the tried
+  polynomials, so they are carried as four 256-byte tables, not formulas.
+
+The round read order is the fixed permutation
+`01 06 03 0a 00 04 09 0f 08 0b 02 05 07 0c 0e 0d` by position, identical in all
+fifteen rounds and all lineages (measured from the arena read PCs). With `S[b]`
+separable (mixed fourth difference zero on all 15 blocks, from the 2026-11-20
+pass) the output stage is therefore
+
+    S[b][q] = R_b( x_b )[q] ^ M_{q mod 4}( x_{b-1}[q ^ 3] ) ^ const
+
+and `R_b` is the round body: fifteen 16-byte mixing maps, the only remaining
+unknown substance of the genesis. Four of the sixteen coefficient bytes of the
+coupling (`M0..M3`) are already in hand.
+
+**The window law closes at nine bytes per window.** Every one of the 1792 window
+bytes is written by one byte store in a single 256-iteration loop
+(`0xE1F74..0xE26DE`), one store PC per window (`0xD60`=`0xE2441`,
+`0x1F30`=`0xE24C9`, `0x1A00`=`0xE2508`, `0xC50`=`0xE25A4`, `0x2460`=`0xE25C2`,
+`0x1280`=`0xE2626`, `0x1390`=`0xE26AA`). A loop whose only per-iteration datum is
+the index byte must be affine in that index; measured, it is:
+
+    w[i] = c ^ XOR_{k : bit k of i set} basis[k]
+
+on **A1, A2, B, C, D, E and F for all five canonical windows**, and the eight
+canonical basis bytes have GF(2) rank 8 on every capture, which is exactly why
+`w` is a permutation. The nine-byte `Params` is therefore a total description of
+a canonical window, not an approximation: `perun-adi-core::planter` now exposes
+`Window::params()`, `Window::from_params()`, `PlanterWindows::canonical_params()`
+and `PlanterWindows::canonical_basis_ranks()`, and the gated corpus test asserts
+rank 8, the byte-exact `from_params` round trip, and the invariance of the five
+constants on all seven captures. (`from_params` was validated by replaying the
+canonical tables through the Rust evaluator; the C `+0xC50`/`+0x1280` extras do
+**not** obey the law on any of the seven captures -- an earlier note that called
+them affine was reading the intermediate `pre-A1` replay, where they are not
+yet filled, and the final snapshots are not affine. Their role stays open.)
+
+**What is closed, and what is not.** Closed: the arena slice (`SPIM[8:248]`,
+240/240), the stage shape (fixed straight-line circuit, one PC trace), the block
+map (15 × 16 bytes, block-local read, one-byte `p ^ 3` back-coupling,
+all 240 bytes read exactly once), the live slice (`schedule[0xB0..0xF0)`,
+16 dwords), the output law (nine-byte affine per canonical window, rank 8), and
+the Rust types that own all of it. Not closed: the fifteen round maps `R_b`
+themselves -- 15 × 16 output bytes, each a function of its own 16 input bytes
+plus one byte of the previous block. That is the whole of the remaining planter
+genesis; the port does not guess it.
+
+**A port attempt withdrawn, and the rule it leaves.** Transcribing the
+dispatcher block `0xDD946` as a 16-byte S-box round produced a wrong answer,
+because the block is a CFF dispatcher and its `[r8+...]`/`[r9+...]`/`[r13+...]`
+loads are table indirections, not round arithmetic. The rule re-learned here is
+the one the Windows lane already paid for: an obfuscated body is lifted from
+**measured** input-output pairs, not from a disassembly reading of its control
+flow. For `R_b` the measurement is available and cheap -- hold one block, sweep
+its 16 bytes, read the next block -- and the next entry will carry the fifteen
+assembled `R_b` (or a proof that one round function with a context schedule
+serves all fifteen), followed by the same 7-capture parity gate that
+`planter_corpus` already runs.

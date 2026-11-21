@@ -61,12 +61,22 @@ window contents must be recorded independently of object identity: the
 signature is useful as a per-capture property, not as the sole acceptance
 predicate for the active planter.
 
-| Family | Planter offset | First known writer site(s) |
+| Family | Planter offset | Store site (confirmed 2026-11-21) |
 |---|---:|---|
-| fam1 | `0xD60` | `0xFB05B`, `0xFB075` |
-| fam2 | `0x1A00` | `0xE2508` (confirmed) |
-| fam3 | `0x2460` | `0xE25C2` (confirmed) |
-| fam4 | `0x1390` | `0xE26AA` (confirmed) |
+| fam1 | `0xD60` | `0xE2441` |
+| fam2 | `0x1A00` | `0xE2508` |
+| fam3 | `0x2460` | `0xE25C2` |
+| fam4 | `0x1390` | `0xE26AA` |
+| fifth | `0x1F30` | `0xE24C9` |
+| extra | `0x0C50` | `0xE25A4` |
+| extra | `0x1280` | `0xE2626` |
+
+All seven are one-byte stores inside a single 256-iteration loop spanning
+`0xE1F74..0xE26DE`; each PC executes 256 times over all 256 indices. The
+earlier fam1 candidates `0xFB05B`/`0xFB075` are not the window store: the
+`0xFB0xx` loop is a byte transport into the planter staging area
+(`mov byte [r9+rsi], bl` at `0xFA9C1`, `mov byte [r11+rdx], sil` at
+`0xFAA8F`), and `0xD60` is generated later by the evaluator loop.
 
 **Sparse-window writer audit (six runs, 2026-11-02).** The new one-byte
 hardware probes were armed on the final byte of fam2 (`+0x1AFF`), fam4
@@ -142,8 +152,15 @@ Two known dynamic byte stores write through that staging pointer:
 - `0xFAA8F`: `mov byte [r11+rdx], sil`
 
 The fam1 loop at `0xFB05B`/`0xFB075` transports bytes into the planter; it is
-not, by itself, the permutation generator. The staging/source/planter writes
-are interleaved in the CFF stream.
+not, by itself, the permutation generator (measured 2026-11-21: the generator
+is the single evaluator loop `0xE1F74..0xE26DE`, whose fam1 store is
+`0xE2441`). The staging/source/planter writes are interleaved in the CFF stream.
+
+**Index law of the evaluator (2026-11-21).** The 256-iteration loop writes
+`w[i] = c ^ XOR_{k : bit k of i set} basis[k]` for the five canonical windows on
+all seven captures A1..F, with basis bytes of GF(2) rank 8. The two extra
+windows at `+0xC50`/`+0x1280` are permutations in the final snapshots but do not
+obey that law; their writer is a later path and their role is open.
 
 A separate store at `0xE24C9` writes to `[RDI+R15+0x1F30]`. In live run
 `41202921615`, this site executed 256 times over all 256 indices
