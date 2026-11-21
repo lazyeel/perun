@@ -6298,3 +6298,61 @@ its 16 bytes, read the next block -- and the next entry will carry the fifteen
 assembled `R_b` (or a proof that one round function with a context schedule
 serves all fifteen), followed by the same 7-capture parity gate that
 `planter_corpus` already runs.
+
+## 2026-11-21 (later) — the goal is pure Rust, and the port is one round, not fifteen
+
+The campaign's objective is now explicit: **a full ADI/Anisette implementation in
+Rust, with no Apple binary anywhere in the runtime path** (the native images stay
+only as a temporary oracle during development), and work stays on
+`rnd/phase1-standalone-anisette`. This entry sizes the remaining port rather than
+restating the goal.
+
+**The first boundary is already landed in Rust.** `arena_from_spim` in
+`perun-adi-core/src/planter.rs` returns exactly `spim[8..248]`, matching the
+native copy at `0xA958D` byte for byte on A1, A2, C and D. It is a pure slice of
+the input: no seed, no identity, no relabelling. Pinned by
+`arena_is_the_spim_suffix_verbatim`, which builds a structurally valid 347-byte
+SPIM (BE u32 Body B length 52, version 4) so the boundary is checkable without
+any capture or Apple image.
+
+**The round body is one function, not fifteen.** Hashing the executed PC stream
+per (16 arena reads + 4 schedule stores) block on the fixed lab gives:
+
+| block | executed instructions | PC-stream SHA-256 |
+|---|---|---|
+| 0 | 3463 | `9f6a04fe3487…` |
+| 1..14 | **3128 each** | **`ef9c9279b39a…` (identical)** |
+
+So the genesis is **one round function invoked fourteen times**, plus a special
+first block that spends an extra 335 instructions on the IV. That is a much
+smaller lift than "fifteen different mixers", and it explains why the canonical
+basis is session-dynamic while the constants are lineage-invariant: the
+*algorithm* is fixed; only the arena bytes change.
+
+The whole pipeline now measures as:
+
+```text
+spim[8..248]  (arena_from_spim, done)
+  -> block 0: IV init (335 extra instructions)
+  -> 14 x round(3128 instructions), register-carried coupling, M_{q mod 4}
+  -> schedule[0xB0..0xF0)   (16 dword reads, the live 64 bytes)
+  -> 256-iteration evaluator loop, seven store PCs, one byte per window per iteration
+  -> five canonical windows as w[i] = c ^ XOR_{k:bit k of i} basis[k]
+```
+
+**What is left to eliminate Apple binaries is therefore a single straight-line
+body of 3128 instructions plus the IV prologue.** Transcribing it to Rust (as
+`fold_zone.rs` already does for the Windows fold zone) is enough to make
+`expand_planter(spim)` a pure-Rust function with no native image required at
+run time. The acceptance criterion for this track is the same one the plan
+already uses for Track D: a run with no `libCoreADI.so`, no Bionic linker and no
+capture directory present, passing the same seven-capture parity gate that
+`planter_corpus` runs today.
+
+For the record, the two Track-C code violations the plan warned about are still
+present and are *not* fixed by this entry: `if mixer == 13 { Some(inp.mul) }` at
+five sites in `body_a.rs`, and the oracle-anchored candidate selection in
+`generate_digest_from_tapes` / `read_paired_cpim`. They sit on the CPIM lane,
+not on the planter lane, and they are the next thing to remove after the round
+body lands. `tools/adi_step_trace.c` is still absent from the repo and should be
+restored or dropped from the instrument list in §8 of the campaign plan.
