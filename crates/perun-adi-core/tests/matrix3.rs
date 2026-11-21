@@ -115,10 +115,22 @@ fn part_a() -> (usize, usize, usize) {
 }
 
 /// Part B: the public Start-state parity grid over the five native cases.
-fn part_b() {
+///
+/// The grid is a private, local capture: it lives under `PERUN_GRID_ROOT` (or
+/// the lab default `/home/admin/rig/cases`) and is never committed. When that
+/// directory is absent -- which is the case on any fresh clone and in CI --
+/// the gate skips instead of failing, exactly as Part A does.
+fn part_b() -> bool {
     let root = std::env::var("PERUN_GRID_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/home/admin/rig/cases"));
+    if !GRID.iter().all(|name| root.join(name).join("cap").is_dir()) {
+        eprintln!(
+            "{}: the five-case Start/OTP grid is not mounted -- part B skipped",
+            root.display()
+        );
+        return false;
+    }
     let mut mids = HashSet::new();
     let mut payloads = HashSet::new();
     for name in GRID {
@@ -168,6 +180,7 @@ fn part_b() {
         GRID.len(),
         "the grid's OTP payloads must be distinct (time-varying law)"
     );
+    true
 }
 
 fn hex_short(bytes: &[u8]) -> String {
@@ -181,7 +194,13 @@ fn hex_short(bytes: &[u8]) -> String {
 #[test]
 fn matrix3_differential_oracle() {
     let (checked, body_a_exact, digest_exact) = part_a();
-    part_b();
+    let grid = part_b();
+    if checked == 0 && !grid {
+        eprintln!(
+            "matrix3: neither the private corpus nor the five-case grid is mounted -- skipped"
+        );
+        return;
+    }
     eprintln!(
         "matrix3: corpus cases={checked}, body-A bytes exact={body_a_exact}/160, digest bytes exact={digest_exact}/32"
     );
