@@ -103,6 +103,20 @@ pub const ARENA_LEN: usize = 240;
 /// The arena's RVA inside `libCoreADI`'s writable image.
 pub const ARENA_RVA: usize = 0x19B600;
 
+/// The arena the planter genesis consumes, taken straight from the SPIM.
+///
+/// Measured byte for byte on A1, A2, C and D: the arena is exactly
+/// `spim[8..248]`, the 240 bytes following the 8-byte SPIM header. No
+/// permutation, no relabelling, no seed and no identity enters here -- the
+/// native `0xA958D` unrolled copy block only rearranges the dwords it writes.
+/// The later windows depend on `arena[160..240]`, i.e. on `spim[168..248]`,
+/// but the arena itself is a pure slice of the input and needs no producer.
+pub fn arena_from_spim(spim: &crate::spim::Spim) -> [u8; ARENA_LEN] {
+    let mut out = [0u8; ARENA_LEN];
+    out.copy_from_slice(&spim.to_bytes()[8..248]);
+    out
+}
+
 /// The four fixed GF(2)-linear masks of the cross-block coupling.
 ///
 /// Schedule byte `q` of block `b` receives one byte of arena block `b-1`, at
@@ -506,6 +520,25 @@ mod tests {
         assert_eq!(PLANTER_LEN, 0x2700);
         assert_eq!(ARENA_LEN, 240);
         assert_eq!(Family::CANONICAL.len(), 5);
+    }
+
+    /// The input boundary of the genesis is a slice, not a transform.
+    #[test]
+    fn arena_is_the_spim_suffix_verbatim() {
+        let mut bytes = [0u8; crate::spim::SPIM_LEN];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(37).wrapping_add(11);
+        }
+        // the anatomy Start requires: BE u32 Body B length 52, version 4.
+        bytes[crate::spim::LENGTH_OFFSET..crate::spim::LENGTH_OFFSET + 4]
+            .copy_from_slice(&(crate::spim::BODY_B_LEN as u32).to_be_bytes());
+        bytes[crate::spim::VERSION_OFFSET..crate::spim::VERSION_OFFSET + 4]
+            .copy_from_slice(&4u32.to_be_bytes());
+        let spim = crate::spim::Spim::parse(&bytes).expect("valid 347-byte SPIM");
+        let arena = arena_from_spim(&spim);
+        assert_eq!(arena.len(), ARENA_LEN);
+        assert_eq!(&arena[..], &bytes[8..248]);
+        assert_eq!(&arena[160..], &bytes[168..248]);
     }
 
     fn affine_window(c: u8, basis: [u8; 8]) -> [u8; WINDOW_LEN] {
