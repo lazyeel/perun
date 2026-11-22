@@ -326,3 +326,33 @@ so there is no remaining planter `R_b` or schedule-to-window task. The rest of
 oracle-anchored CPIM/digest inputs, Track-D clean execution, and broader golden
 coverage are still open. The planter goldens satisfy §6 for this component, not
 for the whole ADI/Anisette corpus.
+
+---
+
+## 12. `session16` measured producer status — 2026-11-22
+
+Track C's `session16` item is now decomposed but **not closed**. Full formulas,
+validation counts and open gates are in `research-runs/session16-kdf-2026-11-22.md`.
+The raw entropy/session artifacts remain local `0600/0700`.
+
+* The final sixteen-store loop is isolated and byte-exact. It uses 83,566 dynamic
+  instructions but only 457 unique PCs. Its entire input is the generated
+  624-word state page plus `R14`, established by two-way transplantation.
+* The 40-byte entropy draw initializes Bionic `arc4random`: ChaCha20 with a
+  32-byte key and 8-byte IV, 1,024-byte buffer, reinitialization from its first
+  40 bytes, and LE words from offset 40. The initial and next three native
+  returns match this construction exactly on the sequential controlled draw.
+* The 624-word MT19937-shaped initializer is measured, not guessed from standard
+  KDFs. The exact initial recurrence matches 624/624 words; the 624-iteration
+  first mix and 623-iteration second mix match all 50 captured snapshots each.
+  The second loop preserves `i=2` from the first loop's wrap. The formulas and
+  buffer-update masks are committed in the note.
+* Plain digest/`init_by_array`/`seed_seq` candidates are rejected. The general
+  fourth key-buffer slot and the exact twist MBA are still open, so no
+  `session16.rs` is claimed and the CPIM acceptance gate remains unmet.
+
+Next: close twist/output parity on sequential and `0xA5`, close the fourth slot
+on held-out draws, implement `session16_from_entropy([u8;40])` in pure Rust with
+hash-only CI goldens, then return to WeaveFeeds, mixer-14 and the eight digest
+words. Track A's independent OTP and Track B's Rust `ProvisioningEnd` remain
+open as stated in §10.

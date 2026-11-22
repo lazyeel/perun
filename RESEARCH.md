@@ -6449,3 +6449,48 @@ Rust `ProvisioningEnd`, a proper independent `otp.rs`, and the native
 `adi-android headers` subprocess remain open. The next Track-C work is the CPIM
 producer chain that consumes this now-closed planter boundary; Track D still
 needs its own clean-environment acceptance run.
+
+## 2026-11-22 (later) — `session16`: ChaCha-seeded MT19937 family, initialization measured
+
+The first post-planter entropy investigation is recorded in full in
+`research-runs/session16-kdf-2026-11-22.md`. It is a measured KDF result, not a
+new production closure.
+
+**The final session store loop is isolated and exact.** A checkpoint must select
+`RBP-0x44D0+0x0F`, the first of sixteen descending byte destinations at
+`0xA5CF6`; the unfiltered first hit and the `slot`-only filter both select the
+wrong work. Through the 16th store the loop executes 83,566 instructions with
+457 unique PCs: 46-instruction short links plus a 27,667-instruction body used
+four times. It reproduces the native session block exactly. Two sessions have
+identical PC streams and first-read addresses; 32 frame bytes are invariant,
+there are no heap/other-library reads, and the complete input is the generated
+624-word state page plus `R14`, proven by two-way page+register transplantation.
+`R14` is not the public session handle.
+
+**The 40-byte draw is Bionic `arc4random`, not a plain digest.** The exact
+Android/Bionic construction is a 32-byte ChaCha key plus 8-byte IV, ChaCha20 from
+counter zero, a 1,024-byte buffer, reinitialization from its first 40 bytes, and
+little-endian output words starting at offset 40. The initial return and next
+three calls match those words exactly on the sequential controlled draw. The
+first output also determines the MT seed through the measured mask at `0x87BAC`.
+The four-word key buffer is measured at `0x87CF0`; three slots use the second
+measured mask, while the general fourth-slot producer is still open.
+
+**The generator is MT19937-shaped, but standard seed shortcuts fail.** It has a
+624-word state at `0x183090` and exact MT19937 tempering. The native MBA initial
+recurrence now reproduces all 624 words. The first 624-iteration mixing loop,
+including its four-word buffer update and the special low-bit mask on buffer 0,
+matches all 50 captured iteration snapshots and the final state. The second
+623-iteration loop also matches all 50 snapshots when `i=2` is preserved from
+the first loop's wrap. The 623rd final state matches 623/624 words; the remaining
+`mt[0]` distinction is stage-dependent, with `0x80000000` confirmed at the twist
+entry. Exact formulas and loop boundaries are in the note, so they are not left
+only in this session's context.
+
+**Open:** the twist MBA at `0xA65F9..0xA6810` still does not reproduce output 32
+or the post-twist state, and the fourth key-buffer slot needs a general formula.
+Therefore there is no `session16.rs` yet and no autonomous CPIM claim. The next
+gate is twist parity on sequential/`0xA5`, fourth-slot parity on two held-out
+draws, then dependency-free `session16_from_entropy([u8;40])` with hash-only CI
+vectors. After that, the remaining CPIM work is WeaveFeeds, mixer-14 and the
+eight digest-word producers; proper OTP and `ProvisioningEnd` remain separate.
