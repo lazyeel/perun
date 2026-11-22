@@ -6494,3 +6494,26 @@ gate is twist parity on sequential/`0xA5`, fourth-slot parity on two held-out
 draws, then dependency-free `session16_from_entropy([u8;40])` with hash-only CI
 vectors. After that, the remaining CPIM work is WeaveFeeds, mixer-14 and the
 eight digest-word producers; proper OTP and `ProvisioningEnd` remain separate.
+
+## 2026-11-22 (later) — Twist reaches exact 624/624 state parity; output still open
+
+The post-`session16` twist investigation has a new, precise result: starting from
+the actual pre-twist state, the measured twist now reproduces the native
+`genrand` state **on all 624 words**. All 227 first-loop stores, all 396
+second-half stores, and the special final store also match individually. This
+is a real full-state closure on the sequential `00..27` draw, not just a selected
+PC/trace match.
+
+The necessary corrections are documented in
+`research-runs/session16-kdf-2026-11-22.md` § 7: upper-mask handling, the native
+matrix pair `0x4e79914b`/`0xd7712194` (not `0x9908b0df`), second-load ordering,
+updated-`mt[0]` at the wrap, CFF-junk elimination in final `y`, and two opcode
+misreads. In particular `0xA6845` and `0xA6870` are **XOR**, not AND, with no
+pre-mask; this makes final temper `EDX` match native exactly at `0xA68C8`.
+
+**Still open:** `R14` after the output XOR is not yet reproduced at the
+session-loop checkpoint from the same replay, and the final-word matrix parity /
+`y` index-state needs a held-out draw. The general fourth key-buffer slot also
+remains open. Current work is replay/output reconciliation, not production
+integration; `session16.rs` and autonomous CPIM are still not claimed. The
+planter result and all earlier green CI results are unaffected.

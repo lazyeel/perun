@@ -347,12 +347,17 @@ The raw entropy/session artifacts remain local `0600/0700`.
   first mix and 623-iteration second mix match all 50 captured snapshots each.
   The second loop preserves `i=2` from the first loop's wrap. The formulas and
   buffer-update masks are committed in the note.
-* Plain digest/`init_by_array`/`seed_seq` candidates are rejected. The general
-  fourth key-buffer slot and the exact twist MBA are still open, so no
-  `session16.rs` is claimed and the CPIM acceptance gate remains unmet.
+* Plain digest/`init_by_array`/`seed_seq` candidates are rejected. The twist now
+  reproduces the native post-twist state **on all 624 words** for the sequential
+  draw; all first/second-loop stores and the final store match too. Exact opcode
+  and matrix corrections are in `session16-kdf-2026-11-22.md` § 7.
+* Output is still not closed: post-XOR `R14` is not reproduced at the session
+  checkpoint from the same replay, held-out final-word parity/`y` state remains
+  to be proven, and the fourth key-buffer slot is still open. No `session16.rs`
+  or CPIM autonomy is claimed.
 
-Next: close twist/output parity on sequential and `0xA5`, close the fourth slot
-on held-out draws, implement `session16_from_entropy([u8;40])` in pure Rust with
+Next: reconcile replay/output and final-word parity on held-out draws, close the
+fourth slot, implement `session16_from_entropy([u8;40])` in pure Rust with
 hash-only CI goldens, then return to WeaveFeeds, mixer-14 and the eight digest
 words. Track A's independent OTP and Track B's Rust `ProvisioningEnd` remain
 open as stated in §10.
