@@ -280,3 +280,28 @@ the same method that closed the Windows CFF body.
   `coupling_bank.py`, `caps_law.py`, `extra_law.py`, `pre_vs_fin.py`.
 - A failed probe is retained in the name only if it still tells a reader what
   not to repeat.
+
+## 10. Implementation closure (2026-11-22)
+
+Sections 7 and 9 described the state before transcription. The fifteen `R_b`
+maps and the evaluator are no longer open. Exact executed-trace liveness reduced
+the shared schedule body to 3,092 instructions invoked fifteen times, with four
+output-dependent dword masks carried through the short link. The post-schedule
+part is 1,138 instructions once plus a 479-instruction body invoked 256 times.
+
+`tools/transpile_planter.py` now emits `planter_core.rs` and `planter_tables.rs`.
+It is strict (unsupported semantics abort), preserves arithmetic/flags/stores,
+and emits no x86 machine code. `planter::expand_planter` is implemented in pure
+Rust; `schedule_from_arena` and `window_tables_from_arena` expose the measured
+boundaries. Static lookup data is non-executable Rust data, and production has
+no Apple/Bionic/capture dependency.
+
+Results: the 240-byte schedule matches byte for byte on all seven captures, and
+all seven 256-byte windows match byte for byte on all seven captures (12,544
+window bytes, including both extras). Three synthetic schedule digests and three
+synthetic full-window-set digests are committed and run without captures.
+
+The earlier statement in § 6 that the extras were "not written by the canonical
+evaluator" was too strong and is withdrawn. § 8 has the correct mechanism: all
+seven are written in one loop; only five satisfy the affine position law. The
+complete port transcribes that loop rather than approximating the extras.

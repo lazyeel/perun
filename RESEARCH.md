@@ -6356,3 +6356,96 @@ five sites in `body_a.rs`, and the oracle-anchored candidate selection in
 not on the planter lane, and they are the next thing to remove after the round
 body lands. `tools/adi_step_trace.c` is still absent from the repo and should be
 restored or dropped from the instrument list in §8 of the campaign plan.
+
+## 2026-11-22 — The complete planter producer is closed in pure Rust
+
+This entry supersedes the previous entry's statement that only the round body was
+left, and the older statements that `expand_planter(spim)` was oracle-gated. The
+**whole planter producer**, including the schedule-to-window evaluator and both
+non-affine tables, is now independently implemented in Rust.
+
+### Implementation and exact reduction
+
+`crates/perun-adi-core/src/planter_core.rs` and `planter_tables.rs` are generated
+by the new strict `tools/transpile_planter.py`, using
+`tools/planter_replay.py` only as a development-time checkpoint reader. The
+measured 171,017-instruction dynamic path reduces to **4,709 unique transcribed
+instructions**:
+
+| body | unique instructions | executions |
+|---|---:|---:|
+| shared schedule arithmetic at `0xDD92B..0xE09F5` | 3,092 | 15 |
+| post-schedule setup at `0xE09FD..0xE1F6B` | 1,138 | 1 |
+| window body at `0xE1F74..0xE26DE` | 479 | 256 |
+
+The original 371-instruction entry prefix and fourteen 36-instruction dispatch
+links are replaced by their measured live-data equivalents, not by unrolled
+native code. Backward liveness on the shared body found only `RBP`, `RSI`, `R13`
+and eight frame slots as live-ins. The cross-round dependence is four
+output-dependent dword masks at `RBP-0x78/-0xD0/-0x70/-0x80`, transformed into
+`RBP-0x1A8/-0x110/-0xD8/-0x108`; the cursor advances by 16 and `RSI/R13` are
+reset. This explains the previously measured coupling without fifteen separate
+round implementations. The evaluator's two older pointers are structural:
+`planter-0x10` and `planter+0x2980`; no captured register snapshot is embedded.
+
+The generator fails on every unsupported instruction, operand or flag consumer.
+It preserves exact register widths, partial-register writes, little-endian
+loads/stores, wrapping arithmetic, `mul`, `shld/shrd`, `ZF/CF`, unsigned `seta`
+and carry-in `adc`. Only three measured computed-dispatch jumps are replaced by
+structured Rust successors (`0xE0A2B`, `0xE1F6B`, `0xE26DE`). Every arithmetic
+operation and all seven one-byte window stores remain. Per-instruction lexical
+blocks avoid a `rustc` debug-info stack overflow caused by thousands of
+shadowed temporaries; no special `RUST_MIN_STACK` setting is needed.
+
+Nineteen read-only, non-executable lookup pages are represented as Rust data
+arrays. There is **no ELF image, x86 instruction byte array, Apple `.so`, Bionic
+linker, loader, relocation, capture read or native subprocess** in the generated
+production path. The old allocator calls in the discarded entry prefix are not
+part of the arithmetic body and have no Rust counterpart.
+
+### Public boundaries and verification
+
+`perun_adi_core::planter` now exposes:
+
+* `schedule_from_arena` / `schedule_from_spim` → the exact 240-byte schedule;
+* `window_tables_from_arena` → all seven raw 256-byte tables in `Family::ALL`
+  order, including dependent-basis tables from synthetic arenas;
+* `expand_planter(spim)` → typed, permutation-checked `PlanterWindows`, with no
+  identity parameter and no oracle/capture/native dependency.
+
+The development gate was run with the seven local SPIMs linked to their captures
+under the private `0700` corpus (the added `spim.bin` files are local `0600`, not
+committed):
+
+```text
+pure-Rust schedule:       7/7 captures, 240/240 bytes each
+pure-Rust expand_planter: 7/7 captures, 7/7 windows and 256/256 bytes each
+```
+
+That is **1,680 schedule bytes and 12,544 window bytes compared exactly**, with
+zero differences. Both non-affine extras match too; they are not reconstructed
+with `Window::from_params` and are not treated as affine.
+
+Ordinary capture-free tests now execute committed synthetic SHA-256 goldens for
+three arenas (zero, sequential and `37*i+11`): one digest of each 240-byte
+schedule and one digest of each concatenated seven-window result. Only hashes
+are committed, so a normal CI run exercises the complete implementation rather
+than reporting green after all parity checks skipped.
+
+Final local gates: `cargo clippy --workspace --all-targets -- -D warnings` and
+`cargo test --workspace` both passed. A separate mount-namespace run hid the
+Apple/Bionic tree and every capture/core directory, then passed all 11 planter
+unit tests (including every synthetic golden) plus the capture-free integration
+target. `ldd` on the test binary reports only the normal Linux loader, libc and
+libgcc: no Apple or Bionic dynamic dependency. The seven-capture differential
+gate was also rerun after the final source formatting and remained exact.
+
+### Boundary of this result
+
+The **planter lane** no longer needs Apple binaries, even during a normal
+capture-free run. This is not yet full ADI/Anisette acceptance: `session16` and
+its KDF, oracle-anchored digest selection, the five `mixer == 13` feed exceptions,
+Rust `ProvisioningEnd`, a proper independent `otp.rs`, and the native
+`adi-android headers` subprocess remain open. The next Track-C work is the CPIM
+producer chain that consumes this now-closed planter boundary; Track D still
+needs its own clean-environment acceptance run.

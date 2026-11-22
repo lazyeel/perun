@@ -11,11 +11,17 @@
 //! * every one of the seven windows is a complete byte permutation;
 //! * the five canonical windows carry their lineage-invariant constants;
 //! * the five canonical windows obey the affine position law;
-//! * the two extra windows are allowed to be sparse/affine or not (role open).
+//! * `schedule_from_spim` matches the captured 240-byte schedule exactly;
+//! * `expand_planter` matches every byte of all seven windows exactly, including
+//!   the two non-affine extras.
 
 use std::path::{Path, PathBuf};
 
-use perun_adi_core::planter::{Family, PlanterWindows, Window, PLANTER_LEN, WINDOW_LEN};
+use perun_adi_core::planter::{
+    expand_planter, schedule_from_spim, Family, PlanterWindows, Window, PLANTER_LEN, SCHEDULE_LEN,
+    SCHEDULE_OFFSET, WINDOW_LEN,
+};
+use perun_adi_core::spim::Spim;
 
 fn capture_dirs() -> Vec<PathBuf> {
     if let Some(single) = std::env::var_os("PERUN_PLANTER_CASE") {
@@ -112,8 +118,8 @@ fn planter_windows_match_the_private_captures() {
             );
         }
 
-        // The two extras are filled by a different path: they are permutations
-        // here, but they do not obey the affine law on any of the seven
+        // The two extras are permutations here, but they do not obey the
+        // canonical affine law on any of the seven
         // captures. Pinning the negative keeps a future affine finding visible.
         for family in [Family::ExtraC50, Family::Extra1280] {
             assert!(
@@ -129,6 +135,73 @@ fn planter_windows_match_the_private_captures() {
 
     assert!(checked >= 1, "at least one planter capture must be checked");
     eprintln!("planter windows: {checked} private captures verified");
+}
+
+#[test]
+fn rust_schedule_matches_the_private_captures_byte_for_byte() {
+    let cases = capture_dirs();
+    if cases.is_empty() {
+        eprintln!("PERUN_PLANTER_DIR/PERUN_PLANTER_CASE unset -- skipping the schedule gate");
+        return;
+    }
+
+    let mut checked = 0usize;
+    for case in cases {
+        let spim_path = case.join("spim.bin");
+        if !spim_path.exists() {
+            continue;
+        }
+        let spim_bytes = read(&spim_path);
+        let spim = Spim::parse(&spim_bytes)
+            .unwrap_or_else(|error| panic!("{}: {error}", spim_path.display()));
+        let planter = read(&case.join("planter.final.bin"));
+        let expected = &planter[SCHEDULE_OFFSET..SCHEDULE_OFFSET + SCHEDULE_LEN];
+        let actual = schedule_from_spim(&spim);
+        assert_eq!(
+            &actual[..],
+            expected,
+            "{}: pure-Rust schedule diverged from the native capture",
+            case.display()
+        );
+        checked += 1;
+    }
+    assert!(checked >= 1, "at least one capture must include spim.bin");
+    eprintln!("pure-Rust schedule: {checked} private captures matched byte for byte");
+}
+
+#[test]
+fn rust_expansion_matches_all_seven_private_window_sets() {
+    let cases = capture_dirs();
+    if cases.is_empty() {
+        eprintln!("PERUN_PLANTER_DIR/PERUN_PLANTER_CASE unset -- skipping the expansion gate");
+        return;
+    }
+
+    let mut checked = 0usize;
+    for case in cases {
+        let spim_path = case.join("spim.bin");
+        if !spim_path.exists() {
+            continue;
+        }
+        let spim = Spim::parse(&read(&spim_path))
+            .unwrap_or_else(|error| panic!("{}: {error}", spim_path.display()));
+        let expanded = expand_planter(&spim)
+            .unwrap_or_else(|error| panic!("{}: {error}", spim_path.display()));
+        let expected = PlanterWindows::parse(&read(&case.join("planter.final.bin")))
+            .expect("captured planter windows");
+        for family in Family::ALL {
+            assert_eq!(
+                expanded.window(family).as_bytes(),
+                expected.window(family).as_bytes(),
+                "{} {}: pure-Rust expansion diverged",
+                case.display(),
+                family.name()
+            );
+        }
+        checked += 1;
+    }
+    assert!(checked >= 1, "at least one capture must include spim.bin");
+    eprintln!("pure-Rust expand_planter: {checked} captures, all seven windows matched");
 }
 
 #[test]

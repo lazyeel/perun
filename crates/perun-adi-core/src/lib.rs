@@ -40,6 +40,8 @@ pub mod early_zone;
 pub mod fold_zone;
 pub mod identity;
 pub mod planter;
+mod planter_core;
+mod planter_tables;
 pub mod sha256;
 pub mod simd_cycles;
 pub mod spim;
