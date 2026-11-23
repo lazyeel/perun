@@ -42,6 +42,7 @@ pub mod identity;
 pub mod planter;
 mod planter_core;
 mod planter_tables;
+pub mod session;
 pub mod sha256;
 pub mod simd_cycles;
 pub mod spim;

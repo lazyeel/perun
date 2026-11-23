@@ -6517,3 +6517,29 @@ session-loop checkpoint from the same replay, and the final-word matrix parity /
 remains open. Current work is replay/output reconciliation, not production
 integration; `session16.rs` and autonomous CPIM are still not claimed. The
 planter result and all earlier green CI results are unaffected.
+
+## 2026-11-22 (later) — `session16` key schedule and native output replay reconciled
+
+The fourth key-buffer slot is now measured: the complete construction is
+`seed = seed_mask(out0)` and `key = [B(out4), B(out2), B(out3), B(out1)]`, where
+`B(x) = x - ((2x) & 0xc34d0ed8) + 0x61a6876c`. The fourth slot is therefore
+`B(out1)`, not a digest or raw slice. The closed ChaCha/`arc4random` and seed/key
+boundary now has a dependency-free Rust implementation in
+`perun-adi-core/src/session.rs`, with RFC 8439 and hash-only sequential/`0xA5`
+tests. Its complete 984-byte exposed `arc4random` buffer is covered as well. This
+module deliberately does not claim to be the full `session16_from_entropy` API.
+
+The earlier native output mismatch was an invocation-boundary problem. Minimal
+counters select twist-address hit 7,264 for sequential and 7,037 for `0xA5`.
+Replaying from each resulting `0xA65F9` checkpoint through the correctly filtered
+sixteen stores now matches the native session block exactly on both draws:
+102,025 dynamic instructions and 457 unique PCs per run. This supersedes the
+"post-XOR `R14` not reproduced" status above. The counts are capture-navigation
+facts, not constants for a production algorithm.
+
+The compact independent formula remains the next gate. Its first twist matches
+624/624 words, but naive repeated application does not yet match the native
+second-twist entry; final-word matrix parity and cursor/`y` state need explanation
+and held-out `0x11`/`0x22` checks. Full details are in
+`research-runs/session16-kdf-2026-11-22.md` § 8. No complete `session16` producer
+or autonomous CPIM integration is claimed.

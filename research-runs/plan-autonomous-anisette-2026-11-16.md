@@ -361,3 +361,26 @@ fourth slot, implement `session16_from_entropy([u8;40])` in pure Rust with
 hash-only CI goldens, then return to WeaveFeeds, mixer-14 and the eight digest
 words. Track A's independent OTP and Track B's Rust `ProvisioningEnd` remain
 open as stated in §10.
+
+---
+
+## 13. `session16` key/output reconciliation — later 2026-11-22
+
+Two items marked open in §12 are now resolved, with the evidence boundary kept
+explicit:
+
+* The fourth key slot is `B(out1)`; the full native order is seed `A(out0)` and key
+  `[B(out4), B(out2), B(out3), B(out1)]`. The pure-Rust `session.rs` implements
+  the measured ChaCha/`arc4random` and seed/key component, including RFC and
+  hash-only tests. It is not yet the complete `session16` generator.
+* Correctly selected native twist-start checkpoints now replay through all sixteen
+  session stores byte-exactly on sequential and `0xA5` (102,025 instructions, 457
+  unique PCs each). The former post-XOR `R14` mismatch was an invocation-boundary
+  error, not an additional missing output transform.
+
+Track C is still open: the compact formula must work from raw entropy without a
+captured twist checkpoint, including repeated-twist final-word behavior, matrix
+parity and cursor state, then pass held-out `0x11`/`0x22`. Only after that gate
+may `session16_from_entropy([u8;40])` replace the copied CPIM field. The remaining
+queue is otherwise unchanged: WeaveFeeds, mixer-14, eight digest-word producers,
+Rust `ProvisioningEnd`, independent OTP, and clean-environment integration.
