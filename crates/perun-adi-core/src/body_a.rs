@@ -31,8 +31,8 @@
 pub struct MixerInputs {
     /// The planter-derived lane value (c for lanes A/B, c3 for C, c4 for D).
     pub lane_value: u8,
-    /// A/B multiplication operand. In each M14 giant-tape row this slot
-    /// instead carries the already-finalized post-tail output byte.
+    /// A/B product after the native `mul cl` instruction. Use
+    /// [`mixer14_inputs`] to construct this field from M14's selector.
     pub mul: u8,
     /// Legacy tape-structure field retained for input compatibility.
     /// The cross-session measurement disproved the proposed m4 first-round
@@ -42,9 +42,6 @@ pub struct MixerInputs {
 
 /// The sixteen mixers in block order (store RVAs of the census).
 pub const BODY_A_ROUNDS: usize = 10;
-/// One M14 post-tail byte per round is carried from the same-session giant tape.
-pub const BODY_A_M14_TAPE_RESULTS: usize = BODY_A_ROUNDS;
-
 pub const STORES: [u32; 16] = [
     0xE6B9D, 0xE6BE2, 0xE6C47, 0xE6CA0, 0xE6D06, 0xE6D3E, 0xE6D8B, 0xE6DC1, 0xE6E28, 0xE6E5F,
     0xE6EAA, 0xE6EE4, 0xE6F42, 0xE6F73, 0xE6FC4, 0xE7023,
@@ -149,19 +146,38 @@ pub fn mixer_byte(mixer: usize, inp: &MixerInputs, zones: &Zones) -> Option<u8> 
     }
 }
 
+fn read_planter_1a00(dir: &str) -> Result<[u8; 256], String> {
+    let planter = std::fs::read(format!("{dir}/planter34.bin"))
+        .map_err(|error| format!("read M14 planter window: {error}"))?;
+    if planter.len() < 0x1B00 {
+        return Err("planter34.bin does not cover the +0x1A00 M14 window".into());
+    }
+    Ok(planter[0x1A00..0x1B00]
+        .try_into()
+        .expect("256-byte M14 window"))
+}
+
+/// Construct M14's measured pre-tail inputs from its selector.
+///
+/// At `0xE6F4E..0xE6F62` the selector crosses the planter `+0x1A00`
+/// window and `0x8D`, then `mul cl` squares that value. The zone tail is
+/// the ordinary lane-B operation at `0xE6F62..0xE6F6C`.
+pub fn mixer14_inputs(selector: u8, planter_1a00: &[u8; 256]) -> MixerInputs {
+    let value = planter_1a00[selector as usize] ^ 0x8D;
+    MixerInputs {
+        lane_value: value,
+        mul: value.wrapping_mul(value),
+        m4_round1: false,
+    }
+}
+
 /// Assemble body A from ten rounds whose entries are in mixer order.
 /// `ROW_POS` is the destination permutation, not a mixer identifier.
-/// Mixer 14's tape hit is after its tail, so `mul` already contains its
-/// final output byte and must not be sent through `mixer_byte` again.
 pub fn generate_body_a(rounds: &[[MixerInputs; 16]; 10], zones: &Zones) -> [u8; 160] {
     let mut body = [0u8; 160];
     for (k, round) in rounds.iter().enumerate() {
         for (mixer, inp) in round.iter().enumerate() {
-            let out = if mixer == 13 {
-                Some(inp.mul)
-            } else {
-                mixer_byte(mixer, inp, zones)
-            };
+            let out = mixer_byte(mixer, inp, zones);
             if let Some(b) = out {
                 let pos = ROW_POS[mixer] + 0x10 * k;
                 body[pos] = b;
@@ -275,9 +291,11 @@ pub fn selectors(f: &WeaveFeeds, planter_1390: &[u8; 256]) -> [u8; 16] {
 /// body A is reconstructed from giant/selector tapes and the baked
 /// session-invariant zones; the digest uses measured word-tape inputs.
 /// Returns the depot and the number of filled body-A positions. M14's
-/// post-tail output is read from tape directly, not recomputed here.
+/// selector is recovered from `DH ^ 0x5D`, expanded through the measured
+/// planter window and squared before the ordinary lane-B tail.
 pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String> {
     let mut zones = Zones::from_files(dir)?;
+    let planter_1a00 = read_planter_1a00(dir)?;
     let tape =
         std::fs::read_to_string(format!("{dir}/zone26_tape.txt")).map_err(|e| e.to_string())?;
     let sel_txt = std::fs::read_to_string(format!("{dir}/sel34_tape.txt")).ok();
@@ -358,14 +376,16 @@ pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String
         if mixer == 11 {
             lane_value ^= 0xDD;
         }
-        cur.push((
-            mixer,
+        let input = if mixer == 13 {
+            mixer14_inputs(((rdx >> 8) as u8) ^ 0x5D, &planter_1a00)
+        } else {
             MixerInputs {
                 lane_value,
                 mul: al,
                 m4_round1: false,
-            },
-        ));
+            }
+        };
+        cur.push((mixer, input));
     }
     if !cur.is_empty() {
         rounds_raw.push(cur);
@@ -442,7 +462,7 @@ pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String
     // m4_round1 is a legacy tape field retained for compatibility;
     // mixer_byte() does not branch on it (cross-session result).
 
-    // the depot zone: body A rows (m14's row IS the finished byte)
+    // the depot zone: every body-A row uses its measured pre-tail inputs
     let mut depot = [0u8; 0xC0];
     let mut written = [false; 0xA0];
     let mut body_bytes = 0usize;
@@ -468,11 +488,7 @@ pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String
                     k + 1
                 ));
             }
-            let got = if *j == 13 {
-                Some(inp.mul)
-            } else {
-                mixer_byte(*j, inp, &zones)
-            };
+            let got = mixer_byte(*j, inp, &zones);
             let Some(b) = got else {
                 return Err(format!(
                     "mixer {} round {} indexed outside its 0x300-byte zone window",
@@ -829,8 +845,8 @@ mod tests {
     /// The live parity: same-session zone-read and selector tapes are
     /// joined to reconstruct all sixteen mixer inputs in each of ten
     /// rounds. m12, m4 and m15 are backfilled from the selector tape
-    /// where their giant-read breakpoint is absent; m14 carries its
-    /// already-finished output byte. Every one of the 160 body-A bytes
+    /// where their giant-read breakpoint is absent; m14 reconstructs its
+    /// pre-tail selector and product. Every one of the 160 body-A bytes
     /// must match the same session's CPIM.
     #[test]
     #[ignore = "requires same-session zone-26 tapes and paired CPIM; set PERUN_BODY_A_PAIR_READY=1"]
@@ -850,6 +866,7 @@ mod tests {
         // its OWN switch, flipped only while the zone-26 artifacts
         // are the same run's pair.
         let mut zones = Zones::from_files(&dir).expect("same-session zone files");
+        let planter_1a00 = read_planter_1a00(&dir).expect("same-session M14 planter");
         let tape = std::fs::read_to_string(format!("{dir}/zone26_tape.txt"))
             .expect("same-session zone-26 tape");
         let cpim = read_paired_cpim(&dir).expect("same-session paired CPIM");
@@ -939,14 +956,16 @@ mod tests {
             } else {
                 lane_value
             };
-            cur.push((
-                mixer,
+            let input = if mixer == 13 {
+                mixer14_inputs(((rdx >> 8) as u8) ^ 0x5D, &planter_1a00)
+            } else {
                 MixerInputs {
                     lane_value,
                     mul: al,
                     m4_round1: false,
-                },
-            ));
+                }
+            };
+            cur.push((mixer, input));
         }
         if !cur.is_empty() {
             rounds_raw.push(cur);
@@ -1048,13 +1067,9 @@ mod tests {
             for (j, inp) in round {
                 let pos = ROW_POS[*j] + 0x10 * k;
                 let expect = cpim[0x18 + pos];
-                // m14's breakpoint (0xe6f6c) sits AFTER its tail -- the
-                // tape row carries the finished byte itself (10/10 live).
-                let got = if *j == 13 {
-                    Some(inp.mul)
-                } else {
-                    mixer_byte(*j, inp, &zones)
-                };
+                // M14 uses the selector/product reconstructed from DH and
+                // the +0x1A00 window before its ordinary lane-B tail.
+                let got = mixer_byte(*j, inp, &zones);
                 match got {
                     Some(b) => {
                         assert_eq!(
@@ -1100,6 +1115,7 @@ mod tests {
         use crate::digest::{generate_digest, DigestInputs, K_HIGH, K_LOW};
         let dir = std::env::var("PERUN_LIVE_DIR").unwrap_or_else(|_| "/opt/data/adi-re".into());
         let mut zones = Zones::from_files(&dir).expect("same-session zone files");
+        let planter_1a00 = read_planter_1a00(&dir).expect("same-session M14 planter");
         let tape = std::fs::read_to_string(format!("{dir}/zone26_tape.txt"))
             .expect("same-session zone-26 tape");
         let wtape = std::fs::read_to_string(format!("{dir}/pair_wp_words.txt"))
@@ -1191,14 +1207,16 @@ mod tests {
             } else {
                 lane_value
             };
-            cur.push((
-                mixer,
+            let input = if mixer == 13 {
+                mixer14_inputs(((rdx >> 8) as u8) ^ 0x5D, &planter_1a00)
+            } else {
                 MixerInputs {
                     lane_value,
                     mul: al,
                     m4_round1: false,
-                },
-            ));
+                }
+            };
+            cur.push((mixer, input));
         }
         if !cur.is_empty() {
             rounds_raw.push(cur);
@@ -1296,13 +1314,8 @@ mod tests {
         for (k, round) in rounds_raw.iter().take(10).enumerate() {
             for (j, inp) in round {
                 let pos = ROW_POS[*j] + 0x10 * k;
-                // m14's row carries the finished byte (the breakpoint
-                // sits after the tail, measured 10/10).
-                let got = if *j == 13 {
-                    Some(inp.mul)
-                } else {
-                    mixer_byte(*j, inp, &zones)
-                };
+                // M14 is computed from its reconstructed pre-tail inputs.
+                let got = mixer_byte(*j, inp, &zones);
                 if let Some(b) = got {
                     depot[pos] = b;
                     seen[pos] = true;
@@ -1489,7 +1502,7 @@ mod tests {
     }
 
     /// Regression: a mixer ordinal and its destination row are different
-    /// coordinate systems. Also pin mixer 14's post-tail tape semantics.
+    /// coordinate systems. All mixers use the same pre-tail arithmetic API.
     #[test]
     fn body_a_uses_mixer_ids_then_applies_the_row_ladder() {
         let zones = Zones {
@@ -1517,17 +1530,39 @@ mod tests {
         let mut expected = [0u8; 160];
         for (round_no, round) in rounds.iter().enumerate() {
             for (mixer, input) in round.iter().enumerate() {
-                let out = if mixer == 13 {
-                    Some(input.mul)
-                } else {
-                    mixer_byte(mixer, input, &zones)
-                }
-                .expect("a u8 lane value always indexes the 0x300-byte dynamic window");
+                let out = mixer_byte(mixer, input, &zones)
+                    .expect("a u8 lane value always indexes the 0x300-byte dynamic window");
                 expected[ROW_POS[mixer] + 0x10 * round_no] = out;
             }
         }
 
         assert_eq!(generate_body_a(&rounds, &zones), expected);
+    }
+
+    #[test]
+    fn mixer14_squares_its_post_window_value_before_the_lane_b_tail() {
+        let selector = 0x20;
+        let mut planter = [0u8; 256];
+        planter[selector as usize] = 0x71;
+        let input = mixer14_inputs(selector, &planter);
+        let value = 0x71 ^ 0x8D;
+        assert_eq!(input.lane_value, value);
+        assert_eq!(input.mul, value.wrapping_mul(value));
+
+        let mut zones = Zones {
+            a: [0; ZONE_WINDOW],
+            b: [0; ZONE_WINDOW],
+            c: [0; ZONE_WINDOW],
+            d: [0; ZONE_WINDOW],
+            c1a: 0,
+            c1b: 0,
+            c1c: 0,
+            c1d: 0,
+        };
+        let index = value as usize + 0x100;
+        zones.b[index] = 0x35;
+        let expected = input.mul.wrapping_add(0x35) ^ FINAL_XOR[13];
+        assert_eq!(mixer_byte(13, &input, &zones), Some(expected));
     }
 
     /// The ladder invariant, pinned without any live files: every

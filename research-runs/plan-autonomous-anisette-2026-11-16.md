@@ -364,6 +364,29 @@ open as stated in §10.
 
 ---
 
+## 13. `session16` key/output reconciliation — later 2026-11-22
+
+Two items marked open in §12 are now resolved, with the evidence boundary kept
+explicit:
+
+* The fourth key slot is `B(out1)`; the full native order is seed `A(out0)` and key
+  `[B(out4), B(out2), B(out3), B(out1)]`. The pure-Rust `session.rs` implements
+  the measured ChaCha/`arc4random` and seed/key component, including RFC and
+  hash-only tests. It is not yet the complete `session16` generator.
+* Correctly selected native twist-start checkpoints now replay through all sixteen
+  session stores byte-exactly on sequential and `0xA5` (102,025 instructions, 457
+  unique PCs each). The former post-XOR `R14` mismatch was an invocation-boundary
+  error, not an additional missing output transform.
+
+Track C is still open: the compact formula must work from raw entropy without a
+captured twist checkpoint, including repeated-twist final-word behavior, matrix
+parity and cursor state, then pass held-out `0x11`/`0x22`. Only after that gate
+may `session16_from_entropy([u8;40])` replace the copied CPIM field. The remaining
+queue is otherwise unchanged: WeaveFeeds, mixer-14, eight digest-word producers,
+Rust `ProvisioningEnd`, independent OTP, and clean-environment integration.
+
+---
+
 ## 14. Track C `session16` component closed — final 2026-11-22
 
 The `session16` item is now **independently implemented**:
@@ -393,23 +416,17 @@ Track B's Rust `ProvisioningEnd` and Track D's clean-environment run remain open
 
 ---
 
-## 13. `session16` key/output reconciliation — later 2026-11-22
+## 15. Mixer 14 shortcut removed — 2026-11-23
 
-Two items marked open in §12 are now resolved, with the evidence boundary kept
-explicit:
+The mixer-14 item is now closed. The executed pre-tail formula is
+`v = planter_1A00[x] ^ 0x8D`, `mul = low8(v²)`, followed by the ordinary lane-B
+zone tail and `0xF2`. The legacy tape selector is `DH ^ 0x5D`, so no finalized
+output byte is consumed. `mixer14_inputs` implements the boundary and all five
+`Some(inp.mul)` exceptions have been removed from production and tests.
 
-* The fourth key slot is `B(out1)`; the full native order is seed `A(out0)` and key
-  `[B(out4), B(out2), B(out3), B(out1)]`. The pure-Rust `session.rs` implements
-  the measured ChaCha/`arc4random` and seed/key component, including RFC and
-  hash-only tests. It is not yet the complete `session16` generator.
-* Correctly selected native twist-start checkpoints now replay through all sixteen
-  session stores byte-exactly on sequential and `0xA5` (102,025 instructions, 457
-  unique PCs each). The former post-XOR `R14` mismatch was an invocation-boundary
-  error, not an additional missing output transform.
-
-Track C is still open: the compact formula must work from raw entropy without a
-captured twist checkpoint, including repeated-twist final-word behavior, matrix
-parity and cursor state, then pass held-out `0x11`/`0x22`. Only after that gate
-may `session16_from_entropy([u8;40])` replace the copied CPIM field. The remaining
-queue is otherwise unchanged: WeaveFeeds, mixer-14, eight digest-word producers,
-Rust `ProvisioningEnd`, independent OTP, and clean-environment integration.
+Verification: native pre-tail parity 10/10, private Rust differential gate 10/10,
+hermetic synthetic unit test, workspace tests and Clippy green. The next Track-C
+item is the WeaveFeeds transition. It is measured as one identical 2,546-PC
+circuit per round on sequential and `0xA5` (624 reads, 86 writes, all 160 mixer
+stores observed), but is not yet implemented. Digest-word producers and full
+CPIM integration remain open; Tracks A/B/D are unchanged.

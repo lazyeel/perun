@@ -6584,3 +6584,35 @@ The remaining CPIM work is unchanged: WeaveFeeds, mixer-14 and eight digest-word
 producers, then replacing the copied session field in `OracleCaptureInputs`.
 Rust `ProvisioningEnd`, independent OTP and clean-environment Track-D acceptance
 remain open.
+
+## 2026-11-23 — Mixer 14 pre-tail closed; all tape-result exceptions removed
+
+A same-run replay from the existing `0xDD511` checkpoint reaches the first mixer
+read at `0xE6B54` in 401,311 instructions with no faults. Across ten rounds it
+then observes all 160 mixer stores. Every complete round has the same 2,546-PC
+stream on sequential and `0xA5`, with 624 data reads and 86 writes. This gives a
+small measured circuit for the remaining WeaveFeeds transition; that transition
+is not yet ported.
+
+M14 itself is now closed. The executed pre-tail path at `0xE6F4E..0xE6F6C`
+shows that `selectors()[13]` is the value **before** the second window, not the
+zone index or final byte. Let `x = selectors()[13]`; then:
+
+```text
+v    = planter[+0x1A00][x] XOR 0x8D
+mul  = low8(v * v)                 # mov eax,ecx; mul cl
+byte = low8(mul + zone_B[v]) XOR 0xF2
+```
+
+The ordinary lane-B `mixer_byte` therefore applies with `lane_value=v` and
+`mul=low8(v²)`. On the legacy giant tape, `RDX` survives to the post-store hit,
+so `x = DH XOR 0x5D` reconstructs the selector without a finished-output tape.
+The new `mixer14_inputs` implements this boundary and both tape parsers use it.
+All five `if mixer == 13 { Some(inp.mul) }` / post-tail shortcuts are gone;
+`generate_body_a` now sends every mixer through the same arithmetic API.
+
+Native parity is 10/10 pre-tail records, and the new private Rust gate
+(`PERUN_MIXER14_VECTORS`) passes 10/10 without committing raw values. A synthetic
+hermetic test pins the square/tail semantics. Workspace tests and Clippy are
+green. This removes the M14 oracle shortcut, but not the WeaveFeeds transition,
+digest-word selection or the remaining CPIM integration boundaries.
