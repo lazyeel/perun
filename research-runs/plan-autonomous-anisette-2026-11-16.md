@@ -364,6 +364,35 @@ open as stated in §10.
 
 ---
 
+## 14. Track C `session16` component closed — final 2026-11-22
+
+The `session16` item is now **independently implemented**:
+`session16_from_entropy([u8;40]) -> [u8;16]` in `perun-adi-core/src/session.rs`.
+It has no production capture/native dependency. The final model contains:
+
+* the entropy/ChaCha seed and four-word key schedule;
+* 32 exact rounds of the first twist family (624/624 on every measured round);
+* the `0xA65F9` family with general old-final-word upper/new-first-word parity,
+  the executed final add and exact non-textbook temper MBA;
+* the **120-byte predecessor** whose nonzero-advance rule derives the 31/32 (and
+  potentially later) session boundary instead of accepting a captured count;
+* the same nonzero-advance session output, including the measured 17-store/five-
+  word reverse-sequential case and immediate termination at destination zero.
+
+Acceptance for this component: 12/12 distinct native inputs and 13/13 captures
+match byte-for-byte, including held-out `0x11`/`0x22`, both predecessor lengths
+and both session store counts. Public CI uses twelve SHA-256-only goldens;
+`PERUN_SESSION16_DIR` enables a separate full-byte private gate (12/12 green).
+Workspace tests and Clippy are green. See `session16-kdf-2026-11-22.md` § 9.
+
+This changes only the Track-C `session16` row. CPIM integration has not yet
+consumed the function, and `OracleCaptureInputs` still represents the old copied
+boundary. Next in Track C: WeaveFeeds, mixer-14 and the eight digest-word
+producers, then zero-reference CPIM integration. Track A's independent OTP,
+Track B's Rust `ProvisioningEnd` and Track D's clean-environment run remain open.
+
+---
+
 ## 13. `session16` key/output reconciliation — later 2026-11-22
 
 Two items marked open in §12 are now resolved, with the evidence boundary kept

@@ -6543,3 +6543,44 @@ second-twist entry; final-word matrix parity and cursor/`y` state need explanati
 and held-out `0x11`/`0x22` checks. Full details are in
 `research-runs/session16-kdf-2026-11-22.md` § 8. No complete `session16` producer
 or autonomous CPIM integration is claimed.
+
+## 2026-11-22 (final) — `session16_from_entropy` closed in pure Rust
+
+The raw-entropy producer is now independently implemented in
+`perun-adi-core/src/session.rs` as
+`session16_from_entropy([u8;40]) -> [u8;16]`. This is a complete component
+result, superseding the open-output status above; it is not yet a claim of full
+CPIM autonomy.
+
+The missing structure was larger than the single measured twist. The initialized
+state first passes through **32 rounds of a different twist family** with matrix
+`0x5bb8223a`/`0xc2b092e5`; one compact formula reproduces 624/624 words on every
+round. The `0xA65F9` family is also idempotent once its final word uses the old
+`mt[623]` upper bit, the new `mt[0]` parity, and the executed `add edi,esi` in the
+correct order. Twenty-six fully captured consecutive transitions match 624/624.
+The earlier claims that `0xA67D3` was junk and that temper was textbook MT19937
+are withdrawn: exact native output requires the executed MBA corrections and a
+final `0xe46af5c7` XOR.
+
+The input-dependent 31/32 boundary is derived, not hardcoded. Before session16,
+the same generator fills a **120-byte predecessor** whose destination advances
+only for nonzero transformed bytes. Thus `N = words_needed(120) + 1`: zero
+predecessor zeros gives 31, one gives 32. This predicts all native counts,
+including sequential/`0x01`/`0x7f` at 32 and the other measured inputs at 31.
+Session output itself has the same nonzero-advance rule. The reverse-sequential
+case consequently needs 17 stores and five words, rather than the usual 16/four;
+the production loop handles it and immediate termination at destination zero.
+
+Validation is byte-exact on **12/12 distinct controlled inputs** (13/13 captures
+including an independent reverse-draw repeat), covering held-out `0x11`/`0x22`,
+both twist counts and both store counts. Twelve SHA-256-only goldens run in CI;
+`tests/session16_corpus.rs` additionally compares full private CPIM bytes when
+`PERUN_SESSION16_DIR` is set. That private gate passes 12/12, and workspace tests
+plus Clippy are green. The production module performs no file I/O and uses no
+Apple/Bionic image, capture or subprocess. Full formulas and evidence boundaries
+are in `research-runs/session16-kdf-2026-11-22.md` § 9.
+
+The remaining CPIM work is unchanged: WeaveFeeds, mixer-14 and eight digest-word
+producers, then replacing the copied session field in `OracleCaptureInputs`.
+Rust `ProvisioningEnd`, independent OTP and clean-environment Track-D acceptance
+remain open.
