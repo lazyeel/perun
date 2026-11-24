@@ -6708,3 +6708,30 @@ subsequent digest state from SPIM/entropy. The full producer is capture-free ove
 explicit semantic state, but is not yet a SPIM-only cold-provisioning generator.
 Rust `ProvisioningEnd`, independent OTP and clean-environment Track-D acceptance
 remain separate work.
+
+## 2026-11-24 — Independent warm OTP: semantic ABI, no trace replay
+
+The new `otp::run_otp` is now a real warm-OTP generator over explicit semantic
+state and an epoch, not another `warmvm` verification pass. It executes the
+lifted instruction program directly and does not open a trace, compare PCs or
+copy a callee's recorded GP/XMM state. Its native ABI is limited to seven actual
+operations: `malloc`, `free`, `lstat`, `gettimeofday`,
+`pthread_rwlock_rdlock`, `pthread_rwlock_wrlock` and `pthread_rwlock_unlock`.
+The four additional PLT entries are the same operations.
+
+A census of all 92 calls reduced them to 11 call targets and then to this small
+ABI. `lstat` writes the real Bionic x86_64 `struct stat` layout from filesystem
+metadata; `gettimeofday` writes the caller-supplied epoch; rwlocks return zero;
+and a deterministic malloc arena preserves bytes across allocation/free cycles.
+All 82 call sites were verified to have stable return states across all five
+epochs, but that stability is not used as a register replay table.
+
+The independent test passes **5/5 epochs** with no `otp-trace.bin` or recorded
+callee state: `tM`, `tI`, `tE1794862200`, `tE1794863400` and `tE1794865200`.
+Workspace tests and Clippy are green. This is the independent `otp.rs` that Track
+A required, with the same explicit-state boundary as the mixer.
+
+Remaining product work is loading that state from the own provisioning record
+and completing `ProvisioningEnd`, then exercising Rust-End ⇄ Rust-OTP and clean
+acceptance. Cold Start genesis and the native CLI subprocess are not claimed
+closed by this result.

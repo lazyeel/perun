@@ -493,3 +493,23 @@ This completes the capture-free integration over explicit semantic state, not
 its cold genesis. Remaining Track C: produce `MixerState` and the subsequent
 digest state from SPIM/entropy. Rust `ProvisioningEnd`, independent OTP and
 Track-D clean-environment acceptance remain open.
+
+---
+
+## 19. Track A independent warm OTP implemented — 2026-11-24
+
+`otp::run_otp` now executes the warm path without reading a trace or replaying a
+callee's recorded register state. The 92 external calls reduce to seven semantic
+operations: malloc/free, `lstat`, frozen `gettimeofday`, and three pthread rwlock
+functions (four more PLT entries are aliases). A deterministic arena preserves
+memory, Bionic's exact stat layout is written from real metadata, epoch is an
+explicit input, and rwlocks return zero.
+
+The independent gate passes **5/5 epochs** with no `otp-trace.bin` or recorded
+callee state. Workspace tests and Clippy are green. This supersedes `warmvm`'s
+trace-verifier boundary and supplies the requested independent `otp.rs`.
+
+Remaining Track-B/product work: construct the semantic warm state from the own
+provisioning record and implement `ProvisioningEnd`, then prove Rust-End ⇄
+Rust-OTP and clean acceptance. Cold `MixerState` genesis and the native CLI
+subprocess remain open.
