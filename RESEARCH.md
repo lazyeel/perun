@@ -6726,10 +6726,20 @@ and a deterministic malloc arena preserves bytes across allocation/free cycles.
 All 82 call sites were verified to have stable return states across all five
 epochs, but that stability is not used as a register replay table.
 
-The independent test passes **5/5 epochs** with no `otp-trace.bin` or recorded
-callee state: `tM`, `tI`, `tE1794862200`, `tE1794863400` and `tE1794865200`.
-Workspace tests and Clippy are green. This is the independent `otp.rs` that Track
-A required, with the same explicit-state boundary as the mixer.
+The independent test initially passed **5/5 epochs** with no `otp-trace.bin` or
+recorded callee state: `tM`, `tI`, `tE1794862200`, `tE1794863400` and
+`tE1794865200`. Two additional same-run post-End states (`tb-end1` and
+`tb-end2`) now pass at a shared epoch as well, making the gate **7/7 states**.
+This distinguishes state dependence from the earlier epoch sweep.
+
+The new captures also exposed a tooling error rather than an ABI omission: their
+full heap dump had been taken at `0x7ffff7890000`, while the lifter's declared
+arena is `0x7ffff77ff000..0x7ffff7a00000`. Seeding the shifted bytes overlapped
+and zeroed part of CoreADI RW state. Recapturing the declared range fixed both
+runs without changing `run_otp`. `trace_lift.py` now rejects unequal bytes in
+every overlapping seed range, so this corruption fails closed. Workspace tests
+and Clippy are green. This is the independent `otp.rs` that Track A required,
+with the same explicit-state boundary as the mixer.
 
 Remaining product work is loading that state from the own provisioning record
 and completing `ProvisioningEnd`, then exercising Rust-End ⇄ Rust-OTP and clean

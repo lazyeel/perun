@@ -65,6 +65,8 @@ EPOCHS = {
     'tE1794862200': 1794862200,
     'tE1794863400': 1794863400,
     'tE1794865200': 1794865200,
+    'tb-end1': 1794862800,
+    'tb-end2': 1794862800,
 }
 SEED_RANGES = [
     ('ca_rodata', 0x7ffff7679000, 0x4f000),
@@ -1031,6 +1033,24 @@ class Lifter:
                         f'{c}: seed {name} size {len(data)} != {size}')
                     continue
                 seeds.append((addr, data))
+            # The last CoreADI RW page is also the first heap page.  A dump
+            # made at a shifted heap base otherwise overwrites that page in
+            # Memory::seed and produces a plausible but corrupt bundle.
+            if len(seeds) == len(SEED_RANGES):
+                for right in range(len(seeds)):
+                    right_addr, right_data = seeds[right]
+                    for left in range(right):
+                        left_addr, left_data = seeds[left]
+                        start = max(left_addr, right_addr)
+                        end = min(left_addr + len(left_data),
+                                  right_addr + len(right_data))
+                        if start >= end:
+                            continue
+                        if (left_data[start - left_addr:end - left_addr] !=
+                                right_data[start - right_addr:end - right_addr]):
+                            self.errors.append(
+                                f'{c}: seed overlap {SEED_RANGES[left][0]}/'
+                                f'{SEED_RANGES[right][0]} differs at {start:#x}')
             buf += struct.pack('<I', len(seeds))
             for addr, data in seeds:
                 buf += struct.pack('<QQ', addr, len(data)) + data

@@ -505,9 +505,14 @@ functions (four more PLT entries are aliases). A deterministic arena preserves
 memory, Bionic's exact stat layout is written from real metadata, epoch is an
 explicit input, and rwlocks return zero.
 
-The independent gate passes **5/5 epochs** with no `otp-trace.bin` or recorded
-callee state. Workspace tests and Clippy are green. This supersedes `warmvm`'s
-trace-verifier boundary and supplies the requested independent `otp.rs`.
+The independent gate passed **5/5 epochs** with no `otp-trace.bin` or recorded
+callee state, and now also passes two additional same-run post-End states at a
+shared epoch: **7/7 states** total. Their first bundles exposed a shifted heap
+capture (`0x7ffff7890000` instead of the declared `0x7ffff77ff000` arena), which
+overlapped CoreADI RW state; recapturing the correct range required no OTP code
+change. The lifter now rejects inconsistent overlapping seeds. Workspace tests
+and Clippy are green. This supersedes `warmvm`'s trace-verifier boundary and
+supplies the requested independent `otp.rs`.
 
 Remaining Track-B/product work: construct the semantic warm state from the own
 provisioning record and implement `ProvisioningEnd`, then prove Rust-End ⇄

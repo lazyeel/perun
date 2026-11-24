@@ -215,12 +215,17 @@ pub fn run_otp(program: Program, bundle: &CaseBundle, epoch: u64) -> Result<Vec<
         }
         if stub_at < bundle.stubs.len() && bundle.stubs[stub_at].rec_call == record {
             let stub = &bundle.stubs[stub_at];
-            host_call(&mut vm, stub, epoch)?;
+            let site = vm.rip;
+            host_call(&mut vm, stub, epoch).map_err(|error| {
+                VmError::BadProgram(format!("external call at {site:#x}: {error:?}"))
+            })?;
             record = stub.rec_ret;
             stub_at += 1;
             continue;
         }
-        vm.step()?;
+        let site = vm.rip;
+        vm.step()
+            .map_err(|error| VmError::BadProgram(format!("instruction at {site:#x}: {error:?}")))?;
         record += 1;
         steps += 1;
     }
