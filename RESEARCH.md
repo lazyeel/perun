@@ -6680,3 +6680,31 @@ from SPIM/entropy remains a separate task. Thus WeaveFeeds and M14 are closed,
 but this result does not falsely claim SPIM-only CPIM autonomy. Remaining work
 is that initial-state producer and zero-reference CPIM integration; the digest
 layout and store-time inputs are already implemented as described above.
+
+## 2026-11-24 — Full 276-byte CPIM from explicit semantic state, no oracle artifacts
+
+The new `start::generate_cpim_from_state(StartInputs)` joins the closed
+components into one capture-free producer. It takes only a validated `Spim`, the
+40-byte entropy draw, a `MixerState` and eight `DigestInputs`; it computes the
+session block with `session16_from_entropy`, all 160 body-A bytes with the
+independent mixer circuit, the digest with `generate_digest`, and Body B with the
+measured verbatim SPIM splice. It returns the complete 276-byte container through
+`CpimLayout`.
+
+This is **not** the old `OracleCaptureInputs` packer. No reference CPIM, depot,
+zone/mixer tape, native library or subprocess is read on the generation path.
+`DigestInputs` comes from the pure `digest_inputs_from_watch_tape` parser when a
+development differential test needs it, but the production function accepts the
+semantic words directly.
+
+A new same-run corpus (`core-planter-entry` + digest watchpoints + CPIM) gives
+**276/276 bytes on both sequential and `0xA5**. The first attempted comparison
+had only 32 mismatches and exposed a corpus lineage error: mixer and digest state
+came from different native runs. Recapturing all three artifacts atomically fixed
+the test, not the algorithm. Workspace tests and Clippy are green.
+
+The remaining cold-Start boundary is now precise: genesis of `MixerState` and the
+subsequent digest state from SPIM/entropy. The full producer is capture-free over
+explicit semantic state, but is not yet a SPIM-only cold-provisioning generator.
+Rust `ProvisioningEnd`, independent OTP and clean-environment Track-D acceptance
+remain separate work.

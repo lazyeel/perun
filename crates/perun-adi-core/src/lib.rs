@@ -18,6 +18,8 @@
 //!   measured round-0 entry state;
 //! * [`cpim`]        -- the 276-byte CPIM anatomy (the reference
 //!   cold-canon dump parsed to its length-delimited sections);
+//! * [`start`]       -- capture-free 276-byte CPIM assembly from explicit
+//!   semantic SPIM/entropy/mixer/digest inputs;
 //! * [`state`]       -- the versioned provisioning-state container and
 //!   the lossless codec for Apple's `adi.pb`;
 //! * [`identity`]    -- the 16-byte `adi_identifier` and its bound half;
@@ -53,6 +55,7 @@ pub mod session;
 pub mod sha256;
 pub mod simd_cycles;
 pub mod spim;
+pub mod start;
 pub mod state;
 pub mod warmvm;
 pub mod word_channels;

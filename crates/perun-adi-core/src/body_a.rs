@@ -558,7 +558,7 @@ fn read_paired_cpim(dir: &str) -> Result<Vec<u8>, String> {
 /// register/frame word consumed by the adjacent `LEA` and shift chain. This is
 /// still a capture-backed loader, not a SPIM-only producer, but it no longer
 /// selects candidates by matching the answer.
-fn digest_inputs_from_watch_tape(text: &str) -> Result<crate::digest::DigestInputs, String> {
+pub fn digest_inputs_from_watch_tape(text: &str) -> Result<crate::digest::DigestInputs, String> {
     use crate::digest::DigestInputs;
     use std::collections::HashMap;
 

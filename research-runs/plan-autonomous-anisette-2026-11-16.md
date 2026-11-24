@@ -473,3 +473,23 @@ bytes. The circuit takes that state explicitly, so it must not be mistaken for a
 complete SPIM-only CPIM generator. M14, session16 and digest store-time selection
 are already closed. Next: initial mixer genesis and zero-reference integration;
 Tracks A/B/D remain open.
+
+---
+
+## 18. Capture-free CPIM over semantic state — 2026-11-24
+
+`start::generate_cpim_from_state(StartInputs)` now produces the complete 276-byte
+CPIM from a validated SPIM, 40-byte entropy draw, `MixerState` and
+`DigestInputs`. It computes session16, all 160 body-A bytes and the 32-byte
+digest, then splices Body B from SPIM. No reference CPIM, depot, zone/mixer tape,
+Apple image or native process is read on the generation path.
+
+The new same-run corpus proves **276/276 bytes on sequential and `0xA5`. An
+initial 32-byte mismatch was a test-lineage error (mixer and digest captured in
+different runs), corrected by atomically capturing core + watchpoints + CPIM.
+Workspace tests and Clippy are green.
+
+This completes the capture-free integration over explicit semantic state, not
+its cold genesis. Remaining Track C: produce `MixerState` and the subsequent
+digest state from SPIM/entropy. Rust `ProvisioningEnd`, independent OTP and
+Track-D clean-environment acceptance remain open.
