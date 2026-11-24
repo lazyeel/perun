@@ -524,11 +524,10 @@ pub fn generate_body_from_tapes(dir: &str) -> Result<([u8; 0xC0], usize), String
     Ok((depot, body_bytes))
 }
 
-/// Validate the captured depot slice against the reference CPIM before
-/// resolving digest words. This rejects a mismatched CPIM/depot pair, but
-/// does not cryptographically authenticate every zone/selector/word tape;
-/// those still rely on the capture script's startup truncation and the
-/// caller's explicit same-session readiness marker.
+/// Test-only consistency check for a captured depot/CPIM pair. Production
+/// digest generation does not call this helper: it consumes store-time words,
+/// never answer-side sums.
+#[cfg(test)]
 fn read_paired_cpim(dir: &str) -> Result<Vec<u8>, String> {
     let cpim = std::fs::read(format!("{dir}/live_prov_out.bin"))
         .map_err(|e| format!("read live CPIM: {e}"))?;
@@ -552,75 +551,80 @@ fn read_paired_cpim(dir: &str) -> Result<Vec<u8>, String> {
     Ok(cpim)
 }
 
-/// The 32-byte digest zone from measured word-tape candidates.
-/// For each block, the candidate register word is selected by checking
-/// candidate + the measured block constant against the corresponding
-/// sum in live_prov_out.bin. Rust performs the digest arithmetic, but
-/// candidate selection is oracle-anchored rather than SPIM-only.
-pub fn generate_digest_from_tapes(dir: &str) -> Result<[u8; 32], String> {
-    use crate::digest::{generate_digest, DigestInputs, K_HIGH, K_LOW};
-    let cpim = read_paired_cpim(dir)?;
-    let ttxt =
-        std::fs::read_to_string(format!("{dir}/pair_wp_words.txt")).map_err(|e| e.to_string())?;
-    let mut rows: Vec<Vec<(String, u32)>> = Vec::new();
-    for line in ttxt.lines() {
-        if !line.starts_with("hit") {
-            continue;
-        }
-        let mut fields = Vec::new();
-        for f in line.split_whitespace() {
-            if let Some((k, v)) = f.split_once('=') {
-                if let Ok(x) = u32::from_str_radix(v.trim_start_matches("0x"), 16) {
-                    fields.push((k.to_string(), x));
-                }
-            }
-        }
-        rows.push(fields);
-    }
-    const CANON: [(usize, &str, u32); 8] = [
-        (0xA0, "RCX", K_LOW),
-        (0xA4, "W8", K_LOW),
-        (0xA8, "W6", K_LOW),
-        (0xAC, "W2", K_LOW),
-        (0xB0, "W1", K_HIGH),
-        (0xB4, "W3", K_HIGH),
-        (0xB8, "W5", K_HIGH),
-        (0xBC, "W4", K_HIGH),
-    ];
+/// Resolve the eight digest words from their own store-time producers.
+///
+/// No reference CPIM is read. Each selected RIP is the instruction immediately
+/// following a store covered by the depot watchpoint; the named field is the
+/// register/frame word consumed by the adjacent `LEA` and shift chain. This is
+/// still a capture-backed loader, not a SPIM-only producer, but it no longer
+/// selects candidates by matching the answer.
+fn digest_inputs_from_watch_tape(text: &str) -> Result<crate::digest::DigestInputs, String> {
+    use crate::digest::DigestInputs;
+    use std::collections::HashMap;
+
     let mut words = DigestInputs::default();
-    for (block, key, k) in CANON {
-        let mut word = None;
-        'hits: for row in &rows {
-            for (kk, vv) in row {
-                if kk == key && vv.wrapping_add(k) == expect_sum(&cpim, block) {
-                    word = Some(*vv);
-                    break 'hits;
-                }
-            }
+    let mut seen = [false; 8];
+    for line in text.lines().filter(|line| line.starts_with("hit")) {
+        let fields: HashMap<&str, u32> = line
+            .split_whitespace()
+            .filter_map(|field| field.split_once('='))
+            .filter_map(|(key, value)| {
+                u32::from_str_radix(value.trim_start_matches(['+', '0', 'x']), 16)
+                    .ok()
+                    .map(|parsed| (key, parsed))
+            })
+            .collect();
+        let Some(&rip) = fields.get("rip") else {
+            continue;
+        };
+        let (slot, key) = match rip {
+            0xFBDFB => (0, "RCX"),
+            0xFBE18 => (1, "W8"),
+            0xFBEC2 => (2, "W6"),
+            0xFBF12 => (3, "W2"),
+            0xFBF85 => (4, "W1"),
+            0xFBFFE => (5, "W3"),
+            0xFC044 => (6, "W5"),
+            0xFC110 => (7, "W4"),
+            _ => continue,
+        };
+        let value = *fields
+            .get(key)
+            .ok_or_else(|| format!("digest producer {rip:#x} lacks {key}"))?;
+        if seen[slot] {
+            return Err(format!("duplicate digest producer {rip:#x}"));
         }
-        let w = word.ok_or_else(|| format!("block {block:#x} unresolved on the word tape"))?;
-        match block {
-            0xA0 => words.a0 = w,
-            0xA4 => words.a4 = w,
-            0xA8 => words.a8 = w,
-            0xAC => words.ac = w,
-            0xB0 => words.b0 = w,
-            0xB4 => words.b4 = w,
-            0xB8 => words.b8 = w,
-            _ => words.bc = w,
+        seen[slot] = true;
+        match slot {
+            0 => words.a0 = value,
+            1 => words.a4 = value,
+            2 => words.a8 = value,
+            3 => words.ac = value,
+            4 => words.b0 = value,
+            5 => words.b4 = value,
+            6 => words.b8 = value,
+            _ => words.bc = value,
         }
     }
-    Ok(generate_digest(&words))
+    let missing: Vec<usize> = seen
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, present)| (!present).then_some(0xA0 + 4 * slot))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "store-time digest tape is missing blocks {missing:#x?}"
+        ));
+    }
+    Ok(words)
 }
 
-/// The four live bytes of one digest block, read from a previously
-/// pair-validated CPIM (MSB first).
-fn expect_sum(cpim: &[u8], block: usize) -> u32 {
-    let mut s = 0u32;
-    for b in 0..4 {
-        s = (s << 8) | cpim[0x18 + block + b] as u32;
-    }
-    s
+/// Generate the digest zone exclusively from store-time watchpoint words.
+pub fn generate_digest_from_tapes(dir: &str) -> Result<[u8; 32], String> {
+    let path = format!("{dir}/pair_wp_words.txt");
+    let text = std::fs::read_to_string(&path).map_err(|error| format!("read {path}: {error}"))?;
+    let words = digest_inputs_from_watch_tape(&text)?;
+    Ok(crate::digest::generate_digest(&words))
 }
 
 // ---------------------------------------------------------------------------
@@ -806,6 +810,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn digest_store_producers_need_no_reference_cpim() {
+        use crate::digest::DigestInputs;
+        let producers = [
+            (0xFBDFB, "RCX", 1u32),
+            (0xFBE18, "W8", 2),
+            (0xFBEC2, "W6", 3),
+            (0xFBF12, "W2", 4),
+            (0xFBF85, "W1", 5),
+            (0xFBFFE, "W3", 6),
+            (0xFC044, "W5", 7),
+            (0xFC110, "W4", 8),
+        ];
+        let text = producers
+            .iter()
+            .map(|(rip, key, value)| format!("hit=1 window=A0 rip=+{rip:#x} {key}={value:#x}\n"))
+            .collect::<String>();
+        let words = digest_inputs_from_watch_tape(&text).expect("eight store-time producers");
+        assert_eq!(
+            words,
+            DigestInputs {
+                a0: 1,
+                a4: 2,
+                a8: 3,
+                ac: 4,
+                b0: 5,
+                b4: 6,
+                b8: 7,
+                bc: 8,
+            }
+        );
+        let duplicate = format!("{text}hit=2 window=A0 rip=+0xfbdfb RCX=0x9\n");
+        assert!(digest_inputs_from_watch_tape(&duplicate).is_err());
+        let missing = text.replace("rip=+0xfc044", "rip=+0xfc045");
+        assert!(digest_inputs_from_watch_tape(&missing).is_err());
+    }
+
+    #[test]
     fn paired_cpim_rejects_stale_or_mismatched_depot() {
         use std::time::{SystemTime, UNIX_EPOCH};
         let nonce = SystemTime::now()
@@ -834,10 +875,10 @@ mod tests {
             "mismatched pair must be rejected"
         );
         let error = generate_digest_from_tapes(path)
-            .expect_err("the production resolver must reject a mismatched CPIM/depot pair");
+            .expect_err("a missing store-time tape must fail closed");
         assert!(
-            error.contains("does not match live_prov_out.bin"),
-            "expected the explicit pair-mismatch guard, got: {error}"
+            error.contains("pair_wp_words.txt"),
+            "the producer must depend on the store-time tape, not the reference CPIM: {error}"
         );
         std::fs::remove_dir_all(&dir).expect("remove temporary test directory");
     }
@@ -1096,12 +1137,10 @@ mod tests {
     }
 
     /// THE THROUGH TEST: the full 192-byte depot of ONE session --
-    /// body A assembled from mixer tapes, digest candidates selected
-    /// from post-write register snapshots against CPIM sums, then both
-    /// compared with the same run's CPIM (cpim[0x18+j] == depot[j]).
-    /// The digest resolver is oracle-anchored; candidate words are not
-    /// claimed to come from each block's own store. This test is ignored
-    /// by default and must be opted into with its same-session marker.
+    /// body A assembled from mixer tapes and the digest generated from
+    /// store-time words, then both compared with the same run's CPIM
+    /// (cpim[0x18+j] == depot[j]). This test is ignored by default and
+    /// must be opted into with its same-session marker.
     #[test]
     #[ignore = "requires same-session zone, word, depot, and CPIM artifacts; set PERUN_DIGEST_PAIR_READY=1"]
     fn live_full_depot_parity() {
@@ -1112,14 +1151,11 @@ mod tests {
             "1",
             "set PERUN_DIGEST_PAIR_READY=1 only for a complete same-session pair"
         );
-        use crate::digest::{generate_digest, DigestInputs, K_HIGH, K_LOW};
         let dir = std::env::var("PERUN_LIVE_DIR").unwrap_or_else(|_| "/opt/data/adi-re".into());
         let mut zones = Zones::from_files(&dir).expect("same-session zone files");
         let planter_1a00 = read_planter_1a00(&dir).expect("same-session M14 planter");
         let tape = std::fs::read_to_string(format!("{dir}/zone26_tape.txt"))
             .expect("same-session zone-26 tape");
-        let wtape = std::fs::read_to_string(format!("{dir}/pair_wp_words.txt"))
-            .expect("same-session digest word tape");
         let cpim = read_paired_cpim(&dir).expect("same-session paired CPIM");
         assert_eq!(cpim.len(), 0x114, "the live CPIM is 276 bytes");
         // the session's first lane values, straight off the tape:
@@ -1331,70 +1367,12 @@ mod tests {
             seen[..0xA0].iter().all(|&v| v),
             "no body-A position may remain unassembled"
         );
-        // the digest: resolve the eight words from measured hits
-        let mut rows: Vec<Vec<(String, u32)>> = Vec::new();
-        for line in wtape.lines() {
-            if line.starts_with("hit") {
-                let mut fields = Vec::new();
-                for f in line.split_whitespace() {
-                    if let Some((k, v)) = f.split_once('=') {
-                        if let Ok(x) = u32::from_str_radix(v.trim_start_matches("0x"), 16) {
-                            fields.push((k.to_string(), x));
-                        }
-                    }
-                }
-                rows.push(fields);
-            }
-        }
-        const CANON: [(usize, &str, u32); 8] = [
-            (0xA0, "RCX", K_LOW),
-            (0xA4, "W8", K_LOW),
-            (0xA8, "W6", K_LOW),
-            (0xAC, "W2", K_LOW),
-            (0xB0, "W1", K_HIGH),
-            (0xB4, "W3", K_HIGH),
-            (0xB8, "W5", K_HIGH),
-            (0xBC, "W4", K_HIGH),
-        ];
-        let mut words = DigestInputs::default();
-        for (block, key, k) in CANON {
-            let mut s_live = 0u32;
-            for b in 0..4 {
-                s_live = (s_live << 8) | cpim[0x18 + block + b] as u32;
-            }
-            let mut word = None;
-            'hits: for row in &rows {
-                for (kk, vv) in row {
-                    if kk == key && vv.wrapping_add(k) == s_live {
-                        word = Some(*vv);
-                        break 'hits;
-                    }
-                }
-            }
-            let Some(w) = word else {
-                // the prologue-cascade block may stay gated, named, never silent
-                assert_eq!(
-                    block, 0xA0,
-                    "only the prologue-cascade block may stay gated"
-                );
-                continue;
-            };
-            match block {
-                0xA0 => words.a0 = w,
-                0xA4 => words.a4 = w,
-                0xA8 => words.a8 = w,
-                0xAC => words.ac = w,
-                0xB0 => words.b0 = w,
-                0xB4 => words.b4 = w,
-                0xB8 => words.b8 = w,
-                _ => words.bc = w,
-            }
-        }
-        let dz = generate_digest(&words);
+        // The same store-time producer as production; CPIM is only the
+        // comparison oracle below, never an input to word selection.
+        let dz = generate_digest_from_tapes(&dir).expect("store-time digest words");
         depot[0xA0..0xC0].copy_from_slice(&dz);
-        let digest_live = if words.a0 == 0 { 28 } else { 32 };
-        let first_digest_seen = if words.a0 == 0 { 0xA4 } else { 0xA0 };
-        for s in &mut seen[first_digest_seen..0xC0] {
+        let digest_live = 32;
+        for s in &mut seen[0xA0..0xC0] {
             *s = true;
         }
         // the unloader law, byte for byte, over everything assembled

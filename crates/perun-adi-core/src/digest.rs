@@ -3,7 +3,7 @@
 //! writing depot rows 0xA0..0xBF). Measured live across two runs
 //! (31/32) and closed to ALL EIGHT blocks in one run (`pair37.py`:
 //! three hardware watchpoints over 8-byte depot spans at 0xA0/0xA8/0xB0;
-//! each stop records the eight carrier-register candidates, a post-write
+//! each stop records the eight carrier-register words, a post-write
 //! instruction pointer, and the run's CPIM/depot slice).
 //!
 //! THE MEASURED LAW: the digest zone depot[0xA0..0xC0) is the
@@ -28,15 +28,11 @@
 //! lane, and the masked-base arithmetic 0xa879896bfa0398XX with
 //! `pos = XX - 0x7CE` still holds for the store addresses.
 //!
-//! The words are PHASE-LIVE: registers evolve across the node's
-//! stores (r13 walked three values, r14 two, rcx and rdx a dozen
-//! in the measured run). The pair37 tape is a sequence of post-write
-//! register snapshots triggered by watchpoints on the 8-byte spans
-//! at 0xA0, 0xA8, and 0xB0. It does NOT identify each candidate word
-//! as captured at that word's own 4-byte store. The resolver searches
-//! all snapshots for a register value whose sum matches the corresponding
-//! CPIM block; this is oracle-anchored candidate lookup, not independent
-//! store-time provenance.
+//! The words are PHASE-LIVE: registers evolve across the node's stores.
+//! The production loader in `body_a` therefore uses eight named store-time
+//! RIP/register pairs, not a snapshot whose value happens to match a CPIM sum.
+//! The reference CPIM is only an external test oracle, including in the
+//! ignored live parity test.
 
 /// The digest zone length in depot coordinates: depot[0xA0..0xC0).
 pub const DIGEST_LEN: usize = 32;
@@ -48,9 +44,8 @@ pub const K_LOW: u32 = 0x3ADA8A5E;
 /// Its two's-complement twin is -0x64E9699E.
 pub const K_HIGH: u32 = 0x9B169662;
 
-/// The eight channel words, one per block, each named by its
-/// measured carrier register. The current resolver selects among
-/// post-write snapshots using the reference CPIM sums.
+/// The eight channel words, one per block, each named by its measured
+/// carrier register. Production constructs them from named store-time events.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DigestInputs {
     pub a0: u32, // rcx, prologue phase
@@ -130,9 +125,8 @@ mod tests {
         assert_eq!(inp.sums().len() * 4, DIGEST_LEN);
     }
 
-    /// Live parity against the same-session CPIM/depot pair. The
-    /// word candidates are post-write register snapshots, not asserted
-    /// to be captured at each block's own store.
+    /// Live parity against the same-session CPIM/depot pair, using the
+    /// production store-time producer rather than answer-side selection.
     #[test]
     #[ignore = "requires same-session digest word tape, depot slice and CPIM; set PERUN_DIGEST_PAIR_READY=1"]
     fn live_digest_parity() {
@@ -150,22 +144,7 @@ mod tests {
             std::fs::read_to_string(&tape).expect("same-session digest word tape is required");
         let cpim = std::fs::read(&cpim_path).expect("same-session live CPIM is required");
         assert_eq!(cpim.len(), 0x114, "the live CPIM is 276 bytes");
-        // parse the tape rows: channel words per hit
-        let mut rows: Vec<Vec<(String, u32)>> = Vec::new();
-        for line in ttxt.lines() {
-            if line.starts_with("hit") {
-                let mut fields = Vec::new();
-                for f in line.split_whitespace() {
-                    if let Some((k, v)) = f.split_once('=') {
-                        if let Ok(x) = u32::from_str_radix(v.trim_start_matches("0x"), 16) {
-                            fields.push((k.to_string(), x));
-                        }
-                    }
-                }
-                rows.push(fields);
-            }
-        }
-        assert!(!rows.is_empty(), "tape has no hit rows");
+        assert!(!ttxt.is_empty(), "tape has no hit rows");
         // SAME-SESSION PROOF, mechanical: the run's depot slice (dumped by
         // the writer of the same gdb session) must equal the CPIM's
         // depot window -- if the two disagree the artifacts are from
@@ -183,81 +162,16 @@ mod tests {
         } else {
             panic!("no writer depot slice -- the pair is incomplete");
         }
-        // the block map: (depot block, channel key, constant)
-        const CANON: [(usize, &str, u32); 8] = [
-            (0xA0, "RCX", K_LOW),
-            (0xA4, "W8", K_LOW),
-            (0xA8, "W6", K_LOW),
-            (0xAC, "W2", K_LOW),
-            (0xB0, "W1", K_HIGH),
-            (0xB4, "W3", K_HIGH),
-            (0xB8, "W5", K_HIGH),
-            (0xBC, "W4", K_HIGH),
-        ];
-        let get = |cpim: &[u8], pos: usize| cpim[0x18 + pos];
-        let mut words = DigestInputs::default();
-        let mut resolved = 0;
-        let mut gated = 0;
-        for (block, key, k) in CANON {
-            // the block's four live bytes, MSB first
-            let mut s_live = 0u32;
-            for b in 0..4 {
-                s_live = (s_live << 8) | get(&cpim, block + b) as u32;
-            }
-            // resolve the word from a measured hit
-            let mut word = None;
-            'hits: for row in &rows {
-                for (kk, vv) in row {
-                    if kk == key && vv.wrapping_add(k) == s_live {
-                        word = Some(*vv);
-                        break 'hits;
-                    }
-                }
-            }
-            // The 0xA0 block's word is the PROLOGUE cascade output
-            // (rcx after the imul chain at +0xfbdf4) -- a channel the
-            // watchpoint tape does not always carry. An unresolved
-            // 0xA0 is the named gate, never a silent pass.
-            let Some(w) = word else {
-                assert_eq!(
-                    block, 0xA0,
-                    "only the prologue-cascade block may stay gated"
-                );
-                gated += 4;
-                continue;
-            };
-            match block {
-                0xA0 => words.a0 = w,
-                0xA4 => words.a4 = w,
-                0xA8 => words.a8 = w,
-                0xAC => words.ac = w,
-                0xB0 => words.b0 = w,
-                0xB4 => words.b4 = w,
-                0xB8 => words.b8 = w,
-                _ => words.bc = w,
-            }
-            resolved += 4;
-        }
-        // the full zone, one generation: the resolved blocks byte for
-        // byte; the gated block (if any) is skipped by position, named.
-        let d = generate_digest(&words);
-        let gated_base = if gated > 0 {
-            Some(0xA0 - DIGEST_ZONE)
-        } else {
-            None
-        };
+        let d =
+            crate::body_a::generate_digest_from_tapes(&dir).expect("store-time digest producer");
         for (i, &b) in d.iter().enumerate() {
-            if let Some(g) = gated_base {
-                if (g..g + 4).contains(&i) {
-                    continue;
-                }
-            }
-            let pos = DIGEST_ZONE + i;
-            assert_eq!(b, get(&cpim, pos), "depot+{pos:#x}");
+            assert_eq!(
+                b,
+                cpim[0x18 + DIGEST_ZONE + i],
+                "depot+{:#x}",
+                DIGEST_ZONE + i
+            );
         }
-        // the gated block's bytes are not asserted (the zero-filled
-        // DigestInputs word would fail them); the resolved ones are.
-        assert!(resolved + gated == 32, "the eight blocks tile the zone");
-        eprintln!("DIGEST live parity: {resolved}/32 bytes (gated: {gated} -- the prologue-cascade block)");
+        eprintln!("DIGEST live parity: 32/32 bytes from store-time producers");
     }
 }

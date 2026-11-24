@@ -6616,3 +6616,37 @@ Native parity is 10/10 pre-tail records, and the new private Rust gate
 hermetic test pins the square/tail semantics. Workspace tests and Clippy are
 green. This removes the M14 oracle shortcut, but not the WeaveFeeds transition,
 digest-word selection or the remaining CPIM integration boundaries.
+
+## 2026-11-24 — Digest answer-side selection replaced by store-time provenance
+
+Three minimal depot watchpoints (`+0xA0/+0xA8/+0xB0`) on the measured
+`0x7ffff780f300` depot produced 24 actual digest write events on each controlled
+input. The old `0xFBDF0` breakpoint was invalid because it lies inside a
+`movabs`, not at an instruction boundary; the executed store chain itself is the
+correct evidence. Every one of the eight words is now taken from a named RIP and
+register/frame field immediately adjacent to its own store:
+
+| block | post-store RIP | input field |
+|---|---|---|
+| `0xA0` | `0xFBDFB` | `RCX` |
+| `0xA4` | `0xFBE18` | `W8` / `RDX` |
+| `0xA8` | `0xFBEC2` | `W6` / `R13` |
+| `0xAC` | `0xFBF12` | `W2` / `R14` |
+| `0xB0` | `0xFBF85` | `W1` / `[RBP-0xB8]` |
+| `0xB4` | `0xFBFFE` | `W3` / `[RBP-0x40]` |
+| `0xB8` | `0xFC044` | `W5` / `[RBP-0x68]` |
+| `0xBC` | `0xFC110` | `W4` / `R8` |
+
+For both sequential and `0xA5`, these direct producers match all eight CPIM sums
+and all 32 digest bytes without searching snapshots or comparing candidates to
+the answer. `generate_digest_from_tapes` now parses only these store-time events;
+it no longer calls `read_paired_cpim` and contains no `expect_sum`, `s_live` or
+CPIM candidate loop. The CPIM is read only by the external parity test after
+generation. Historical resolvers in the ignored live tests were removed too.
+
+The new `tests/digest_corpus.rs` gate passes 2/2 captures and 32/32 bytes per
+capture. A synthetic unit test pins all eight RIP mappings and fail-closed
+missing/duplicate behavior. Workspace tests and Clippy are green. This removes
+the answer-side oracle shortcut, but does **not** yet derive the upstream digest
+state from SPIM/entropy: WeaveFeeds and the initial mixer key-state remain the
+next independent boundary, followed by full CPIM integration.

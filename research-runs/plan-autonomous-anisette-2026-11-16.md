@@ -430,3 +430,23 @@ item is the WeaveFeeds transition. It is measured as one identical 2,546-PC
 circuit per round on sequential and `0xA5` (624 reads, 86 writes, all 160 mixer
 stores observed), but is not yet implemented. Digest-word producers and full
 CPIM integration remain open; Tracks A/B/D are unchanged.
+
+---
+
+## 16. Digest answer-side oracle removed — 2026-11-24
+
+The digest resolver no longer selects words by matching reference CPIM sums.
+Three depot watchpoints yielded 24 real write events on each of sequential and
+`0xA5`. Eight named post-store RIP/register pairs now construct `DigestInputs`
+directly (`0xFBDFB/RCX`, `0xFBE18/W8`, `0xFBEC2/W6`, `0xFBF12/W2`,
+`0xFBF85/W1`, `0xFBFFE/W3`, `0xFC044/W5`, `0xFC110/W4`).
+
+`generate_digest_from_tapes` reads only the store-time tape, never the reference
+CPIM. The old candidate loops were removed from production and ignored tests;
+`read_paired_cpim` is test-only. Both captures pass 32/32 digest bytes, and the
+new private gate passes 2/2. Synthetic fail-closed tests, workspace tests and
+Clippy are green.
+
+This closes the answer-side selection issue, not upstream SPIM/entropy genesis of
+the digest state. WeaveFeeds and the initial mixer key-state are still required
+before zero-reference CPIM integration. Tracks A/B/D are unchanged.
