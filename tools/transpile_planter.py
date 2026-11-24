@@ -46,9 +46,9 @@ for _n in range(8, 16):
 HIGH8 = {"ah", "bh", "ch", "dh"}
 FLAG_NEUTRAL = {
     "mov", "movzx", "movsxd", "lea", "cdqe", "not",
-    "sete", "setne", "seta", "cmove", "cmovne", "jmp",
+    "sete", "setne", "seta", "setb", "cmove", "cmovne", "jmp",
 }
-FLAG_CONSUMERS = {"sete", "setne", "seta", "cmove", "cmovne", "adc"}
+FLAG_CONSUMERS = {"sete", "setne", "seta", "setb", "cmove", "cmovne", "adc"}
 ALLOWED_DISPATCH = {0xE0A2B, 0xE1F6B, 0xE26DE}
 
 
@@ -222,8 +222,8 @@ def emit(ins):
             "let _b = %s;" % read_op(ins, 1),
             "let _v = alu_add(%d, alu_add(%d, _a, _b), s.cf as u64);" % (bits(ins), bits(ins)),
         ] + write_op(ins, 0)
-    if mn in ("sete", "setne", "seta") and n == 1 and bits(ins) == 8:
-        predicate = {"sete": "s.zf", "setne": "!s.zf", "seta": "!s.cf && !s.zf"}[mn]
+    if mn in ("sete", "setne", "seta", "setb") and n == 1 and bits(ins) == 8:
+        predicate = {"sete": "s.zf", "setne": "!s.zf", "seta": "!s.cf && !s.zf", "setb": "s.cf"}[mn]
         return ["let _v = if %s { 1 } else { 0 };" % predicate] + write_op(ins, 0)
     if mn in ("cmove", "cmovne") and n == 2:
         predicate = "s.zf" if mn == "cmove" else "!s.zf"

@@ -6650,3 +6650,33 @@ missing/duplicate behavior. Workspace tests and Clippy are green. This removes
 the answer-side oracle shortcut, but does **not** yet derive the upstream digest
 state from SPIM/entropy: WeaveFeeds and the initial mixer key-state remain the
 next independent boundary, followed by full CPIM integration.
+
+## 2026-11-24 — The complete ten-round mixer circuit is independent Rust
+
+The remaining WeaveFeeds transition has now been ported as a real straight-line
+algorithm, rather than a feed-table or a captured CPIM replay. Starting at
+`0xDD511`, replay reaches `0xE6B54` in 401,311 instructions without faults.
+Sequential and `0xA5` then execute the identical **2,546-PC round** ten times,
+with 624 data reads and 86 writes per round, only two measured CFF `jmp` sites,
+and no calls or libc. `tools/transpile_mixer.py` rejects any other control flow
+or unsupported semantics and checks both PC streams and all ten read-only data
+pages before generating Rust.
+
+`mixer::body_a(&mut MixerState) -> [u8;160]` executes ten iterations of that
+circuit. Production `mixer_core.rs` contains the 2,546 exact arithmetic
+instructions; `mixer_tables.rs` contains only ten static non-executable 4 KiB
+lookup pages. There are no Apple instructions, ELF images, file reads, native
+subprocesses or reference-CPIM comparisons. The shared instruction emitter was
+extended only with `setb`; planter output/tests are unaffected.
+
+The private differential gate passes on both independent initial states:
+**2/2 inputs, all ten rounds, 160/160 body-A bytes per input**. Workspace tests
+and Clippy are green. The 160-byte heap source is correctly handled as sixteen
+bytes per round, not one block shared by all rounds.
+
+`MixerState` is an explicit semantic boundary: sixteen registers, the 0x6000-byte
+frame/planter/key state, 160 heap bytes and the 192-byte depot. Its own genesis
+from SPIM/entropy remains a separate task. Thus WeaveFeeds and M14 are closed,
+but this result does not falsely claim SPIM-only CPIM autonomy. Remaining work
+is that initial-state producer and zero-reference CPIM integration; the digest
+layout and store-time inputs are already implemented as described above.

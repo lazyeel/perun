@@ -22,6 +22,8 @@
 //!   the lossless codec for Apple's `adi.pb`;
 //! * [`identity`]    -- the 16-byte `adi_identifier` and its bound half;
 //! * [`spim`]        -- the 347-byte Start input: 264 payload + Body B + tag;
+//! * [`mixer`]       -- the fixed ten-round body-A circuit over an explicit
+//!   semantic initial state (whose own genesis is tracked separately);
 //! * [`session`]     -- the entropy-to-`session16` KDF, including both measured
 //!   MT twist families and the nonzero-byte output loop;
 //! * [`sha256`]      -- the dependency-free SHA-256/HMAC used by the
@@ -41,6 +43,9 @@ pub mod early_series;
 pub mod early_zone;
 pub mod fold_zone;
 pub mod identity;
+pub mod mixer;
+mod mixer_core;
+mod mixer_tables;
 pub mod planter;
 mod planter_core;
 mod planter_tables;

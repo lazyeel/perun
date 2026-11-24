@@ -450,3 +450,26 @@ Clippy are green.
 This closes the answer-side selection issue, not upstream SPIM/entropy genesis of
 the digest state. WeaveFeeds and the initial mixer key-state are still required
 before zero-reference CPIM integration. Tracks A/B/D are unchanged.
+
+---
+
+## 17. WeaveFeeds round circuit closed — 2026-11-24
+
+The WeaveFeeds transition is now implemented in pure Rust as
+`mixer::body_a(&mut MixerState) -> [u8;160]`. Sequential and `0xA5` execute one
+identical 2,546-PC straight-line circuit per round, with two CFF jumps and no
+calls/libc. `tools/transpile_mixer.py` validates both streams and ten static data
+pages, then emits exact arithmetic and read-only arrays. It does not emit Apple
+machine code, an image or capture reads.
+
+The full private gate passes 2/2 inputs and 160/160 body-A bytes on each, covering
+all ten rounds and all sixteen 16-byte heap blocks. Workspace tests and Clippy
+are green. This is a generic algorithm over `MixerState`, not a CPIM playback or
+answer-side candidate lookup.
+
+The remaining Track-C boundary is the **genesis of `MixerState`** from
+SPIM/entropy: 16 registers, the 0x6000-byte frame/key/planter state and 160 heap
+bytes. The circuit takes that state explicitly, so it must not be mistaken for a
+complete SPIM-only CPIM generator. M14, session16 and digest store-time selection
+are already closed. Next: initial mixer genesis and zero-reference integration;
+Tracks A/B/D remain open.
