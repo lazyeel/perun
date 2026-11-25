@@ -100,13 +100,41 @@ It passes 2/2 states and 544/544 bytes per state. Workspace tests, Clippy,
 `test_planter_trace.py`, capture/lifecycle tool tests and C harness compilation
 are green.
 
+## Pre-tail is independent too
+
+`end_pretail::transform_pretail` now closes the preceding 544-byte producer as
+well. Its measured circuit is **137 instructions**, repeated 543 times, followed
+by the final measured one-byte store. A 75,002-record capture confirms the
+137-PC period through record 74,506; later divergence is the next native stage,
+not another circuit. Both inputs have identical PC streams and match 544/544
+intermediate bytes. Only two static lookup pages are required.
+
+The source and destination are distinct: `PretailState.source` is a read-only
+544-byte region at native state offset `0x280`, while `PretailState.tail` holds
+the output region at `0x35`. Executing 544 full circuits would incorrectly read
+one byte past the source; 543 circuits plus the measured final store is the
+exact output boundary. The generated `last_core` encodes that boundary without
+clamping a memory error. `transpile_end_tail.py --mode pretail` shares the same
+validated emitter and same-run state pipeline as the 34-block mode.
+
+The private gate is:
+
+```text
+PERUN_END_PRETAIL_DIR=target/private-cores/end-pretail \
+  cargo test -p perun-adi-core --test end_pretail_corpus -- --nocapture
+```
+
+Both pre-tail and tail gates pass 2/2 states and 544/544 bytes per state. The
+intermediate snapshots also equal the independently captured second-pass input.
+
 ## Remaining Track-B work
 
-1. Derive the intermediate 544+16-byte state from session/CPIM/PTM/TK/identity.
+1. Derive the initial pre-tail/tail semantic states from
+   session/CPIM/PTM/TK/identity, including their key/frame setup.
 2. Close the earlier `0x35`-byte header, the 16-byte stage at `0x149170`, and the
    final four bytes before the write.
 3. Assemble those components into real `ProvisioningEnd`, then construct warm
    semantic state from the own PERUNST record and prove Rust-End ⇄ Rust-OTP.
 
-None of these is claimed by the 34-block component. Track-C cold `MixerState`
-genesis and Track-D native CLI removal are independent open items.
+None of these is claimed by the two completed circuits. Track-C cold
+`MixerState` genesis and Track-D native CLI removal are independent open items.

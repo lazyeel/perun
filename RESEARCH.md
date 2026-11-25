@@ -6778,3 +6778,23 @@ final serializer is therefore withdrawn. The earlier 0x35-byte header,
 intermediate 544+16-byte genesis, and 16+4-byte trailer are still open, as are
 full `ProvisioningEnd`, record-to-warm-state loading and Rust-End ⇄ Rust-OTP.
 See `research-runs/end-tail-circuit-2026-11-25.md`.
+
+## 2026-11-25 — The preceding 544-byte producer is independent Rust too
+
+`end_pretail::transform_pretail` now closes the circuit before the 34-block
+transformation. It contains **137 arithmetic instructions**, executes 543 full
+iterations plus the measured final one-byte store, and matches **544/544 bytes
+on both independent states**. Two static lookup pages are sufficient; there are
+no Apple images, capture reads or native subprocesses in production.
+
+The source and destination are separate 544-byte regions, not one expanded
+buffer. `PretailState.source` covers native state offset `0x280`, while
+`PretailState.tail` covers the output at `0x35`. The final full circuit would
+read one byte beyond the source, so the exact boundary is 543 circuits plus the
+measured final store. A 75,002-record same-run trace confirms the 137-PC period
+through record 74,506 and matches the independently captured second-pass input.
+
+Both End circuits now pass 2/2 states and 544/544 bytes per state, and Clippy is
+green. Full `ProvisioningEnd` remains unclaimed: initial semantic-state/key
+setup, the earlier 0x35-byte header and 16+4-byte trailer still have to be
+derived before End→warm-state integration.

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # Copyright 2026 lazyeel (https://github.com/lazyeel)
 # SPDX-License-Identifier: Apache-2.0
-"""Transpile the measured 3,370-instruction End tail block to pure Rust.
+"""Transpile measured End pre-tail/tail circuits to pure Rust.
 
 Development oracle only. Two independent ptrace streams must execute the same
-circuit and repeat it after 3,370 records. The generator emits no Apple machine
-code, image, capture reads or expected output. Initial/final semantic states are
-written only to a caller-selected private directory for differential tests.
+circuit: 137 instructions for pre-tail or 3,370 for tail. The generator emits no
+Apple machine code, image, capture reads or expected output. Initial/final
+semantic states are written only to a caller-selected private directory for
+differential tests.
 """
 import argparse
 import os
@@ -22,6 +23,8 @@ LIB_BASE = 0x7FFFF7679000
 TAIL_ADDRESS = 0x7FFFF78335B5
 TAIL_LEN = 0x220
 TAIL_STATE_LEN = 0x230
+SOURCE_ADDRESS = 0x7FFFF7833800
+SOURCE_LEN = 0x220
 HEAP_ADDRESS = 0x7FFFF78C8000
 HEAP_LEN = 0x4000
 HEAP_SEED_BASE = 0x7FFFF77FF000
@@ -31,6 +34,10 @@ DATA_LEN = 0x5000
 FRAME_LEN = 0x500
 BLOCK_RECORDS = 3370
 REQUIRED_RECORDS = 7002
+PERIOD_RECORDS = 7002
+ITERATIONS = 34
+TRACE_BASENAME = "block.trace.bin"
+MODE = "tail"
 REGISTER_ORDER = [
     "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
     "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
@@ -90,12 +97,12 @@ def read_trace(path):
 def load_case(spec):
     name, paths = spec.split("=", 1)
     trace_dir, seed_dir, final_dir = paths.split(":")
-    trace = read_trace(Path(trace_dir) / "block.trace.bin")
+    trace = read_trace(Path(trace_dir) / TRACE_BASENAME)
     if [pc for pc, _ in trace[:BLOCK_RECORDS]] != [pc for pc, _ in trace[BLOCK_RECORDS:2 * BLOCK_RECORDS]]:
-        raise ValueError(f"{name}: first two tail blocks have different PC streams")
-    for at in range(BLOCK_RECORDS, len(trace) - BLOCK_RECORDS):
+        raise ValueError(f"{name}: first two circuit iterations have different PC streams")
+    for at in range(BLOCK_RECORDS, PERIOD_RECORDS):
         if trace[at][0] != trace[at - BLOCK_RECORDS][0]:
-            raise ValueError(f"{name}: tail PC period differs at record {at}")
+            raise ValueError(f"{name}: circuit PC period differs at record {at}")
     registers, rbp = trace[0][1], trace[0][1][6]
     stack = (Path(seed_dir) / "stack.bin").read_bytes()
     heap = (Path(seed_dir) / "heap.bin").read_bytes()
@@ -107,12 +114,15 @@ def load_case(spec):
     dynamic = heap[HEAP_ADDRESS - HEAP_SEED_BASE:HEAP_ADDRESS - HEAP_SEED_BASE + HEAP_LEN]
     tail_at = TAIL_ADDRESS - HEAP_SEED_BASE
     tail = heap[tail_at:tail_at + TAIL_STATE_LEN]
-    final = (Path(final_dir) / "adi-data/adi.pb").read_bytes()
+    source = heap[SOURCE_ADDRESS - HEAP_SEED_BASE:SOURCE_ADDRESS - HEAP_SEED_BASE + SOURCE_LEN] if MODE == "pretail" else b""
+    final_path = (Path(seed_dir) / "mid.bin") if MODE == "pretail" else (Path(final_dir) / "adi-data/adi.pb")
+    final = final_path.read_bytes()
     expected = final[0x35:0x35 + TAIL_LEN]
-    if len(frame) != FRAME_LEN or len(dynamic) != HEAP_LEN or len(tail) != TAIL_STATE_LEN or len(expected) != TAIL_LEN:
+    if (len(frame) != FRAME_LEN or len(dynamic) != HEAP_LEN or len(tail) != TAIL_STATE_LEN or
+            len(expected) != TAIL_LEN or (MODE == "pretail" and len(source) != SOURCE_LEN)):
         raise ValueError(f"{name}: truncated semantic state")
     return dict(name=name, trace=trace, registers=registers, rbp=rbp,
-                frame=frame, heap=dynamic, data=data, tail=tail, expected=expected)
+                frame=frame, heap=dynamic, data=data, source=source, tail=tail, expected=expected)
 
 
 def decode_and_census(case, image):
@@ -163,7 +173,8 @@ def tables_rust(image, pages):
             out.append("    " + ", ".join("0x%02x" % b for b in data[pos:pos + 16]) + ",\n")
         out.append("];\n\n")
     out.append("pub(crate) fn read8(address: u64) -> Option<u8> {\n")
-    out.append("    let rva = address.checked_sub(super::end_tail_core::LIB_BASE)?;\n")
+    prefix = "end_pretail" if MODE == "pretail" else "end_tail"
+    out.append(f"    let rva = address.checked_sub(super::{prefix}_core::LIB_BASE)?;\n")
     out.append("    let page = rva & !0xfff;\n")
     out.append("    let offset = (rva & 0xfff) as usize;\n")
     out.append("    let table: &[u8; 4096] = match page {\n")
@@ -374,14 +385,80 @@ fn block_core(s: &mut TailCore) {
 '''
 
 
+def render_core(insns):
+    text = TEMPLATE.replace("{{BODY}}", render_body(insns))
+    if MODE == "pretail":
+        text = text.replace("end_tail", "end_pretail")
+        text = text.replace("End tail", "End pre-tail")
+        text = text.replace("TailState", "PretailState")
+        text = text.replace("TailCore", "PretailCore")
+        text = text.replace("InvalidTailFrame", "InvalidPretailFrame")
+        text = text.replace("transform_tail", "transform_pretail")
+        text = text.replace("GENERATED by tools/transpile_end_pretail.py", "GENERATED by tools/transpile_end_tail.py")
+        text = text.replace("one 34-block tail transformation", "one 544-iteration pre-tail transformation")
+        text = text.replace("for _ in 0..34", "for _ in 0..543")
+        text = text.replace("    core.finish(state);", "    last_core(&mut core);\n    core.finish(state);")
+        text = text.replace("all 34 sixteen-byte blocks", "all 544 one-byte iterations")
+        text = text.replace("34-block transformation", "544-iteration transformation")
+        text = text.replace(
+            "Execute the same measured circuit over all 544 one-byte iterations.",
+            "Execute 543 full one-byte circuits and the final measured store.",
+        )
+        text = text.replace(
+            "const OUTPUT_LEN: usize = 0x220;",
+            "const OUTPUT_LEN: usize = 0x220;\nconst SOURCE_ADDRESS: u64 = 0x7ffff7833800;\nconst SOURCE_LEN: usize = 0x220;",
+        )
+        text = text.replace(
+            "    pub tail: [u8; TAIL_LEN],",
+            "    pub source: [u8; SOURCE_LEN],\n    pub tail: [u8; TAIL_LEN],",
+        )
+        text = text.replace(
+            "    tail: [u8; TAIL_LEN],",
+            "    source: [u8; SOURCE_LEN],\n    tail: [u8; TAIL_LEN],",
+        )
+        text = text.replace(
+            "heap: [u8; HEAP_LEN], data: [u8; DATA_LEN], tail: [u8; TAIL_LEN]",
+            "heap: [u8; HEAP_LEN], data: [u8; DATA_LEN], source: [u8; SOURCE_LEN], tail: [u8; TAIL_LEN]",
+        )
+        text = text.replace(
+            "Ok(Self { registers, frame, heap, data, tail })",
+            "Ok(Self { registers, frame, heap, data, source, tail })",
+        )
+        text = text.replace(
+            "            data: state.data,\n            tail: state.tail,",
+            "            data: state.data,\n            source: state.source,\n            tail: state.tail,",
+        )
+        text = text.replace(
+            "        if (TAIL_ADDRESS..TAIL_ADDRESS + TAIL_LEN as u64).contains(&address) {",
+            "        if (SOURCE_ADDRESS..SOURCE_ADDRESS + SOURCE_LEN as u64).contains(&address) {\n            return self.source[(address - SOURCE_ADDRESS) as usize];\n        }\n        if (TAIL_ADDRESS..TAIL_ADDRESS + TAIL_LEN as u64).contains(&address) {",
+        )
+        text = text.replace(
+            "#[inline] fn alu_or(bits: u32, a: u64, b: u64) -> u64 { (a | b) & mask(bits) }\n",
+            "",
+        )
+        text += ("\n#[allow(clippy::all, unused_parens)]\n"
+                 "fn last_core(s: &mut PretailCore) {\n" +
+                 render_body(insns[:1]) + "\n}\n")
+    return text
+
+
 def main():
+    global MODE, BLOCK_RECORDS, REQUIRED_RECORDS, PERIOD_RECORDS, ITERATIONS, TRACE_BASENAME
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--mode", choices=["tail", "pretail"], default="tail")
     ap.add_argument("--case1", required=True, help="name=trace-dir:seed-dir:final-dir")
     ap.add_argument("--case2", required=True, help="name=trace-dir:seed-dir:final-dir")
     ap.add_argument("--image", required=True)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--state-dir", required=True)
     args = ap.parse_args()
+    MODE = args.mode
+    if MODE == "pretail":
+        BLOCK_RECORDS = 137
+        REQUIRED_RECORDS = 75002
+        PERIOD_RECORDS = 74506
+        ITERATIONS = 544
+        TRACE_BASENAME = "pretail.trace.bin"
     cases = [load_case(args.case1), load_case(args.case2)]
     if [pc for pc, _ in cases[0]["trace"][:BLOCK_RECORDS]] != [pc for pc, _ in cases[1]["trace"][:BLOCK_RECORDS]]:
         raise ValueError("independent inputs execute different tail circuits")
@@ -395,14 +472,18 @@ def main():
         emit_tail(ins)
 
     out_dir = Path(args.out_dir)
-    (out_dir / "end_tail_tables.rs").write_text(tables_rust(image, pages))
-    (out_dir / "end_tail_core.rs").write_text(TEMPLATE.replace("{{BODY}}", render_body(insns)))
+    prefix = "end_pretail" if MODE == "pretail" else "end_tail"
+    tables = tables_rust(image, pages)
+    if MODE == "pretail":
+        tables = tables.replace("End tail", "End pre-tail")
+    (out_dir / f"{prefix}_tables.rs").write_text(tables)
+    (out_dir / f"{prefix}_core.rs").write_text(render_core(insns))
     state_dir = Path(args.state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(state_dir, 0o700)
     for case in cases:
         blob = (struct.pack("<16Q", *case["registers"]) + case["frame"] + case["heap"] +
-                case["data"] + case["tail"] + case["expected"])
+                case["data"] + case["source"] + case["tail"] + case["expected"])
         path = state_dir / (case["name"] + ".bin")
         path.write_bytes(blob)
         os.chmod(path, 0o600)

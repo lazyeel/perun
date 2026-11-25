@@ -28,6 +28,8 @@
 //!   semantic initial state (whose own genesis is tracked separately);
 //! * [`otp`]         -- independent warm-OTP execution with a semantic native
 //!   ABI rather than trace/callee replay;
+//! * [`end_pretail`] -- the independent 544-iteration End pre-transformation
+//!   over an explicit semantic intermediate state (not full ProvisioningEnd);
 //! * [`end_tail`]    -- the independent 34-block End transformation over an
 //!   explicit semantic intermediate state (not full ProvisioningEnd);
 //! * [`session`]     -- the entropy-to-`session16` KDF, including both measured
@@ -47,6 +49,9 @@ pub mod cpim_engine;
 pub mod digest;
 pub mod early_series;
 pub mod early_zone;
+pub mod end_pretail;
+mod end_pretail_core;
+mod end_pretail_tables;
 pub mod end_tail;
 mod end_tail_core;
 mod end_tail_tables;

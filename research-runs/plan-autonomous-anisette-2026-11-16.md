@@ -540,3 +540,18 @@ through the PERUNST capture CLI. Details and remaining boundaries are in
 This is not yet full `ProvisioningEnd`. Next: derive the intermediate 544+16
 bytes, close the earlier 0x35-byte header and 16+4-byte trailer, then integrate
 End with the own warm-state loader and Rust OTP. Track C/D remain unchanged.
+
+---
+
+## 21. Track B pre-tail circuit implemented — 2026-11-25
+
+`end_pretail::transform_pretail` closes the producer preceding the 34-block
+circuit. It executes 137 arithmetic instructions 543 times plus the final
+one-byte store, uses two static lookup pages, and passes 2/2 independent states
+at 544/544 bytes each. Source and destination are separate 544-byte regions;
+the final store boundary prevents an out-of-range read instead of hiding it.
+
+Both pre-tail and tail are now independently implemented and verified. Their
+initial semantic/key/frame states are still explicit inputs, so full End is not
+claimed. Next: derive those states from provisioning inputs, close the earlier
+0x35-byte header and 16+4-byte trailer, then prove End → own state → OTP.
