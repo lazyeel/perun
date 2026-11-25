@@ -477,6 +477,55 @@ static void capture_state(const char *name) {
     capture_file(name, (path && *path) ? path : "adi-data/adi.pb");
 }
 
+static size_t read_raw_file(const char *path, void *data, size_t capacity) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) die("offline input: cannot open %s: %s", path, strerror(errno));
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+        (uint64_t)st.st_size > capacity) {
+        close(fd);
+        die("offline input: %s is not a nonempty bounded regular file", path);
+    }
+    size_t size = (size_t)st.st_size;
+    size_t off = 0;
+    while (off < size) {
+        ssize_t n = read(fd, (uint8_t *)data + off, size - off);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) {
+            close(fd);
+            die("offline input: read failed: %s", path);
+        }
+        off += (size_t)n;
+    }
+    if (close(fd) != 0) die("offline input: close failed: %s", path);
+    return size;
+}
+
+static size_t read_offline_part(const char *dir, const char *name,
+                                void *data, size_t capacity) {
+    char path[4096];
+    int n = snprintf(path, sizeof path, "%s/%s", dir, name);
+    if (n <= 0 || n >= (int)sizeof path) die("offline input path is too long");
+    return read_raw_file(path, data, capacity);
+}
+
+static int complete_provisioning(ADI_ProvisioningEnd_t pEnd, uint32_t session,
+                                 const uint8_t *ptm, uint32_t ptm_n,
+                                 const uint8_t *tk, uint32_t tk_n) {
+    capture_blob("ptm.bin", ptm, ptm_n);
+    capture_blob("tk.bin", tk, tk_n);
+    capture_state("adi-state-before-end.bin");
+    g_adi_phase = 2;
+    int rc = pEnd(session, ptm, ptm_n, tk, tk_n);
+    struct timespec provisioned_at = {0};
+    if (clock_gettime(CLOCK_REALTIME, &provisioned_at) != 0)
+        die("provisioning-end clock_gettime failed: %s", strerror(errno));
+    capture_blob("provisioning-end-rc.bin", &rc, sizeof rc);
+    capture_blob("provisioned-at.bin", &provisioned_at, sizeof provisioned_at);
+    capture_state("adi-state-after-end.bin");
+    return rc;
+}
+
 static void otp_probe_capture(unsigned sample, const char *field,
                               const void *data, size_t size) {
     char name[96];
@@ -805,13 +854,8 @@ int main(int argc, char **argv) {
          * server that issued them. */
         const char *offline_spim = getenv("ADI_OFFLINE_SPIM");
         if (offline_spim && *offline_spim) {
-            int sfd = open(offline_spim, O_RDONLY);
-            if (sfd < 0) die("offline spim: cannot open %s", offline_spim);
             static uint8_t spim_buf[4096];
-            size_t spim_n = 0;
-            spim_n = (size_t)read(sfd, spim_buf, sizeof spim_buf);
-            close(sfd);
-            if (spim_n == 0) die("offline spim: empty file %s", offline_spim);
+            size_t spim_n = read_raw_file(offline_spim, spim_buf, sizeof spim_buf);
             info("prov", "OFFLINE spim loaded (%zu bytes from %s)", spim_n, offline_spim);
 
             uint8_t *cpim = NULL; uint32_t cpim_n = 0; uint32_t session = 0;
@@ -832,6 +876,24 @@ int main(int argc, char **argv) {
             save_prov_result(cpim, cpim_n, rc);
             ww_finish(cpim, cpim_n);
 #endif
+            const char *offline_finish = getenv("ADI_OFFLINE_FINISH");
+            if (offline_finish && *offline_finish) {
+                static uint8_t ptm[1024], tk[64];
+                size_t ptm_n = read_offline_part(offline_finish, "ptm.bin",
+                                                 ptm, sizeof ptm);
+                size_t tk_n = read_offline_part(offline_finish, "tk.bin",
+                                                tk, sizeof tk);
+                info("prov", "OFFLINE ptm/tk loaded (%zu/%zu bytes)", ptm_n, tk_n);
+                rc = complete_provisioning(pEnd, session, ptm, (uint32_t)ptm_n,
+                                           tk, (uint32_t)tk_n);
+                if (rc != 0) die("ADIProvisioningEnd=%d", rc);
+                info("prov", "PROVISIONING COMPLETE (offline)");
+                g_adi_phase = 3;
+                code = pCode(DS_ID);
+                capture_blob("login-code-after-end.bin", &code, sizeof code);
+                if (code != 0) die("still not provisioned after successful end()");
+                goto provisioning_complete;
+            }
             info("done", "offline transform complete");
             return 0;
         }
@@ -909,13 +971,8 @@ int main(int argc, char **argv) {
         size_t ptm_n = 0, tk_n = 0;
         uint8_t *ptm = b64_decode(ptm_b64, &ptm_n);
         uint8_t *tk  = b64_decode(tk_b64,  &tk_n);
-        capture_blob("ptm.bin", ptm, ptm_n);
-        capture_blob("tk.bin", tk, tk_n);
-        capture_state("adi-state-before-end.bin");
-        g_adi_phase = 2;
-        rc = pEnd(session, ptm, (uint32_t)ptm_n, tk, (uint32_t)tk_n);
-        capture_blob("provisioning-end-rc.bin", &rc, sizeof rc);
-        capture_state("adi-state-after-end.bin");
+        rc = complete_provisioning(pEnd, session, ptm, (uint32_t)ptm_n,
+                                   tk, (uint32_t)tk_n);
         if (rc != 0) die("ADIProvisioningEnd=%d", rc);
         info("prov", "PROVISIONING COMPLETE");
 
@@ -924,6 +981,13 @@ int main(int argc, char **argv) {
         capture_blob("login-code-after-end.bin", &code, sizeof code);
         info("adi", "re-check ADIGetLoginCode=%d", code);
         if (code != 0) die("still not provisioned after successful end()");
+    }
+
+provisioning_complete:
+    ;
+    if (getenv("ADI_TRACE_END_ONLY") && strcmp(getenv("ADI_TRACE_END_ONLY"), "1") == 0) {
+        info("done", "stopping after offline/online ProvisioningEnd as requested");
+        return 0;
     }
 
     /* 4b. mint one OTP */

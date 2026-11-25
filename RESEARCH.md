@@ -6745,3 +6745,36 @@ Remaining product work is loading that state from the own provisioning record
 and completing `ProvisioningEnd`, then exercising Rust-End ⇄ Rust-OTP and clean
 acceptance. Cold Start genesis and the native CLI subprocess are not claimed
 closed by this result.
+
+## 2026-11-25 — The 34-block End transformation is independent Rust
+
+Track B now has a real arithmetic component, not just the PERUNST container.
+`end_tail::transform_tail` executes a fixed **3,370-instruction** circuit over 34
+sixteen-byte blocks and matches **544/544 bytes on both independent states**.
+The circuit repeats exactly after 3,370 records, is identical across those
+inputs, has no calls/libc and contains only two CFF jumps. Production
+`end_tail_core.rs` contains arithmetic only; eleven static non-executable lookup
+pages replace no runtime image. There are no capture reads or native processes.
+
+`TailState` is an explicit semantic boundary: sixteen registers, a 0x500-byte
+frame, 0x4000 dynamic heap bytes, 0x5000 relocated CoreADI RW bytes, and 560
+state bytes (544 output plus sixteen chaining/trailer bytes). Relocated RW/GOT
+pages are per-case state, not file bytes; an initial attempt that read them from
+the ELF failed at `0x181c58` and was corrected. Final trace/stack/heap/RW inputs
+are same-run captures. Full workspace tests, Clippy and the private two-state
+gate are green.
+
+The oracle work also became reproducible offline. `ADI_OFFLINE_FINISH` supplies
+captured PTM/TK after an offline Start, while `ADI_TRACE_END_ONLY` prevents
+later trace re-arming. Both cases reproduce CPIM/session and the native post-End
+state byte-for-byte without a network call. `provisioned-at.bin` now records the
+native timespec and round-trips through `adi_state --capture`.
+
+Write provenance decomposed the remaining End work. `0x170de0` produces the
+544-byte region `state[0x35..0x255)`; `0x149170` takes 52,066 records and changes
+sixteen bytes at `0x255..0x265`; the 1,570-record straight-line tail changes the
+last four bytes and reaches the write. The old description of `0x149170` as the
+final serializer is therefore withdrawn. The earlier 0x35-byte header,
+intermediate 544+16-byte genesis, and 16+4-byte trailer are still open, as are
+full `ProvisioningEnd`, record-to-warm-state loading and Rust-End ⇄ Rust-OTP.
+See `research-runs/end-tail-circuit-2026-11-25.md`.

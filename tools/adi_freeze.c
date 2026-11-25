@@ -212,6 +212,8 @@ static struct {
     int lib_seen;             /* child opened the library */
     unsigned long base;       /* runtime base of the first lib mapping */
     unsigned long patch_addr; /* base + rva */
+    unsigned long stop_rva;   /* optional --trace-stop-rva */
+    unsigned long stop_addr;  /* base + stop_rva */
     int patched;
     int done;                 /* trace finished: never arm or reopen again */
     unsigned char orig_byte;
@@ -346,6 +348,7 @@ static void trace_try_arm(pid_t pid) {
         return;
     if (!trc.base && trace_resolve_base(pid) != 0) return;
     trc.patch_addr = trc.base + trc.rva;
+    trc.stop_addr = trc.stop_rva ? trc.base + trc.stop_rva : 0;
     int m = trace_byte_matches_file(pid, trc.patch_addr);
     if (m != 1) {
         if (getenv("ADI_FREEZE_DEBUG_MAPS")) {
@@ -402,6 +405,17 @@ static void trace_try_arm(pid_t pid) {
 
 struct dump_range { unsigned long long addr, size; char tag[192]; };
 struct rdump { unsigned long long rec; unsigned long long addr, size; char tag[192]; };
+struct write_watch {
+    unsigned long long addr, size;
+    char path[192];
+    unsigned char *previous, *current;
+    FILE *log;
+};
+static struct write_watch wwatch[4];
+static int nwwatch;
+struct xor_patch { unsigned long long addr, size; unsigned char value; };
+static struct xor_patch xpatches[8];
+static int nxpatches;
 
 static struct {
     long long epoch;          /* fixed realtime seconds; -1 = derive from host */
@@ -428,6 +442,8 @@ static struct {
     int ndumps;               /* dumped when tracing stops (post-state) */
     struct dump_range sdumps[16];
     int nstartdumps;          /* dumped at the first trace stop (entry state) */
+    struct dump_range edumps[16];
+    int nenddumps;            /* dumped at the traced wrapper return */
     struct rdump rdumps[256];
     int nrdumps;              /* dumped when record rec is written */
     struct dump_range mregions[16];
@@ -706,6 +722,28 @@ static void child_mem_read(pid_t pid, unsigned long long addr, unsigned char *ou
         size_t n = len - off < 8 ? len - off : 8;
         memcpy(out + off, &w, n);
         off += n;
+    }
+}
+
+static void fast_child_mem_read(pid_t pid, unsigned long long addr,
+                                unsigned char *out, size_t len) {
+    struct iovec local = { .iov_base = out, .iov_len = len };
+    struct iovec remote = { .iov_base = (void *)(uintptr_t)addr, .iov_len = len };
+    if (process_vm_readv(pid, &local, 1, &remote, 1, 0) == (ssize_t)len) return;
+    child_mem_read(pid, addr, out, len);
+}
+
+static void apply_xor_patches(pid_t pid) {
+    for (int i = 0; i < nxpatches; i++) {
+        struct xor_patch *p = &xpatches[i];
+        unsigned char *bytes = malloc((size_t)p->size);
+        if (!bytes) die("trace-xor allocation failed");
+        fast_child_mem_read(pid, p->addr, bytes, (size_t)p->size);
+        for (size_t j = 0; j < p->size; j++) bytes[j] ^= p->value;
+        if (poke_bytes(pid, (unsigned long)p->addr, bytes, (unsigned long)p->size) != 0)
+            die("trace-xor write failed at %llx", p->addr);
+        free(bytes);
+        fprintf(stderr, "[trace] XOR-patched %llu bytes at %llx\n", p->size, p->addr);
     }
 }
 
@@ -1044,6 +1082,42 @@ static void dump_ranges(pid_t pid, struct dump_range *ds, int n) {
         fclose(f);
         fprintf(stderr, "[dump] %s: %llx..%llx (%llu bytes)\n", d->tag,
                 d->addr, d->addr + d->size, d->size);
+    }
+}
+
+static void write_watch_setup(pid_t pid) {
+    for (int i = 0; i < nwwatch; i++) {
+        struct write_watch *w = &wwatch[i];
+        w->previous = malloc((size_t)w->size);
+        w->current = malloc((size_t)w->size);
+        if (!w->previous || !w->current) die("write-watch allocation failed");
+        fast_child_mem_read(pid, w->addr, w->previous, (size_t)w->size);
+        int fd = open(w->path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (fd < 0) die("write-watch log open failed: %s", w->path);
+        w->log = fdopen(fd, "w");
+        if (!w->log) die("write-watch log fdopen failed: %s", w->path);
+        fprintf(w->log, "# record producer_ip next_ip offset length\n");
+    }
+}
+
+static void write_watch_check(pid_t pid, unsigned long long rec,
+                              unsigned long long producer,
+                              unsigned long long next) {
+    for (int i = 0; i < nwwatch; i++) {
+        struct write_watch *w = &wwatch[i];
+        fast_child_mem_read(pid, w->addr, w->current, (size_t)w->size);
+        size_t at = 0;
+        int changed = 0;
+        while (at < w->size) {
+            if (w->previous[at] == w->current[at]) { at++; continue; }
+            size_t start = at++;
+            while (at < w->size && w->previous[at] != w->current[at]) at++;
+            fprintf(w->log, "%llu %llx %llx %zx %zx\n", rec, producer, next,
+                    start, at - start);
+            changed = 1;
+        }
+        memcpy(w->previous, w->current, (size_t)w->size);
+        if (changed) fflush(w->log);
     }
 }
 
@@ -1532,6 +1606,7 @@ int main(int argc, char **argv) {
         else if (!strncmp(a, "--scan-dir=", 11)) scan_dir = a + 11;
         else if (!strncmp(a, "--trace-lib=", 12)) { trc.lib_name = a + 12; trc.requested = 1; }
         else if (!strncmp(a, "--trace-rva=", 12)) { trc.rva = strtoul(a + 12, NULL, 0); trc.requested = 1; }
+        else if (!strncmp(a, "--trace-stop-rva=", 17)) trc.stop_rva = strtoul(a + 17, NULL, 0);
         else if (!strncmp(a, "--trace-out=", 12)) { trc.out_path = a + 12; trc.requested = 1; }
         else if (!strncmp(a, "--trace-max=", 12)) { trc.max_steps = strtoull(a + 12, NULL, 0); }
         else if (!strcmp(a, "--trace-noxs")) trc.no_xstate = 1;
@@ -1541,6 +1616,34 @@ int main(int argc, char **argv) {
         else if (!strncmp(a, "--tsc-base=", 11)) opt.tsc_base = strtoull(a + 11, NULL, 0);
         else if (!strncmp(a, "--tsc-step=", 11)) opt.tsc_step = strtoull(a + 11, NULL, 0);
         else if (!strncmp(a, "--otp-buf=", 10)) opt.otp_buf = strtoull(a + 10, NULL, 0);
+        else if (!strncmp(a, "--trace-xor=", 12)) {
+            if (nxpatches >= 8) die("too many --trace-xor");
+            char spec[256];
+            snprintf(spec, sizeof spec, "%s", a + 12);
+            char *colon1 = strchr(spec, ':');
+            char *colon2 = colon1 ? strchr(colon1 + 1, ':') : NULL;
+            if (!colon1 || !colon2) die("bad --trace-xor (ADDR:SIZE:BYTE)");
+            *colon1 = 0; *colon2 = 0;
+            struct xor_patch *p = &xpatches[nxpatches++];
+            p->addr = strtoull(spec, NULL, 0);
+            p->size = strtoull(colon1 + 1, NULL, 0);
+            p->value = (unsigned char)strtoul(colon2 + 1, NULL, 0);
+            if (!p->size || p->size > (1u << 20)) die("bad --trace-xor size");
+        }
+        else if (!strncmp(a, "--trace-watch=", 14)) {
+            if (nwwatch >= 4) die("too many --trace-watch");
+            char spec[256];
+            snprintf(spec, sizeof spec, "%s", a + 14);
+            char *colon1 = strchr(spec, ':');
+            char *colon2 = colon1 ? strchr(colon1 + 1, ':') : NULL;
+            if (!colon1 || !colon2) die("bad --trace-watch (ADDR:SIZE:LOG)");
+            *colon1 = 0; *colon2 = 0;
+            struct write_watch *w = &wwatch[nwwatch++];
+            w->addr = strtoull(spec, NULL, 0);
+            w->size = strtoull(colon1 + 1, NULL, 0);
+            if (!w->size || w->size > (1u << 20)) die("bad --trace-watch size");
+            snprintf(w->path, sizeof w->path, "%s", colon2 + 1);
+        }
         else if (!strncmp(a, "--trace-mem=", 12)) {
             char spec[256];
             snprintf(spec, sizeof spec, "%s", a + 12);
@@ -1577,6 +1680,19 @@ int main(int argc, char **argv) {
             if (!colon1 || !colon2) die("bad --dump-start (ADDR:SIZE:TAG)");
             *colon1 = 0; *colon2 = 0;
             struct dump_range *d = &opt.sdumps[opt.nstartdumps++];
+            d->addr = strtoull(spec, NULL, 0);
+            d->size = strtoull(colon1 + 1, NULL, 0);
+            snprintf(d->tag, sizeof d->tag, "%s", colon2 + 1);
+        }
+        else if (!strncmp(a, "--dump-ret=", 11)) {
+            if (opt.nenddumps >= 16) die("too many --dump-ret");
+            char spec[256];
+            snprintf(spec, sizeof spec, "%s", a + 11);
+            char *colon1 = strchr(spec, ':');
+            char *colon2 = colon1 ? strchr(colon1 + 1, ':') : NULL;
+            if (!colon1 || !colon2) die("bad --dump-ret (ADDR:SIZE:TAG)");
+            *colon1 = 0; *colon2 = 0;
+            struct dump_range *d = &opt.edumps[opt.nenddumps++];
             d->addr = strtoull(spec, NULL, 0);
             d->size = strtoull(colon1 + 1, NULL, 0);
             snprintf(d->tag, sizeof d->tag, "%s", colon2 + 1);
@@ -1777,6 +1893,8 @@ int main(int argc, char **argv) {
                         trace_write(w, &r, 1);
                         if (opt.nstartdumps)
                             dump_ranges(w, opt.sdumps, opt.nstartdumps);
+                        apply_xor_patches(w);
+                        write_watch_setup(w);
                         fprintf(stderr, "[trace] entered tid=%d, retaddr=0x%lx args rdi=%llx rsi=%llx rdx=%llx rcx=%llx r8=%llx (all threads stepping)\n",
                                 w, trc.retaddr, (unsigned long long)r.rdi, (unsigned long long)r.rsi,
                                 (unsigned long long)r.rdx, (unsigned long long)r.rcx,
@@ -1792,8 +1910,20 @@ int main(int argc, char **argv) {
                             ptrace(PTRACE_SYSCALL, w, 0, 0);
                             continue;
                         }
+                        if (trc.stop_addr && r.rip == trc.stop_addr) {
+                            trace_write(w, &r, 3);
+                            if (opt.nenddumps)
+                                dump_ranges(w, opt.edumps, opt.nenddumps);
+                            fprintf(stderr, "[trace] stop RVA reached tid=%d after %llu records\n",
+                                    w, trc.steps);
+                            trace_stop_all(w);
+                            ptrace(PTRACE_SYSCALL, w, 0, 0);
+                            continue;
+                        }
                         if (r.rip == trc.retaddr) {
                             trace_write(w, &r, 3);
+                            if (opt.nenddumps)
+                                dump_ranges(w, opt.edumps, opt.nenddumps);
                             ps->tracing = 0;
                             wp_disarm(w);
                             if (nrd_ret) dump_reg_dumps(w, &r, rd_ret, nrd_ret, "ret");
@@ -1854,6 +1984,7 @@ int main(int argc, char **argv) {
                                 }
                             }
                         }
+                        unsigned long long completed_ip = ps->prev_valid ? ps->prev_ip : 0;
                         trace_calllog(w, ps, (unsigned long long)r.rip);
                         ps->prev_ip = (unsigned long)r.rip;
                         ps->prev_valid = 1;
@@ -1862,11 +1993,13 @@ int main(int argc, char **argv) {
                             int mw = wp_check(w);
                             if (mw)
                                 fprintf(stderr, "[trace] OTP payload store at prev_ip=%llx ip=%llx rax=%llx rbx=%llx rcx=%llx rdx=%llx\n",
-                                        (unsigned long long)ps->prev_ip,
+                                        completed_ip,
                                         (unsigned long long)r.rip,
                                         (unsigned long long)r.rax, (unsigned long long)r.rbx,
                                         (unsigned long long)r.rcx, (unsigned long long)r.rdx);
                             trace_write(w, &r, mw ? 5 : 2);
+                            write_watch_check(w, trc.steps - 1, completed_ip,
+                                              (unsigned long long)r.rip);
                             if (nmlr) {
                                 /* libc is not lifted: carry the caller-visible
                                  * stores across the boundary as a delta log.

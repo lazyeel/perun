@@ -518,3 +518,25 @@ Remaining Track-B/product work: construct the semantic warm state from the own
 provisioning record and implement `ProvisioningEnd`, then prove Rust-End ⇄
 Rust-OTP and clean acceptance. Cold `MixerState` genesis and the native CLI
 subprocess remain open.
+
+---
+
+## 20. Track B 34-block circuit implemented — 2026-11-25
+
+`end_tail::transform_tail` is an independent pure-Rust implementation of one
+3,370-instruction block circuit, executed 34 times and verified at 544/544 bytes
+on two independent states. It has no capture/native dependency; eleven static
+non-executable pages are its only tables. `TailState` explicitly separates
+intermediate-state genesis from this completed arithmetic boundary.
+
+Same-run offline Start→End captures reproduce CPIM/session and native state
+without network access. They also correct the old serializer interpretation:
+`0x170de0` produces `state[0x35..0x255)`, `0x149170` changes the next sixteen
+bytes, and a 1,570-record tail changes the final four. Relocated RW bytes are
+semantic state, not static ELF contents. `provisioned-at.bin` now round-trips
+through the PERUNST capture CLI. Details and remaining boundaries are in
+`research-runs/end-tail-circuit-2026-11-25.md`.
+
+This is not yet full `ProvisioningEnd`. Next: derive the intermediate 544+16
+bytes, close the earlier 0x35-byte header and 16+4-byte trailer, then integrate
+End with the own warm-state loader and Rust OTP. Track C/D remain unchanged.

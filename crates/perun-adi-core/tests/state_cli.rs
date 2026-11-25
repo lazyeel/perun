@@ -171,6 +171,10 @@ fn native_capture_round_trips_through_the_container() {
     fs::write(capture.join("ptm.bin"), pattern::<487>(0x92)).unwrap();
     fs::write(capture.join("tk.bin"), pattern::<16>(0x93)).unwrap();
     fs::write(capture.join("spim.bin"), pattern::<347>(0x94)).unwrap();
+    let mut timespec = Vec::new();
+    timespec.extend_from_slice(&1_763_000_000i64.to_le_bytes());
+    timespec.extend_from_slice(&0i64.to_le_bytes());
+    fs::write(capture.join("provisioned-at.bin"), timespec).unwrap();
 
     let state = dir.join("state.bin");
     let sealed = run(&[
@@ -183,8 +187,6 @@ fn native_capture_round_trips_through_the_container() {
         capture.to_str().unwrap(),
         "--session",
         "0x210168c6",
-        "--at",
-        "1763000000",
     ]);
     assert!(
         sealed.status.success(),
@@ -208,8 +210,15 @@ fn native_capture_round_trips_through_the_container() {
         "open --capture failed: {}",
         String::from_utf8_lossy(&opened.stderr)
     );
+    assert!(String::from_utf8_lossy(&opened.stdout).contains("provisioned_at=1763000000"));
 
-    for name in ["cpim.bin", "ptm.bin", "tk.bin", "spim.bin"] {
+    for name in [
+        "cpim.bin",
+        "ptm.bin",
+        "tk.bin",
+        "spim.bin",
+        "provisioned-at.bin",
+    ] {
         assert_eq!(
             fs::read(capture.join(name)).unwrap(),
             fs::read(exported.join(name)).unwrap(),

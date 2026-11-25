@@ -28,6 +28,8 @@
 //!   semantic initial state (whose own genesis is tracked separately);
 //! * [`otp`]         -- independent warm-OTP execution with a semantic native
 //!   ABI rather than trace/callee replay;
+//! * [`end_tail`]    -- the independent 34-block End transformation over an
+//!   explicit semantic intermediate state (not full ProvisioningEnd);
 //! * [`session`]     -- the entropy-to-`session16` KDF, including both measured
 //!   MT twist families and the nonzero-byte output loop;
 //! * [`sha256`]      -- the dependency-free SHA-256/HMAC used by the
@@ -45,6 +47,9 @@ pub mod cpim_engine;
 pub mod digest;
 pub mod early_series;
 pub mod early_zone;
+pub mod end_tail;
+mod end_tail_core;
+mod end_tail_tables;
 pub mod fold_zone;
 pub mod identity;
 pub mod mixer;

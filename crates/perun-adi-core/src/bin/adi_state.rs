@@ -80,6 +80,8 @@ fn seal(args: &[String]) -> Result<(), String> {
         };
         let at = if opts.has("--at") {
             parse_u64(&opts.take("--at")?)?
+        } else if let Some(at) = read_provisioned_at(&dir)? {
+            at
         } else {
             now()?
         };
@@ -134,6 +136,13 @@ fn open(args: &[String]) -> Result<(), String> {
             std::fs::write(format!("{dir}/spim.bin"), spim).map_err(|error| error.to_string())?;
         }
         std::fs::write(format!("{dir}/session.bin"), record.session.to_le_bytes())
+            .map_err(|error| error.to_string())?;
+        let seconds = i64::try_from(record.provisioned_at)
+            .map_err(|_| "provisioned_at does not fit the native timespec".to_string())?;
+        let mut provisioned_at = Vec::with_capacity(16);
+        provisioned_at.extend_from_slice(&seconds.to_le_bytes());
+        provisioned_at.extend_from_slice(&0i64.to_le_bytes());
+        std::fs::write(format!("{dir}/provisioned-at.bin"), provisioned_at)
             .map_err(|error| error.to_string())?;
     }
     if summary {
@@ -207,6 +216,24 @@ fn now() -> Result<u64, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .map_err(|error| error.to_string())
+}
+
+fn read_provisioned_at(dir: &str) -> Result<Option<u64>, String> {
+    let path = format!("{dir}/provisioned-at.bin");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("{path}: {error}")),
+    };
+    if bytes.len() != 16 {
+        return Err(format!("{path}: expected a 16-byte native timespec"));
+    }
+    let seconds = i64::from_le_bytes(bytes[..8].try_into().expect("length checked"));
+    let nanoseconds = i64::from_le_bytes(bytes[8..].try_into().expect("length checked"));
+    if seconds < 0 || !(0..1_000_000_000).contains(&nanoseconds) {
+        return Err(format!("{path}: invalid native timespec"));
+    }
+    Ok(Some(seconds as u64))
 }
 
 fn read_len(path: &str, len: usize) -> Result<Vec<u8>, String> {

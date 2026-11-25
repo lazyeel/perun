@@ -53,6 +53,18 @@ Two, both recorded inline:
 Separately worth reporting upstream: `adi_test.c` reads `r2` after `free(r2)`
 in the `finishMachineProvisioning` branch, in the error path only.
 
+## Offline development replay
+
+`ADI_OFFLINE_SPIM=/path/spim.bin` runs Start without contacting Apple and then
+stops, as before. Setting `ADI_OFFLINE_FINISH=/path/to/capture` as well loads
+`ptm.bin` and `tk.bin` from that directory, runs End, checks the login code and
+continues to OTP. The Start output must belong to the same provisioning attempt
+as PTM/TK; the mode is for controlled oracle experiments, not for production.
+Both online and offline End paths capture `provisioned-at.bin` as the native
+16-byte `timespec` immediately after the call. `ADI_TRACE_END_ONLY=1` stops
+after that check, before OTP, so a one-shot End/serializer trace cannot be
+re-armed by later work.
+
 ## Library source (default)
 
 `run-native.sh` fetches the x86_64 native libraries straight from Apple's
