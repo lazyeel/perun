@@ -555,3 +555,14 @@ Both pre-tail and tail are now independently implemented and verified. Their
 initial semantic/key/frame states are still explicit inputs, so full End is not
 claimed. Next: derive those states from provisioning inputs, close the earlier
 0x35-byte header and 16+4-byte trailer, then prove End → own state → OTP.
+
+---
+
+## 22. Warm executor is independent of trace schedules — 2026-11-25
+
+`otp::run_otp` now intercepts ABI calls by current RIP and stops at the wrapper
+return address read from the initial stack. It no longer consumes recorded
+`rec_call`/`rec_ret`, `stop_rec`, stub states or libc memory deltas. The gate
+clears those fields and zeroes the bundle's expected OTP before execution;
+7/7 states still match. This removes the trace-schedule dependency from the
+future own warm-state loader, but does not itself implement that loader or End.

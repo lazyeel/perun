@@ -6798,3 +6798,17 @@ Both End circuits now pass 2/2 states and 544/544 bytes per state, and Clippy is
 green. Full `ProvisioningEnd` remains unclaimed: initial semantic-state/key
 setup, the earlier 0x35-byte header and 16+4-byte trailer still have to be
 derived before End→warm-state integration.
+
+## 2026-11-25 — Warm OTP no longer consumes a recorded call schedule
+
+`otp::run_otp` now intercepts the semantic ABI from the current RIP and obtains
+the wrapper return address from the initial stack. Recorded `rec_call` /
+`rec_ret`, `stop_rec`, stub GP/XMM states and libc memory deltas are not read.
+This removes a separate loader blocker: an own warm bundle need not carry a
+trace schedule in addition to its semantic state.
+
+The strengthened private gate clears `stop_rec`, all stubs and all memory
+deltas, and zeroes the expected OTP bytes in each bundle before execution. All
+**7/7 states** still match the saved oracle outputs. Thus the remaining input is
+only the lifted program, explicit semantic warm state and epoch. This is not yet
+a `ProvisioningRecord -> CaseBundle` constructor or a claim of complete End.

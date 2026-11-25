@@ -6,12 +6,15 @@
 //! Unlike `warmvm`'s trace verifier, this module never replays a callee's
 //! recorded register state. The small native ABI is implemented directly:
 //! deterministic malloc layout, free, `lstat`, frozen `gettimeofday` and
-//! pthread rwlock operations. The instruction stream is not read.
+//! pthread rwlock operations. The instruction stream is not read. External
+//! calls are intercepted from the current RIP and the wrapper return is taken
+//! from the initial stack, so recorded stub schedules and stop records are not
+//! inputs either.
 
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 
-use crate::warmvm::{self, CaseBundle, Program, Stub, Vm, VmError};
+use crate::warmvm::{self, CaseBundle, Program, Vm, VmError};
 
 const MALLOC: u64 = 0x7ffff7b76630;
 const FREE: u64 = 0x7ffff7b76600;
@@ -28,6 +31,7 @@ const SS_WRLOCK: u64 = 0x7ffff7664240;
 const RAX: usize = 0;
 const RSI: usize = 4;
 const RDI: usize = 5;
+const RSP: usize = 7;
 
 /// One deterministic allocation result, independent of a trace or epoch.
 fn malloc_result(site: u64) -> Option<u64> {
@@ -176,9 +180,8 @@ fn target_for_site(site: u64) -> Option<u64> {
     })
 }
 
-fn host_call(vm: &mut Vm, stub: &Stub, epoch: u64) -> Result<(), VmError> {
+fn host_call(vm: &mut Vm, target: u64, ret: u64, epoch: u64) -> Result<(), VmError> {
     let site = vm.rip;
-    let target = target_for_site(site).ok_or(VmError::BadOperand("external call target"))?;
     match target {
         MALLOC | SS_MALLOC => {
             vm.gpr[RAX] = malloc_result(site).ok_or(VmError::BadOperand("malloc layout"))?;
@@ -199,34 +202,38 @@ fn host_call(vm: &mut Vm, stub: &Stub, epoch: u64) -> Result<(), VmError> {
         }
         _ => return Err(VmError::Unsupported(0)),
     }
-    vm.rip = stub.ret;
+    vm.rip = ret;
     Ok(())
 }
 
 /// Execute the warm path with semantic ABI calls and return its OTP buffer.
 pub fn run_otp(program: Program, bundle: &CaseBundle, epoch: u64) -> Result<Vec<u8>, VmError> {
     let mut vm = warmvm::prepare(bundle, program);
-    let mut record = 0u64;
-    let mut stub_at = 0usize;
+    let return_address = vm.mem.read_uint(vm.gpr[RSP], 8)?;
     let mut steps = 0u64;
-    while record < bundle.stop_rec {
-        if steps > 5_000_000 {
+    loop {
+        if vm.rip == return_address {
+            break;
+        }
+        if steps >= 5_000_000 {
             return Err(VmError::BadProgram("warm OTP step limit".into()));
         }
-        if stub_at < bundle.stubs.len() && bundle.stubs[stub_at].rec_call == record {
-            let stub = &bundle.stubs[stub_at];
-            let site = vm.rip;
-            host_call(&mut vm, stub, epoch).map_err(|error| {
+        let site = vm.rip;
+        if let Some(target) = target_for_site(site) {
+            let ilen = vm
+                .program
+                .insns
+                .get(&site)
+                .ok_or(VmError::NoInsn(site))?
+                .ilen as u64;
+            host_call(&mut vm, target, site.wrapping_add(ilen), epoch).map_err(|error| {
                 VmError::BadProgram(format!("external call at {site:#x}: {error:?}"))
             })?;
-            record = stub.rec_ret;
-            stub_at += 1;
-            continue;
+        } else {
+            vm.step().map_err(|error| {
+                VmError::BadProgram(format!("instruction at {site:#x}: {error:?}"))
+            })?;
         }
-        let site = vm.rip;
-        vm.step()
-            .map_err(|error| VmError::BadProgram(format!("instruction at {site:#x}: {error:?}")))?;
-        record += 1;
         steps += 1;
     }
     warmvm::otp(&vm, bundle)

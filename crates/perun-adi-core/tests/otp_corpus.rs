@@ -23,13 +23,18 @@ fn warm_otp_is_independent_of_recorded_execution() {
         ("tb-end1", 1794862800),
         ("tb-end2", 1794862800),
     ] {
-        let bundle = CaseBundle::load(root.join(format!("case_{case}.bin")).to_str().unwrap())
+        let mut bundle = CaseBundle::load(root.join(format!("case_{case}.bin")).to_str().unwrap())
             .expect("private warm case");
+        let expected = bundle.otp.clone();
+        bundle.stop_rec = 0;
+        bundle.stubs.clear();
+        bundle.mem.clear();
+        bundle.otp.fill(0);
         let program = Program::load(program_path.to_str().unwrap()).expect("lifted program");
         let actual = run_otp(program, &bundle, epoch).unwrap_or_else(|error| {
             panic!("{case}: semantic warm-OTP execution failed: {error:?}")
         });
-        assert_eq!(actual, bundle.otp, "{case}: semantic OTP diverged");
+        assert_eq!(actual, expected, "{case}: semantic OTP diverged");
     }
-    eprintln!("independent warm OTP: 7 states matched without a trace");
+    eprintln!("independent warm OTP: 7 states matched without a trace or recorded call schedule");
 }
