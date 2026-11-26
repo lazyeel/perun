@@ -581,3 +581,14 @@ Source-generation is therefore being decomposed into small algorithms rather
 than a monolithic `vdfut768ig` lift. Full End still requires the remaining
 source stages, initial semantic states, the 16-byte tag, and integration with
 the own record and warm OTP.
+
+---
+
+## 24. Linked source-32 circuits — 2026-11-26
+
+`end_source32a` (53 instructions) and `end_source32b` (156) each run 31
+circuits plus the final measured store and match 32/32 bytes on two states. The
+integration gate additionally proves A → B on both inputs. The generator now
+handles parent frames above RBP and collects lookup pages across all repeated
+circuits, while emitting only one core per stage. All previous gates and the
+full workspace test suite remain green.

@@ -153,6 +153,23 @@ widening the buffer. After a host restart reset `kernel.pid_max`, subsequent
 oracle captures used a dedicated PID namespace and returned to the `admin` user
 inside it; no global sysctl or production behavior was changed.
 
+## Linked source-32 stages — 2026-11-26
+
+`end_source32a` and `end_source32b` now implement two linked source stages and
+pass **2/2 independent states at 32/32 bytes per stage**. The first uses 53
+instructions (31 circuits plus final store) and the second 156 (31 plus final
+store). A combined test also proves that A's output is B's input on both states.
+
+Their native source/destination range is
+`0x7ffff78a22a4..0x7ffff78a22c3`. Source-32a additionally consumes dynamic bytes
+at `0x7ffff780f2a4..0x7ffff780f2c3`; source-32b transforms the first stage's
+buffer in place. Four and two static lookup pages are used respectively.
+
+These stages required two model corrections, both caught by fail-closed tests:
+their frame includes a parent region above RBP (`RBP-0x500..RBP+0x4000`), and
+static lookup pages must be collected across all repeated circuits, not only the
+first one. The generated core still contains only one circuit per stage.
+
 ## Remaining Track-B work
 
 1. Derive the initial pre-tail/tail semantic states from

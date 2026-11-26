@@ -18,6 +18,7 @@ const HEAP_LEN: usize = 0x4000;
 const DATA_ADDRESS: u64 = 0x7ffff77fb000;
 const DATA_LEN: usize = 0x5000;
 const FRAME_LEN: usize = 0x500;
+const FRAME_BEFORE: u64 = 0x500;
 
 /// Explicit semantic state at the start of one 60-byte source transformation.
 /// Genesis of this state from provisioning inputs is a separate boundary.
@@ -141,7 +142,7 @@ impl Source60Core {
     }
 
     fn read8(&self, address: u64) -> u8 {
-        let bottom = self.regs.rbp.wrapping_sub(FRAME_LEN as u64);
+        let bottom = self.regs.rbp.wrapping_sub(FRAME_BEFORE);
         if address >= bottom && address < bottom + FRAME_LEN as u64 {
             return self.frame[(address - bottom) as usize];
         }
@@ -177,7 +178,7 @@ impl Source60Core {
 
     fn store(&mut self, address: u64, size: usize, value: u64) {
         assert!(matches!(size, 1 | 2 | 4 | 8));
-        let bottom = self.regs.rbp.wrapping_sub(FRAME_LEN as u64);
+        let bottom = self.regs.rbp.wrapping_sub(FRAME_BEFORE);
         if address >= bottom && address + size as u64 <= bottom + FRAME_LEN as u64 {
             let offset = (address - bottom) as usize;
             self.frame[offset..offset + size].copy_from_slice(&value.to_le_bytes()[..size]);

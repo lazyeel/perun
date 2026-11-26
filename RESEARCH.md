@@ -6830,3 +6830,16 @@ and one dynamic source. These boundaries avoid lifting their CFF loops.
 The shared generator now supports tail, pre-tail and source-60 layouts with
 exact final-store boundaries. Both previous 544-byte gates still pass. Full
 `ProvisioningEnd` and initial semantic-state genesis remain open.
+
+## 2026-11-26 — Two linked source-32 circuits are independent
+
+`end_source32a` and `end_source32b` implement the 53- and 156-instruction source
+stages (31 circuits plus final store each). They pass **2/2 states at 32/32
+bytes per stage**, and the combined gate proves that A's output is B's input.
+Their shared buffer is `0x7ffff78a22a4..0x7ffff78a22c3`.
+
+These cases exposed two general model requirements now enforced by tests:
+frames may include a parent region above RBP, and lookup-page census must cover
+all repeated circuits, not just the first. Generated cores remain one circuit
+per stage, with no Apple image, capture reads or native subprocess. The other
+three differential gates and workspace tests remain green.

@@ -32,6 +32,7 @@ STACK_SEED_BASE = 0x7FFFFFFEF000
 DATA_ADDRESS = 0x7FFFF77FB000
 DATA_LEN = 0x5000
 FRAME_LEN = 0x500
+FRAME_BEFORE = 0x500
 BLOCK_RECORDS = 3370
 REQUIRED_RECORDS = 7002
 PERIOD_RECORDS = 7002
@@ -109,24 +110,24 @@ def load_case(spec):
     data = (Path(seed_dir) / "ca_rw.bin").read_bytes()
     if len(data) != DATA_LEN:
         raise ValueError(f"{name}: expected {DATA_LEN} CoreADI RW bytes")
-    frame_start = rbp - FRAME_LEN
+    frame_start = rbp - FRAME_BEFORE
     frame = stack[frame_start - STACK_SEED_BASE:frame_start - STACK_SEED_BASE + FRAME_LEN]
     dynamic = heap[HEAP_ADDRESS - HEAP_SEED_BASE:HEAP_ADDRESS - HEAP_SEED_BASE + HEAP_LEN]
     tail_at = TAIL_ADDRESS - HEAP_SEED_BASE
     tail = heap[tail_at:tail_at + TAIL_STATE_LEN]
     source = (heap[SOURCE_ADDRESS - HEAP_SEED_BASE:SOURCE_ADDRESS - HEAP_SEED_BASE + SOURCE_LEN]
-              if MODE in ("pretail", "source60") else b"")
+              if MODE in ("pretail", "source60", "source32a", "source32b") else b"")
     if MODE == "pretail":
         final_path = Path(seed_dir) / "mid.bin"
-    elif MODE == "source60":
+    elif MODE in ("source60", "source32a", "source32b"):
         final_path = Path(seed_dir) / "expected.bin"
     else:
         final_path = Path(final_dir) / "adi-data/adi.pb"
     final = final_path.read_bytes()
-    expected_at = 0 if MODE == "source60" else 0x35
+    expected_at = 0 if MODE in ("source60", "source32a", "source32b") else 0x35
     expected = final[expected_at:expected_at + TAIL_LEN]
     if (len(frame) != FRAME_LEN or len(dynamic) != HEAP_LEN or len(tail) != TAIL_STATE_LEN or
-            len(expected) != TAIL_LEN or (MODE in ("pretail", "source60") and len(source) != SOURCE_LEN)):
+            len(expected) != TAIL_LEN or (MODE in ("pretail", "source60", "source32a", "source32b") and len(source) != SOURCE_LEN)):
         raise ValueError(f"{name}: truncated semantic state")
     return dict(name=name, trace=trace, registers=registers, rbp=rbp,
                 frame=frame, heap=dynamic, data=data, source=source, tail=tail, expected=expected)
@@ -137,7 +138,7 @@ def decode_and_census(case, image):
     md.detail = True
     insns = []
     pages = set()
-    for ip, registers in case["trace"][:BLOCK_RECORDS]:
+    for index, (ip, registers) in enumerate(case["trace"][:PERIOD_RECORDS]):
         rva = ip - LIB_BASE
         ins = next(md.disasm(image[rva:rva + 15], ip, count=1), None)
         if ins is None:
@@ -156,7 +157,8 @@ def decode_and_census(case, image):
             if (LIB_BASE <= address < LIB_BASE + len(image) and
                     not DATA_ADDRESS <= address < DATA_ADDRESS + DATA_LEN):
                 pages.add((address - LIB_BASE) & ~0xFFF)
-        insns.append(ins)
+        if index < BLOCK_RECORDS:
+            insns.append(ins)
     return insns, sorted(pages)
 
 
@@ -407,6 +409,16 @@ def render_core(insns):
                          function="transform_source60", runs=59,
                          state_doc="one 60-byte source transformation",
                          iteration_doc="59 full source circuits and the final measured store"),
+        "source32a": dict(prefix="end_source32a", title="End source-32a", state="Source32aState",
+                          core="Source32aCore", invalid="InvalidSource32aFrame",
+                          function="transform_source32a", runs=31,
+                          state_doc="one 32-byte source transformation",
+                          iteration_doc="31 full source circuits and the final measured store"),
+        "source32b": dict(prefix="end_source32b", title="End source-32b", state="Source32bState",
+                          core="Source32bCore", invalid="InvalidSource32bFrame",
+                          function="transform_source32b", runs=31,
+                          state_doc="one 32-byte source transformation",
+                          iteration_doc="31 full source circuits and the final measured store"),
     }[MODE]
     text = text.replace("end_tail", names["prefix"])
     text = text.replace("End tail", names["title"])
@@ -425,6 +437,11 @@ def render_core(insns):
                         f"const TAIL_ADDRESS: u64 = 0x{TAIL_ADDRESS:x};")
     text = text.replace("const TAIL_LEN: usize = 0x230;",
                         f"const TAIL_LEN: usize = 0x{TAIL_STATE_LEN:x};")
+    text = text.replace("const FRAME_LEN: usize = 0x500;",
+                        f"const FRAME_LEN: usize = 0x{FRAME_LEN:x};\n"
+                        f"const FRAME_BEFORE: u64 = 0x{FRAME_BEFORE:x};")
+    text = text.replace("self.regs.rbp.wrapping_sub(FRAME_LEN as u64)",
+                        "self.regs.rbp.wrapping_sub(FRAME_BEFORE)")
     text = text.replace("const OUTPUT_LEN: usize = 0x220;",
                         f"const OUTPUT_LEN: usize = 0x{TAIL_LEN:x};\n"
                         f"const SOURCE_ADDRESS: u64 = 0x{SOURCE_ADDRESS:x};\n"
@@ -480,9 +497,9 @@ def render_core(insns):
 
 def main():
     global MODE, BLOCK_RECORDS, REQUIRED_RECORDS, PERIOD_RECORDS, ITERATIONS, TRACE_BASENAME
-    global TAIL_ADDRESS, TAIL_LEN, TAIL_STATE_LEN, SOURCE_ADDRESS, SOURCE_LEN
+    global TAIL_ADDRESS, TAIL_LEN, TAIL_STATE_LEN, SOURCE_ADDRESS, SOURCE_LEN, FRAME_LEN, FRAME_BEFORE
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--mode", choices=["tail", "pretail", "source60"], default="tail")
+    ap.add_argument("--mode", choices=["tail", "pretail", "source60", "source32a", "source32b"], default="tail")
     ap.add_argument("--case1", required=True, help="name=trace-dir:seed-dir:final-dir")
     ap.add_argument("--case2", required=True, help="name=trace-dir:seed-dir:final-dir")
     ap.add_argument("--image", required=True)
@@ -507,6 +524,19 @@ def main():
         TAIL_STATE_LEN = 0x3C
         SOURCE_ADDRESS = 0x7FFFF780F25C
         SOURCE_LEN = 0x3C
+    elif MODE in ("source32a", "source32b"):
+        BLOCK_RECORDS = 53 if MODE == "source32a" else 156
+        REQUIRED_RECORDS = 1698 if MODE == "source32a" else 4994
+        PERIOD_RECORDS = 1662 if MODE == "source32a" else 4970
+        ITERATIONS = 32
+        TRACE_BASENAME = f"{MODE}.trace.bin"
+        TAIL_ADDRESS = 0x7FFFF78A22A4
+        TAIL_LEN = 0x20
+        TAIL_STATE_LEN = 0x20
+        SOURCE_ADDRESS = 0x7FFFF780F2A4 if MODE == "source32a" else TAIL_ADDRESS
+        SOURCE_LEN = 0x20
+        FRAME_LEN = 0x4500
+        FRAME_BEFORE = 0x500
     cases = [load_case(args.case1), load_case(args.case2)]
     if [pc for pc, _ in cases[0]["trace"][:BLOCK_RECORDS]] != [pc for pc, _ in cases[1]["trace"][:BLOCK_RECORDS]]:
         raise ValueError("independent inputs execute different tail circuits")
@@ -523,7 +553,10 @@ def main():
     prefix = "end_tail" if MODE == "tail" else f"end_{MODE}"
     tables = tables_rust(image, pages)
     if MODE != "tail":
-        title = "End pre-tail" if MODE == "pretail" else "End source-60"
+        title = {
+            "pretail": "End pre-tail", "source60": "End source-60",
+            "source32a": "End source-32a", "source32b": "End source-32b",
+        }[MODE]
         tables = tables.replace("End tail", title)
     (out_dir / f"{prefix}_tables.rs").write_text(tables)
     (out_dir / f"{prefix}_core.rs").write_text(render_core(insns))
