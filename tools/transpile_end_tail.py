@@ -4,10 +4,10 @@
 """Transpile measured End pre-tail/tail circuits to pure Rust.
 
 Development oracle only. Two independent ptrace streams must execute the same
-circuit: 137 instructions for pre-tail or 3,370 for tail. The generator emits no
-Apple machine code, image, capture reads or expected output. Initial/final
-semantic states are written only to a caller-selected private directory for
-differential tests.
+measured circuit, including the two-pass source32c layout and its bridge. The
+generator emits no Apple machine code, image, capture reads or expected output.
+Initial/final semantic states are written only to a caller-selected private
+directory for differential tests.
 """
 import argparse
 import os
@@ -34,6 +34,7 @@ DATA_LEN = 0x5000
 FRAME_LEN = 0x500
 FRAME_BEFORE = 0x500
 BLOCK_RECORDS = 3370
+BRIDGE_RECORDS = 0
 REQUIRED_RECORDS = 7002
 PERIOD_RECORDS = 7002
 ITERATIONS = 34
@@ -99,11 +100,16 @@ def load_case(spec):
     name, paths = spec.split("=", 1)
     trace_dir, seed_dir, final_dir = paths.split(":")
     trace = read_trace(Path(trace_dir) / TRACE_BASENAME)
-    if [pc for pc, _ in trace[:BLOCK_RECORDS]] != [pc for pc, _ in trace[BLOCK_RECORDS:2 * BLOCK_RECORDS]]:
-        raise ValueError(f"{name}: first two circuit iterations have different PC streams")
-    for at in range(BLOCK_RECORDS, PERIOD_RECORDS):
-        if trace[at][0] != trace[at - BLOCK_RECORDS][0]:
-            raise ValueError(f"{name}: circuit PC period differs at record {at}")
+    if MODE == "source32c":
+        second = BLOCK_RECORDS + BRIDGE_RECORDS
+        if [pc for pc, _ in trace[:BLOCK_RECORDS]] != [pc for pc, _ in trace[second:second + BLOCK_RECORDS]]:
+            raise ValueError(f"{name}: the two measured passes have different PC streams")
+    else:
+        if [pc for pc, _ in trace[:BLOCK_RECORDS]] != [pc for pc, _ in trace[BLOCK_RECORDS:2 * BLOCK_RECORDS]]:
+            raise ValueError(f"{name}: first two circuit iterations have different PC streams")
+        for at in range(BLOCK_RECORDS, PERIOD_RECORDS):
+            if trace[at][0] != trace[at - BLOCK_RECORDS][0]:
+                raise ValueError(f"{name}: circuit PC period differs at record {at}")
     registers, rbp = trace[0][1], trace[0][1][6]
     stack = (Path(seed_dir) / "stack.bin").read_bytes()
     heap = (Path(seed_dir) / "heap.bin").read_bytes()
@@ -116,18 +122,18 @@ def load_case(spec):
     tail_at = TAIL_ADDRESS - HEAP_SEED_BASE
     tail = heap[tail_at:tail_at + TAIL_STATE_LEN]
     source = (heap[SOURCE_ADDRESS - HEAP_SEED_BASE:SOURCE_ADDRESS - HEAP_SEED_BASE + SOURCE_LEN]
-              if MODE in ("pretail", "source60", "source32a", "source32b") else b"")
+              if MODE in ("pretail", "source60", "source32a", "source32b", "source32c") else b"")
     if MODE == "pretail":
         final_path = Path(seed_dir) / "mid.bin"
-    elif MODE in ("source60", "source32a", "source32b"):
+    elif MODE in ("source60", "source32a", "source32b", "source32c"):
         final_path = Path(seed_dir) / "expected.bin"
     else:
         final_path = Path(final_dir) / "adi-data/adi.pb"
     final = final_path.read_bytes()
-    expected_at = 0 if MODE in ("source60", "source32a", "source32b") else 0x35
+    expected_at = 0 if MODE in ("source60", "source32a", "source32b", "source32c") else 0x35
     expected = final[expected_at:expected_at + TAIL_LEN]
     if (len(frame) != FRAME_LEN or len(dynamic) != HEAP_LEN or len(tail) != TAIL_STATE_LEN or
-            len(expected) != TAIL_LEN or (MODE in ("pretail", "source60", "source32a", "source32b") and len(source) != SOURCE_LEN)):
+            len(expected) != TAIL_LEN or (MODE in ("pretail", "source60", "source32a", "source32b", "source32c") and len(source) != SOURCE_LEN)):
         raise ValueError(f"{name}: truncated semantic state")
     return dict(name=name, trace=trace, registers=registers, rbp=rbp,
                 frame=frame, heap=dynamic, data=data, source=source, tail=tail, expected=expected)
@@ -145,6 +151,11 @@ def decode_and_census(case, image):
             raise ValueError(f"cannot decode {rva:#x}")
         if ins.mnemonic in ("call", "ret") or (ins.mnemonic.startswith("j") and ins.mnemonic != "jmp"):
             raise ValueError(f"unsupported tail control flow at {rva:#x}")
+        if ins.mnemonic == "lea":
+            # LEA computes an address; it does not read the referenced page.
+            if index < BLOCK_RECORDS + BRIDGE_RECORDS:
+                insns.append(ins)
+            continue
         for op in ins.operands:
             if op.type != X86_OP_MEM or not (op.access & 1):
                 continue
@@ -157,7 +168,7 @@ def decode_and_census(case, image):
             if (LIB_BASE <= address < LIB_BASE + len(image) and
                     not DATA_ADDRESS <= address < DATA_ADDRESS + DATA_LEN):
                 pages.add((address - LIB_BASE) & ~0xFFF)
-        if index < BLOCK_RECORDS:
+        if index < BLOCK_RECORDS + BRIDGE_RECORDS:
             insns.append(ins)
     return insns, sorted(pages)
 
@@ -173,8 +184,8 @@ def tables_rust(image, pages):
 """]
     for rva in pages:
         data = image[rva:rva + 0x1000]
-        if rva >= 0x186168:
-            raise ValueError(f"static page {rva:#x} is outside the measured image")
+        if rva >= 0x4F000:
+            raise ValueError(f"static page {rva:#x} is outside the read-only image region")
         # The last page includes the zero-initialized BSS tail.
         data = data + bytes(0x1000 - len(data))
         out.append("pub(crate) static PAGE_%05X: [u8; 4096] = [\n" % rva)
@@ -395,7 +406,7 @@ fn block_core(s: &mut TailCore) {
 
 
 def render_core(insns):
-    text = TEMPLATE.replace("{{BODY}}", render_body(insns))
+    text = TEMPLATE.replace("{{BODY}}", render_body(insns[:BLOCK_RECORDS]))
     if MODE == "tail":
         return text
     names = {
@@ -419,6 +430,11 @@ def render_core(insns):
                           function="transform_source32b", runs=31,
                           state_doc="one 32-byte source transformation",
                           iteration_doc="31 full source circuits and the final measured store"),
+        "source32c": dict(prefix="end_source32c", title="End source-32c", state="Source32cState",
+                          core="Source32cCore", invalid="InvalidSource32cFrame",
+                          function="transform_source32c", runs=1,
+                          state_doc="one two-pass 32-byte source transformation",
+                          iteration_doc="two measured passes separated by their 20-instruction bridge"),
     }[MODE]
     text = text.replace("end_tail", names["prefix"])
     text = text.replace("End tail", names["title"])
@@ -489,17 +505,36 @@ def render_core(insns):
                 f"    ((a & mask(bits)) {operation} shift_count(bits, b)) & mask(bits)\n}}\n",
                 "",
             )
-    text += ("\n#[allow(clippy::all, unused_parens)]\n"
-             f"fn last_core(s: &mut {names['core']}) {{\n" +
-             render_body(insns[:1]) + "\n}\n")
+    if MODE == "source32c":
+        text = text.replace(
+            "for _ in 0..1 {\n        block_core(&mut core);\n    }\n    last_core(&mut core);",
+            "block_core(&mut core);\n    bridge_core(&mut core);\n    block_core(&mut core);",
+        )
+        text += ("\n#[allow(clippy::all, unused_parens)]\n"
+                 f"fn bridge_core(s: &mut {names['core']}) {{\n" +
+                 render_body(insns[BLOCK_RECORDS:]) + "\n}\n")
+    else:
+        text += ("\n#[allow(clippy::all, unused_parens)]\n"
+                 f"fn last_core(s: &mut {names['core']}) {{\n" +
+                 render_body(insns[:1]) + "\n}\n")
+    if "rol" in used:
+        text = text.replace(
+            "/// Execute ",
+            "#[inline]\nfn alu_rol(bits: u32, a: u64, b: u64) -> u64 {\n"
+            "    let count = shift_count(bits, b);\n"
+            "    let value = a & mask(bits);\n"
+            "    ((value << count) | (value >> ((bits - count) % bits))) & mask(bits)\n}\n"
+            "/// Execute ",
+            1,
+        )
     return text
 
 
 def main():
-    global MODE, BLOCK_RECORDS, REQUIRED_RECORDS, PERIOD_RECORDS, ITERATIONS, TRACE_BASENAME
+    global MODE, BLOCK_RECORDS, BRIDGE_RECORDS, REQUIRED_RECORDS, PERIOD_RECORDS, ITERATIONS, TRACE_BASENAME
     global TAIL_ADDRESS, TAIL_LEN, TAIL_STATE_LEN, SOURCE_ADDRESS, SOURCE_LEN, FRAME_LEN, FRAME_BEFORE
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--mode", choices=["tail", "pretail", "source60", "source32a", "source32b"], default="tail")
+    ap.add_argument("--mode", choices=["tail", "pretail", "source60", "source32a", "source32b", "source32c"], default="tail")
     ap.add_argument("--case1", required=True, help="name=trace-dir:seed-dir:final-dir")
     ap.add_argument("--case2", required=True, help="name=trace-dir:seed-dir:final-dir")
     ap.add_argument("--image", required=True)
@@ -537,6 +572,20 @@ def main():
         SOURCE_LEN = 0x20
         FRAME_LEN = 0x4500
         FRAME_BEFORE = 0x500
+    elif MODE == "source32c":
+        BLOCK_RECORDS = 3416
+        BRIDGE_RECORDS = 20
+        REQUIRED_RECORDS = 6856
+        PERIOD_RECORDS = 6852
+        ITERATIONS = 2
+        TRACE_BASENAME = "source32c.trace.bin"
+        TAIL_ADDRESS = 0x7FFFF78A22A4
+        TAIL_LEN = 0x20
+        TAIL_STATE_LEN = 0x20
+        SOURCE_ADDRESS = TAIL_ADDRESS
+        SOURCE_LEN = 0x20
+        FRAME_LEN = 0x4500
+        FRAME_BEFORE = 0x500
     cases = [load_case(args.case1), load_case(args.case2)]
     if [pc for pc, _ in cases[0]["trace"][:BLOCK_RECORDS]] != [pc for pc, _ in cases[1]["trace"][:BLOCK_RECORDS]]:
         raise ValueError("independent inputs execute different tail circuits")
@@ -556,6 +605,7 @@ def main():
         title = {
             "pretail": "End pre-tail", "source60": "End source-60",
             "source32a": "End source-32a", "source32b": "End source-32b",
+            "source32c": "End source-32c",
         }[MODE]
         tables = tables.replace("End tail", title)
     (out_dir / f"{prefix}_tables.rs").write_text(tables)

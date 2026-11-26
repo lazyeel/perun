@@ -45,7 +45,7 @@ for _n in range(8, 16):
         REG_ALIASES["r%d%s" % (_n, _suffix)] = "r%d" % _n
 HIGH8 = {"ah", "bh", "ch", "dh"}
 FLAG_NEUTRAL = {
-    "mov", "movzx", "movsxd", "lea", "cdqe", "not",
+    "mov", "movabs", "movzx", "movsxd", "lea", "cdqe", "not",
     "sete", "setne", "seta", "setb", "cmove", "cmovne", "cmova", "cmovb", "jmp",
 }
 FLAG_CONSUMERS = {"sete", "setne", "seta", "setb", "cmove", "cmovne", "cmova", "cmovb", "adc"}
@@ -154,7 +154,7 @@ def emit_binary(ins):
 def emit(ins):
     mn = ins.mnemonic
     n = len(ins.operands)
-    if mn in ("mov", "movzx") and n == 2:
+    if mn in ("mov", "movabs", "movzx") and n == 2:
         return emit_assignment(ins, read_op(ins, 1))
     if mn == "movsxd" and n == 2 and bits(ins, 1) == 32 and bits(ins, 0) == 64:
         return emit_assignment(ins, "((%s as u32) as i32) as i64 as u64" % read_op(ins, 1))

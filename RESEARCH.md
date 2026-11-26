@@ -6753,7 +6753,7 @@ Track B now has a real arithmetic component, not just the PERUNST container.
 sixteen-byte blocks and matches **544/544 bytes on both independent states**.
 The circuit repeats exactly after 3,370 records, is identical across those
 inputs, has no calls/libc and contains only two CFF jumps. Production
-`end_tail_core.rs` contains arithmetic only; eleven static non-executable lookup
+`end_tail_core.rs` contains arithmetic only; nine static non-executable lookup
 pages replace no runtime image. There are no capture reads or native processes.
 
 `TailState` is an explicit semantic boundary: sixteen registers, a 0x500-byte
@@ -6784,7 +6784,7 @@ See `research-runs/end-tail-circuit-2026-11-25.md`.
 `end_pretail::transform_pretail` now closes the circuit before the 34-block
 transformation. It contains **137 arithmetic instructions**, executes 543 full
 iterations plus the measured final one-byte store, and matches **544/544 bytes
-on both independent states**. Two static lookup pages are sufficient; there are
+on both independent states**. One static lookup page is sufficient; there are
 no Apple images, capture reads or native subprocesses in production.
 
 The source and destination are separate 544-byte regions, not one expanded
@@ -6817,7 +6817,7 @@ a `ProvisioningRecord -> CaseBundle` constructor or a claim of complete End.
 
 `end_source60::transform_source60` implements one 42-instruction source stage
 as 59 full circuits plus the final store. It passes **2/2 independent states at
-60/60 bytes**, uses five static lookup pages, and has no capture/native runtime
+60/60 bytes**, uses four static lookup pages, and has no capture/native runtime
 dependency. Exact output/source ranges are `0x7ffff78a22e8..0x7ffff78a2323` and
 `0x7ffff780f25c..0x7ffff780f297`; the memory guard rejected an earlier off-by-12
 range instead of accepting corrupt output.
@@ -6843,3 +6843,19 @@ frames may include a parent region above RBP, and lookup-page census must cover
 all repeated circuits, not just the first. Generated cores remain one circuit
 per stage, with no Apple image, capture reads or native subprocess. The other
 three differential gates and workspace tests remain green.
+
+## 2026-11-26 — The third linked source-32 circuit is independent
+
+`end_source32c` extends the proven chain to A → B → C. It executes one
+3,416-instruction pass, a measured 20-instruction bridge and the second pass,
+and matches **32/32 bytes on 2/2 states**. A separate integration gate first
+recomputes B and requires its output to equal C's input on both captures.
+
+The complete trace corrects the earlier store description: sixteen unique
+**byte-store** PCs each execute twice, covering all 32 byte positions; they are
+not sixteen two-byte stores. Two new independent 6,856-record streams agree on
+every PC. The shared generator supports the two-pass/bridge layout, `movabs`
+and exact width-limited `rol`; all previous End gates remain green. Its census
+now excludes LEA targets because LEA performs no memory read, and rejects
+static pages outside the read-only image region. Regenerating all six End table
+modules removed every executable-text page without changing any byte result.

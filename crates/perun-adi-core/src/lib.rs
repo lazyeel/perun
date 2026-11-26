@@ -28,8 +28,8 @@
 //!   semantic initial state (whose own genesis is tracked separately);
 //! * [`otp`]         -- independent warm-OTP execution with a semantic native
 //!   ABI rather than trace/callee replay;
-//! * [`end_source32a`] / [`end_source32b`] -- two linked independent 32-byte
-//!   End source-generation stages;
+//! * [`end_source32a`] / [`end_source32b`] / [`end_source32c`] -- three linked
+//!   independent 32-byte End source-generation stages;
 //! * [`end_source60`] -- one independent 60-byte End source-generation stage;
 //! * [`end_pretail`] -- the independent 544-iteration End pre-transformation
 //!   over an explicit semantic intermediate state (not full ProvisioningEnd);
@@ -61,6 +61,9 @@ mod end_source32a_tables;
 pub mod end_source32b;
 mod end_source32b_core;
 mod end_source32b_tables;
+pub mod end_source32c;
+mod end_source32c_core;
+mod end_source32c_tables;
 pub mod end_source60;
 mod end_source60_core;
 mod end_source60_tables;

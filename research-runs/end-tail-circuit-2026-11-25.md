@@ -12,7 +12,7 @@ not a complete `ProvisioningEnd`, not an Apple `adi.pb` serializer, and not a
 
 Production contains no Apple machine code or ELF/Bionic image, no capture reads
 and no native subprocess. `end_tail_core.rs` contains 3,370 arithmetic
-instructions; `end_tail_tables.rs` contains eleven static non-executable 4 KiB
+instructions; `end_tail_tables.rs` contains nine static non-executable 4 KiB
 lookup pages. Private initial/final states remain under
 `target/private-cores/end-tail` with mode `0700/0600` and are used only by the
 env-gated differential test.
@@ -107,7 +107,7 @@ well. Its measured circuit is **137 instructions**, repeated 543 times, followed
 by the final measured one-byte store. A 75,002-record capture confirms the
 137-PC period through record 74,506; later divergence is the next native stage,
 not another circuit. Both inputs have identical PC streams and match 544/544
-intermediate bytes. Only two static lookup pages are required.
+intermediate bytes. Only one static lookup page is required.
 
 The source and destination are distinct: `PretailState.source` is a read-only
 544-byte region at native state offset `0x280`, while `PretailState.tail` holds
@@ -133,7 +133,7 @@ intermediate snapshots also equal the independently captured second-pass input.
 42 arithmetic instructions, 59 full circuits plus the final measured store, and
 **2/2 independent states at 60/60 bytes**. Destination is the native range
 `0x7ffff78a22e8..0x7ffff78a2323`; the independent source range is
-`0x7ffff780f25c..0x7ffff780f297`. Five static lookup pages are used.
+`0x7ffff780f25c..0x7ffff780f297`. Four static lookup pages are used.
 
 The 42-record period holds through record 2,490; later instructions belong to
 the next native stage. Executing the final full circuit would therefore be as
@@ -163,12 +163,38 @@ store). A combined test also proves that A's output is B's input on both states.
 Their native source/destination range is
 `0x7ffff78a22a4..0x7ffff78a22c3`. Source-32a additionally consumes dynamic bytes
 at `0x7ffff780f2a4..0x7ffff780f2c3`; source-32b transforms the first stage's
-buffer in place. Four and two static lookup pages are used respectively.
+buffer in place. They use three static lookup pages and one static lookup page
+respectively.
 
 These stages required two model corrections, both caught by fail-closed tests:
 their frame includes a parent region above RBP (`RBP-0x500..RBP+0x4000`), and
 static lookup pages must be collected across all repeated circuits, not only the
 first one. The generated core still contains only one circuit per stage.
+
+## Third linked source-32 stage — later 2026-11-26
+
+`end_source32c` continues the same buffer after source-32b and passes **2/2
+states at 32/32 bytes**, with a separate B → C integration assertion. Its input
+at `0x7ffff78a22a4..0x7ffff78a22c3` equals B's independently generated output on
+both captures. The implementation executes a 3,416-instruction pass, the
+measured 20-instruction bridge, then the same pass once more. Ten static
+lookup pages are used; the shared emitter now also handles `movabs` and
+width-limited `rol`.
+
+A compliance audit also corrected the shared census: LEA computes an address
+but does not read it, so its target must not contribute a lookup page. Removing
+those false reads eliminated every executable-text page from all six generated
+End table modules. Generation now fails closed if a requested static page lies
+outside the read-only image region. The resulting current page counts are
+9/1/4/3/1/10 for tail/pre-tail/source60/source32a/source32b/source32c; all byte
+gates remained unchanged and green after regeneration.
+
+The long trace corrects an earlier store-width description: the stage has
+**sixteen unique byte-store RVAs, each executed twice**, not sixteen two-byte
+stores. The two passes cover the first and second sixteen-byte halves
+respectively, for 32 distinct byte positions total. The old source32b-only
+captures stopped before this stage; two new same-run captures at `0x145d13`
+provide identical 6,856-record streams on independent inputs.
 
 ## Remaining Track-B work
 

@@ -525,7 +525,7 @@ subprocess remain open.
 
 `end_tail::transform_tail` is an independent pure-Rust implementation of one
 3,370-instruction block circuit, executed 34 times and verified at 544/544 bytes
-on two independent states. It has no capture/native dependency; eleven static
+on two independent states. It has no capture/native dependency; nine static
 non-executable pages are its only tables. `TailState` explicitly separates
 intermediate-state genesis from this completed arithmetic boundary.
 
@@ -547,7 +547,7 @@ End with the own warm-state loader and Rust OTP. Track C/D remain unchanged.
 
 `end_pretail::transform_pretail` closes the producer preceding the 34-block
 circuit. It executes 137 arithmetic instructions 543 times plus the final
-one-byte store, uses two static lookup pages, and passes 2/2 independent states
+one-byte store, uses one static lookup page, and passes 2/2 independent states
 at 544/544 bytes each. Source and destination are separate 544-byte regions;
 the final store boundary prevents an out-of-range read instead of hiding it.
 
@@ -592,3 +592,23 @@ integration gate additionally proves A → B on both inputs. The generator now
 handles parent frames above RBP and collects lookup pages across all repeated
 circuits, while emitting only one core per stage. All previous gates and the
 full workspace test suite remain green.
+
+---
+
+## 25. Third source-32 stage and the 64-round tag boundary — later 2026-11-26
+
+`end_source32c` closes the third linked 32-byte stage: a 3,416-instruction
+pass, a 20-instruction bridge and a second pass match 32/32 bytes on two
+states, with B → C integration verified. The sixteen producer PCs are byte
+stores executed twice each, not sixteen two-byte stores. `movabs` and
+width-limited `rol` joined the strict emitter. A shared census correction no
+longer treats LEA as a memory read: all six End table modules were regenerated
+without executable-text pages, and generation rejects static pages outside the
+read-only image region. Every differential gate stayed green.
+
+The following 16-byte tag stage now has an exact sub-boundary as well: records
+12,060..32,604 of `0x149170` are a 64 × 321-instruction SSE circuit producing
+two 1,024-byte heap buffers. Two same-run loop-entry captures exist. That
+circuit is measured but **not yet implemented**; its prefix, unique suffix and
+final tag remain open, and no standard hash primitive is claimed. Full End,
+record-to-warm-state loading and clean acceptance are still unclosed.
