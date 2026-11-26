@@ -127,6 +127,32 @@ PERUN_END_PRETAIL_DIR=target/private-cores/end-pretail \
 Both pre-tail and tail gates pass 2/2 states and 544/544 bytes per state. The
 intermediate snapshots also equal the independently captured second-pass input.
 
+## Source-60 and a 384-byte direct copy — 2026-11-26
+
+`end_source60::transform_source60` adds the first source-generation component:
+42 arithmetic instructions, 59 full circuits plus the final measured store, and
+**2/2 independent states at 60/60 bytes**. Destination is the native range
+`0x7ffff78a22e8..0x7ffff78a2323`; the independent source range is
+`0x7ffff780f25c..0x7ffff780f297`. Five static lookup pages are used.
+
+The 42-record period holds through record 2,490; later instructions belong to
+the next native stage. Executing the final full circuit would therefore be as
+incorrect as in pre-tail, so `last_core` encodes the exact final-store boundary.
+
+Two related producers were reduced semantically without a circuit:
+
+- `0xcea3d` is a verified direct copy of **384/384 bytes** from the separate
+  dynamic buffer `0x7ffff78d9180`.
+- `0xcddf5` is the measured `index*0x73 XOR sil XOR four_source_bytes` stage;
+  three sources are static image data and one is dynamic heap data. The formula
+  matches consecutive native stores before the source-60 circuit was generated.
+
+The initial wrong destination/source ranges (`22f4`/`f25d`) were rejected by the
+Rust memory guard and corrected from all 60 effective addresses, not hidden by
+widening the buffer. After a host restart reset `kernel.pid_max`, subsequent
+oracle captures used a dedicated PID namespace and returned to the `admin` user
+inside it; no global sysctl or production behavior was changed.
+
 ## Remaining Track-B work
 
 1. Derive the initial pre-tail/tail semantic states from

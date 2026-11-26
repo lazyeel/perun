@@ -566,3 +566,18 @@ return address read from the initial stack. It no longer consumes recorded
 clears those fields and zeroes the bundle's expected OTP before execution;
 7/7 states still match. This removes the trace-schedule dependency from the
 future own warm-state loader, but does not itself implement that loader or End.
+
+---
+
+## 23. Source-generation component — 2026-11-26
+
+`end_source60::transform_source60` implements a 42-instruction source circuit
+as 59 iterations plus the final measured store, verified at 60/60 bytes on two
+independent states. The shared generator now supports all three layouts and
+their exact final-store boundaries. A separate producer is a direct 384-byte
+copy, while `0xcddf5` reduces to an indexed XOR of four sources.
+
+Source-generation is therefore being decomposed into small algorithms rather
+than a monolithic `vdfut768ig` lift. Full End still requires the remaining
+source stages, initial semantic states, the 16-byte tag, and integration with
+the own record and warm OTP.

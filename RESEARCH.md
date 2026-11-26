@@ -6812,3 +6812,21 @@ deltas, and zeroes the expected OTP bytes in each bundle before execution. All
 **7/7 states** still match the saved oracle outputs. Thus the remaining input is
 only the lifted program, explicit semantic warm state and epoch. This is not yet
 a `ProvisioningRecord -> CaseBundle` constructor or a claim of complete End.
+
+## 2026-11-26 — The first source-generation circuit and direct-copy law
+
+`end_source60::transform_source60` implements one 42-instruction source stage
+as 59 full circuits plus the final store. It passes **2/2 independent states at
+60/60 bytes**, uses five static lookup pages, and has no capture/native runtime
+dependency. Exact output/source ranges are `0x7ffff78a22e8..0x7ffff78a2323` and
+`0x7ffff780f25c..0x7ffff780f297`; the memory guard rejected an earlier off-by-12
+range instead of accepting corrupt output.
+
+A neighboring 384-byte producer is simpler: `0xcea3d` is a direct copy from
+`0x7ffff78d9180`, verified 384/384. `0xcddf5` is the measured
+`index*0x73 XOR sil XOR four_source_bytes` formula, with three static sources
+and one dynamic source. These boundaries avoid lifting their CFF loops.
+
+The shared generator now supports tail, pre-tail and source-60 layouts with
+exact final-store boundaries. Both previous 544-byte gates still pass. Full
+`ProvisioningEnd` and initial semantic-state genesis remain open.
