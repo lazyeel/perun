@@ -31,6 +31,8 @@
 //! * [`end_source32a`] / [`end_source32b`] / [`end_source32c`] -- three linked
 //!   independent 32-byte End source-generation stages;
 //! * [`end_source60`] -- one independent 60-byte End source-generation stage;
+//! * [`end_tag_round`] -- the independent 64-round SSE subcircuit producing two
+//!   1,024-byte intermediate buffers (not the complete 16-byte tag);
 //! * [`end_pretail`] -- the independent 544-iteration End pre-transformation
 //!   over an explicit semantic intermediate state (not full ProvisioningEnd);
 //! * [`end_tail`]    -- the independent 34-block End transformation over an
@@ -67,6 +69,9 @@ mod end_source32c_tables;
 pub mod end_source60;
 mod end_source60_core;
 mod end_source60_tables;
+pub mod end_tag_round;
+mod end_tag_round_core;
+mod end_tag_round_tables;
 pub mod end_tail;
 mod end_tail_core;
 mod end_tail_tables;

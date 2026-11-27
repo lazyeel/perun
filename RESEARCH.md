@@ -6859,3 +6859,21 @@ and exact width-limited `rol`; all previous End gates remain green. Its census
 now excludes LEA targets because LEA performs no memory read, and rejects
 static pages outside the read-only image region. Regenerating all six End table
 modules removed every executable-text page without changing any byte result.
+
+## 2026-11-27 — The repeated 64-round tag SSE circuit is independent
+
+`end_tag_round::transform_tag_round` executes the exact 321-instruction circuit
+64 times and matches **2/2 states, with two 1,024-byte outputs per state**. Its
+boundary is `0x156780..0x156e7f`; a candidate entry three instructions later
+was rejected rather than hidden with a partial-loop shortcut. Both independent
+20,548-record streams have identical PCs and an exact 321-record period.
+
+The implementation uses portable SSE lane helpers with synthetic unit tests,
+per-case GP/XMM/frame/heap/RW state, six static read-only pages and twelve
+sparse page-zero ranges. Sparse page-zero data avoids copying the ELF header;
+generation classifies every actual read and excludes LEA and write-only
+operands. Workspace tests, Clippy and the private differential gate are green.
+
+This is not yet the complete `0x149170` stage or a 16-byte tag algorithm. Its
+prefix, unique suffix and final tag bytes remain separate boundaries, and no
+standard hash/cipher identification is claimed.

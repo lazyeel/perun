@@ -608,7 +608,12 @@ read-only image region. Every differential gate stayed green.
 
 The following 16-byte tag stage now has an exact sub-boundary as well: records
 12,060..32,604 of `0x149170` are a 64 × 321-instruction SSE circuit producing
-two 1,024-byte heap buffers. Two same-run loop-entry captures exist. That
-circuit is measured but **not yet implemented**; its prefix, unique suffix and
-final tag remain open, and no standard hash primitive is claimed. Full End,
-record-to-warm-state loading and clean acceptance are still unclosed.
+two 1,024-byte heap buffers. `end_tag_round` now implements this subcircuit and
+passes **2/2 states with 2 × 1,024/1,024 bytes each** (2026-11-27). Its exact
+entry is `0x156780`; a capture three instructions later was rejected. Portable
+SSE helpers, six read-only pages and twelve sparse page-zero ranges are enough,
+with no ELF header, executable image or production capture dependency.
+
+The prefix, unique suffix and final tag remain open, and no standard hash
+primitive is claimed. Full End, record-to-warm-state loading and clean
+acceptance are still unclosed.

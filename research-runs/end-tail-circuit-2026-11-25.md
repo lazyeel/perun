@@ -196,6 +196,28 @@ respectively, for 32 distinct byte positions total. The old source32b-only
 captures stopped before this stage; two new same-run captures at `0x145d13`
 provide identical 6,856-record streams on independent inputs.
 
+## The 64-round tag subcircuit is independent — 2026-11-27
+
+`end_tag_round::transform_tag_round` implements the repeated SSE component of
+`0x149170`: **321 instructions × 64 rounds**, matching **2/2 states and two
+1,024-byte buffers per state**. The exact circuit starts at `0x156780` and ends
+before `0x156e7f`. A first capture at `0x15678d` was rejected because it was
+three instructions into the period; recapturing at the real boundary gave two
+identical 20,548-record streams with no period mismatch.
+
+The semantic input contains sixteen GP registers, sixteen XMM registers, a
+0x500-byte frame, 0x4000 dynamic heap bytes and 0x5000 relocated RW bytes.
+Portable byte-lane Rust helpers implement the measured SSE semantics and have
+synthetic unit tests. Six read-only lookup pages plus twelve sparse page-zero
+ranges are sufficient; page zero is sparse specifically so no ELF header or
+program headers enter production. Every memory read is classified during
+generation, and write-only operands and LEA are excluded from the read census.
+
+The private gate is enabled by `PERUN_END_TAG_ROUND_DIR` and passes both outputs
+on both states. This closes only the repeated producer of two intermediate
+buffers. The preceding 12,060 records, the unique suffix and the final 16-byte
+tag remain open; no MD5/SHA/HMAC/AES identification is claimed.
+
 ## Remaining Track-B work
 
 1. Derive the initial pre-tail/tail semantic states from
