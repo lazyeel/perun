@@ -614,6 +614,10 @@ entry is `0x156780`; a capture three instructions later was rejected. Portable
 SSE helpers, six read-only pages and twelve sparse page-zero ranges are enough,
 with no ELF header, executable image or production capture dependency.
 
-The prefix, unique suffix and final tag remain open, and no standard hash
-primitive is claimed. Full End, record-to-warm-state loading and clean
-acceptance are still unclosed.
+The final serializer is also independent now: `end_tagfinal` implements the
+432-instruction block at `0x16b72a..0x16bded` and passes **2/2 states at 16/16
+bytes**. Full same-run traces with record-indexed dumps supplied its semantic
+input after a late breakpoint changed the CFF route. The prefix and unique
+middle suffix connecting the two implemented components remain open, and no
+standard hash primitive is claimed. Full End, record-to-warm-state loading and
+clean acceptance are still unclosed.

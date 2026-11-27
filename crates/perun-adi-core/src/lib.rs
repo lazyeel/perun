@@ -33,6 +33,8 @@
 //! * [`end_source60`] -- one independent 60-byte End source-generation stage;
 //! * [`end_tag_round`] -- the independent 64-round SSE subcircuit producing two
 //!   1,024-byte intermediate buffers (not the complete 16-byte tag);
+//! * [`end_tagfinal`] -- the independent final 16-byte tag serializer over an
+//!   explicit post-suffix semantic state;
 //! * [`end_pretail`] -- the independent 544-iteration End pre-transformation
 //!   over an explicit semantic intermediate state (not full ProvisioningEnd);
 //! * [`end_tail`]    -- the independent 34-block End transformation over an
@@ -72,6 +74,9 @@ mod end_source60_tables;
 pub mod end_tag_round;
 mod end_tag_round_core;
 mod end_tag_round_tables;
+pub mod end_tagfinal;
+mod end_tagfinal_core;
+mod end_tagfinal_tables;
 pub mod end_tail;
 mod end_tail_core;
 mod end_tail_tables;

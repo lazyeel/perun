@@ -6877,3 +6877,17 @@ operands. Workspace tests, Clippy and the private differential gate are green.
 This is not yet the complete `0x149170` stage or a 16-byte tag algorithm. Its
 prefix, unique suffix and final tag bytes remain separate boundaries, and no
 standard hash/cipher identification is claimed.
+
+## 2026-11-27 — The final 16-byte tag serializer is independent too
+
+`end_tagfinal::transform_tagfinal` executes the exact 432-instruction block at
+`0x16b72a..0x16bded`, including its `cmp`, intermediate MBA and all sixteen
+final stores. It matches **16/16 bytes on 2/2 states** and uses four read-only
+lookup pages. Full same-run `0x149170` traces and record-indexed dumps supplied
+the boundary state after a late breakpoint proved to alter the CFF route.
+
+The repeated two-buffer producer and final serializer are now independently
+implemented. Their connecting unique suffix and the earlier prefix remain open,
+so the complete tag algorithm and `ProvisioningEnd` are still not claimed. The
+workspace, Clippy and 90 Python tests are green, including a new `trace_slice`
+record-zero regression test.

@@ -100,7 +100,9 @@ def load_case(spec):
     name, paths = spec.split("=", 1)
     trace_dir, seed_dir, final_dir = paths.split(":")
     trace = read_trace(Path(trace_dir) / TRACE_BASENAME)
-    if MODE == "source32c":
+    if MODE == "tagfinal":
+        pass
+    elif MODE == "source32c":
         second = BLOCK_RECORDS + BRIDGE_RECORDS
         if [pc for pc, _ in trace[:BLOCK_RECORDS]] != [pc for pc, _ in trace[second:second + BLOCK_RECORDS]]:
             raise ValueError(f"{name}: the two measured passes have different PC streams")
@@ -122,18 +124,18 @@ def load_case(spec):
     tail_at = TAIL_ADDRESS - HEAP_SEED_BASE
     tail = heap[tail_at:tail_at + TAIL_STATE_LEN]
     source = (heap[SOURCE_ADDRESS - HEAP_SEED_BASE:SOURCE_ADDRESS - HEAP_SEED_BASE + SOURCE_LEN]
-              if MODE in ("pretail", "source60", "source32a", "source32b", "source32c") else b"")
+              if MODE in ("pretail", "source60", "source32a", "source32b", "source32c", "tagfinal") else b"")
     if MODE == "pretail":
         final_path = Path(seed_dir) / "mid.bin"
-    elif MODE in ("source60", "source32a", "source32b", "source32c"):
+    elif MODE in ("source60", "source32a", "source32b", "source32c", "tagfinal"):
         final_path = Path(seed_dir) / "expected.bin"
     else:
         final_path = Path(final_dir) / "adi-data/adi.pb"
     final = final_path.read_bytes()
-    expected_at = 0 if MODE in ("source60", "source32a", "source32b", "source32c") else 0x35
+    expected_at = 0 if MODE in ("source60", "source32a", "source32b", "source32c", "tagfinal") else 0x35
     expected = final[expected_at:expected_at + TAIL_LEN]
     if (len(frame) != FRAME_LEN or len(dynamic) != HEAP_LEN or len(tail) != TAIL_STATE_LEN or
-            len(expected) != TAIL_LEN or (MODE in ("pretail", "source60", "source32a", "source32b", "source32c") and len(source) != SOURCE_LEN)):
+            len(expected) != TAIL_LEN or (MODE in ("pretail", "source60", "source32a", "source32b", "source32c", "tagfinal") and len(source) != SOURCE_LEN)):
         raise ValueError(f"{name}: truncated semantic state")
     return dict(name=name, trace=trace, registers=registers, rbp=rbp,
                 frame=frame, heap=dynamic, data=data, source=source, tail=tail, expected=expected)
@@ -435,6 +437,11 @@ def render_core(insns):
                           function="transform_source32c", runs=1,
                           state_doc="one two-pass 32-byte source transformation",
                           iteration_doc="two measured passes separated by their 20-instruction bridge"),
+        "tagfinal": dict(prefix="end_tagfinal", title="End tag final", state="TagFinalState",
+                         core="TagFinalCore", invalid="InvalidTagFinalFrame",
+                         function="transform_tagfinal", runs=1,
+                         state_doc="one final 16-byte tag serialization",
+                         iteration_doc="one measured 432-instruction final serialization"),
     }[MODE]
     text = text.replace("end_tail", names["prefix"])
     text = text.replace("End tail", names["title"])
@@ -505,7 +512,12 @@ def render_core(insns):
                 f"    ((a & mask(bits)) {operation} shift_count(bits, b)) & mask(bits)\n}}\n",
                 "",
             )
-    if MODE == "source32c":
+    if MODE == "tagfinal":
+        text = text.replace(
+            "for _ in 0..1 {\n        block_core(&mut core);\n    }\n    last_core(&mut core);",
+            "block_core(&mut core);",
+        )
+    elif MODE == "source32c":
         text = text.replace(
             "for _ in 0..1 {\n        block_core(&mut core);\n    }\n    last_core(&mut core);",
             "block_core(&mut core);\n    bridge_core(&mut core);\n    block_core(&mut core);",
@@ -534,7 +546,7 @@ def main():
     global MODE, BLOCK_RECORDS, BRIDGE_RECORDS, REQUIRED_RECORDS, PERIOD_RECORDS, ITERATIONS, TRACE_BASENAME
     global TAIL_ADDRESS, TAIL_LEN, TAIL_STATE_LEN, SOURCE_ADDRESS, SOURCE_LEN, FRAME_LEN, FRAME_BEFORE
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--mode", choices=["tail", "pretail", "source60", "source32a", "source32b", "source32c"], default="tail")
+    ap.add_argument("--mode", choices=["tail", "pretail", "source60", "source32a", "source32b", "source32c", "tagfinal"], default="tail")
     ap.add_argument("--case1", required=True, help="name=trace-dir:seed-dir:final-dir")
     ap.add_argument("--case2", required=True, help="name=trace-dir:seed-dir:final-dir")
     ap.add_argument("--image", required=True)
@@ -586,6 +598,19 @@ def main():
         SOURCE_LEN = 0x20
         FRAME_LEN = 0x4500
         FRAME_BEFORE = 0x500
+    elif MODE == "tagfinal":
+        BLOCK_RECORDS = 432
+        REQUIRED_RECORDS = 436
+        PERIOD_RECORDS = 432
+        ITERATIONS = 1
+        TRACE_BASENAME = "tagfinal.trace.bin"
+        TAIL_ADDRESS = 0x7FFFF78337D5
+        TAIL_LEN = 0x10
+        TAIL_STATE_LEN = 0x10
+        SOURCE_ADDRESS = TAIL_ADDRESS
+        SOURCE_LEN = 0x10
+        FRAME_LEN = 0x600
+        FRAME_BEFORE = 0x600
     cases = [load_case(args.case1), load_case(args.case2)]
     if [pc for pc, _ in cases[0]["trace"][:BLOCK_RECORDS]] != [pc for pc, _ in cases[1]["trace"][:BLOCK_RECORDS]]:
         raise ValueError("independent inputs execute different tail circuits")
@@ -605,7 +630,7 @@ def main():
         title = {
             "pretail": "End pre-tail", "source60": "End source-60",
             "source32a": "End source-32a", "source32b": "End source-32b",
-            "source32c": "End source-32c",
+            "source32c": "End source-32c", "tagfinal": "End tag final",
         }[MODE]
         tables = tables.replace("End tail", title)
     (out_dir / f"{prefix}_tables.rs").write_text(tables)

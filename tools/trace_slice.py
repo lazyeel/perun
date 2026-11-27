@@ -98,6 +98,8 @@ class Slicer:
         the register between stops i and i+1 sits at record i's ip. Walk back
         to the first record where the value differs (i) and return i (the
         record whose ip IS the producing instruction)."""
+        if rec <= 0:
+            return None
         val = self.reg_at(rec, ridx)
         i = rec - 1
         with open(self.trace, 'rb') as f:

@@ -215,8 +215,28 @@ generation, and write-only operands and LEA are excluded from the read census.
 
 The private gate is enabled by `PERUN_END_TAG_ROUND_DIR` and passes both outputs
 on both states. This closes only the repeated producer of two intermediate
-buffers. The preceding 12,060 records, the unique suffix and the final 16-byte
-tag remain open; no MD5/SHA/HMAC/AES identification is claimed.
+buffers. The preceding 12,060 records and unique middle suffix remain open; no
+MD5/SHA/HMAC/AES identification is claimed.
+
+## Final 16-byte tag serializer — later 2026-11-27
+
+`end_tagfinal::transform_tagfinal` implements the final **432-instruction**
+serializer at `0x16b72a..0x16bded` and passes **2/2 states at 16/16 bytes**.
+The circuit includes its own flag-producing `cmp`, all intermediate MBA and all
+sixteen final byte stores, stopping before the following native call. Four
+static read-only pages are used. `PERUN_END_TAGFINAL_DIR` enables its private
+gate.
+
+A late breakpoint at `0x16b72a` did not hit because it changed the selected CFF
+route. Full `0x149170` traces reproduced the earlier 52,066-record streams
+exactly, so record-indexed dumps at record 51,362 supplied the correct same-run
+boundary state without forcing execution or mixing lineages. A regression test
+also covers the `trace_slice` record-zero external-seed boundary fixed during
+this analysis.
+
+The repeated producer and final serializer are now independent components, but
+the middle suffix that connects them is still open. This is not yet a complete
+16-byte tag producer or a complete `ProvisioningEnd`.
 
 ## Remaining Track-B work
 
