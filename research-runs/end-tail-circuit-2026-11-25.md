@@ -238,14 +238,29 @@ The repeated producer and final serializer are now independent components, but
 the middle suffix that connects them is still open. This is not yet a complete
 16-byte tag producer or a complete `ProvisioningEnd`.
 
+## Fixed 0x35-byte header and suffix slicing status — later 2026-11-27
+
+`end_header::end_header` supplies the fixed **53-byte structural prefix**. It
+matches **185/185 valid post-End snapshots** in the local corpus, including two
+independent gated states, and has a hermetic SHA-256 unit test. The sole other
+snapshot was the unannotated `tb-mut` mutation with a changed declared-length
+byte, not a valid post-End counterexample. No identity, session, CPIM, PTM, TK
+or SPIM bytes are copied on this path.
+
+A backward register/flag/dynamic-memory slice from the final tag to the SSE-loop
+boundary retained **18,573 of 19,190 instructions**. Global def-use therefore
+does not provide an honest small middle circuit. The remaining suffix must be
+decomposed into measured semantic stages rather than renaming an almost
+monolithic lift as a slice.
+
 ## Remaining Track-B work
 
 1. Derive the initial pre-tail/tail semantic states from
    session/CPIM/PTM/TK/identity, including their key/frame setup.
-2. Close the earlier `0x35`-byte header, the 16-byte stage at `0x149170`, and the
-   final four bytes before the write.
+2. Complete the 16-byte stage at `0x149170` through its middle suffix and close
+   the final four bytes before the write. The 0x35-byte header is now closed.
 3. Assemble those components into real `ProvisioningEnd`, then construct warm
    semantic state from the own PERUNST record and prove Rust-End ⇄ Rust-OTP.
 
-None of these is claimed by the two completed circuits. Track-C cold
-`MixerState` genesis and Track-D native CLI removal are independent open items.
+None of these is claimed by the completed components. Track-C cold `MixerState`
+genesis and Track-D native CLI removal are independent open items.

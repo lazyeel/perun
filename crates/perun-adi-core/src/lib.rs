@@ -28,6 +28,7 @@
 //!   semantic initial state (whose own genesis is tracked separately);
 //! * [`otp`]         -- independent warm-OTP execution with a semantic native
 //!   ABI rather than trace/callee replay;
+//! * [`end_header`] -- the measured fixed 53-byte provisioning-state prefix;
 //! * [`end_source32a`] / [`end_source32b`] / [`end_source32c`] -- three linked
 //!   independent 32-byte End source-generation stages;
 //! * [`end_source60`] -- one independent 60-byte End source-generation stage;
@@ -56,6 +57,7 @@ pub mod cpim_engine;
 pub mod digest;
 pub mod early_series;
 pub mod early_zone;
+pub mod end_header;
 pub mod end_pretail;
 mod end_pretail_core;
 mod end_pretail_tables;

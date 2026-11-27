@@ -1,0 +1,43 @@
+// Copyright 2026 lazyeel (https://github.com/lazyeel)
+// SPDX-License-Identifier: Apache-2.0
+
+//! Fixed structural prefix of the native 617-byte provisioning state.
+//!
+//! All 185 valid post-End snapshots in the measured corpus carry this exact
+//! prefix across independent identities, sessions and provisioning inputs. It
+//! is static structural data, not a computed `ProvisioningEnd` stage.
+
+/// Length of the fixed native state prefix.
+pub const END_HEADER_LEN: usize = 0x35;
+
+/// Native container header and the fixed leading bytes of its tail.
+pub const END_HEADER: [u8; END_HEADER_LEN] = [
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1d, 0x32, 0x2d, 0xc2, 0x59, 0x53, 0x07, 0x34, 0x06,
+    0xcc, 0x19, 0xe0, 0x57, 0xae, 0x5e, 0x2e, 0xdb, 0xe6, 0x02, 0xc5, 0xab, 0x19, 0x49, 0xd1, 0x4a,
+    0xcb, 0x74, 0x25, 0xf5, 0xfa, 0xe1, 0x78, 0xe9, 0x0b, 0xb5, 0x64, 0xe8, 0xdd, 0x01, 0xb1, 0x8c,
+    0xed, 0x26, 0xae, 0x43, 0xb0,
+];
+
+/// Return the fixed prefix for a future full End serializer.
+pub const fn end_header() -> [u8; END_HEADER_LEN] {
+    END_HEADER
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefix_has_the_measured_shape_and_hash() {
+        assert_eq!(u32::from_be_bytes(END_HEADER[..4].try_into().unwrap()), 1);
+        assert_eq!(u32::from_be_bytes(END_HEADER[4..8].try_into().unwrap()), 29);
+        assert_eq!(
+            crate::sha256::digest(&end_header()),
+            [
+                0x9f, 0xd5, 0x76, 0x28, 0xf7, 0xfb, 0x21, 0x90, 0x92, 0x81, 0x18, 0xfe, 0x80, 0xa6,
+                0x21, 0x8c, 0xf3, 0x0e, 0xbd, 0x47, 0x0c, 0x9b, 0x5e, 0x24, 0x5e, 0x91, 0x1b, 0x0b,
+                0xd0, 0xb2, 0x74, 0xca,
+            ]
+        );
+    }
+}

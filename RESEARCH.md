@@ -6891,3 +6891,18 @@ implemented. Their connecting unique suffix and the earlier prefix remain open,
 so the complete tag algorithm and `ProvisioningEnd` are still not claimed. The
 workspace, Clippy and 90 Python tests are green, including a new `trace_slice`
 record-zero regression test.
+
+## 2026-11-27 — Fixed state header; global tag slicing is not a shortcut
+
+`end_header` closes the earlier 0x35-byte boundary as static structural data.
+The prefix is identical in **185/185 valid post-End snapshots**, passes a
+private 2-state gate and has a hermetic SHA-256 unit test. It contains no direct
+identity/session/CPIM/PTM/TK/SPIM copies. The only differing file was the
+unannotated `tb-mut` mutation with a changed declared-length byte, not a valid
+post-End state.
+
+A backward register, flag and dynamic-memory slice from the final tag to the
+SSE-loop boundary retained **18,573 of 19,190 instructions**. Thus global
+def-use is not a legitimate way to obtain a small middle-tag circuit. The
+remaining suffix needs semantic-stage decomposition; no almost-monolithic lift
+is claimed as progress.

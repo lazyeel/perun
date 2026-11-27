@@ -621,3 +621,18 @@ input after a late breakpoint changed the CFF route. The prefix and unique
 middle suffix connecting the two implemented components remain open, and no
 standard hash primitive is claimed. Full End, record-to-warm-state loading and
 clean acceptance are still unclosed.
+
+---
+
+## 26. Fixed header and the middle-suffix measurement — 2026-11-27
+
+`end_header` closes the earlier 0x35-byte boundary as a fixed structural prefix:
+**185/185 valid post-End snapshots** agree, a private two-state gate and a
+hermetic SHA-256 test are green. No provisioning-input copies are involved.
+
+A backward register/flag/dynamic-memory slice from the final tag to the SSE-loop
+boundary retained **18,573 of 19,190 instructions**. This rejects global def-use
+as a useful shortcut for the remaining middle suffix. It must be decomposed by
+semantic stages; a nearly monolithic lift is not accepted as a small circuit.
+Full End, initial-state genesis, record-to-warm-state loading and clean
+acceptance remain open.
