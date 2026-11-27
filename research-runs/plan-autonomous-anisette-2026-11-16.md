@@ -636,3 +636,17 @@ as a useful shortcut for the remaining middle suffix. It must be decomposed by
 semantic stages; a nearly monolithic lift is not accepted as a small circuit.
 Full End, initial-state genesis, record-to-warm-state loading and clean
 acceptance remain open.
+
+---
+
+## 27. First middle-tag checkpoint stage — later 2026-11-27
+
+`end_tag_middle0` implements 204 straight-line instructions after the repeated
+tag circuit and matches complete checkpoint states on two runs. A same-process
+three-checkpoint gate proves **tag_round → middle0** with full GP/XMM/frame/heap/
+RW equality on both inputs. The generic `transpile_end_middle.py` now supports
+record-bounded stages; the round frame is 0x700 to cover `RBP-0x6a8`.
+
+This is the first semantic decomposition result inside the middle suffix, not a
+complete tag or End. Subsequent stages, final-four provenance, initial-state
+genesis and clean acceptance remain open.

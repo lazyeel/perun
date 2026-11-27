@@ -6906,3 +6906,17 @@ SSE-loop boundary retained **18,573 of 19,190 instructions**. Thus global
 def-use is not a legitimate way to obtain a small middle-tag circuit. The
 remaining suffix needs semantic-stage decomposition; no almost-monolithic lift
 is claimed as progress.
+
+## 2026-11-27 — First middle-tag stage and a same-process chain
+
+`end_tag_middle0` implements the first 204 straight-line instructions after the
+64-round tag circuit and matches complete GP/XMM/frame/heap/RW checkpoints on
+**2/2 states**. A generic checkpoint transpiler now supports measured record
+boundaries for subsequent middle stages.
+
+A same-process three-checkpoint corpus proves **tag_round → middle0** with full
+register and memory equality on both runs. The round frame grew to 0x700 for
+reads through `RBP-0x6a8`; its original two-buffer gate still passes. A failed
+cross-process comparison exposed differing stack geometry and was replaced by
+this stricter corpus rather than by relaxed assertions. Full workspace tests,
+Clippy and 90 Python tests remain green.

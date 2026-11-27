@@ -206,7 +206,7 @@ three instructions into the period; recapturing at the real boundary gave two
 identical 20,548-record streams with no period mismatch.
 
 The semantic input contains sixteen GP registers, sixteen XMM registers, a
-0x500-byte frame, 0x4000 dynamic heap bytes and 0x5000 relocated RW bytes.
+0x700-byte frame, 0x4000 dynamic heap bytes and 0x5000 relocated RW bytes.
 Portable byte-lane Rust helpers implement the measured SSE semantics and have
 synthetic unit tests. Six read-only lookup pages plus twelve sparse page-zero
 ranges are sufficient; page zero is sparse specifically so no ELF header or
@@ -252,6 +252,25 @@ boundary retained **18,573 of 19,190 instructions**. Global def-use therefore
 does not provide an honest small middle circuit. The remaining suffix must be
 decomposed into measured semantic stages rather than renaming an almost
 monolithic lift as a slice.
+
+## First middle-tag checkpoint stage and same-run chain — later 2026-11-27
+
+`end_tag_middle0::transform_tag_middle0` implements the first **204 straight-line
+instructions** after the repeated circuit (`0x156e7f` through the initial
+limb/XOR mixing). It matches complete GP/XMM/frame/heap/RW checkpoint states on
+**2/2 independent runs**. `tools/transpile_end_middle.py` provides the generic
+record-boundary/checkpoint generator for subsequent stages.
+
+The integration gate uses one native process per input with checkpoints at loop
+entry, loop exit and middle-stage exit. It proves **tag_round → middle0** with
+full register and memory equality on both runs. The tag-round frame model was
+expanded from 0x500 to 0x700 because this stage reads through `RBP-0x6a8`; its
+original 2×1024-byte gate remains green. Cross-process stack-geometry comparison
+was correctly rejected instead of weakening the state assertions.
+
+This is the first semantic-stage result inside the 18,573-live-instruction middle
+suffix. The remaining middle stages are still open, as are full tag genesis and
+`ProvisioningEnd`.
 
 ## Remaining Track-B work
 

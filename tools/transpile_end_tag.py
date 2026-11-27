@@ -27,7 +27,7 @@ HEAP_SEED_BASE = 0x7FFFF77FF000
 STACK_SEED_BASE = 0x7FFFFFFEF000
 DATA_ADDRESS = 0x7FFFF77FB000
 DATA_LEN = 0x5000
-FRAME_LEN = 0x500
+FRAME_LEN = 0x700
 OUTPUT_A_ADDRESS = 0x7FFFF78CB300
 OUTPUT_B_ADDRESS = 0x7FFFF78C9500
 OUTPUT_LEN = 0x400
@@ -192,7 +192,21 @@ pub(crate) static ZERO_PAGE_RANGES: &[(u32, &[u8])] = &[
         for pos in range(0, len(data), 16):
             out.append("    " + ", ".join(f"0x{byte:02x}" for byte in data[pos:pos + 16]) + ",\n")
         out.append("];\n\n")
-    out.append("""pub(crate) fn read8(address: u64) -> Option<u8> {
+    if not pages:
+        out.append("""pub(crate) fn read8(address: u64) -> Option<u8> {
+    let rva = address.checked_sub(super::end_tag_round_core::LIB_BASE)? as u32;
+    if rva < 0x1000 {
+        for &(start, bytes) in ZERO_PAGE_RANGES {
+            if rva >= start && rva - start < bytes.len() as u32 {
+                return Some(bytes[(rva - start) as usize]);
+            }
+        }
+    }
+    None
+}
+""")
+    else:
+        out.append("""pub(crate) fn read8(address: u64) -> Option<u8> {
     let rva = address.checked_sub(super::end_tag_round_core::LIB_BASE)? as u32;
     if rva < 0x1000 {
         for &(start, bytes) in ZERO_PAGE_RANGES {
@@ -206,9 +220,9 @@ pub(crate) static ZERO_PAGE_RANGES: &[(u32, &[u8])] = &[
     let offset = (rva & 0xfff) as usize;
     let table: &[u8; 4096] = match page {
 """)
-    for rva in pages:
-        out.append(f"        0x{rva:05x} => &PAGE_{rva:05X},\n")
-    out.append("""        _ => return None,
+        for rva in pages:
+            out.append(f"        0x{rva:05x} => &PAGE_{rva:05X},\n")
+        out.append("""        _ => return None,
     };
     Some(table[offset])
 }
@@ -332,7 +346,7 @@ const HEAP_ADDRESS: u64 = 0x7ffff78c8000;
 const HEAP_LEN: usize = 0x4000;
 const DATA_ADDRESS: u64 = 0x7ffff77fb000;
 const DATA_LEN: usize = 0x5000;
-const FRAME_LEN: usize = 0x500;
+const FRAME_LEN: usize = 0x700;
 const OUTPUT_A_ADDRESS: u64 = 0x7ffff78cb300;
 const OUTPUT_B_ADDRESS: u64 = 0x7ffff78c9500;
 const OUTPUT_LEN: usize = 0x400;

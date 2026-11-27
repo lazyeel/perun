@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 const REGISTERS_LEN: usize = 128;
 const XMM_LEN: usize = 16 * 16;
-const FRAME_LEN: usize = 0x500;
+const FRAME_LEN: usize = 0x700;
 const HEAP_LEN: usize = 0x4000;
 const DATA_LEN: usize = 0x5000;
 const BUNDLE_LEN: usize =
