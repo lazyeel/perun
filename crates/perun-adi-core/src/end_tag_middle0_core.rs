@@ -247,6 +247,10 @@ pub fn transform_tag_middle0(state: &mut TagMiddle0State) {
 
 #[allow(clippy::all, unused_parens)]
 fn block_core(s: &mut TagMiddle0Core) {
+    chunk_000(s);
+}
+#[allow(clippy::all, unused_parens)]
+fn chunk_000(s: &mut TagMiddle0Core) {
     // 0x156e7f: mov rax, qword ptr [rbp - 0x98]
     s.site = 0x156e7f;
     {
@@ -302,6 +306,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = 0xfc0a56f8u64;
         let _v = alu_and(32, _a, _b);
         s.regs.rcx = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x156eb3: mov eax, dword ptr [rbp - 0x5e4]
     s.site = 0x156eb3;
@@ -330,6 +336,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rax & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.r11 = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x156ec5: mov rax, qword ptr [rbp - 0xc8]
     s.site = 0x156ec5;
@@ -404,6 +412,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = 0x81b695cau64;
         let _v = alu_and(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x156f0a: mov ecx, dword ptr [rbp - 0x5a0]
     s.site = 0x156f0a;
@@ -427,6 +437,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _v = alu_xor(32, _a, _b);
         let _addr = (s.regs.rbp).wrapping_add(0xfffffffffffffd50u64);
         s.store(_addr, 4, _v);
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x156f18: mov eax, dword ptr [rbp - 0x170]
     s.site = 0x156f18;
@@ -441,6 +453,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffa70u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x156f24: xor eax, dword ptr [rbp - 0x538]
     s.site = 0x156f24;
@@ -449,6 +463,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffac8u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x156f2a: mov dword ptr [rbp - 0x170], eax
     s.site = 0x156f2a;
@@ -498,6 +514,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffab8u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.r9 = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x156f59: mov ecx, dword ptr [rbp - 0x5f8]
     s.site = 0x156f59;
@@ -548,6 +566,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = 0x98b6feb0u64;
         let _v = alu_and(32, _a, _b);
         s.regs.rsi = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x156f83: mov rcx, qword ptr [rbp - 0x640]
     s.site = 0x156f83;
@@ -576,6 +596,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rcx & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rsi = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x156f94: mov ecx, dword ptr [rbp - 0x5f4]
     s.site = 0x156f94;
@@ -590,6 +612,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = 0x52de9a60u64;
         let _v = alu_and(32, _a, _b);
         s.regs.rcx = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x156fa0: mov r12, qword ptr [rbp - 0x198]
     s.site = 0x156fa0;
@@ -612,6 +636,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffa68u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.r12 = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x156fb1: mov qword ptr [rbp - 0x198], r12
     s.site = 0x156fb1;
@@ -633,6 +659,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffc00u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rcx = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x156fc4: add edi, 0x1ddfbbe8
     s.site = 0x156fc4;
@@ -649,6 +677,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.r11 & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rdi = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x156fcd: mov dword ptr [rbp - 0x370], edi
     s.site = 0x156fcd;
@@ -672,6 +702,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rsi & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x156fda: mov qword ptr [rbp - 0x138], rax
     s.site = 0x156fda;
@@ -695,6 +727,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.r9 & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.r8 = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x156feb: mov qword ptr [rbp - 0x90], r8
     s.site = 0x156feb;
@@ -710,6 +744,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffc80u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rcx = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x156ff8: mov dword ptr [rbp - 0x148], ecx
     s.site = 0x156ff8;
@@ -731,6 +767,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = 0xa8c20884u64;
         let _v = alu_and(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x15700a: mov rcx, qword ptr [rbp - 0x648]
     s.site = 0x15700a;
@@ -759,6 +797,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rcx & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x15701c: mov rcx, qword ptr [rbp - 0xf0]
     s.site = 0x15701c;
@@ -773,6 +813,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rax & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rcx = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x157025: mov qword ptr [rbp - 0xf0], rcx
     s.site = 0x157025;
@@ -794,6 +836,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffad0u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x157038: mov dword ptr [rbp - 0x1f0], eax
     s.site = 0x157038;
@@ -816,6 +860,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _v = alu_xor(32, _a, _b);
         let _addr = (s.regs.rbp).wrapping_add(0xfffffffffffffd60u64);
         s.store(_addr, 4, _v);
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x15704a: mov eax, dword ptr [rbp - 0x510]
     s.site = 0x15704a;
@@ -852,6 +898,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rax & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rcx = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x157063: mov rsi, qword ptr [rbp - 0x440]
     s.site = 0x157063;
@@ -866,6 +914,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffb00u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rsi = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x157070: xor esi, ecx
     s.site = 0x157070;
@@ -874,6 +924,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rcx & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rsi = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x157072: movabs rax, 0x100000000
     s.site = 0x157072;
@@ -930,6 +982,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rax & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.r14 = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x15709d: mov r13d, dword ptr [rbp - 0x248]
     s.site = 0x15709d;
@@ -952,6 +1006,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rsi & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.r13 = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1570ae: mov rbx, qword ptr [rbp - 0x588]
     s.site = 0x1570ae;
@@ -966,6 +1022,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffff958u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rbx = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1570bb: mov rax, qword ptr [rbp - 0x540]
     s.site = 0x1570bb;
@@ -980,6 +1038,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffff968u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1570c8: mov rsi, qword ptr [rbp - 0x658]
     s.site = 0x1570c8;
@@ -1008,6 +1068,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = 0xfbe524dau64;
         let _v = alu_and(32, _a, _b);
         s.regs.rcx = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1570e1: mov edi, dword ptr [rbp - 0x62c]
     s.site = 0x1570e1;
@@ -1030,6 +1092,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rax & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rdi = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1570eb: mov eax, dword ptr [rbp - 0x620]
     s.site = 0x1570eb;
@@ -1044,6 +1108,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = 0x4ef177b8u64;
         let _v = alu_and(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1570f6: mov r10d, dword ptr [rbp - 0x628]
     s.site = 0x1570f6;
@@ -1074,6 +1140,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rsi & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.r10 = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x157109: mov rcx, qword ptr [rbp - 0x678]
     s.site = 0x157109;
@@ -1110,6 +1178,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rcx & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.r15 = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x157126: mov dword ptr [rbp - 0x218], r15d
     s.site = 0x157126;
@@ -1161,6 +1231,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rax & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rcx = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x15714d: mov r8, qword ptr [rbp - 0x668]
     s.site = 0x15714d;
@@ -1217,6 +1289,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = 0x48710080u64;
         let _v = alu_and(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x157182: mov rsi, qword ptr [rbp - 0x688]
     s.site = 0x157182;
@@ -1247,6 +1321,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rdi & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rsi = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x157193: mov eax, dword ptr [rbp - 0x604]
     s.site = 0x157193;
@@ -1261,6 +1337,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = 0x51304880u64;
         let _v = alu_and(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x15719e: mov rdi, qword ptr [rbp - 0x690]
     s.site = 0x15719e;
@@ -1291,6 +1369,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.r10 & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rdi = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1571b0: add r8d, 0x29518d2f
     s.site = 0x1571b0;
@@ -1319,6 +1399,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.r10 & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1571c7: xor eax, r8d
     s.site = 0x1571c7;
@@ -1327,6 +1409,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.r8 & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1571ca: xor eax, dword ptr [rbp - 0x168]
     s.site = 0x1571ca;
@@ -1335,6 +1419,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffe98u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1571d0: xor ecx, dword ptr [rbp - 0x490]
     s.site = 0x1571d0;
@@ -1343,6 +1429,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffb70u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rcx = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1571d6: xor ecx, eax
     s.site = 0x1571d6;
@@ -1351,6 +1439,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rax & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rcx = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1571d8: mov rax, qword ptr [rbp - 0x220]
     s.site = 0x1571d8;
@@ -1365,6 +1455,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.r13 & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1571e2: xor eax, ecx
     s.site = 0x1571e2;
@@ -1373,6 +1465,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rcx & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1571e4: xor eax, esi
     s.site = 0x1571e4;
@@ -1381,6 +1475,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rsi & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1571e6: mov r13, rax
     s.site = 0x1571e6;
@@ -1408,6 +1504,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffdd0u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1571fd: mov rsi, qword ptr [rbp - 0x4a0]
     s.site = 0x1571fd;
@@ -1422,6 +1520,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffae0u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rsi = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x15720a: xor esi, eax
     s.site = 0x15720a;
@@ -1430,6 +1530,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rax & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rsi = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x15720c: mov rax, qword ptr [rbp - 0x518]
     s.site = 0x15720c;
@@ -1444,6 +1546,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffb68u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x157219: xor eax, esi
     s.site = 0x157219;
@@ -1452,6 +1556,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rsi & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x15721b: xor eax, ebx
     s.site = 0x15721b;
@@ -1460,6 +1566,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rbx & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x15721d: xor eax, r14d
     s.site = 0x15721d;
@@ -1468,6 +1576,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.r14 & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x157220: add r11d, 0xb908c0aa
     s.site = 0x157220;
@@ -1484,6 +1594,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffff960u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.r11 = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x15722e: xor r11d, dword ptr [rbp - 0x550]
     s.site = 0x15722e;
@@ -1492,6 +1604,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffab0u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.r11 = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x157235: add r9d, 0x3fc019e7
     s.site = 0x157235;
@@ -1508,6 +1622,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.r9 & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.r11 = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x15723f: xor r11d, eax
     s.site = 0x15723f;
@@ -1516,6 +1632,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rax & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.r11 = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x157242: xor r11d, edi
     s.site = 0x157242;
@@ -1524,6 +1642,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.rdi & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.r11 = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x157245: mov qword ptr [rbp - 0x318], r11
     s.site = 0x157245;
@@ -1545,6 +1665,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = 0x6f4ed540u64;
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x157254: mov ebx, eax
     s.site = 0x157254;
@@ -1572,6 +1694,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = 0xf7493cbdu64;
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x157264: mov esi, eax
     s.site = 0x157264;
@@ -1599,6 +1723,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = 0x2f7b63abu64;
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x157274: mov r13d, eax
     s.site = 0x157274;
@@ -1626,6 +1752,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffcd0u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x157289: xor eax, dword ptr [rbp - 0x470]
     s.site = 0x157289;
@@ -1634,6 +1762,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffb90u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x15728f: xor eax, dword ptr [rbp - 0x40c]
     s.site = 0x15728f;
@@ -1642,6 +1772,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffbf4u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x157295: xor eax, r10d
     s.site = 0x157295;
@@ -1650,6 +1782,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = (s.regs.r10 & 0xffffffff);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x157298: xor eax, dword ptr [rbp - 0x2b8]
     s.site = 0x157298;
@@ -1658,6 +1792,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffd48u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x15729e: xor eax, dword ptr [rbp - 0x110]
     s.site = 0x15729e;
@@ -1666,6 +1802,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffef0u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1572a4: xor eax, dword ptr [rbp - 0x448]
     s.site = 0x1572a4;
@@ -1674,6 +1812,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffbb8u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1572aa: xor eax, dword ptr [rbp - 0x23c]
     s.site = 0x1572aa;
@@ -1682,6 +1822,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffdc4u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1572b0: xor eax, dword ptr [rbp - 0x178]
     s.site = 0x1572b0;
@@ -1690,6 +1832,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffe88u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1572b6: xor eax, dword ptr [rbp - 0x3e8]
     s.site = 0x1572b6;
@@ -1698,6 +1842,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffc18u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1572bc: xor eax, dword ptr [rbp - 0x1f8]
     s.site = 0x1572bc;
@@ -1706,6 +1852,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffe08u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1572c2: xor eax, dword ptr [rbp - 0x130]
     s.site = 0x1572c2;
@@ -1714,6 +1862,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffed0u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1572c8: xor eax, dword ptr [rbp - 0x158]
     s.site = 0x1572c8;
@@ -1722,6 +1872,8 @@ fn block_core(s: &mut TagMiddle0Core) {
         let _b = s.load((s.regs.rbp).wrapping_add(0xfffffffffffffea8u64), 4);
         let _v = alu_xor(32, _a, _b);
         s.regs.rax = (_v as u32) as u64;
+        s.zf = _v == 0;
+        s.cf = false;
     }
     // 0x1572ce: mov qword ptr [rbp - 0x4c8], rdx
     s.site = 0x1572ce;

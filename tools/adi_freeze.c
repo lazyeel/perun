@@ -445,7 +445,7 @@ static struct {
     struct dump_range edumps[16];
     int nenddumps;            /* dumped at the traced wrapper return */
     struct rdump rdumps[256];
-    int nrdumps;              /* dumped when record rec is written */
+    int nrdumps;              /* rec=N dumps at file record N+1: entry is not counted */
     struct dump_range mregions[16];
     int nmregions;            /* watched for cross-libc memory deltas */
     const char *mout_path;    /* delta log, written at trace stop */

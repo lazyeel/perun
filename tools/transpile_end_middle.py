@@ -334,6 +334,20 @@ fn block_core(s: &mut {{CORE}}) {
 '''
 
 
+def render_chunked(insns, core_name):
+    calls = []
+    functions = []
+    for index, start in enumerate(range(0, len(insns), 512)):
+        name = f"chunk_{index:03d}"
+        calls.append(f"    {name}(s);")
+        functions.append(
+            "#[allow(clippy::all, unused_parens)]\n"
+            f"fn {name}(s: &mut {core_name}) {{\n" +
+            render_body(insns[start:start + 512]) + "\n}\n"
+        )
+    return "\n".join(calls), "\n".join(functions)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--case1", required=True, help="name=case-dir")
@@ -369,7 +383,8 @@ def main():
     text = text.replace("{{STATE}}", state_name)
     text = text.replace("{{CORE}}", core_name)
     text = text.replace("{{FUNCTION}}", f"transform_{args.prefix.removeprefix('end_')}")
-    text = text.replace("{{BODY}}", render_body(insns))
+    calls, chunks = render_chunked(insns, core_name)
+    text = text.replace("{{BODY}}", calls)
     used = {ins.mnemonic for ins in insns}
     for helper, mnemonic in [("alu_or", "or"), ("alu_mul", "imul"),
                              ("alu_add", "add"), ("alu_sub", "sub"),
@@ -391,7 +406,7 @@ def main():
             "    ((value << count) | (value >> ((bits - count) % bits))) & mask(bits)\n}\n",
             "",
         )
-    (out_dir / f"{args.prefix}_core.rs").write_text(text)
+    (out_dir / f"{args.prefix}_core.rs").write_text(text + chunks)
 
     state_dir = Path(args.state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)

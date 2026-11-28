@@ -38,8 +38,9 @@
 //!   1,024-byte intermediate buffers (not the complete 16-byte tag);
 //! * [`end_tagfinal`] -- the independent final 16-byte tag serializer over an
 //!   explicit post-suffix semantic state;
-//! * [`end_tag_middle0`] / [`end_tag_middle1`] -- the first two middle-tag
-//!   stages, checked against complete checkpoint states and a same-process chain;
+//! * [`end_tag_middle0`] / [`end_tag_middle1`] / [`end_tag_middle2`] /
+//!   [`end_tag_middle3`] -- middle-tag stages checked against complete
+//!   checkpoint states and a same-process chain;
 //! * [`end_pretail`] -- the independent 544-iteration End pre-transformation
 //!   over an explicit semantic intermediate state (not full ProvisioningEnd);
 //! * [`end_tail`]    -- the independent 34-block End transformation over an
@@ -86,6 +87,12 @@ mod end_tag_middle0_tables;
 pub mod end_tag_middle1;
 mod end_tag_middle1_core;
 mod end_tag_middle1_tables;
+pub mod end_tag_middle2;
+mod end_tag_middle2_core;
+mod end_tag_middle2_tables;
+pub mod end_tag_middle3;
+mod end_tag_middle3_core;
+mod end_tag_middle3_tables;
 pub mod end_tag_round;
 mod end_tag_round_core;
 mod end_tag_round_tables;

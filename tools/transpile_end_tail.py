@@ -609,8 +609,8 @@ def main():
         TAIL_STATE_LEN = 0x10
         SOURCE_ADDRESS = TAIL_ADDRESS
         SOURCE_LEN = 0x10
-        FRAME_LEN = 0x600
-        FRAME_BEFORE = 0x600
+        FRAME_LEN = 0x700
+        FRAME_BEFORE = 0x700
     cases = [load_case(args.case1), load_case(args.case2)]
     if [pc for pc, _ in cases[0]["trace"][:BLOCK_RECORDS]] != [pc for pc, _ in cases[1]["trace"][:BLOCK_RECORDS]]:
         raise ValueError("independent inputs execute different tail circuits")

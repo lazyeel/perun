@@ -300,13 +300,32 @@ also exposed that `dump-rec=N` addresses file record N+1 because of the entry
 record. Corrected initial/final snapshots are therefore used here, while short
 late-breakpoint captures with equivalent-but-different CFF routes were rejected.
 
+## Complete tag chain closed — 2026-11-28
+
+A full interval census before further decomposition found **18,266 unique PCs in
+18,266 records**, no calls/jumps and zero repeated-period candidates for
+33,096..51,362. The suffix is therefore flat CFF, not a hidden loop. It is
+implemented as two large semantic stages rather than dozens of small ones:
+
+- `end_tag_middle2`: 4,516 instructions before the first prior-tag read;
+- `end_tag_middle3`: 13,750 instructions consuming prior tag and both buffers.
+
+The complete same-process chain **tag_round → middle0 → middle1 → middle2 →
+middle3 → tagfinal** matches **2/2 states and 16/16 final bytes**. This closes
+`0x149170` as an independently implemented component. Generated bodies are
+split into 512-instruction Rust functions only to bound stack frames, not as
+additional semantic stages; test checkpoint pairs are heap-backed, so no
+`RUST_MIN_STACK` override is needed. `cmovae` and logical-instruction ZF/CF
+semantics were added to the strict emitter.
+
+Full workspace tests, Clippy and 90 Python tests pass. Initial semantic-state
+genesis and full `ProvisioningEnd` assembly remain open.
+
 ## Remaining Track-B work
 
 1. Derive the initial pre-tail/tail semantic states from
    session/CPIM/PTM/TK/identity, including their key/frame setup.
-2. Complete the 16-byte stage at `0x149170` through its remaining middle suffix.
-   The 0x35-byte header and final-four producer are now closed.
-3. Assemble those components into real `ProvisioningEnd`, then construct warm
+2. Assemble those components into real `ProvisioningEnd`, then construct warm
    semantic state from the own PERUNST record and prove Rust-End ⇄ Rust-OTP.
 
 None of these is claimed by the completed components. Track-C cold `MixerState`

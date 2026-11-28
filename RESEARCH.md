@@ -6942,3 +6942,17 @@ The actual last store is `0xb7e6b`; `0xb618d` and `0xb75xx` are only precursors.
 Full-gap same-process captures established this provenance and corrected the
 `dump-rec=N` → file-record-N+1 boundary. Equivalent short captures that did not
 produce the native final word were rejected rather than accepted as evidence.
+
+## 2026-11-28 — Complete tag chain closed with two large CFF stages
+
+The 33,096..51,362 interval contains **18,266 unique PCs in 18,266 records**, no
+calls/jumps and zero repeated-period candidates. It is flat CFF, so `middle2`
+(4,516 instructions) and `middle3` (13,750) replace the planned fine-grained
+split. The full **tag_round → middle0 → middle1 → middle2 → middle3 → tagfinal**
+chain matches **2/2 states and 16/16 final bytes**, closing `0x149170`.
+
+Generated bodies use 512-instruction Rust functions solely to bound stack
+frames; test checkpoint pairs are boxed and no `RUST_MIN_STACK` override is
+needed. The strict emitter now handles `cmovae` and logical ZF/CF semantics.
+Workspace tests, Clippy and 90 Python tests are green. Next are End-state
+genesis, own warm-state loading and cold MixerState generation.

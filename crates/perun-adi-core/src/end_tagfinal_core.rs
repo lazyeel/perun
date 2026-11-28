@@ -17,8 +17,8 @@ const HEAP_ADDRESS: u64 = 0x7ffff78c8000;
 const HEAP_LEN: usize = 0x4000;
 const DATA_ADDRESS: u64 = 0x7ffff77fb000;
 const DATA_LEN: usize = 0x5000;
-const FRAME_LEN: usize = 0x600;
-const FRAME_BEFORE: u64 = 0x600;
+const FRAME_LEN: usize = 0x700;
+const FRAME_BEFORE: u64 = 0x700;
 
 /// Explicit semantic state at the start of one final 16-byte tag serialization.
 /// Genesis of this state from provisioning inputs is a separate boundary.

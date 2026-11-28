@@ -674,3 +674,19 @@ Full-gap same-process captures established the interval and corrected the
 `dump-rec=N` → file-record-N+1 boundary. Remaining work is the rest of the middle
 tag suffix, initial semantic-state genesis, full End assembly, own warm-state
 loading and clean acceptance.
+
+---
+
+## 30. Complete tag chain closed — 2026-11-28
+
+The remaining middle interval has **18,266 unique PCs in 18,266 records** and
+no calls/jumps or repeated-period candidates. It is flat CFF, so it is
+implemented as two large stages: `middle2` (4,516 instructions) and `middle3`
+(13,750). The complete **tag_round → middle0 → middle1 → middle2 → middle3 →
+tagfinal** chain matches **2/2 states and 16/16 final bytes**, closing
+`0x149170`.
+
+Generated 512-instruction Rust functions bound stack frames without changing
+semantic boundaries; boxed test states avoid any special stack setting.
+Remaining priorities are own warm-state construction, cold MixerState genesis
+from SPIM/entropy, and initial End-state derivation from provisioning inputs.

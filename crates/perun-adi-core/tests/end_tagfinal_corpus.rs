@@ -6,7 +6,7 @@
 use perun_adi_core::end_tagfinal::{transform_tagfinal, TagFinalState, TAGFINAL_LEN};
 use std::path::{Path, PathBuf};
 
-const FRAME_LEN: usize = 0x600;
+const FRAME_LEN: usize = 0x700;
 const HEAP_LEN: usize = 0x4000;
 const DATA_LEN: usize = 0x5000;
 const BUNDLE_LEN: usize = 128 + FRAME_LEN + HEAP_LEN + DATA_LEN + 3 * TAGFINAL_LEN;

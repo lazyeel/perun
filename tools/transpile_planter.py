@@ -46,9 +46,9 @@ for _n in range(8, 16):
 HIGH8 = {"ah", "bh", "ch", "dh"}
 FLAG_NEUTRAL = {
     "mov", "movabs", "movzx", "movsxd", "lea", "cdqe", "not",
-    "sete", "setne", "seta", "setb", "cmove", "cmovne", "cmova", "cmovb", "jmp",
+    "sete", "setne", "seta", "setb", "cmove", "cmovne", "cmova", "cmovae", "cmovb", "jmp",
 }
-FLAG_CONSUMERS = {"sete", "setne", "seta", "setb", "cmove", "cmovne", "cmova", "cmovb", "adc"}
+FLAG_CONSUMERS = {"sete", "setne", "seta", "setb", "cmove", "cmovne", "cmova", "cmovae", "cmovb", "adc"}
 ALLOWED_DISPATCH = {0xE0A2B, 0xE1F6B, 0xE26DE}
 
 
@@ -144,11 +144,14 @@ def emit_binary(ins):
     if helper is None:
         helper = "alu_" + ins.mnemonic
     width = bits(ins)
-    return [
+    out = [
         "let _a = %s;" % read_op(ins, 0),
         "let _b = %s;" % read_op(ins, 1),
         "let _v = %s(%d, _a, _b);" % (helper, width),
     ] + write_op(ins, 0)
+    if ins.mnemonic in ("and", "or", "xor"):
+        out += ["s.zf = _v == 0;", "s.cf = false;"]
+    return out
 
 
 def emit(ins):
@@ -225,9 +228,9 @@ def emit(ins):
     if mn in ("sete", "setne", "seta", "setb") and n == 1 and bits(ins) == 8:
         predicate = {"sete": "s.zf", "setne": "!s.zf", "seta": "!s.cf && !s.zf", "setb": "s.cf"}[mn]
         return ["let _v = if %s { 1 } else { 0 };" % predicate] + write_op(ins, 0)
-    if mn in ("cmove", "cmovne", "cmova", "cmovb") and n == 2:
+    if mn in ("cmove", "cmovne", "cmova", "cmovae", "cmovb") and n == 2:
         predicate = {
-            "cmove": "s.zf", "cmovne": "!s.zf",
+            "cmove": "s.zf", "cmovne": "!s.zf", "cmovae": "!s.cf",
             "cmova": "!s.cf && !s.zf", "cmovb": "s.cf",
         }[mn]
         body = ["let _v = %s;" % read_op(ins, 1)] + write_op(ins, 0)
@@ -240,11 +243,11 @@ def audit_flags(insns):
     for ins in insns:
         mn = ins.mnemonic
         if mn in FLAG_CONSUMERS:
-            if source not in ("cmp", "test"):
+            if source not in ("cmp", "test", "and", "or", "xor"):
                 raise ValueError("unproven flag source at %#x: %s" % (ins.address, ins.op_str))
             if mn == "adc":
                 source = None
-        elif mn in ("cmp", "test"):
+        elif mn in ("cmp", "test", "and", "or", "xor"):
             source = mn
         elif mn not in FLAG_NEUTRAL:
             source = None
