@@ -6920,3 +6920,25 @@ reads through `RBP-0x6a8`; its original two-buffer gate still passes. A failed
 cross-process comparison exposed differing stack geometry and was replaced by
 this stricter corpus rather than by relaxed assertions. Full workspace tests,
 Clippy and 90 Python tests remain green.
+
+## 2026-11-28 — Second middle-tag stage and a three-stage chain
+
+`end_tag_middle1` implements the following 288 masked/shift instructions and
+matches complete checkpoint states on **2/2 runs**. A same-process corpus with
+four checkpoints now proves **tag_round → middle0 → middle1** with full
+GP/XMM/frame/heap/RW equality on both inputs. The generic middle generator
+handles stage-specific names, unused helpers and empty lookup tables cleanly.
+Full workspace tests, Clippy and 90 Python tests are green.
+
+## 2026-11-28 — The true final-four producer is closed
+
+`end_final4` implements the 28-instruction producer circuit exactly twenty times
+and matches complete checkpoint state on **2/2 runs**. All 20 output bytes match,
+and bytes 16..19 equal the native `adi.pb` final word consumed by the finalizer.
+The measured destination is RBP-relative; the implementation also carries a
+20-byte source and four static read-only pages.
+
+The actual last store is `0xb7e6b`; `0xb618d` and `0xb75xx` are only precursors.
+Full-gap same-process captures established this provenance and corrected the
+`dump-rec=N` → file-record-N+1 boundary. Equivalent short captures that did not
+produce the native final word were rejected rather than accepted as evidence.

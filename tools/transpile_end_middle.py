@@ -363,8 +363,11 @@ def main():
     out_dir = Path(args.out_dir)
     (out_dir / f"{args.prefix}_tables.rs").write_text(tables)
     text = TEMPLATE.replace("{{PREFIX}}", args.prefix)
-    text = text.replace("{{STATE}}", "TagMiddle0State" if args.prefix == "end_tag_middle0" else "TagMiddleState")
-    text = text.replace("{{CORE}}", "TagMiddle0Core" if args.prefix == "end_tag_middle0" else "TagMiddleCore")
+    stage = args.prefix.removeprefix("end_tag_middle")
+    state_name = f"TagMiddle{stage}State" if stage.isdigit() else "TagMiddleState"
+    core_name = f"TagMiddle{stage}Core" if stage.isdigit() else "TagMiddleCore"
+    text = text.replace("{{STATE}}", state_name)
+    text = text.replace("{{CORE}}", core_name)
     text = text.replace("{{FUNCTION}}", f"transform_{args.prefix.removeprefix('end_')}")
     text = text.replace("{{BODY}}", render_body(insns))
     used = {ins.mnemonic for ins in insns}

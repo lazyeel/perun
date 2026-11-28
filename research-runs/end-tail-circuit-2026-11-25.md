@@ -272,12 +272,40 @@ This is the first semantic-stage result inside the 18,573-live-instruction middl
 suffix. The remaining middle stages are still open, as are full tag genesis and
 `ProvisioningEnd`.
 
+## Second middle-tag stage and a three-stage chain — 2026-11-28
+
+`end_tag_middle1::transform_tag_middle1` implements the next **288 straight-line
+instructions** of masked/shift mixing. It matches complete checkpoint states on
+**2/2 runs**. A four-checkpoint same-process corpus proves the full
+**tag_round → middle0 → middle1** chain with GP/XMM/frame/heap/RW equality on
+both inputs. No cross-process stack-state substitutions are used.
+
+The generic middle transpiler now derives stage-specific state/core names and
+removes unused arithmetic helpers and empty-table fallbacks without warnings.
+The remaining middle suffix and final-four producer are still open.
+
+## Final-four producer closed — 2026-11-28
+
+`end_final4::transform_final4` implements the true last producer: **28
+instructions × 20 iterations**. It matches complete checkpoint state on **2/2
+runs**, produces all 20 output bytes, and its last four bytes equal the native
+`adi.pb` final word. The destination is the measured RBP-relative 20-byte
+buffer; a separate 20-byte source and four static read-only pages are used.
+`end_final4::final4` exposes the finalizer's input word.
+
+The proven `0xb7e6b` store is shared by all iterations. Earlier `0xb618d` and
+`0xb75xx` groups are precursor stages, not the final producer. Full-gap captures
+from `0xcddf5` through `0x149170` established the correct same-run interval and
+also exposed that `dump-rec=N` addresses file record N+1 because of the entry
+record. Corrected initial/final snapshots are therefore used here, while short
+late-breakpoint captures with equivalent-but-different CFF routes were rejected.
+
 ## Remaining Track-B work
 
 1. Derive the initial pre-tail/tail semantic states from
    session/CPIM/PTM/TK/identity, including their key/frame setup.
-2. Complete the 16-byte stage at `0x149170` through its middle suffix and close
-   the final four bytes before the write. The 0x35-byte header is now closed.
+2. Complete the 16-byte stage at `0x149170` through its remaining middle suffix.
+   The 0x35-byte header and final-four producer are now closed.
 3. Assemble those components into real `ProvisioningEnd`, then construct warm
    semantic state from the own PERUNST record and prove Rust-End ⇄ Rust-OTP.
 

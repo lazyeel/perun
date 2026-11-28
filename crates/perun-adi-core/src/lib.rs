@@ -29,6 +29,8 @@
 //! * [`otp`]         -- independent warm-OTP execution with a semantic native
 //!   ABI rather than trace/callee replay;
 //! * [`end_header`] -- the measured fixed 53-byte provisioning-state prefix;
+//! * [`end_final4`] -- the independent 20-iteration producer of the final
+//!   four-byte native state word;
 //! * [`end_source32a`] / [`end_source32b`] / [`end_source32c`] -- three linked
 //!   independent 32-byte End source-generation stages;
 //! * [`end_source60`] -- one independent 60-byte End source-generation stage;
@@ -36,8 +38,8 @@
 //!   1,024-byte intermediate buffers (not the complete 16-byte tag);
 //! * [`end_tagfinal`] -- the independent final 16-byte tag serializer over an
 //!   explicit post-suffix semantic state;
-//! * [`end_tag_middle0`] -- the initial limb/XOR mixing stage between those
-//!   two tag boundaries, checked against complete checkpoint states;
+//! * [`end_tag_middle0`] / [`end_tag_middle1`] -- the first two middle-tag
+//!   stages, checked against complete checkpoint states and a same-process chain;
 //! * [`end_pretail`] -- the independent 544-iteration End pre-transformation
 //!   over an explicit semantic intermediate state (not full ProvisioningEnd);
 //! * [`end_tail`]    -- the independent 34-block End transformation over an
@@ -59,6 +61,9 @@ pub mod cpim_engine;
 pub mod digest;
 pub mod early_series;
 pub mod early_zone;
+pub mod end_final4;
+mod end_final4_core;
+mod end_final4_tables;
 pub mod end_header;
 pub mod end_pretail;
 mod end_pretail_core;
@@ -78,6 +83,9 @@ mod end_source60_tables;
 pub mod end_tag_middle0;
 mod end_tag_middle0_core;
 mod end_tag_middle0_tables;
+pub mod end_tag_middle1;
+mod end_tag_middle1_core;
+mod end_tag_middle1_tables;
 pub mod end_tag_round;
 mod end_tag_round_core;
 mod end_tag_round_tables;

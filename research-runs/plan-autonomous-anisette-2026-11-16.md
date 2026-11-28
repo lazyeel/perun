@@ -650,3 +650,27 @@ record-bounded stages; the round frame is 0x700 to cover `RBP-0x6a8`.
 This is the first semantic decomposition result inside the middle suffix, not a
 complete tag or End. Subsequent stages, final-four provenance, initial-state
 genesis and clean acceptance remain open.
+
+---
+
+## 28. Second middle-tag checkpoint stage — 2026-11-28
+
+`end_tag_middle1` implements the next 288 masked/shift instructions and matches
+complete checkpoint states on two runs. A same-process four-checkpoint gate now
+proves **tag_round → middle0 → middle1** with full register and memory equality
+on both inputs. The remaining middle stages, final-four provenance, state
+genesis and clean acceptance are still open.
+
+---
+
+## 29. Final-four producer closed — 2026-11-28
+
+`end_final4` implements **28 instructions × 20 iterations** and matches complete
+checkpoint state on two runs. All 20 output bytes match, and bytes 16..19 equal
+the native final word. The true producer is `0xb7e6b`; the earlier `0xb618d` and
+`0xb75xx` stages are precursors and are not used for this result.
+
+Full-gap same-process captures established the interval and corrected the
+`dump-rec=N` → file-record-N+1 boundary. Remaining work is the rest of the middle
+tag suffix, initial semantic-state genesis, full End assembly, own warm-state
+loading and clean acceptance.
